@@ -298,6 +298,13 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
     }
   }, [isEditingName]);
 
+  // Auto-clear error when recipients are selected
+  useEffect(() => {
+    if (selectedContacts.length > 0 && error === 'Please select recipients') {
+      setError('');
+    }
+  }, [selectedContacts.length]);
+
   // Autopilot summary
   const getAutopilotSummary = () => {
     const activeDays = Object.entries(autopilot.days).filter(([, v]) => v.enabled).length;
@@ -488,12 +495,21 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
               <div className="flex items-center px-5 py-3 border-b border-gray-100">
                 <span className="text-sm text-gray-400 w-16 flex-shrink-0">To</span>
                 <div className="flex-1 flex items-center gap-2 flex-wrap">
-                  <button onClick={() => setShowRecipients(true)}
-                    className="text-sm font-medium text-blue-600 border border-blue-300 rounded-lg px-3 py-1 hover:bg-blue-50 transition-colors">
-                    Select recipients
-                  </button>
-                  {recipientCount > 0 && (
-                    <Badge className="bg-blue-50 text-blue-700 border-blue-200">{recipientCount} selected</Badge>
+                  {recipientCount > 0 ? (
+                    <>
+                      <Badge className="bg-blue-50 text-blue-700 border-blue-200 font-semibold">
+                        {recipientCount} recipient{recipientCount !== 1 ? 's' : ''}
+                      </Badge>
+                      <button onClick={() => setShowRecipients(true)}
+                        className="text-xs text-blue-600 hover:text-blue-700 hover:underline font-medium">
+                        Edit
+                      </button>
+                    </>
+                  ) : (
+                    <button onClick={() => setShowRecipients(true)}
+                      className="text-sm font-medium text-blue-600 border border-blue-300 rounded-lg px-3 py-1 hover:bg-blue-50 transition-colors">
+                      Select recipients
+                    </button>
                   )}
                 </div>
               </div>
@@ -808,7 +824,10 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                       value={contactListFilter} onChange={e => {
                         setContactListFilter(e.target.value);
                         if (e.target.value === 'all') {
-                          setSelectedContacts(contacts.filter(c => c.status !== 'unsubscribed').map(c => c.id));
+                          const validContacts = contacts.filter((c: any) => c.status !== 'unsubscribed');
+                          setSelectedContacts(validContacts.map((c: any) => c.id));
+                        } else {
+                          setSelectedContacts([]);
                         }
                       }}>
                       <option value="">Select a list</option>
@@ -816,9 +835,33 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                     </select>
                   </div>
                   {selectedContacts.length > 0 && (
-                    <div className="bg-blue-50 rounded-lg p-3 text-sm text-blue-700">
-                      <CheckCircle className="h-4 w-4 inline mr-1.5" />
-                      {selectedContacts.length} contacts selected
+                    <div className="bg-blue-50 rounded-lg p-3 text-sm text-blue-700 flex items-center gap-2">
+                      <CheckCircle className="h-4 w-4 flex-shrink-0" />
+                      <span><strong>{selectedContacts.length}</strong> contact{selectedContacts.length !== 1 ? 's' : ''} selected</span>
+                    </div>
+                  )}
+                  {/* Show selected contact details */}
+                  {selectedContacts.length > 0 && (
+                    <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                      {contacts.filter((c: any) => selectedContacts.includes(c.id)).map((c: any) => (
+                        <div key={c.id} className="flex items-center gap-3 px-3 py-2 bg-white border border-gray-100 rounded-lg">
+                          <div className="w-7 h-7 rounded-full bg-gradient-to-br from-blue-500 to-indigo-500 flex items-center justify-center text-white text-[10px] font-semibold flex-shrink-0">
+                            {(c.firstName?.[0] || c.email?.[0] || '?').toUpperCase()}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="text-sm font-medium text-gray-900 truncate">
+                              {c.firstName || c.lastName ? `${c.firstName || ''} ${c.lastName || ''}`.trim() : c.email}
+                            </div>
+                            {(c.firstName || c.lastName) && (
+                              <div className="text-xs text-gray-400 truncate">{c.email}</div>
+                            )}
+                          </div>
+                          <button onClick={() => setSelectedContacts(prev => prev.filter(id => id !== c.id))}
+                            className="p-0.5 rounded hover:bg-red-50 text-gray-300 hover:text-red-500 flex-shrink-0">
+                            <X className="h-3 w-3" />
+                          </button>
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
@@ -843,8 +886,19 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                   if (recipientTab === 'paste' && pasteEmails.trim()) {
                     const emails = pasteEmails.split('\n').map(e => e.trim()).filter(e => e.includes('@'));
                     // Find matching contacts or create temp ones
-                    const matched = contacts.filter(c => emails.includes(c.email));
-                    if (matched.length > 0) setSelectedContacts(matched.map(c => c.id));
+                    const matched = contacts.filter((c: any) => emails.includes(c.email));
+                    if (matched.length > 0) {
+                      setSelectedContacts(matched.map((c: any) => c.id));
+                    } else {
+                      // Create temporary contact entries from pasted emails
+                      setSelectedContacts(emails.map((_, i) => `paste-${i}`));
+                    }
+                  }
+                  // For contacts tab — selection already done via dropdown onChange
+                  // For sheets tab — would need sheet import logic
+                  // Clear error on successful selection
+                  if (selectedContacts.length > 0 || (recipientTab === 'paste' && pasteEmails.trim())) {
+                    setError('');
                   }
                   setShowRecipients(false);
                 }}>Next</Button>
