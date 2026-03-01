@@ -6,11 +6,6 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { useState, useEffect } from "react";
 import LandingPage from "@/pages/landing-page";
 import MailMeteorDashboard from "@/pages/mailmeteor-dashboard";
-import NewTemplate from "@/pages/new-template";
-import Templates from "@/pages/templates";
-import AccountSettings from "@/pages/account-settings";
-import EmailImportSetup from "@/pages/email-import-setup";
-import ContactsPage from "@/pages/contacts-page";
 import NotFound from "@/pages/not-found";
 
 interface User {
@@ -27,7 +22,6 @@ function Router() {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Check authentication on mount only
   useEffect(() => {
     let mounted = true;
     
@@ -51,8 +45,11 @@ function Router() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="text-gray-600">Loading...</div>
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="flex flex-col items-center">
+          <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-3"></div>
+          <div className="text-gray-600">Loading MailFlow...</div>
+        </div>
       </div>
     );
   }
@@ -61,15 +58,11 @@ function Router() {
     return <LandingPage onLogin={() => window.location.reload()} />;
   }
 
+  // All views are handled by the dashboard component with internal routing
   return (
     <Switch>
       <Route path="/" component={MailMeteorDashboard} />
-      <Route path="/templates" component={Templates} />
-      <Route path="/templates/new" component={NewTemplate} />
-      <Route path="/contacts" component={ContactsPage} />
-      <Route path="/account" component={AccountSettings} />
-      <Route path="/setup" component={EmailImportSetup} />
-      <Route component={NotFound} />
+      <Route path="/:rest*" component={MailMeteorDashboard} />
     </Switch>
   );
 }
