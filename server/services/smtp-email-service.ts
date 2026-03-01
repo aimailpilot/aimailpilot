@@ -72,16 +72,29 @@ export class SmtpEmailService {
   private dailySentCounts: Map<string, { count: number; date: string }> = new Map();
 
   /**
+   * Resolve the correct secure flag based on the port.
+   * Port 465 = implicit TLS (secure: true)
+   * Port 587/25/2525 = STARTTLS (secure: false)
+   */
+  private resolveSecure(port: number, userSecure: boolean): boolean {
+    if (port === 465) return true;
+    if (port === 587 || port === 25 || port === 2525) return false;
+    return userSecure; // respect user's choice for non-standard ports
+  }
+
+  /**
    * Create or get cached SMTP transporter
    */
   private getTransporter(accountId: string, config: SmtpConfig): Transporter {
     const cached = this.transporters.get(accountId);
     if (cached) return cached;
 
+    const secure = this.resolveSecure(config.port, config.secure);
+
     const transporter = nodemailer.createTransport({
       host: config.host,
       port: config.port,
-      secure: config.secure,
+      secure,
       auth: {
         user: config.auth.user,
         pass: config.auth.pass,
@@ -101,31 +114,72 @@ export class SmtpEmailService {
   }
 
   /**
-   * Verify SMTP connection (test credentials)
+   * Create a verification transporter with the given settings
+   */
+  private createVerifyTransporter(host: string, port: number, secure: boolean, auth: { user: string; pass: string }) {
+    return nodemailer.createTransport({
+      host,
+      port,
+      secure,
+      auth,
+      tls: {
+        rejectUnauthorized: false,
+      },
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+    });
+  }
+
+  /**
+   * Verify SMTP connection (test credentials).
+   * Automatically resolves SSL/STARTTLS based on port.
+   * If connection fails with an SSL error, retries with the opposite security setting.
    */
   async verifyConnection(config: SmtpConfig): Promise<{ success: boolean; error?: string }> {
-    try {
-      const transporter = nodemailer.createTransport({
-        host: config.host,
-        port: config.port,
-        secure: config.secure,
-        auth: {
-          user: config.auth.user,
-          pass: config.auth.pass,
-        },
-        tls: {
-          rejectUnauthorized: false,
-        },
-        connectionTimeout: 10000,
-        greetingTimeout: 10000,
-      });
+    const resolvedSecure = this.resolveSecure(config.port, config.secure);
 
+    // First attempt: with the resolved secure setting
+    try {
+      const transporter = this.createVerifyTransporter(config.host, config.port, resolvedSecure, config.auth);
       await transporter.verify();
       transporter.close();
       return { success: true };
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : 'Unknown error';
-      console.error('SMTP verification failed:', errMsg);
+      console.error(`SMTP verification failed (secure=${resolvedSecure}):`, errMsg);
+
+      // If it's an SSL mismatch error, retry with the opposite setting
+      const isSSLError = errMsg.includes('wrong version number') ||
+                         errMsg.includes('ssl3_get_record') ||
+                         errMsg.includes('SSL routines') ||
+                         errMsg.includes('WRONG_VERSION_NUMBER') ||
+                         errMsg.includes('SSL23_GET_SERVER_HELLO') ||
+                         errMsg.includes('EPROTO');
+
+      if (isSSLError) {
+        const retrySecure = !resolvedSecure;
+        console.log(`SSL mismatch detected, retrying with secure=${retrySecure}...`);
+        try {
+          const retryTransporter = this.createVerifyTransporter(config.host, config.port, retrySecure, config.auth);
+          await retryTransporter.verify();
+          retryTransporter.close();
+          // Update the config so subsequent calls use the correct setting
+          config.secure = retrySecure;
+          return { success: true };
+        } catch (retryError) {
+          const retryErrMsg = retryError instanceof Error ? retryError.message : 'Unknown error';
+          console.error(`SMTP retry also failed (secure=${retrySecure}):`, retryErrMsg);
+          // Return the more helpful error from the retry if it's not another SSL error
+          const retryIsSSL = retryErrMsg.includes('wrong version number') || retryErrMsg.includes('ssl3_get_record');
+          return {
+            success: false,
+            error: retryIsSSL
+              ? `SSL/TLS configuration error: Could not connect on port ${config.port} with either SSL or STARTTLS. Try port 587 (STARTTLS) or port 465 (SSL).`
+              : retryErrMsg,
+          };
+        }
+      }
+
       return { success: false, error: errMsg };
     }
   }

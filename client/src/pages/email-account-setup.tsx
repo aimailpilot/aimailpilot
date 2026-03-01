@@ -202,6 +202,12 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
     if (error.includes('self signed certificate')) {
       return 'SSL certificate error. Try toggling the SSL/TLS setting.';
     }
+    if (error.includes('wrong version number') || error.includes('ssl3_get_record') || error.includes('SSL routines') || error.includes('EPROTO')) {
+      return 'SSL/TLS mismatch. Port 587 requires STARTTLS (SSL off), port 465 requires SSL (SSL on). Check your port and SSL settings.';
+    }
+    if (error.includes('SSL/TLS configuration error')) {
+      return error; // Already a friendly message from the backend
+    }
     if (error.includes('Too many connections') || error.includes('rate limit')) {
       return 'Too many attempts. Please wait a moment and try again.';
     }
@@ -659,8 +665,15 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
               </div>
               <div className="flex items-center justify-between pt-1">
                 <div className="flex items-center gap-2">
-                  <Switch checked={formSmtpSecure} onCheckedChange={setFormSmtpSecure} />
-                  <Label className="text-xs text-gray-600">Use SSL/TLS (port 465)</Label>
+                  <Switch checked={formSmtpSecure} onCheckedChange={(checked) => {
+                    setFormSmtpSecure(checked);
+                    // Auto-adjust port when toggling SSL
+                    if (checked && formSmtpPort === 587) setFormSmtpPort(465);
+                    if (!checked && formSmtpPort === 465) setFormSmtpPort(587);
+                  }} />
+                  <Label className="text-xs text-gray-600">
+                    {formSmtpSecure ? 'SSL/TLS (implicit, port 465)' : 'STARTTLS (port 587)'}
+                  </Label>
                 </div>
                 <Lock className="h-3.5 w-3.5 text-gray-300" />
               </div>

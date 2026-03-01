@@ -195,10 +195,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // Build SMTP config from preset or custom
       const preset = SMTP_PRESETS[provider];
+      const resolvedPort = smtpPort || preset?.port || 587;
+      // Auto-resolve secure based on port: 465 = implicit SSL, 587/25/2525 = STARTTLS
+      let resolvedSecure: boolean;
+      if (resolvedPort === 465) {
+        resolvedSecure = true;
+      } else if (resolvedPort === 587 || resolvedPort === 25 || resolvedPort === 2525) {
+        resolvedSecure = false;
+      } else {
+        resolvedSecure = smtpSecure !== undefined ? smtpSecure : (preset?.secure || false);
+      }
       const smtpConfig: SmtpConfig = {
         host: smtpHost || preset?.host || 'smtp.gmail.com',
-        port: smtpPort || preset?.port || 587,
-        secure: smtpSecure !== undefined ? smtpSecure : (preset?.secure || false),
+        port: resolvedPort,
+        secure: resolvedSecure,
         auth: { user: smtpUser, pass: smtpPass },
         fromName: displayName || '',
         fromEmail: email,
