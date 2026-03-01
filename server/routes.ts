@@ -1021,8 +1021,294 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.json(configs);
   });
 
-  // ========== GOOGLE SHEETS MOCK ==========
+  // ========== GOOGLE SHEETS INTEGRATION ==========
 
+  // Helper: extract spreadsheet ID from URL
+  function extractSpreadsheetId(urlOrId: string): string | null {
+    // Direct ID
+    if (/^[a-zA-Z0-9_-]{20,}$/.test(urlOrId)) return urlOrId;
+    // Full URL: https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/...
+    const match = urlOrId.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+    return match ? match[1] : null;
+  }
+
+  // Helper: parse CSV text into rows
+  function parseCSV(text: string): string[][] {
+    const rows: string[][] = [];
+    let current = '';
+    let inQuotes = false;
+    let row: string[] = [];
+    
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (inQuotes) {
+        if (ch === '"' && text[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else if (ch === '"') {
+          inQuotes = false;
+        } else {
+          current += ch;
+        }
+      } else {
+        if (ch === '"') {
+          inQuotes = true;
+        } else if (ch === ',') {
+          row.push(current.trim());
+          current = '';
+        } else if (ch === '\n' || (ch === '\r' && text[i + 1] === '\n')) {
+          row.push(current.trim());
+          current = '';
+          if (row.some(c => c !== '')) rows.push(row);
+          row = [];
+          if (ch === '\r') i++;
+        } else {
+          current += ch;
+        }
+      }
+    }
+    // Last row
+    row.push(current.trim());
+    if (row.some(c => c !== '')) rows.push(row);
+    return rows;
+  }
+
+  // Fetch spreadsheet info (sheet names) using the Google Sheets CSV export
+  // NOTE: Wrapped with .then().catch() for Express 4 async safety
+  app.post('/api/sheets/fetch-info', (req: any, res, next) => {
+    (async () => {
+      const body = req.body || {};
+      const url = body.url;
+      console.log('[sheets/fetch-info] Request body:', JSON.stringify(body));
+      
+      if (!url) {
+        return res.status(400).json({ valid: false, error: 'URL is required' });
+      }
+
+      const spreadsheetId = extractSpreadsheetId(url);
+      if (!spreadsheetId) {
+        return res.status(400).json({ valid: false, error: 'Invalid Google Sheets URL. Please paste a valid Google Sheets URL.' });
+      }
+
+      console.log('[sheets/fetch-info] Extracted spreadsheet ID:', spreadsheetId);
+
+      // Strategy: Try to export the default sheet as CSV to verify access
+      // Then try to discover other sheets via gid probing
+      const sheets: { id: number; name: string; index: number }[] = [];
+
+      // First, try to export gid=0 (default sheet) to verify the spreadsheet is accessible
+      const testCsvUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv&gid=0`;
+      console.log('[sheets/fetch-info] Testing CSV access:', testCsvUrl);
+      
+      const testRes = await fetch(testCsvUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
+        redirect: 'follow',
+      });
+
+      console.log('[sheets/fetch-info] CSV test response status:', testRes.status);
+
+      if (!testRes.ok) {
+        return res.status(400).json({ 
+          valid: false, 
+          error: 'Cannot access this spreadsheet. Make sure it is shared with "Anyone with the link" can view.' 
+        });
+      }
+
+      const testCsv = await testRes.text();
+      
+      // Check if we got an HTML error page instead of CSV
+      if (testCsv.trim().startsWith('<!DOCTYPE') || testCsv.trim().startsWith('<html')) {
+        return res.status(400).json({ 
+          valid: false, 
+          error: 'Cannot access this spreadsheet. Please make sure it is shared publicly with "Anyone with the link".' 
+        });
+      }
+
+      // Default sheet is accessible
+      sheets.push({ id: 0, name: 'Sheet1', index: 0 });
+
+      // Try to discover additional sheets by probing common gids
+      // Google Sheets assigns gid values, the first sheet is usually 0
+      // We'll try a few common additional sheet gids
+      const probGids = [1, 2, 3];
+      for (const gid of probGids) {
+        try {
+          const probeUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv&gid=${gid}`;
+          const probeRes = await fetch(probeUrl, {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            redirect: 'follow',
+          });
+          if (probeRes.ok) {
+            const probeText = await probeRes.text();
+            if (!probeText.trim().startsWith('<!DOCTYPE') && !probeText.trim().startsWith('<html') && probeText.trim().length > 0) {
+              sheets.push({ id: gid, name: `Sheet${sheets.length + 1}`, index: sheets.length });
+            }
+          }
+        } catch { /* ignore probe failures */ }
+      }
+
+      // Try to get real sheet names from the HTML page (best effort)
+      try {
+        const htmlUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit?usp=sharing`;
+        const htmlRes = await fetch(htmlUrl, {
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
+          redirect: 'follow',
+        });
+        
+        if (htmlRes.ok) {
+          const html = await htmlRes.text();
+          
+          // Try multiple regex patterns to extract sheet names
+          const extractedSheets: { id: number; name: string }[] = [];
+          
+          // Pattern 1: sheet tab buttons  
+          const tabRegex1 = /class="[^"]*docs-sheet-tab[^"]*"[^>]*>(?:<[^>]*>)*([^<]+)/gi;
+          let m;
+          while ((m = tabRegex1.exec(html)) !== null) {
+            const name = m[1].trim();
+            if (name && name.length < 100) extractedSheets.push({ id: extractedSheets.length, name });
+          }
+          
+          // Pattern 2: sheet button text
+          if (extractedSheets.length === 0) {
+            const tabRegex2 = /sheet-button[^>]*>(?:<[^>]*>)*\s*([^<]+)/gi;
+            while ((m = tabRegex2.exec(html)) !== null) {
+              const name = m[1].trim();
+              if (name && name.length < 100) extractedSheets.push({ id: extractedSheets.length, name });
+            }
+          }
+
+          // If we found real names, update the sheets array
+          if (extractedSheets.length > 0) {
+            sheets.length = 0; // Clear
+            extractedSheets.forEach((s, i) => {
+              sheets.push({ id: i, name: s.name, index: i });
+            });
+          }
+        }
+      } catch (htmlErr) {
+        console.log('[sheets/fetch-info] HTML extraction failed (non-critical):', htmlErr);
+        // Keep the sheets we already have from CSV probing
+      }
+
+      console.log('[sheets/fetch-info] Found sheets:', JSON.stringify(sheets));
+      
+      return res.json({
+        id: spreadsheetId,
+        title: 'Google Spreadsheet',
+        sheets,
+        valid: true,
+      });
+    })().catch((error) => {
+      console.error('[sheets/fetch-info] Error:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ valid: false, error: 'Failed to fetch spreadsheet information. Please check the URL and sharing settings.' });
+      }
+    });
+  });
+
+  // Fetch sheet data (actual rows) using CSV export
+  app.post('/api/sheets/fetch-data', (req: any, res, next) => {
+    (async () => {
+      const body = req.body || {};
+      const { url, sheetName, gid } = body;
+      console.log('[sheets/fetch-data] Request body:', JSON.stringify(body));
+
+      if (!url) {
+        return res.status(400).json({ error: 'URL is required' });
+      }
+
+      const spreadsheetId = extractSpreadsheetId(url);
+      if (!spreadsheetId) {
+        return res.status(400).json({ error: 'Invalid Google Sheets URL' });
+      }
+
+      // Export as CSV using gid
+      const sheetGid = gid !== undefined ? gid : 0;
+      const csvUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv&gid=${sheetGid}`;
+      console.log('[sheets/fetch-data] Fetching CSV:', csvUrl);
+      
+      const csvRes = await fetch(csvUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
+        redirect: 'follow',
+      });
+
+      if (!csvRes.ok) {
+        return res.status(400).json({ error: 'Cannot export sheet data. Make sure the spreadsheet is shared publicly.' });
+      }
+
+      const csvText = await csvRes.text();
+      
+      // Check if we got an HTML error page instead of CSV
+      if (csvText.trim().startsWith('<!DOCTYPE') || csvText.trim().startsWith('<html')) {
+        return res.status(400).json({ error: 'Cannot access this spreadsheet. Please check sharing settings.' });
+      }
+
+      const rows = parseCSV(csvText);
+
+      if (rows.length === 0) {
+        return res.json({ headers: [], values: [], contacts: [], totalRows: 0, validContacts: 0 });
+      }
+
+      const headers = rows[0];
+      const dataRows = rows.slice(1);
+
+      // Auto-detect column mapping
+      const emailCol = headers.findIndex(h => /email|e-mail|mail/i.test(h));
+      const firstNameCol = headers.findIndex(h => /first.?name|given.?name|first/i.test(h));
+      const lastNameCol = headers.findIndex(h => /last.?name|surname|family.?name|last/i.test(h));
+      const companyCol = headers.findIndex(h => /company|organization|org|business/i.test(h));
+      const nameCol = headers.findIndex(h => /^name$/i.test(h));
+
+      // Build contacts from data
+      const contacts = dataRows
+        .filter(row => {
+          const email = emailCol >= 0 ? row[emailCol] : '';
+          return email && email.includes('@');
+        })
+        .map((row) => {
+          let firstName = firstNameCol >= 0 ? (row[firstNameCol] || '') : '';
+          let lastName = lastNameCol >= 0 ? (row[lastNameCol] || '') : '';
+          
+          // If no first/last name columns but there's a "name" column, split it
+          if (!firstName && !lastName && nameCol >= 0 && row[nameCol]) {
+            const parts = row[nameCol].trim().split(/\s+/);
+            firstName = parts[0] || '';
+            lastName = parts.slice(1).join(' ') || '';
+          }
+
+          return {
+            email: emailCol >= 0 ? (row[emailCol] || '').trim() : '',
+            firstName: firstName.trim(),
+            lastName: lastName.trim(),
+            company: companyCol >= 0 ? (row[companyCol] || '').trim() : '',
+          };
+        });
+
+      console.log('[sheets/fetch-data] Found', contacts.length, 'contacts from', dataRows.length, 'rows');
+
+      return res.json({
+        headers,
+        values: rows,
+        contacts,
+        totalRows: dataRows.length,
+        validContacts: contacts.length,
+        columnMapping: {
+          email: emailCol >= 0 ? headers[emailCol] : null,
+          firstName: firstNameCol >= 0 ? headers[firstNameCol] : (nameCol >= 0 ? headers[nameCol] : null),
+          lastName: lastNameCol >= 0 ? headers[lastNameCol] : null,
+          company: companyCol >= 0 ? headers[companyCol] : null,
+        },
+      });
+    })().catch((error) => {
+      console.error('[sheets/fetch-data] Error:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to fetch sheet data' });
+      }
+    });
+  });
+
+  // Keep old mock endpoints for backward compatibility
   app.get('/api/sheets/info/:spreadsheetId', (req, res) => {
     res.json({
       id: req.params.spreadsheetId,
