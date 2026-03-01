@@ -8,11 +8,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
-import { Progress } from "@/components/ui/progress";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { 
   Mail, Plus, Trash2, TestTube, CheckCircle, XCircle, 
   Loader2, Shield, Eye, EyeOff, AlertCircle, Inbox, Server,
-  ExternalLink, Zap, Globe, Lock, Send
+  ExternalLink, Zap, Globe, Lock, Send, RefreshCw, Copy,
+  ChevronRight, Wifi, WifiOff, Clock, Settings
 } from "lucide-react";
 
 interface EmailAccount {
@@ -49,7 +50,7 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
   const [loading, setLoading] = useState(true);
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
-  const [testResult, setTestResult] = useState<{ id: string; success: boolean; error?: string } | null>(null);
+  const [testResults, setTestResults] = useState<Map<string, { success: boolean; error?: string; timestamp?: string }>>(new Map());
   const [showPassword, setShowPassword] = useState(false);
 
   const [formProvider, setFormProvider] = useState('gmail');
@@ -96,8 +97,20 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
 
   const handleAddAccount = async () => {
     setFormError('');
-    if (!formEmail || !formSmtpUser || !formSmtpPass) {
-      setFormError('Email, SMTP username, and app password are required');
+    if (!formEmail) {
+      setFormError('Email address is required');
+      return;
+    }
+    if (!formSmtpUser) {
+      setFormError('SMTP username is required');
+      return;
+    }
+    if (!formSmtpPass) {
+      setFormError('App password / SMTP password is required');
+      return;
+    }
+    if (!formEmail.includes('@')) {
+      setFormError('Please enter a valid email address');
       return;
     }
     setFormLoading(true);
@@ -125,17 +138,16 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
         onAccountAdded?.();
       } else {
         const err = await res.json();
-        setFormError(err.message || 'Failed to add account');
+        setFormError(err.message || 'Failed to add account. Please check your credentials.');
       }
     } catch (e) {
-      setFormError('Network error. Please try again.');
+      setFormError('Network error. Please check your connection and try again.');
     }
     setFormLoading(false);
   };
 
   const handleTestAccount = async (id: string) => {
     setTestingId(id);
-    setTestResult(null);
     try {
       const res = await fetch(`/api/email-accounts/${id}/test`, {
         method: 'POST',
@@ -144,17 +156,69 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
         body: JSON.stringify({}),
       });
       const data = await res.json();
-      setTestResult({ id, success: data.success, error: data.error });
+      
+      // Parse and improve error messages
+      let error = data.error;
+      if (error) {
+        error = parseSmtpError(error);
+      }
+      
+      setTestResults(prev => {
+        const next = new Map(prev);
+        next.set(id, { 
+          success: data.success, 
+          error,
+          timestamp: new Date().toLocaleTimeString()
+        });
+        return next;
+      });
     } catch (e) {
-      setTestResult({ id, success: false, error: 'Network error' });
+      setTestResults(prev => {
+        const next = new Map(prev);
+        next.set(id, { 
+          success: false, 
+          error: 'Network error - could not reach server',
+          timestamp: new Date().toLocaleTimeString()
+        });
+        return next;
+      });
     }
     setTestingId(null);
   };
 
+  const parseSmtpError = (error: string): string => {
+    if (error.includes('BadCredentials') || error.includes('Username and Password not accepted')) {
+      return 'Invalid credentials. For Gmail, use an App Password (not your regular password). Enable 2-Step Verification first.';
+    }
+    if (error.includes('ECONNREFUSED')) {
+      return 'Connection refused. Check your SMTP host and port settings.';
+    }
+    if (error.includes('ETIMEDOUT') || error.includes('timeout')) {
+      return 'Connection timed out. The SMTP server may be unreachable.';
+    }
+    if (error.includes('ENOTFOUND')) {
+      return 'SMTP host not found. Please verify the hostname.';
+    }
+    if (error.includes('self signed certificate')) {
+      return 'SSL certificate error. Try toggling the SSL/TLS setting.';
+    }
+    if (error.includes('Too many connections') || error.includes('rate limit')) {
+      return 'Too many attempts. Please wait a moment and try again.';
+    }
+    // Strip long SMTP protocol messages
+    const short = error.split('\n')[0];
+    return short.length > 120 ? short.substring(0, 120) + '...' : short;
+  };
+
   const handleDeleteAccount = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this email account?')) return;
+    if (!confirm('Are you sure you want to delete this email account? Any campaigns using this account will stop sending.')) return;
     try {
       await fetch(`/api/email-accounts/${id}`, { method: 'DELETE', credentials: 'include' });
+      setTestResults(prev => {
+        const next = new Map(prev);
+        next.delete(id);
+        return next;
+      });
       await fetchAccounts();
     } catch (e) { console.error('Delete failed:', e); }
   };
@@ -174,51 +238,64 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
   };
 
   const getProviderConfig = (provider: string) => {
-    const configs: Record<string, { icon: string; color: string; bg: string; text: string; limit: number }> = {
-      gmail: { icon: '📧', color: 'from-red-500 to-red-600', bg: 'bg-red-50', text: 'text-red-700', limit: 2000 },
-      outlook: { icon: '📨', color: 'from-blue-500 to-blue-600', bg: 'bg-blue-50', text: 'text-blue-700', limit: 300 },
-      office365: { icon: '📨', color: 'from-blue-600 to-indigo-600', bg: 'bg-indigo-50', text: 'text-indigo-700', limit: 10000 },
-      custom: { icon: '✉️', color: 'from-gray-500 to-gray-600', bg: 'bg-gray-50', text: 'text-gray-700', limit: 500 },
+    const configs: Record<string, { label: string; color: string; bgGradient: string; bg: string; text: string; limit: number; icon: React.ReactNode }> = {
+      gmail: { label: 'Gmail', color: 'from-red-500 to-red-600', bgGradient: 'from-red-50 to-red-100', bg: 'bg-red-50', text: 'text-red-700', limit: 2000, icon: <Mail className="h-5 w-5 text-red-500" /> },
+      outlook: { label: 'Outlook', color: 'from-blue-500 to-blue-600', bgGradient: 'from-blue-50 to-blue-100', bg: 'bg-blue-50', text: 'text-blue-700', limit: 300, icon: <Mail className="h-5 w-5 text-blue-500" /> },
+      office365: { label: 'Office 365', color: 'from-blue-600 to-indigo-600', bgGradient: 'from-indigo-50 to-indigo-100', bg: 'bg-indigo-50', text: 'text-indigo-700', limit: 10000, icon: <Mail className="h-5 w-5 text-indigo-500" /> },
+      custom: { label: 'Custom', color: 'from-gray-500 to-gray-600', bgGradient: 'from-gray-50 to-gray-100', bg: 'bg-gray-50', text: 'text-gray-700', limit: 500, icon: <Server className="h-5 w-5 text-gray-500" /> },
     };
     return configs[provider] || configs.custom;
   };
 
+  const totalCapacity = accounts.reduce((sum, a) => sum + (a.dailyLimit || 500), 0);
+  const totalSent = accounts.reduce((sum, a) => sum + (a.dailySent || 0), 0);
+  const activeCount = accounts.filter(a => a.isActive).length;
+
   return (
     <div className="space-y-6">
-      {/* Stats Row */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <Card className="border-gray-200/60 shadow-sm">
+      {/* Stats Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <Card className="border-gray-200/60 shadow-sm hover:shadow-md transition-shadow">
           <CardContent className="p-4 flex items-center gap-3">
             <div className="bg-blue-50 p-2.5 rounded-xl">
               <Inbox className="h-5 w-5 text-blue-600" />
             </div>
             <div>
               <div className="text-2xl font-bold text-gray-900">{accounts.length}</div>
-              <div className="text-[11px] text-gray-400 font-medium">Connected Accounts</div>
+              <div className="text-[11px] text-gray-400 font-medium">Connected</div>
             </div>
           </CardContent>
         </Card>
-        <Card className="border-gray-200/60 shadow-sm">
+        <Card className="border-gray-200/60 shadow-sm hover:shadow-md transition-shadow">
           <CardContent className="p-4 flex items-center gap-3">
             <div className="bg-emerald-50 p-2.5 rounded-xl">
-              <Shield className="h-5 w-5 text-emerald-600" />
+              <Wifi className="h-5 w-5 text-emerald-600" />
             </div>
             <div>
-              <div className="text-2xl font-bold text-gray-900">{accounts.filter(a => a.isActive).length}</div>
+              <div className="text-2xl font-bold text-gray-900">{activeCount}</div>
               <div className="text-[11px] text-gray-400 font-medium">Active & Verified</div>
             </div>
           </CardContent>
         </Card>
-        <Card className="border-gray-200/60 shadow-sm">
+        <Card className="border-gray-200/60 shadow-sm hover:shadow-md transition-shadow">
           <CardContent className="p-4 flex items-center gap-3">
             <div className="bg-purple-50 p-2.5 rounded-xl">
               <Send className="h-5 w-5 text-purple-600" />
             </div>
             <div>
-              <div className="text-2xl font-bold text-gray-900">
-                {accounts.reduce((sum, a) => sum + (a.dailyLimit || 500), 0).toLocaleString()}
-              </div>
-              <div className="text-[11px] text-gray-400 font-medium">Total Daily Capacity</div>
+              <div className="text-2xl font-bold text-gray-900">{totalCapacity.toLocaleString()}</div>
+              <div className="text-[11px] text-gray-400 font-medium">Daily Capacity</div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card className="border-gray-200/60 shadow-sm hover:shadow-md transition-shadow">
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="bg-amber-50 p-2.5 rounded-xl">
+              <Zap className="h-5 w-5 text-amber-600" />
+            </div>
+            <div>
+              <div className="text-2xl font-bold text-gray-900">{totalSent}</div>
+              <div className="text-[11px] text-gray-400 font-medium">Sent Today</div>
             </div>
           </CardContent>
         </Card>
@@ -270,14 +347,14 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
             const sent = account.dailySent || 0;
             const quotaPercent = Math.min((sent / quota) * 100, 100);
             const isTestingThis = testingId === account.id;
-            const thisTestResult = testResult?.id === account.id ? testResult : null;
+            const thisTestResult = testResults.get(account.id);
 
             return (
               <Card key={account.id} className="border-gray-200/60 shadow-sm hover:shadow-md transition-all group overflow-hidden">
                 <CardContent className="p-0">
                   <div className="flex items-center gap-4 p-4">
                     {/* Provider Icon */}
-                    <div className={`w-12 h-12 rounded-xl ${providerConfig.bg} flex items-center justify-center text-2xl flex-shrink-0 shadow-sm`}>
+                    <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${providerConfig.bgGradient} flex items-center justify-center flex-shrink-0 shadow-sm border border-gray-100/60`}>
                       {providerConfig.icon}
                     </div>
 
@@ -286,7 +363,7 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
                       <div className="flex items-center gap-2 mb-0.5">
                         <span className="font-semibold text-gray-900 text-sm">{account.displayName || account.email}</span>
                         <Badge variant="outline" className={`text-[10px] font-semibold capitalize ${providerConfig.bg} ${providerConfig.text} border-0`}>
-                          {account.provider}
+                          {providerConfig.label}
                         </Badge>
                         {account.isActive ? (
                           <Badge className="bg-emerald-50 text-emerald-700 border-emerald-200 border text-[10px]">
@@ -317,19 +394,31 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
 
                     {/* Actions */}
                     <div className="flex items-center gap-2 flex-shrink-0">
-                      {/* Test result inline */}
+                      {/* Test result */}
                       {thisTestResult && (
-                        <div className="mr-1">
-                          {thisTestResult.success ? (
-                            <Badge className="bg-emerald-50 text-emerald-700 border-emerald-200 border text-xs">
-                              <CheckCircle className="h-3 w-3 mr-1" /> Connected
-                            </Badge>
-                          ) : (
-                            <Badge className="bg-red-50 text-red-700 border-red-200 border text-xs max-w-[200px] truncate" title={thisTestResult.error}>
-                              <XCircle className="h-3 w-3 mr-1 flex-shrink-0" /> {thisTestResult.error || 'Failed'}
-                            </Badge>
-                          )}
-                        </div>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <div className="mr-1">
+                              {thisTestResult.success ? (
+                                <Badge className="bg-emerald-50 text-emerald-700 border-emerald-200 border text-xs cursor-help">
+                                  <CheckCircle className="h-3 w-3 mr-1" /> Connected
+                                </Badge>
+                              ) : (
+                                <Badge className="bg-red-50 text-red-700 border-red-200 border text-xs max-w-[240px] cursor-help">
+                                  <XCircle className="h-3 w-3 mr-1 flex-shrink-0" />
+                                  <span className="truncate">{thisTestResult.error || 'Failed'}</span>
+                                </Badge>
+                              )}
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent side="bottom" className="max-w-sm">
+                            <div className="space-y-1">
+                              <div className="font-medium">{thisTestResult.success ? 'Connection successful' : 'Connection failed'}</div>
+                              {thisTestResult.error && <div className="text-xs opacity-80">{thisTestResult.error}</div>}
+                              {thisTestResult.timestamp && <div className="text-xs opacity-60">Tested at {thisTestResult.timestamp}</div>}
+                            </div>
+                          </TooltipContent>
+                        </Tooltip>
                       )}
 
                       <Button
@@ -364,8 +453,12 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
                     </div>
                     <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
                       <div 
-                        className={`h-full rounded-full transition-all ${quotaPercent > 80 ? 'bg-amber-500' : quotaPercent > 95 ? 'bg-red-500' : 'bg-blue-500'}`} 
-                        style={{ width: `${quotaPercent}%` }} 
+                        className={`h-full rounded-full transition-all duration-500 ${
+                          quotaPercent > 95 ? 'bg-red-500' : 
+                          quotaPercent > 80 ? 'bg-amber-500' : 
+                          'bg-gradient-to-r from-blue-400 to-blue-500'
+                        }`} 
+                        style={{ width: `${Math.max(quotaPercent, 1)}%` }} 
                       />
                     </div>
                   </div>
@@ -377,39 +470,70 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
       )}
 
       {/* Help Section */}
-      <Card className="border-blue-100 bg-gradient-to-br from-blue-50/80 to-indigo-50/50">
-        <CardContent className="p-5">
-          <div className="flex items-start gap-3">
-            <div className="bg-blue-100 p-2 rounded-xl flex-shrink-0">
-              <Shield className="h-5 w-5 text-blue-600" />
-            </div>
-            <div>
-              <h4 className="font-semibold text-blue-900 mb-2 text-sm">How to set up SMTP</h4>
-              <div className="text-sm text-blue-800/80 space-y-2">
-                <div className="flex items-start gap-2">
-                  <span className="bg-blue-200 text-blue-700 text-[10px] font-bold px-1.5 py-0.5 rounded mt-0.5">Gmail</span>
-                  <span>Enable 2-Step Verification, then go to{' '}
-                    <a href="https://myaccount.google.com/apppasswords" target="_blank" className="underline font-medium text-blue-700 hover:text-blue-900 inline-flex items-center gap-0.5">
-                      App Passwords <ExternalLink className="h-3 w-3" />
-                    </a> and generate a password for "Mail". Daily limit: 2,000 emails.
-                  </span>
-                </div>
-                <div className="flex items-start gap-2">
-                  <span className="bg-blue-200 text-blue-700 text-[10px] font-bold px-1.5 py-0.5 rounded mt-0.5">Outlook</span>
-                  <span>Go to Settings, then Mail, then Sync email and enable POP/IMAP/SMTP. Use your password or an app password if 2FA is enabled. Daily limit: 300 emails.</span>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Card className="border-blue-100 bg-gradient-to-br from-blue-50/80 to-indigo-50/50 hover:shadow-md transition-shadow">
+          <CardContent className="p-5">
+            <div className="flex items-start gap-3">
+              <div className="bg-gradient-to-br from-red-100 to-red-50 p-2.5 rounded-xl flex-shrink-0 border border-red-100">
+                <Mail className="h-5 w-5 text-red-500" />
+              </div>
+              <div>
+                <h4 className="font-semibold text-gray-900 mb-1.5 text-sm">Gmail Setup</h4>
+                <ol className="text-sm text-gray-600 space-y-1.5 list-decimal list-inside">
+                  <li>Enable <strong>2-Step Verification</strong> on your Google Account</li>
+                  <li>Go to <a href="https://myaccount.google.com/apppasswords" target="_blank" className="underline font-medium text-blue-700 hover:text-blue-900 inline-flex items-center gap-0.5">
+                    App Passwords <ExternalLink className="h-3 w-3" />
+                  </a></li>
+                  <li>Generate a password for <strong>"Mail"</strong></li>
+                  <li>Use that 16-character code as your SMTP password</li>
+                </ol>
+                <div className="mt-3 flex items-center gap-2">
+                  <Badge variant="outline" className="text-[10px] bg-red-50 text-red-700 border-red-200">
+                    <Zap className="h-3 w-3 mr-0.5" /> 2,000 emails/day
+                  </Badge>
+                  <Badge variant="outline" className="text-[10px] bg-gray-50 text-gray-600 border-gray-200">
+                    Port 587 (STARTTLS)
+                  </Badge>
                 </div>
               </div>
             </div>
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+
+        <Card className="border-blue-100 bg-gradient-to-br from-blue-50/50 to-indigo-50/30 hover:shadow-md transition-shadow">
+          <CardContent className="p-5">
+            <div className="flex items-start gap-3">
+              <div className="bg-gradient-to-br from-blue-100 to-blue-50 p-2.5 rounded-xl flex-shrink-0 border border-blue-100">
+                <Mail className="h-5 w-5 text-blue-500" />
+              </div>
+              <div>
+                <h4 className="font-semibold text-gray-900 mb-1.5 text-sm">Outlook / Office 365</h4>
+                <ol className="text-sm text-gray-600 space-y-1.5 list-decimal list-inside">
+                  <li>Go to <strong>Settings &gt; Mail &gt; Sync email</strong></li>
+                  <li>Enable <strong>POP/IMAP/SMTP</strong></li>
+                  <li>Use your regular password (or app password with 2FA)</li>
+                  <li>SMTP host: <code className="text-xs bg-gray-100 px-1.5 py-0.5 rounded">smtp-mail.outlook.com</code></li>
+                </ol>
+                <div className="mt-3 flex items-center gap-2">
+                  <Badge variant="outline" className="text-[10px] bg-blue-50 text-blue-700 border-blue-200">
+                    <Zap className="h-3 w-3 mr-0.5" /> 300 emails/day
+                  </Badge>
+                  <Badge variant="outline" className="text-[10px] bg-gray-50 text-gray-600 border-gray-200">
+                    Port 587 (STARTTLS)
+                  </Badge>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
 
       {/* Add Account Dialog */}
       <Dialog open={showAddDialog} onOpenChange={(open) => { setShowAddDialog(open); if (!open) resetForm(); }}>
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <div className="bg-blue-50 p-2 rounded-lg">
+              <div className="bg-gradient-to-br from-blue-50 to-indigo-50 p-2 rounded-lg border border-blue-100">
                 <Mail className="h-4 w-4 text-blue-600" />
               </div>
               Add Email Account
@@ -423,35 +547,39 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
             {/* Provider Selection */}
             <div>
               <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Email Provider</Label>
-              <Select value={formProvider} onValueChange={handleProviderChange}>
-                <SelectTrigger className="mt-1.5"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="gmail">
-                    <span className="flex items-center gap-2">📧 Gmail (Google)</span>
-                  </SelectItem>
-                  <SelectItem value="outlook">
-                    <span className="flex items-center gap-2">📨 Outlook / Hotmail</span>
-                  </SelectItem>
-                  <SelectItem value="office365">
-                    <span className="flex items-center gap-2">📨 Office 365</span>
-                  </SelectItem>
-                  <SelectItem value="custom">
-                    <span className="flex items-center gap-2">✉️ Custom SMTP</span>
-                  </SelectItem>
-                </SelectContent>
-              </Select>
+              <div className="grid grid-cols-4 gap-2 mt-1.5">
+                {[
+                  { id: 'gmail', label: 'Gmail', icon: <Mail className="h-4 w-4 text-red-500" /> },
+                  { id: 'outlook', label: 'Outlook', icon: <Mail className="h-4 w-4 text-blue-500" /> },
+                  { id: 'office365', label: 'Office 365', icon: <Mail className="h-4 w-4 text-indigo-500" /> },
+                  { id: 'custom', label: 'Custom', icon: <Server className="h-4 w-4 text-gray-500" /> },
+                ].map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => handleProviderChange(p.id)}
+                    className={`flex flex-col items-center gap-1.5 p-3 rounded-xl border-2 transition-all text-center ${
+                      formProvider === p.id 
+                        ? 'border-blue-500 bg-blue-50/50 shadow-sm' 
+                        : 'border-gray-200 hover:border-gray-300 bg-white'
+                    }`}
+                  >
+                    {p.icon}
+                    <span className={`text-xs font-medium ${formProvider === p.id ? 'text-blue-700' : 'text-gray-600'}`}>{p.label}</span>
+                  </button>
+                ))}
+              </div>
             </div>
 
             {/* Provider-specific alerts */}
             {formProvider === 'gmail' && (
-              <Alert className="border-blue-200 bg-blue-50/50">
-                <AlertCircle className="h-4 w-4 text-blue-600" />
-                <AlertDescription className="text-sm text-blue-800">
-                  <strong>Gmail requires an App Password.</strong> Go to{' '}
+              <Alert className="border-amber-200 bg-amber-50/50">
+                <AlertCircle className="h-4 w-4 text-amber-600" />
+                <AlertDescription className="text-sm text-amber-800">
+                  <strong>Gmail requires an App Password</strong> (not your regular password). You must have 2-Step Verification enabled.{' '}
                   <a href="https://myaccount.google.com/apppasswords" target="_blank" className="underline font-medium inline-flex items-center gap-0.5">
-                    Google App Passwords <ExternalLink className="h-3 w-3" />
-                  </a>{' '}
-                  and generate one for "Mail". 2-Step Verification must be enabled first.
+                    Generate one here <ExternalLink className="h-3 w-3" />
+                  </a>
                 </AlertDescription>
               </Alert>
             )}
@@ -459,7 +587,7 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
               <Alert className="border-blue-200 bg-blue-50/50">
                 <AlertCircle className="h-4 w-4 text-blue-600" />
                 <AlertDescription className="text-sm text-blue-800">
-                  <strong>Enable SMTP auth in Outlook.</strong> Go to Settings, then Mail, then Sync email and enable POP/IMAP/SMTP. Use your regular password or app password if 2FA is enabled.
+                  <strong>Enable SMTP auth</strong> in Outlook settings: Settings &gt; Mail &gt; Sync email &gt; enable POP/IMAP/SMTP.
                 </AlertDescription>
               </Alert>
             )}
@@ -517,7 +645,7 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
                     type={showPassword ? "text" : "password"}
                     value={formSmtpPass}
                     onChange={(e) => setFormSmtpPass(e.target.value)}
-                    placeholder="Your app password"
+                    placeholder={formProvider === 'gmail' ? "16-character app password" : "Your SMTP password"}
                     className="pr-10 bg-white"
                   />
                   <button
@@ -551,7 +679,7 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
             </div>
 
             {formError && (
-              <Alert variant="destructive" className="py-2">
+              <Alert variant="destructive" className="py-3">
                 <XCircle className="h-4 w-4" />
                 <AlertDescription className="text-sm">{formError}</AlertDescription>
               </Alert>

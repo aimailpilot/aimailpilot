@@ -220,33 +220,61 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(201).json({
         ...account,
         smtpConfig: { ...account.smtpConfig, auth: { user: smtpConfig.auth.user, pass: '••••••••' } },
+        message: `Email account ${email} added successfully. Use the "Test" button to verify your SMTP credentials.`,
       });
     } catch (error) {
-      console.error('Error creating email account:', error);
-      res.status(500).json({ message: 'Failed to create email account' });
+      const errMsg = error instanceof Error ? error.message : 'Unknown error';
+      console.error('Error creating email account:', errMsg);
+      res.status(500).json({ 
+        message: `Failed to create email account: ${errMsg}`,
+        code: 'CREATE_FAILED'
+      });
     }
   });
 
   app.post('/api/email-accounts/:id/test', async (req: any, res) => {
     try {
       const account = await storage.getEmailAccount(req.params.id);
-      if (!account || !account.smtpConfig) {
-        return res.status(404).json({ message: 'Account not found or SMTP not configured' });
+      if (!account) {
+        return res.status(404).json({ 
+          success: false, 
+          error: `Email account with ID "${req.params.id}" was not found. It may have been deleted or the ID is incorrect.`,
+          code: 'ACCOUNT_NOT_FOUND'
+        });
+      }
+      if (!account.smtpConfig) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'SMTP is not configured for this account. Please update the account with valid SMTP settings.',
+          code: 'SMTP_NOT_CONFIGURED'
+        });
       }
 
       // Verify SMTP connection
       const verifyResult = await smtpEmailService.verifyConnection(account.smtpConfig);
       if (!verifyResult.success) {
-        return res.json({ success: false, error: verifyResult.error });
+        return res.json({ 
+          success: false, 
+          error: verifyResult.error,
+          code: 'SMTP_VERIFY_FAILED',
+          provider: account.provider,
+          host: account.smtpConfig.host,
+        });
       }
 
       // Send test email
       const testEmail = req.body.testEmail || account.email;
       const sendResult = await smtpEmailService.sendTestEmail(account.id, account.smtpConfig, testEmail);
       
-      res.json(sendResult);
+      res.json({
+        ...sendResult,
+        provider: account.provider,
+        email: account.email,
+        host: account.smtpConfig.host,
+      });
     } catch (error) {
-      res.status(500).json({ success: false, error: 'Failed to test email account' });
+      const errMsg = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ success: false, error: `Internal error while testing: ${errMsg}`, code: 'INTERNAL_ERROR' });
     }
   });
 
@@ -311,9 +339,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get('/api/email-accounts/:id/quota', async (req: any, res) => {
     try {
       const account = await storage.getEmailAccount(req.params.id);
-      if (!account) return res.status(404).json({ message: 'Not found' });
+      if (!account) {
+        return res.status(404).json({ 
+          message: `Email account with ID "${req.params.id}" not found`,
+          code: 'ACCOUNT_NOT_FOUND'
+        });
+      }
       const quota = smtpEmailService.getDailyQuota(account.id, account.provider);
-      res.json(quota);
+      res.json({
+        ...quota,
+        provider: account.provider,
+        email: account.email,
+        resetTime: 'Midnight UTC',
+      });
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch quota' });
     }

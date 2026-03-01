@@ -281,7 +281,7 @@ export default function MailMeteorDashboard() {
             <DropdownMenuTrigger asChild>
               <button className={`w-full flex items-center gap-2.5 rounded-lg hover:bg-gray-50 transition-colors ${sidebarCollapsed ? 'justify-center p-2' : 'p-2'}`}>
                 <Avatar className="h-8 w-8 flex-shrink-0">
-                  <AvatarImage src={user?.picture} />
+                  {user?.picture ? <AvatarImage src={user.picture} /> : null}
                   <AvatarFallback className="bg-gradient-to-br from-blue-500 to-indigo-500 text-white text-xs font-semibold">
                     {user?.name?.[0] || 'U'}
                   </AvatarFallback>
@@ -580,7 +580,7 @@ export default function MailMeteorDashboard() {
                   <div className="bg-gradient-to-r from-blue-600 to-indigo-600 px-6 py-8">
                     <div className="flex items-center gap-4">
                       <Avatar className="h-16 w-16 border-2 border-white/30">
-                        <AvatarImage src={user?.picture} />
+                        {user?.picture ? <AvatarImage src={user.picture} /> : null}
                         <AvatarFallback className="bg-white/20 text-white text-xl font-bold">
                           {user?.name?.[0] || 'U'}
                         </AvatarFallback>
