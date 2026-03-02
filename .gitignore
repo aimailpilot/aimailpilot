@@ -14,6 +14,9 @@ logs/
 *.tar.gz
 *.zip
 google-tokens.json
+data/*.db
+data/*.db-shm
+data/*.db-wal
 .local/
 .config/
 .replit

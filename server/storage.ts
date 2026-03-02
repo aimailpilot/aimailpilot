@@ -1,63 +1,327 @@
-// In-memory storage with full feature support for MailFlow
-// Supports: email accounts with SMTP, campaigns, contacts, templates, tracking, follow-ups
+// Persistent SQLite storage for MailFlow
+// Data is stored in ./data/mailflow.db and survives server restarts
+import Database from 'better-sqlite3';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-function genId() {
-  return crypto.randomUUID();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const DB_PATH = path.resolve(__dirname, '..', 'data', 'mailflow.db');
+const db = new Database(DB_PATH);
+
+// Enable WAL mode for better concurrent read performance
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+
+function genId() { return crypto.randomUUID(); }
+function now() { return new Date().toISOString(); }
+
+// JSON helpers: store arrays/objects as JSON text in SQLite
+function toJson(v: any): string | null { return v != null ? JSON.stringify(v) : null; }
+function fromJson(v: any): any { if (v == null) return null; try { return JSON.parse(v); } catch { return v; } }
+
+// Hydrate a row: parse JSON columns back to objects
+function hydrateContact(r: any) {
+  if (!r) return null;
+  return { ...r, tags: fromJson(r.tags) || [], customFields: fromJson(r.customFields) || {} };
+}
+function hydrateCampaign(r: any) {
+  if (!r) return null;
+  return { ...r, contactIds: fromJson(r.contactIds) || [] };
+}
+function hydrateTemplate(r: any) {
+  if (!r) return null;
+  return { ...r, variables: fromJson(r.variables) || [] };
+}
+function hydrateAccount(r: any) {
+  if (!r) return null;
+  return { ...r, smtpConfig: fromJson(r.smtpConfig) };
+}
+function hydrateEvent(r: any) {
+  if (!r) return null;
+  return { ...r, metadata: fromJson(r.metadata) };
+}
+function hydrateList(r: any) {
+  if (!r) return null;
+  return { ...r, headers: fromJson(r.headers) || [] };
+}
+function hydrateSegment(r: any) {
+  if (!r) return null;
+  return { ...r, filters: fromJson(r.filters) };
 }
 
+// ========== SCHEMA ==========
+db.exec(`
+  CREATE TABLE IF NOT EXISTS organizations (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    domain TEXT,
+    settings TEXT DEFAULT '{}',
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    firstName TEXT,
+    lastName TEXT,
+    role TEXT DEFAULT 'admin',
+    organizationId TEXT NOT NULL,
+    isActive INTEGER DEFAULT 1,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS email_accounts (
+    id TEXT PRIMARY KEY,
+    organizationId TEXT NOT NULL,
+    provider TEXT,
+    email TEXT NOT NULL,
+    displayName TEXT,
+    smtpConfig TEXT,
+    dailyLimit INTEGER DEFAULT 500,
+    dailySent INTEGER DEFAULT 0,
+    isActive INTEGER DEFAULT 1,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS llm_configs (
+    id TEXT PRIMARY KEY,
+    organizationId TEXT NOT NULL,
+    provider TEXT,
+    model TEXT,
+    isPrimary INTEGER DEFAULT 0,
+    isActive INTEGER DEFAULT 1,
+    monthlyCost REAL DEFAULT 0,
+    monthlyLimit INTEGER DEFAULT 0,
+    createdAt TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS contact_lists (
+    id TEXT PRIMARY KEY,
+    organizationId TEXT NOT NULL,
+    name TEXT NOT NULL,
+    source TEXT DEFAULT 'csv',
+    headers TEXT DEFAULT '[]',
+    contactCount INTEGER DEFAULT 0,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS contacts (
+    id TEXT PRIMARY KEY,
+    organizationId TEXT NOT NULL,
+    email TEXT NOT NULL,
+    firstName TEXT,
+    lastName TEXT,
+    company TEXT,
+    jobTitle TEXT,
+    status TEXT DEFAULT 'cold',
+    score INTEGER DEFAULT 0,
+    tags TEXT DEFAULT '[]',
+    customFields TEXT DEFAULT '{}',
+    source TEXT DEFAULT 'manual',
+    listId TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_contacts_org ON contacts(organizationId);
+  CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(organizationId, email);
+  CREATE INDEX IF NOT EXISTS idx_contacts_list ON contacts(listId);
+
+  CREATE TABLE IF NOT EXISTS segments (
+    id TEXT PRIMARY KEY,
+    organizationId TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    filters TEXT,
+    contactCount INTEGER DEFAULT 0,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS templates (
+    id TEXT PRIMARY KEY,
+    organizationId TEXT NOT NULL,
+    name TEXT NOT NULL,
+    category TEXT,
+    subject TEXT,
+    content TEXT,
+    variables TEXT DEFAULT '[]',
+    isPublic INTEGER DEFAULT 0,
+    usageCount INTEGER DEFAULT 0,
+    createdBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS campaigns (
+    id TEXT PRIMARY KEY,
+    organizationId TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    status TEXT DEFAULT 'draft',
+    totalRecipients INTEGER DEFAULT 0,
+    sentCount INTEGER DEFAULT 0,
+    openedCount INTEGER DEFAULT 0,
+    clickedCount INTEGER DEFAULT 0,
+    repliedCount INTEGER DEFAULT 0,
+    bouncedCount INTEGER DEFAULT 0,
+    unsubscribedCount INTEGER DEFAULT 0,
+    subject TEXT,
+    content TEXT,
+    emailAccountId TEXT,
+    templateId TEXT,
+    contactIds TEXT DEFAULT '[]',
+    segmentId TEXT,
+    scheduledAt TEXT,
+    createdBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_campaigns_org ON campaigns(organizationId);
+
+  CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    campaignId TEXT NOT NULL,
+    contactId TEXT,
+    subject TEXT,
+    content TEXT,
+    status TEXT DEFAULT 'sending',
+    trackingId TEXT,
+    emailAccountId TEXT,
+    stepNumber INTEGER DEFAULT 0,
+    sentAt TEXT,
+    openedAt TEXT,
+    clickedAt TEXT,
+    repliedAt TEXT,
+    errorMessage TEXT,
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_messages_campaign ON messages(campaignId);
+  CREATE INDEX IF NOT EXISTS idx_messages_tracking ON messages(trackingId);
+
+  CREATE TABLE IF NOT EXISTS tracking_events (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    campaignId TEXT,
+    messageId TEXT,
+    contactId TEXT,
+    trackingId TEXT,
+    url TEXT,
+    userAgent TEXT,
+    ip TEXT,
+    metadata TEXT,
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_events_campaign ON tracking_events(campaignId);
+  CREATE INDEX IF NOT EXISTS idx_events_message ON tracking_events(messageId);
+
+  CREATE TABLE IF NOT EXISTS unsubscribes (
+    id TEXT PRIMARY KEY,
+    organizationId TEXT,
+    email TEXT,
+    contactId TEXT,
+    campaignId TEXT,
+    reason TEXT,
+    createdAt TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS integrations (
+    id TEXT PRIMARY KEY,
+    organizationId TEXT NOT NULL,
+    type TEXT,
+    name TEXT,
+    isActive INTEGER DEFAULT 1,
+    lastSyncAt TEXT,
+    syncCount INTEGER DEFAULT 0,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS followup_sequences (
+    id TEXT PRIMARY KEY,
+    organizationId TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    isActive INTEGER DEFAULT 1,
+    createdBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS followup_steps (
+    id TEXT PRIMARY KEY,
+    sequenceId TEXT NOT NULL,
+    stepNumber INTEGER DEFAULT 0,
+    trigger TEXT,
+    delayDays INTEGER DEFAULT 0,
+    delayHours INTEGER DEFAULT 0,
+    subject TEXT,
+    content TEXT,
+    isActive INTEGER DEFAULT 1,
+    createdAt TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS campaign_followups (
+    id TEXT PRIMARY KEY,
+    campaignId TEXT NOT NULL,
+    sequenceId TEXT,
+    isActive INTEGER DEFAULT 1,
+    createdAt TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS followup_executions (
+    id TEXT PRIMARY KEY,
+    campaignMessageId TEXT,
+    stepId TEXT,
+    contactId TEXT,
+    campaignId TEXT,
+    status TEXT DEFAULT 'pending',
+    scheduledAt TEXT,
+    executedAt TEXT,
+    createdAt TEXT NOT NULL
+  );
+`);
+
+// ========== SEED DATA (only on first run) ==========
 const ORG_ID = '550e8400-e29b-41d4-a716-446655440001';
 
-// ========== DATA STORES ==========
+function seedIfEmpty() {
+  const orgCount = (db.prepare('SELECT COUNT(*) as c FROM organizations').get() as any).c;
+  if (orgCount > 0) return; // Already seeded
 
-const orgs: any[] = [
-  { id: ORG_ID, name: 'MailFlow Organization', domain: 'mailflow.app', settings: {}, createdAt: new Date(), updatedAt: new Date() }
-];
+  console.log('[SQLite] Seeding initial data...');
+  const ts = now();
 
-const usersData: any[] = [
-  { id: 'user-123', email: 'demo@mailflow.app', firstName: 'Demo', lastName: 'User', role: 'admin', organizationId: ORG_ID, isActive: true, createdAt: new Date(), updatedAt: new Date() }
-];
+  // Organization
+  db.prepare('INSERT INTO organizations (id, name, domain, settings, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)').run(
+    ORG_ID, 'MailFlow Organization', 'mailflow.app', '{}', ts, ts
+  );
 
-// Email accounts with SMTP configuration
-const emailAccountsData: any[] = [];
+  // User
+  db.prepare('INSERT INTO users (id, email, firstName, lastName, role, organizationId, isActive, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)').run(
+    'user-123', 'demo@mailflow.app', 'Demo', 'User', 'admin', ORG_ID, ts, ts
+  );
 
-const llmConfigsData: any[] = [];
+  // Contacts
+  const insertContact = db.prepare('INSERT INTO contacts (id, organizationId, email, firstName, lastName, company, jobTitle, status, score, tags, customFields, source, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+  const contacts = [
+    { email: 'john@techcorp.com', firstName: 'John', lastName: 'Smith', company: 'Tech Corp', jobTitle: 'CTO', status: 'warm', score: 75, tags: ['tech', 'enterprise'], source: 'linkedin' },
+    { email: 'jane@startup.io', firstName: 'Jane', lastName: 'Doe', company: 'Startup IO', jobTitle: 'CEO', status: 'hot', score: 92, tags: ['startup', 'saas'], source: 'referral' },
+    { email: 'mike@enterprise.com', firstName: 'Mike', lastName: 'Johnson', company: 'Enterprise Ltd', jobTitle: 'VP Sales', status: 'cold', score: 30, tags: ['enterprise'], source: 'cold-outreach' },
+    { email: 'sarah@consulting.com', firstName: 'Sarah', lastName: 'Wilson', company: 'Consulting Group', jobTitle: 'Director', status: 'warm', score: 65, tags: ['consulting'], source: 'website' },
+    { email: 'david@agency.co', firstName: 'David', lastName: 'Brown', company: 'Creative Agency', jobTitle: 'Marketing Lead', status: 'replied', score: 88, tags: ['agency', 'marketing'], source: 'event' },
+  ];
+  for (const c of contacts) {
+    insertContact.run(genId(), ORG_ID, c.email, c.firstName, c.lastName, c.company, c.jobTitle, c.status, c.score, toJson(c.tags), '{}', c.source, ts, ts);
+  }
 
-const contactsData: any[] = [
-  { id: genId(), organizationId: ORG_ID, email: 'john@techcorp.com', firstName: 'John', lastName: 'Smith', company: 'Tech Corp', jobTitle: 'CTO', status: 'warm', score: 75, tags: ['tech', 'enterprise'], customFields: {}, source: 'linkedin', createdAt: new Date(), updatedAt: new Date() },
-  { id: genId(), organizationId: ORG_ID, email: 'jane@startup.io', firstName: 'Jane', lastName: 'Doe', company: 'Startup IO', jobTitle: 'CEO', status: 'hot', score: 92, tags: ['startup', 'saas'], customFields: {}, source: 'referral', createdAt: new Date(), updatedAt: new Date() },
-  { id: genId(), organizationId: ORG_ID, email: 'mike@enterprise.com', firstName: 'Mike', lastName: 'Johnson', company: 'Enterprise Ltd', jobTitle: 'VP Sales', status: 'cold', score: 30, tags: ['enterprise'], customFields: {}, source: 'cold-outreach', createdAt: new Date(), updatedAt: new Date() },
-  { id: genId(), organizationId: ORG_ID, email: 'sarah@consulting.com', firstName: 'Sarah', lastName: 'Wilson', company: 'Consulting Group', jobTitle: 'Director', status: 'warm', score: 65, tags: ['consulting'], customFields: {}, source: 'website', createdAt: new Date(), updatedAt: new Date() },
-  { id: genId(), organizationId: ORG_ID, email: 'david@agency.co', firstName: 'David', lastName: 'Brown', company: 'Creative Agency', jobTitle: 'Marketing Lead', status: 'replied', score: 88, tags: ['agency', 'marketing'], customFields: {}, source: 'event', createdAt: new Date(), updatedAt: new Date() },
-];
-
-const segmentsData: any[] = [];
-
-const templatesData: any[] = [
-  { id: genId(), organizationId: ORG_ID, name: 'Welcome Email', category: 'onboarding', subject: 'Welcome to {{company}}!', content: '<p>Hi {{firstName}},</p><p>Welcome aboard! We are thrilled to have you join us at {{company}}.</p><p>Best regards,<br/>The Team</p>', variables: ['firstName', 'company'], isPublic: false, usageCount: 45, createdAt: new Date('2025-09-01'), updatedAt: new Date('2025-09-01') },
-  { id: genId(), organizationId: ORG_ID, name: 'Follow-up Template', category: 'follow-up', subject: 'Quick follow-up - {{topic}}', content: '<p>Hi {{firstName}},</p><p>Just wanted to follow up on our previous conversation about {{topic}}.</p><p>Would you have time for a quick call this week?</p><p>Best,<br/>{{senderName}}</p>', variables: ['firstName', 'topic', 'senderName'], isPublic: false, usageCount: 23, createdAt: new Date('2025-08-28'), updatedAt: new Date('2025-08-28') },
-  { id: genId(), organizationId: ORG_ID, name: 'Product Launch Announcement', category: 'marketing', subject: 'Introducing {{productName}} - You will love this!', content: '<p>Hi {{firstName}},</p><p>We are excited to announce the launch of <strong>{{productName}}</strong>!</p><p>Check it out and let us know what you think.</p><p>Cheers,<br/>The MailFlow Team</p>', variables: ['firstName', 'productName'], isPublic: true, usageCount: 67, createdAt: new Date('2025-08-25'), updatedAt: new Date('2025-08-25') },
-  { id: genId(), organizationId: ORG_ID, name: 'Cold Outreach', category: 'outreach', subject: 'Hi {{firstName}}, quick question about {{company}}', content: '<p>Hi {{firstName}},</p><p>I came across {{company}} and was impressed by what you\'re building.</p><p>I\'d love to share how MailFlow can help {{company}} scale email outreach. Would you be open to a 15-min chat?</p><p>Best,<br/>{{senderName}}</p>', variables: ['firstName', 'company', 'senderName'], isPublic: false, usageCount: 12, createdAt: new Date('2025-09-10'), updatedAt: new Date('2025-09-10') },
-];
-
-const CAMPAIGN_IDS = {
-  q4Launch: 'camp-q4-product-launch-001',
-  onboarding: 'camp-onboarding-series-002',
-  reengagement: 'camp-reengagement-003',
-  newsletter: 'camp-newsletter-aug-004',
-  coldOutreach: 'camp-cold-outreach-005',
-};
-
-const campaignsData: any[] = [
-  { id: CAMPAIGN_IDS.q4Launch, organizationId: ORG_ID, name: 'Q4 Product Launch', description: 'New feature announcement', status: 'completed', totalRecipients: 1250, sentCount: 1180, openedCount: 720, clickedCount: 345, repliedCount: 89, bouncedCount: 12, unsubscribedCount: 5, subject: 'Exciting news from MailFlow!', content: '<p>Hi {{firstName}},</p><p>We have exciting news to share about MailFlow.</p>', emailAccountId: null, templateId: null, contactIds: [], segmentId: null, scheduledAt: null, createdAt: new Date('2025-08-15'), updatedAt: new Date() },
-  { id: CAMPAIGN_IDS.onboarding, organizationId: ORG_ID, name: 'Customer Onboarding Series', description: 'Welcome email sequence', status: 'completed', totalRecipients: 450, sentCount: 430, openedCount: 312, clickedCount: 156, repliedCount: 42, bouncedCount: 3, unsubscribedCount: 2, subject: 'Welcome to MailFlow!', content: '<p>Hi {{firstName}},</p><p>Welcome aboard!</p>', emailAccountId: null, templateId: null, contactIds: [], segmentId: null, scheduledAt: null, createdAt: new Date('2025-08-20'), updatedAt: new Date() },
-  { id: CAMPAIGN_IDS.reengagement, organizationId: ORG_ID, name: 'Re-engagement Campaign', description: 'Win back inactive users', status: 'scheduled', totalRecipients: 890, sentCount: 0, openedCount: 0, clickedCount: 0, repliedCount: 0, bouncedCount: 0, unsubscribedCount: 0, subject: '', content: '', emailAccountId: null, templateId: null, contactIds: [], segmentId: null, scheduledAt: null, createdAt: new Date('2025-09-01'), updatedAt: new Date() },
-  { id: CAMPAIGN_IDS.newsletter, organizationId: ORG_ID, name: 'Newsletter - August', description: 'Monthly newsletter', status: 'completed', totalRecipients: 2400, sentCount: 2380, openedCount: 1450, clickedCount: 678, repliedCount: 120, bouncedCount: 20, unsubscribedCount: 15, subject: 'MailFlow August Newsletter', content: '<p>Hi {{firstName}},</p><p>Here is your monthly update.</p>', emailAccountId: null, templateId: null, contactIds: [], segmentId: null, scheduledAt: null, createdAt: new Date('2025-08-01'), updatedAt: new Date('2025-08-30') },
-  { id: CAMPAIGN_IDS.coldOutreach, organizationId: ORG_ID, name: 'Cold Outreach - Tech', description: 'Tech industry outreach', status: 'draft', totalRecipients: 0, sentCount: 0, openedCount: 0, clickedCount: 0, repliedCount: 0, bouncedCount: 0, unsubscribedCount: 0, subject: '', content: '', emailAccountId: null, templateId: null, contactIds: [], segmentId: null, scheduledAt: null, createdAt: new Date('2025-09-02'), updatedAt: new Date() },
-];
-
-// Generate seed messages and tracking events for completed campaigns
-function seedTrackingData() {
-  const sampleContacts = [
+  // Seed contacts for tracking
+  const seedContacts = [
     { id: 'seed-c1', email: 'alice@bigcorp.com', firstName: 'Alice', lastName: 'Chen', company: 'BigCorp Inc' },
     { id: 'seed-c2', email: 'bob@techstart.io', firstName: 'Bob', lastName: 'Williams', company: 'TechStart' },
     { id: 'seed-c3', email: 'carol@enterprise.co', firstName: 'Carol', lastName: 'Martinez', company: 'Enterprise Co' },
@@ -69,653 +333,559 @@ function seedTrackingData() {
     { id: 'seed-c9', email: 'irene@marketing.co', firstName: 'Irene', lastName: 'Taylor', company: 'Marketing Pro' },
     { id: 'seed-c10', email: 'jack@venture.vc', firstName: 'Jack', lastName: 'Davis', company: 'Venture Capital' },
   ];
-
-  // Add seed contacts to contacts data (skip if email exists)
-  for (const sc of sampleContacts) {
-    if (!contactsData.find(c => c.email === sc.email)) {
-      contactsData.push({
-        ...sc,
-        organizationId: ORG_ID,
-        status: 'warm',
-        score: Math.floor(Math.random() * 60) + 40,
-        tags: ['seed'],
-        customFields: {},
-        source: 'seed',
-        createdAt: new Date('2025-07-01'),
-        updatedAt: new Date(),
-      });
-    }
+  for (const sc of seedContacts) {
+    const score = Math.floor(Math.random() * 60) + 40;
+    insertContact.run(sc.id, ORG_ID, sc.email, sc.firstName, sc.lastName, sc.company, '', 'warm', score, toJson(['seed']), '{}', 'seed', '2025-07-01T00:00:00.000Z', ts);
   }
 
-  // Seed messages + events for Q4 Product Launch
-  const campaignId = CAMPAIGN_IDS.q4Launch;
-  const now = Date.now();
-  const dayMs = 86400000;
+  // Templates
+  const insertTemplate = db.prepare('INSERT INTO templates (id, organizationId, name, category, subject, content, variables, isPublic, usageCount, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+  insertTemplate.run(genId(), ORG_ID, 'Welcome Email', 'onboarding', 'Welcome to {{company}}!', '<p>Hi {{firstName}},</p><p>Welcome aboard!</p>', toJson(['firstName', 'company']), 0, 45, '2025-09-01T00:00:00.000Z', '2025-09-01T00:00:00.000Z');
+  insertTemplate.run(genId(), ORG_ID, 'Follow-up Template', 'follow-up', 'Quick follow-up - {{topic}}', '<p>Hi {{firstName}},</p><p>Just wanted to follow up about {{topic}}.</p>', toJson(['firstName', 'topic', 'senderName']), 0, 23, '2025-08-28T00:00:00.000Z', '2025-08-28T00:00:00.000Z');
+  insertTemplate.run(genId(), ORG_ID, 'Product Launch Announcement', 'marketing', 'Introducing {{productName}}!', '<p>Hi {{firstName}},</p><p>We are excited to announce <strong>{{productName}}</strong>!</p>', toJson(['firstName', 'productName']), 1, 67, '2025-08-25T00:00:00.000Z', '2025-08-25T00:00:00.000Z');
+  insertTemplate.run(genId(), ORG_ID, 'Cold Outreach', 'outreach', 'Hi {{firstName}}, quick question about {{company}}', '<p>Hi {{firstName}},</p><p>I came across {{company}} and was impressed.</p>', toJson(['firstName', 'company', 'senderName']), 0, 12, '2025-09-10T00:00:00.000Z', '2025-09-10T00:00:00.000Z');
 
-  sampleContacts.forEach((contact, i) => {
-    const trackingId = `${campaignId}_${contact.id}_seed_${i}`;
-    const sentTime = new Date(now - (10 - i) * dayMs - Math.random() * dayMs);
-    const msgId = `msg-seed-${campaignId.slice(-3)}-${i}`;
+  // Campaigns
+  const CIDS = {
+    q4: 'camp-q4-product-launch-001',
+    onboard: 'camp-onboarding-series-002',
+    reengage: 'camp-reengagement-003',
+    newsletter: 'camp-newsletter-aug-004',
+    cold: 'camp-cold-outreach-005',
+  };
+  const insertCampaign = db.prepare('INSERT INTO campaigns (id, organizationId, name, description, status, totalRecipients, sentCount, openedCount, clickedCount, repliedCount, bouncedCount, unsubscribedCount, subject, content, contactIds, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+  insertCampaign.run(CIDS.q4, ORG_ID, 'Q4 Product Launch', 'New feature announcement', 'completed', 1250, 1180, 720, 345, 89, 12, 5, 'Exciting news from MailFlow!', '<p>Hi {{firstName}},</p><p>We have exciting news!</p>', '[]', '2025-08-15T00:00:00.000Z', ts);
+  insertCampaign.run(CIDS.onboard, ORG_ID, 'Customer Onboarding Series', 'Welcome email sequence', 'completed', 450, 430, 312, 156, 42, 3, 2, 'Welcome to MailFlow!', '<p>Hi {{firstName}},</p><p>Welcome!</p>', '[]', '2025-08-20T00:00:00.000Z', ts);
+  insertCampaign.run(CIDS.reengage, ORG_ID, 'Re-engagement Campaign', 'Win back inactive users', 'scheduled', 890, 0, 0, 0, 0, 0, 0, '', '', '[]', '2025-09-01T00:00:00.000Z', ts);
+  insertCampaign.run(CIDS.newsletter, ORG_ID, 'Newsletter - August', 'Monthly newsletter', 'completed', 2400, 2380, 1450, 678, 120, 20, 15, 'MailFlow August Newsletter', '<p>Hi {{firstName}},</p><p>Monthly update.</p>', '[]', '2025-08-01T00:00:00.000Z', '2025-08-30T00:00:00.000Z');
+  insertCampaign.run(CIDS.cold, ORG_ID, 'Cold Outreach - Tech', 'Tech industry outreach', 'draft', 0, 0, 0, 0, 0, 0, 0, '', '', '[]', '2025-09-02T00:00:00.000Z', ts);
 
-    // Determine status randomly
-    const rand = Math.random();
-    const hasOpen = rand < 0.7;
-    const hasClick = rand < 0.35;
-    const hasReply = rand < 0.12;
-    const isBounced = rand > 0.97;
+  // Seed messages + tracking events for Q4 Product Launch
+  const insertMsg = db.prepare('INSERT INTO messages (id, campaignId, contactId, subject, content, status, trackingId, stepNumber, sentAt, openedAt, clickedAt, repliedAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+  const insertEvt = db.prepare('INSERT INTO tracking_events (id, type, campaignId, messageId, contactId, trackingId, url, userAgent, metadata, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
 
-    const msg: any = {
-      id: msgId,
-      campaignId,
-      contactId: contact.id,
-      subject: `Exciting news from MailFlow!`,
-      content: `<p>Hi ${contact.firstName},</p><p>We have exciting news...</p>`,
-      status: isBounced ? 'failed' : 'sent',
-      trackingId,
-      emailAccountId: null,
-      stepNumber: 0,
-      sentAt: isBounced ? null : sentTime,
-      openedAt: hasOpen ? new Date(sentTime.getTime() + Math.random() * 3600000) : null,
-      clickedAt: hasClick ? new Date(sentTime.getTime() + Math.random() * 7200000) : null,
-      repliedAt: hasReply ? new Date(sentTime.getTime() + Math.random() * dayMs) : null,
-      createdAt: sentTime,
-    };
+  const seedBatch = db.transaction(() => {
+    const nowMs = Date.now();
+    const dayMs = 86400000;
 
-    messagesData.push(msg);
+    // Q4 Product Launch messages
+    seedContacts.forEach((contact, i) => {
+      const trackingId = `${CIDS.q4}_${contact.id}_seed_${i}`;
+      const sentTime = new Date(nowMs - (10 - i) * dayMs - Math.random() * dayMs).toISOString();
+      const msgId = `msg-seed-001-${i}`;
+      const rand = Math.random();
+      const hasOpen = rand < 0.7;
+      const hasClick = rand < 0.35;
+      const hasReply = rand < 0.12;
+      const isBounced = rand > 0.97;
 
-    // Create tracking events
-    trackingEventsData.push({
-      id: `evt-sent-${msgId}`,
-      type: 'sent',
-      campaignId,
-      messageId: msgId,
-      contactId: contact.id,
-      trackingId,
-      createdAt: sentTime,
-    });
+      const openTime = hasOpen ? new Date(new Date(sentTime).getTime() + Math.random() * 3600000).toISOString() : null;
+      const clickTime = hasClick ? new Date(new Date(sentTime).getTime() + Math.random() * 7200000).toISOString() : null;
+      const replyTime = hasReply ? new Date(new Date(sentTime).getTime() + Math.random() * dayMs).toISOString() : null;
 
-    if (hasOpen) {
-      const openTime = new Date(sentTime.getTime() + Math.random() * 3600000);
-      trackingEventsData.push({
-        id: `evt-open-${msgId}`,
-        type: 'open',
-        campaignId,
-        messageId: msgId,
-        contactId: contact.id,
-        trackingId,
-        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
-        createdAt: openTime,
-      });
-      // Some opened twice
-      if (Math.random() < 0.3) {
-        trackingEventsData.push({
-          id: `evt-open2-${msgId}`,
-          type: 'open',
-          campaignId,
-          messageId: msgId,
-          contactId: contact.id,
-          trackingId,
-          createdAt: new Date(openTime.getTime() + Math.random() * 86400000),
-        });
+      insertMsg.run(msgId, CIDS.q4, contact.id, 'Exciting news from MailFlow!', `<p>Hi ${contact.firstName},</p><p>We have exciting news...</p>`, isBounced ? 'failed' : 'sent', trackingId, 0, isBounced ? null : sentTime, openTime, clickTime, replyTime, sentTime);
+
+      insertEvt.run(`evt-sent-${msgId}`, 'sent', CIDS.q4, msgId, contact.id, trackingId, null, null, null, sentTime);
+      if (hasOpen) {
+        insertEvt.run(`evt-open-${msgId}`, 'open', CIDS.q4, msgId, contact.id, trackingId, null, 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', null, openTime);
+        if (Math.random() < 0.3) {
+          insertEvt.run(`evt-open2-${msgId}`, 'open', CIDS.q4, msgId, contact.id, trackingId, null, null, null, new Date(new Date(openTime!).getTime() + Math.random() * dayMs).toISOString());
+        }
       }
-    }
-
-    if (hasClick) {
-      trackingEventsData.push({
-        id: `evt-click-${msgId}`,
-        type: 'click',
-        campaignId,
-        messageId: msgId,
-        contactId: contact.id,
-        trackingId,
-        url: 'https://mailflow.app/features',
-        createdAt: new Date(sentTime.getTime() + Math.random() * 7200000),
-      });
-    }
-
-    if (hasReply) {
-      trackingEventsData.push({
-        id: `evt-reply-${msgId}`,
-        type: 'reply',
-        campaignId,
-        messageId: msgId,
-        contactId: contact.id,
-        trackingId,
-        createdAt: new Date(sentTime.getTime() + Math.random() * dayMs),
-      });
-    }
-
-    if (isBounced) {
-      trackingEventsData.push({
-        id: `evt-bounce-${msgId}`,
-        type: 'bounce',
-        campaignId,
-        messageId: msgId,
-        contactId: contact.id,
-        trackingId,
-        metadata: { error: 'Mailbox not found' },
-        createdAt: sentTime,
-      });
-    }
-  });
-
-  // Also seed a few for Newsletter campaign
-  const nlCampaignId = CAMPAIGN_IDS.newsletter;
-  sampleContacts.slice(0, 6).forEach((contact, i) => {
-    const trackingId = `${nlCampaignId}_${contact.id}_seed_${i}`;
-    const sentTime = new Date(now - (15 + i) * dayMs);
-    const msgId = `msg-seed-nl-${i}`;
-    const hasOpen = Math.random() < 0.65;
-    const hasClick = Math.random() < 0.3;
-    const hasReply = Math.random() < 0.08;
-
-    messagesData.push({
-      id: msgId,
-      campaignId: nlCampaignId,
-      contactId: contact.id,
-      subject: `MailFlow August Newsletter`,
-      content: `<p>Hi ${contact.firstName},</p><p>Monthly update...</p>`,
-      status: 'sent',
-      trackingId,
-      emailAccountId: null,
-      stepNumber: 0,
-      sentAt: sentTime,
-      openedAt: hasOpen ? new Date(sentTime.getTime() + Math.random() * 7200000) : null,
-      clickedAt: hasClick ? new Date(sentTime.getTime() + Math.random() * 14400000) : null,
-      repliedAt: hasReply ? new Date(sentTime.getTime() + Math.random() * dayMs) : null,
-      createdAt: sentTime,
+      if (hasClick) insertEvt.run(`evt-click-${msgId}`, 'click', CIDS.q4, msgId, contact.id, trackingId, 'https://mailflow.app/features', null, null, clickTime);
+      if (hasReply) insertEvt.run(`evt-reply-${msgId}`, 'reply', CIDS.q4, msgId, contact.id, trackingId, null, null, null, replyTime);
+      if (isBounced) insertEvt.run(`evt-bounce-${msgId}`, 'bounce', CIDS.q4, msgId, contact.id, trackingId, null, null, toJson({ error: 'Mailbox not found' }), sentTime);
     });
 
-    trackingEventsData.push({
-      id: `evt-sent-nl-${i}`,
-      type: 'sent',
-      campaignId: nlCampaignId,
-      messageId: msgId,
-      contactId: contact.id,
-      trackingId,
-      createdAt: sentTime,
+    // Newsletter messages
+    seedContacts.slice(0, 6).forEach((contact, i) => {
+      const trackingId = `${CIDS.newsletter}_${contact.id}_seed_${i}`;
+      const sentTime = new Date(nowMs - (15 + i) * dayMs).toISOString();
+      const msgId = `msg-seed-nl-${i}`;
+      const hasOpen = Math.random() < 0.65;
+      const hasClick = Math.random() < 0.3;
+      const hasReply = Math.random() < 0.08;
+
+      const openTime = hasOpen ? new Date(new Date(sentTime).getTime() + Math.random() * 7200000).toISOString() : null;
+      const clickTime = hasClick ? new Date(new Date(sentTime).getTime() + Math.random() * 14400000).toISOString() : null;
+      const replyTime = hasReply ? new Date(new Date(sentTime).getTime() + Math.random() * dayMs).toISOString() : null;
+
+      insertMsg.run(msgId, CIDS.newsletter, contact.id, 'MailFlow August Newsletter', `<p>Hi ${contact.firstName},</p><p>Monthly update...</p>`, 'sent', trackingId, 0, sentTime, openTime, clickTime, replyTime, sentTime);
+      insertEvt.run(`evt-sent-nl-${i}`, 'sent', CIDS.newsletter, msgId, contact.id, trackingId, null, null, null, sentTime);
+      if (hasOpen) insertEvt.run(`evt-open-nl-${i}`, 'open', CIDS.newsletter, msgId, contact.id, trackingId, null, null, null, openTime);
+      if (hasClick) insertEvt.run(`evt-click-nl-${i}`, 'click', CIDS.newsletter, msgId, contact.id, trackingId, 'https://mailflow.app/blog/august-update', null, null, clickTime);
+      if (hasReply) insertEvt.run(`evt-reply-nl-${i}`, 'reply', CIDS.newsletter, msgId, contact.id, trackingId, null, null, null, replyTime);
     });
-
-    if (hasOpen) {
-      trackingEventsData.push({
-        id: `evt-open-nl-${i}`,
-        type: 'open',
-        campaignId: nlCampaignId,
-        messageId: msgId,
-        contactId: contact.id,
-        trackingId,
-        createdAt: new Date(sentTime.getTime() + Math.random() * 7200000),
-      });
-    }
-
-    if (hasClick) {
-      trackingEventsData.push({
-        id: `evt-click-nl-${i}`,
-        type: 'click',
-        campaignId: nlCampaignId,
-        messageId: msgId,
-        contactId: contact.id,
-        trackingId,
-        url: 'https://mailflow.app/blog/august-update',
-        createdAt: new Date(sentTime.getTime() + Math.random() * 14400000),
-      });
-    }
-
-    if (hasReply) {
-      trackingEventsData.push({
-        id: `evt-reply-nl-${i}`,
-        type: 'reply',
-        campaignId: nlCampaignId,
-        messageId: msgId,
-        contactId: contact.id,
-        trackingId,
-        createdAt: new Date(sentTime.getTime() + Math.random() * dayMs),
-      });
-    }
   });
+
+  seedBatch();
+  console.log('[SQLite] Seed complete.');
 }
 
-const messagesData: any[] = [];
-const integrationsData: any[] = [];
-const followupSequencesData: any[] = [];
-const followupStepsData: any[] = [];
-const campaignFollowupsData: any[] = [];
-const followupExecutionsData: any[] = [];
+seedIfEmpty();
 
-// Contact Lists (stores list name + imported column headers)
-const contactListsData: any[] = [];
-
-// Tracking data stores
-const trackingEventsData: any[] = [];
-const unsubscribesData: any[] = [];
-
-// Run seed
-seedTrackingData();
-
+// ========== DatabaseStorage class (all methods use SQLite) ==========
 export class DatabaseStorage {
   // ========== Organization ==========
-  async getOrganization(id: string) { return orgs.find(o => o.id === id); }
-  async createOrganization(org: any) { const n = { id: genId(), ...org, createdAt: new Date(), updatedAt: new Date() }; orgs.push(n); return n; }
+  async getOrganization(id: string) { return db.prepare('SELECT * FROM organizations WHERE id = ?').get(id) || null; }
+  async createOrganization(org: any) {
+    const id = genId(); const ts2 = now();
+    db.prepare('INSERT INTO organizations (id, name, domain, settings, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)').run(id, org.name, org.domain || '', toJson(org.settings || {}), ts2, ts2);
+    return this.getOrganization(id);
+  }
 
   // ========== Users ==========
-  async getUser(id: string) { return usersData.find(u => u.id === id); }
-  async getUserByEmail(email: string) { return usersData.find(u => u.email === email); }
-  async createUser(user: any) { const n = { id: genId(), ...user, createdAt: new Date(), updatedAt: new Date() }; usersData.push(n); return n; }
+  async getUser(id: string) { return db.prepare('SELECT * FROM users WHERE id = ?').get(id) || null; }
+  async getUserByEmail(email: string) { return db.prepare('SELECT * FROM users WHERE email = ?').get(email) || null; }
+  async createUser(user: any) {
+    const id = genId(); const ts2 = now();
+    db.prepare('INSERT INTO users (id, email, firstName, lastName, role, organizationId, isActive, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, user.email, user.firstName || '', user.lastName || '', user.role || 'admin', user.organizationId, user.isActive ? 1 : 0, ts2, ts2);
+    return this.getUser(id);
+  }
   async updateUser(id: string, data: any) {
-    const idx = usersData.findIndex(u => u.id === id);
-    if (idx >= 0) { usersData[idx] = { ...usersData[idx], ...data, updatedAt: new Date() }; return usersData[idx]; }
-    throw new Error('User not found');
+    const existing = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+    if (!existing) throw new Error('User not found');
+    const merged = { ...existing as any, ...data, updatedAt: now() };
+    db.prepare('UPDATE users SET firstName=?, lastName=?, role=?, isActive=?, updatedAt=? WHERE id=?').run(merged.firstName, merged.lastName, merged.role, merged.isActive ? 1 : 0, merged.updatedAt, id);
+    return this.getUser(id);
   }
 
-  // ========== Email Accounts (with SMTP) ==========
+  // ========== Email Accounts ==========
   async getEmailAccounts(organizationId: string) {
-    return emailAccountsData.filter(a => a.organizationId === organizationId);
+    return db.prepare('SELECT * FROM email_accounts WHERE organizationId = ?').all(organizationId).map(hydrateAccount);
   }
-  async getEmailAccount(id: string) {
-    return emailAccountsData.find(a => a.id === id);
-  }
+  async getEmailAccount(id: string) { return hydrateAccount(db.prepare('SELECT * FROM email_accounts WHERE id = ?').get(id)); }
   async getEmailAccountByEmail(organizationId: string, email: string) {
-    return emailAccountsData.find(a => a.organizationId === organizationId && a.email === email);
+    return hydrateAccount(db.prepare('SELECT * FROM email_accounts WHERE organizationId = ? AND email = ?').get(organizationId, email));
   }
   async createEmailAccount(account: any) {
-    const n = { id: genId(), ...account, dailySent: 0, isActive: true, createdAt: new Date(), updatedAt: new Date() };
-    emailAccountsData.push(n);
-    return n;
+    const id = genId(); const ts2 = now();
+    db.prepare('INSERT INTO email_accounts (id, organizationId, provider, email, displayName, smtpConfig, dailyLimit, dailySent, isActive, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, account.organizationId, account.provider || 'custom', account.email, account.displayName || account.email, toJson(account.smtpConfig), account.dailyLimit || 500, 0, 1, ts2, ts2
+    );
+    return this.getEmailAccount(id);
   }
   async updateEmailAccount(id: string, data: any) {
-    const idx = emailAccountsData.findIndex(a => a.id === id);
-    if (idx >= 0) { emailAccountsData[idx] = { ...emailAccountsData[idx], ...data, updatedAt: new Date() }; return emailAccountsData[idx]; }
-    throw new Error('Email account not found');
+    const existing = await this.getEmailAccount(id);
+    if (!existing) throw new Error('Email account not found');
+    const merged = { ...existing, ...data };
+    db.prepare('UPDATE email_accounts SET displayName=?, smtpConfig=?, dailyLimit=?, dailySent=?, isActive=?, updatedAt=? WHERE id=?').run(
+      merged.displayName, toJson(merged.smtpConfig), merged.dailyLimit, merged.dailySent, merged.isActive ? 1 : 0, now(), id
+    );
+    return this.getEmailAccount(id);
   }
-  async deleteEmailAccount(id: string) {
-    const idx = emailAccountsData.findIndex(a => a.id === id);
-    if (idx >= 0) { emailAccountsData.splice(idx, 1); return true; }
-    return false;
-  }
+  async deleteEmailAccount(id: string) { db.prepare('DELETE FROM email_accounts WHERE id = ?').run(id); return true; }
 
   // ========== LLM Configurations ==========
-  async getLlmConfigurations(organizationId: string) { return llmConfigsData.filter(c => c.organizationId === organizationId); }
-  async getPrimaryLlmConfiguration(organizationId: string) { return llmConfigsData.find(c => c.organizationId === organizationId && c.isPrimary && c.isActive); }
-  async createLlmConfiguration(config: any) { const n = { id: genId(), ...config, createdAt: new Date() }; llmConfigsData.push(n); return n; }
+  async getLlmConfigurations(organizationId: string) { return db.prepare('SELECT * FROM llm_configs WHERE organizationId = ?').all(organizationId); }
+  async getPrimaryLlmConfiguration(organizationId: string) { return db.prepare('SELECT * FROM llm_configs WHERE organizationId = ? AND isPrimary = 1 AND isActive = 1').get(organizationId) || null; }
+  async createLlmConfiguration(config: any) {
+    const id = genId();
+    db.prepare('INSERT INTO llm_configs (id, organizationId, provider, model, isPrimary, isActive, monthlyCost, monthlyLimit, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, config.organizationId, config.provider, config.model, config.isPrimary ? 1 : 0, config.isActive ? 1 : 0, config.monthlyCost || 0, config.monthlyLimit || 0, now()
+    );
+    return db.prepare('SELECT * FROM llm_configs WHERE id = ?').get(id);
+  }
   async updateLlmConfiguration(id: string, data: any) {
-    const idx = llmConfigsData.findIndex(c => c.id === id);
-    if (idx >= 0) { llmConfigsData[idx] = { ...llmConfigsData[idx], ...data }; return llmConfigsData[idx]; }
-    throw new Error('LLM config not found');
+    const existing = db.prepare('SELECT * FROM llm_configs WHERE id = ?').get(id);
+    if (!existing) throw new Error('LLM config not found');
+    const m = { ...existing as any, ...data };
+    db.prepare('UPDATE llm_configs SET provider=?, model=?, isPrimary=?, isActive=?, monthlyCost=?, monthlyLimit=? WHERE id=?').run(m.provider, m.model, m.isPrimary ? 1 : 0, m.isActive ? 1 : 0, m.monthlyCost, m.monthlyLimit, id);
+    return db.prepare('SELECT * FROM llm_configs WHERE id = ?').get(id);
   }
 
   // ========== Contact Lists ==========
   async getContactLists(organizationId: string) {
-    return contactListsData.filter(l => l.organizationId === organizationId)
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    return db.prepare('SELECT * FROM contact_lists WHERE organizationId = ? ORDER BY createdAt DESC').all(organizationId).map(hydrateList);
   }
-  async getContactList(id: string) { return contactListsData.find(l => l.id === id); }
+  async getContactList(id: string) { return hydrateList(db.prepare('SELECT * FROM contact_lists WHERE id = ?').get(id)); }
   async createContactList(list: any) {
-    const n = { id: genId(), ...list, contactCount: list.contactCount || 0, createdAt: new Date(), updatedAt: new Date() };
-    contactListsData.push(n);
-    return n;
+    const id = genId(); const ts2 = now();
+    db.prepare('INSERT INTO contact_lists (id, organizationId, name, source, headers, contactCount, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, list.organizationId, list.name, list.source || 'csv', toJson(list.headers || []), list.contactCount || 0, ts2, ts2
+    );
+    return this.getContactList(id);
   }
   async updateContactList(id: string, data: any) {
-    const idx = contactListsData.findIndex(l => l.id === id);
-    if (idx >= 0) { contactListsData[idx] = { ...contactListsData[idx], ...data, updatedAt: new Date() }; return contactListsData[idx]; }
-    throw new Error('Contact list not found');
+    const existing = await this.getContactList(id);
+    if (!existing) throw new Error('Contact list not found');
+    const m = { ...existing, ...data };
+    db.prepare('UPDATE contact_lists SET name=?, contactCount=?, updatedAt=? WHERE id=?').run(m.name, m.contactCount, now(), id);
+    return this.getContactList(id);
   }
-  async deleteContactList(id: string) {
-    const idx = contactListsData.findIndex(l => l.id === id);
-    if (idx >= 0) { contactListsData.splice(idx, 1); return true; }
-    return false;
-  }
+  async deleteContactList(id: string) { db.prepare('DELETE FROM contact_lists WHERE id = ?').run(id); return true; }
 
   // ========== Contacts ==========
   async getContacts(organizationId: string, limit = 50, offset = 0, filters?: { listId?: string }) {
-    let result = contactsData.filter(c => c.organizationId === organizationId);
     if (filters?.listId) {
-      result = result.filter(c => c.listId === filters.listId);
+      return db.prepare('SELECT * FROM contacts WHERE organizationId = ? AND listId = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(organizationId, filters.listId, limit, offset).map(hydrateContact);
     }
-    return result.slice(offset, offset + limit);
+    return db.prepare('SELECT * FROM contacts WHERE organizationId = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(organizationId, limit, offset).map(hydrateContact);
   }
   async getContactsCount(organizationId: string, filters?: { listId?: string }) {
-    let result = contactsData.filter(c => c.organizationId === organizationId);
     if (filters?.listId) {
-      result = result.filter(c => c.listId === filters.listId);
+      return (db.prepare('SELECT COUNT(*) as c FROM contacts WHERE organizationId = ? AND listId = ?').get(organizationId, filters.listId) as any).c;
     }
-    return result.length;
+    return (db.prepare('SELECT COUNT(*) as c FROM contacts WHERE organizationId = ?').get(organizationId) as any).c;
   }
-  async getContact(id: string) { return contactsData.find(c => c.id === id); }
+  async getContact(id: string) { return hydrateContact(db.prepare('SELECT * FROM contacts WHERE id = ?').get(id)); }
   async getContactByEmail(organizationId: string, email: string) {
-    return contactsData.find(c => c.organizationId === organizationId && c.email === email);
+    return hydrateContact(db.prepare('SELECT * FROM contacts WHERE organizationId = ? AND email = ?').get(organizationId, email));
   }
   async createContact(contact: any) {
-    const n = { id: genId(), ...contact, score: contact.score || 0, tags: contact.tags || [], customFields: contact.customFields || {}, createdAt: new Date(), updatedAt: new Date() };
-    contactsData.push(n);
-    return n;
+    const id = genId(); const ts2 = now();
+    db.prepare('INSERT INTO contacts (id, organizationId, email, firstName, lastName, company, jobTitle, status, score, tags, customFields, source, listId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, contact.organizationId, contact.email, contact.firstName || '', contact.lastName || '', contact.company || '', contact.jobTitle || '',
+      contact.status || 'cold', contact.score || 0, toJson(contact.tags || []), toJson(contact.customFields || {}), contact.source || 'manual', contact.listId || null, ts2, ts2
+    );
+    return this.getContact(id);
   }
   async createContactsBulk(contacts: any[], listId?: string) {
     const results: any[] = [];
-    for (const contact of contacts) {
-      // Skip if email already exists
-      const exists = contactsData.find(c => c.organizationId === contact.organizationId && c.email === contact.email);
-      if (exists) {
-        // Update existing contact's listId if importing to a new list
-        if (listId && !exists.listId) {
-          exists.listId = listId;
-          exists.updatedAt = new Date();
+    const insertStmt = db.prepare('INSERT INTO contacts (id, organizationId, email, firstName, lastName, company, jobTitle, status, score, tags, customFields, source, listId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    const findStmt = db.prepare('SELECT * FROM contacts WHERE organizationId = ? AND email = ?');
+    const updateListStmt = db.prepare('UPDATE contacts SET listId = ?, updatedAt = ? WHERE id = ?');
+
+    const batch = db.transaction(() => {
+      for (const contact of contacts) {
+        const existing = findStmt.get(contact.organizationId, contact.email);
+        if (existing) {
+          if (listId && !(existing as any).listId) {
+            updateListStmt.run(listId, now(), (existing as any).id);
+          }
+          results.push({ ...hydrateContact(existing), _skipped: true });
+          continue;
         }
-        results.push({ ...exists, _skipped: true });
-        continue;
+        const id = genId(); const ts2 = now();
+        insertStmt.run(
+          id, contact.organizationId, contact.email, contact.firstName || '', contact.lastName || '', contact.company || '', contact.jobTitle || '',
+          contact.status || 'cold', contact.score || 0, toJson(contact.tags || []), toJson(contact.customFields || {}), contact.source || 'import',
+          listId || contact.listId || null, ts2, ts2
+        );
+        results.push({ id, ...contact, listId: listId || contact.listId || null, tags: contact.tags || [], customFields: contact.customFields || {} });
       }
-      const n = { id: genId(), ...contact, listId: listId || contact.listId || null, score: contact.score || 0, tags: contact.tags || [], customFields: contact.customFields || {}, createdAt: new Date(), updatedAt: new Date() };
-      contactsData.push(n);
-      results.push(n);
-    }
+    });
+    batch();
     return results;
   }
   async updateContact(id: string, data: any) {
-    const idx = contactsData.findIndex(c => c.id === id);
-    if (idx >= 0) { contactsData[idx] = { ...contactsData[idx], ...data, updatedAt: new Date() }; return contactsData[idx]; }
-    throw new Error('Contact not found');
+    const existing = await this.getContact(id);
+    if (!existing) throw new Error('Contact not found');
+    const m = { ...existing, ...data };
+    db.prepare('UPDATE contacts SET firstName=?, lastName=?, company=?, jobTitle=?, status=?, score=?, tags=?, customFields=?, source=?, listId=?, updatedAt=? WHERE id=?').run(
+      m.firstName, m.lastName, m.company, m.jobTitle, m.status, m.score, toJson(m.tags), toJson(m.customFields), m.source, m.listId || null, now(), id
+    );
+    return this.getContact(id);
   }
-  async deleteContact(id: string) {
-    const idx = contactsData.findIndex(c => c.id === id);
-    if (idx >= 0) { contactsData.splice(idx, 1); return true; }
-    return false;
-  }
+  async deleteContact(id: string) { db.prepare('DELETE FROM contacts WHERE id = ?').run(id); return true; }
   async deleteContacts(ids: string[]) {
-    for (const id of ids) {
-      const idx = contactsData.findIndex(c => c.id === id);
-      if (idx >= 0) contactsData.splice(idx, 1);
-    }
+    const del = db.prepare('DELETE FROM contacts WHERE id = ?');
+    const batch = db.transaction(() => { for (const id of ids) del.run(id); });
+    batch();
     return true;
   }
   async searchContacts(organizationId: string, query: string, filters?: { listId?: string }) {
-    const q = query.toLowerCase();
-    let result = contactsData.filter(c => c.organizationId === organizationId && (
-      (c.firstName || '').toLowerCase().includes(q) ||
-      (c.lastName || '').toLowerCase().includes(q) ||
-      c.email.toLowerCase().includes(q) ||
-      (c.company || '').toLowerCase().includes(q) ||
-      (c.jobTitle || '').toLowerCase().includes(q) ||
-      (c.tags || []).some((t: string) => t.toLowerCase().includes(q)) ||
-      // Search across customFields values
-      Object.values(c.customFields || {}).some((v: any) => String(v).toLowerCase().includes(q))
-    ));
-    if (filters?.listId) {
-      result = result.filter(c => c.listId === filters.listId);
-    }
-    return result.slice(0, 100);
+    const q = `%${query.toLowerCase()}%`;
+    let sql = `SELECT * FROM contacts WHERE organizationId = ? AND (
+      LOWER(firstName) LIKE ? OR LOWER(lastName) LIKE ? OR LOWER(email) LIKE ? OR
+      LOWER(company) LIKE ? OR LOWER(jobTitle) LIKE ? OR LOWER(tags) LIKE ? OR LOWER(customFields) LIKE ?
+    )`;
+    const params: any[] = [organizationId, q, q, q, q, q, q, q];
+    if (filters?.listId) { sql += ' AND listId = ?'; params.push(filters.listId); }
+    sql += ' ORDER BY createdAt DESC LIMIT 100';
+    return db.prepare(sql).all(...params).map(hydrateContact);
   }
   async getContactsBySegment(segmentId: string) {
-    const segment = segmentsData.find(s => s.id === segmentId);
+    const segment = await this.getContactSegment(segmentId);
     if (!segment || !segment.filters) return [];
-    // Simple filter implementation
-    return contactsData.filter(c => {
-      if (segment.filters.status && c.status !== segment.filters.status) return false;
-      if (segment.filters.tag && !(c.tags || []).includes(segment.filters.tag)) return false;
-      return c.organizationId === segment.organizationId;
-    });
+    let sql = 'SELECT * FROM contacts WHERE organizationId = ?';
+    const params: any[] = [segment.organizationId];
+    if (segment.filters.status) { sql += ' AND status = ?'; params.push(segment.filters.status); }
+    if (segment.filters.tag) { sql += ' AND tags LIKE ?'; params.push(`%${segment.filters.tag}%`); }
+    return db.prepare(sql).all(...params).map(hydrateContact);
   }
 
   // ========== Contact Segments ==========
-  async getContactSegments(organizationId: string) { return segmentsData.filter(s => s.organizationId === organizationId); }
-  async getContactSegment(id: string) { return segmentsData.find(s => s.id === id); }
+  async getContactSegments(organizationId: string) { return db.prepare('SELECT * FROM segments WHERE organizationId = ?').all(organizationId).map(hydrateSegment); }
+  async getContactSegment(id: string) { return hydrateSegment(db.prepare('SELECT * FROM segments WHERE id = ?').get(id)); }
   async createContactSegment(segment: any) {
-    const n = { id: genId(), ...segment, createdAt: new Date(), updatedAt: new Date() };
-    segmentsData.push(n);
-    return n;
+    const id = genId(); const ts2 = now();
+    db.prepare('INSERT INTO segments (id, organizationId, name, description, filters, contactCount, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, segment.organizationId, segment.name, segment.description || '', toJson(segment.filters), segment.contactCount || 0, ts2, ts2
+    );
+    return this.getContactSegment(id);
   }
   async updateContactSegment(id: string, data: any) {
-    const idx = segmentsData.findIndex(s => s.id === id);
-    if (idx >= 0) { segmentsData[idx] = { ...segmentsData[idx], ...data, updatedAt: new Date() }; return segmentsData[idx]; }
-    throw new Error('Segment not found');
+    const existing = await this.getContactSegment(id);
+    if (!existing) throw new Error('Segment not found');
+    const m = { ...existing, ...data };
+    db.prepare('UPDATE segments SET name=?, description=?, filters=?, contactCount=?, updatedAt=? WHERE id=?').run(m.name, m.description, toJson(m.filters), m.contactCount, now(), id);
+    return this.getContactSegment(id);
   }
-  async deleteContactSegment(id: string) {
-    const idx = segmentsData.findIndex(s => s.id === id);
-    if (idx >= 0) { segmentsData.splice(idx, 1); return true; }
-    return false;
-  }
+  async deleteContactSegment(id: string) { db.prepare('DELETE FROM segments WHERE id = ?').run(id); return true; }
 
   // ========== Email Templates ==========
-  async getEmailTemplates(organizationId: string) { return templatesData.filter(t => t.organizationId === organizationId); }
-  async getEmailTemplate(id: string) { return templatesData.find(t => t.id === id); }
+  async getEmailTemplates(organizationId: string) { return db.prepare('SELECT * FROM templates WHERE organizationId = ?').all(organizationId).map(hydrateTemplate); }
+  async getEmailTemplate(id: string) { return hydrateTemplate(db.prepare('SELECT * FROM templates WHERE id = ?').get(id)); }
   async createEmailTemplate(template: any) {
-    const n = { id: genId(), ...template, usageCount: 0, createdAt: new Date(), updatedAt: new Date() };
-    templatesData.push(n);
-    return n;
+    const id = genId(); const ts2 = now();
+    db.prepare('INSERT INTO templates (id, organizationId, name, category, subject, content, variables, isPublic, usageCount, createdBy, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, template.organizationId, template.name, template.category || '', template.subject || '', template.content || '', toJson(template.variables || []), template.isPublic ? 1 : 0, 0, template.createdBy || null, ts2, ts2
+    );
+    return this.getEmailTemplate(id);
   }
   async updateEmailTemplate(id: string, data: any) {
-    const idx = templatesData.findIndex(t => t.id === id);
-    if (idx >= 0) { templatesData[idx] = { ...templatesData[idx], ...data, updatedAt: new Date() }; return templatesData[idx]; }
-    throw new Error('Template not found');
+    const existing = await this.getEmailTemplate(id);
+    if (!existing) throw new Error('Template not found');
+    const m = { ...existing, ...data };
+    db.prepare('UPDATE templates SET name=?, category=?, subject=?, content=?, variables=?, isPublic=?, usageCount=?, updatedAt=? WHERE id=?').run(
+      m.name, m.category, m.subject, m.content, toJson(m.variables), m.isPublic ? 1 : 0, m.usageCount, now(), id
+    );
+    return this.getEmailTemplate(id);
   }
-  async deleteEmailTemplate(id: string) {
-    const idx = templatesData.findIndex(t => t.id === id);
-    if (idx >= 0) { templatesData.splice(idx, 1); return true; }
-    return false;
-  }
+  async deleteEmailTemplate(id: string) { db.prepare('DELETE FROM templates WHERE id = ?').run(id); return true; }
 
   // ========== Campaigns ==========
   async getCampaigns(organizationId: string, limit = 20, offset = 0) {
-    return campaignsData
-      .filter(c => c.organizationId === organizationId)
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-      .slice(offset, offset + limit);
+    return db.prepare('SELECT * FROM campaigns WHERE organizationId = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(organizationId, limit, offset).map(hydrateCampaign);
   }
-  async getCampaign(id: string) { return campaignsData.find(c => c.id === id); }
+  async getCampaign(id: string) { return hydrateCampaign(db.prepare('SELECT * FROM campaigns WHERE id = ?').get(id)); }
   async createCampaign(campaign: any) {
-    const n = {
-      id: genId(), ...campaign,
-      sentCount: 0, openedCount: 0, clickedCount: 0, repliedCount: 0, bouncedCount: 0, unsubscribedCount: 0,
-      totalRecipients: campaign.totalRecipients || 0,
-      contactIds: campaign.contactIds || [],
-      createdAt: new Date(), updatedAt: new Date()
-    };
-    campaignsData.push(n);
-    return n;
+    const id = genId(); const ts2 = now();
+    db.prepare('INSERT INTO campaigns (id, organizationId, name, description, status, totalRecipients, sentCount, openedCount, clickedCount, repliedCount, bouncedCount, unsubscribedCount, subject, content, emailAccountId, templateId, contactIds, segmentId, scheduledAt, createdBy, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, campaign.organizationId, campaign.name, campaign.description || '', campaign.status || 'draft', campaign.totalRecipients || 0,
+      campaign.subject || '', campaign.content || '', campaign.emailAccountId || null, campaign.templateId || null,
+      toJson(campaign.contactIds || []), campaign.segmentId || null, campaign.scheduledAt || null, campaign.createdBy || null, ts2, ts2
+    );
+    return this.getCampaign(id);
   }
   async updateCampaign(id: string, data: any) {
-    const idx = campaignsData.findIndex(c => c.id === id);
-    if (idx >= 0) { campaignsData[idx] = { ...campaignsData[idx], ...data, updatedAt: new Date() }; return campaignsData[idx]; }
-    throw new Error('Campaign not found');
+    const existing = await this.getCampaign(id);
+    if (!existing) throw new Error('Campaign not found');
+    const m = { ...existing, ...data };
+    db.prepare(`UPDATE campaigns SET name=?, description=?, status=?, totalRecipients=?, sentCount=?, openedCount=?, clickedCount=?, repliedCount=?, bouncedCount=?, unsubscribedCount=?, subject=?, content=?, emailAccountId=?, templateId=?, contactIds=?, segmentId=?, scheduledAt=?, updatedAt=? WHERE id=?`).run(
+      m.name, m.description, m.status, m.totalRecipients, m.sentCount, m.openedCount, m.clickedCount, m.repliedCount, m.bouncedCount, m.unsubscribedCount,
+      m.subject, m.content, m.emailAccountId || null, m.templateId || null, toJson(m.contactIds), m.segmentId || null, m.scheduledAt || null, now(), id
+    );
+    return this.getCampaign(id);
   }
-  async deleteCampaign(id: string) {
-    const idx = campaignsData.findIndex(c => c.id === id);
-    if (idx >= 0) { campaignsData.splice(idx, 1); return true; }
-    return false;
-  }
+  async deleteCampaign(id: string) { db.prepare('DELETE FROM campaigns WHERE id = ?').run(id); return true; }
   async getCampaignStats(organizationId: string) {
-    const orgCampaigns = campaignsData.filter(c => c.organizationId === organizationId);
+    const row = db.prepare(`SELECT
+      COUNT(*) as totalCampaigns,
+      SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as activeCampaigns,
+      SUM(sentCount) as totalSent, SUM(openedCount) as totalOpened,
+      SUM(clickedCount) as totalClicked, SUM(repliedCount) as totalReplied,
+      SUM(bouncedCount) as totalBounced, SUM(unsubscribedCount) as totalUnsubscribed
+    FROM campaigns WHERE organizationId = ?`).get(organizationId) as any;
     return {
-      totalCampaigns: orgCampaigns.length,
-      activeCampaigns: orgCampaigns.filter(c => c.status === 'active').length,
-      totalSent: orgCampaigns.reduce((sum, c) => sum + (c.sentCount || 0), 0),
-      totalOpened: orgCampaigns.reduce((sum, c) => sum + (c.openedCount || 0), 0),
-      totalClicked: orgCampaigns.reduce((sum, c) => sum + (c.clickedCount || 0), 0),
-      totalReplied: orgCampaigns.reduce((sum, c) => sum + (c.repliedCount || 0), 0),
-      totalBounced: orgCampaigns.reduce((sum, c) => sum + (c.bouncedCount || 0), 0),
-      totalUnsubscribed: orgCampaigns.reduce((sum, c) => sum + (c.unsubscribedCount || 0), 0),
+      totalCampaigns: row.totalCampaigns || 0,
+      activeCampaigns: row.activeCampaigns || 0,
+      totalSent: row.totalSent || 0,
+      totalOpened: row.totalOpened || 0,
+      totalClicked: row.totalClicked || 0,
+      totalReplied: row.totalReplied || 0,
+      totalBounced: row.totalBounced || 0,
+      totalUnsubscribed: row.totalUnsubscribed || 0,
     };
   }
 
   // ========== Campaign Messages ==========
   async getCampaignMessages(campaignId: string, limit = 100, offset = 0) {
-    return messagesData.filter(m => m.campaignId === campaignId).slice(offset, offset + limit);
+    return db.prepare('SELECT * FROM messages WHERE campaignId = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(campaignId, limit, offset);
   }
-  async getCampaignMessage(id: string) { return messagesData.find(m => m.id === id); }
-  async getCampaignMessageByTracking(trackingId: string) {
-    return messagesData.find(m => m.trackingId === trackingId);
-  }
+  async getCampaignMessage(id: string) { return db.prepare('SELECT * FROM messages WHERE id = ?').get(id) || null; }
+  async getCampaignMessageByTracking(trackingId: string) { return db.prepare('SELECT * FROM messages WHERE trackingId = ?').get(trackingId) || null; }
   async createCampaignMessage(message: any) {
-    const n = { id: genId(), ...message, createdAt: new Date() };
-    messagesData.push(n);
-    return n;
+    const id = genId();
+    db.prepare('INSERT INTO messages (id, campaignId, contactId, subject, content, status, trackingId, emailAccountId, stepNumber, sentAt, openedAt, clickedAt, repliedAt, errorMessage, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, message.campaignId, message.contactId || null, message.subject || '', message.content || '', message.status || 'sending',
+      message.trackingId || null, message.emailAccountId || null, message.stepNumber || 0,
+      message.sentAt || null, message.openedAt || null, message.clickedAt || null, message.repliedAt || null, message.errorMessage || null, now()
+    );
+    return this.getCampaignMessage(id);
   }
   async updateCampaignMessage(id: string, data: any) {
-    const idx = messagesData.findIndex(m => m.id === id);
-    if (idx >= 0) { messagesData[idx] = { ...messagesData[idx], ...data }; return messagesData[idx]; }
-    throw new Error('Message not found');
+    const existing = await this.getCampaignMessage(id);
+    if (!existing) throw new Error('Message not found');
+    const m = { ...existing as any, ...data };
+    db.prepare('UPDATE messages SET status=?, sentAt=?, openedAt=?, clickedAt=?, repliedAt=?, errorMessage=? WHERE id=?').run(
+      m.status, m.sentAt, m.openedAt, m.clickedAt, m.repliedAt, m.errorMessage, id
+    );
+    return this.getCampaignMessage(id);
   }
 
   // ========== Tracking Events ==========
   async createTrackingEvent(event: any) {
-    const n = { id: genId(), ...event, createdAt: new Date() };
-    trackingEventsData.push(n);
-    return n;
+    const id = genId();
+    db.prepare('INSERT INTO tracking_events (id, type, campaignId, messageId, contactId, trackingId, url, userAgent, ip, metadata, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, event.type, event.campaignId || null, event.messageId || null, event.contactId || null, event.trackingId || null,
+      event.url || null, event.userAgent || null, event.ip || null, toJson(event.metadata), now()
+    );
+    return { id, ...event, createdAt: now() };
   }
   async getTrackingEvents(campaignId: string) {
-    return trackingEventsData.filter(e => e.campaignId === campaignId)
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    return db.prepare('SELECT * FROM tracking_events WHERE campaignId = ? ORDER BY createdAt DESC').all(campaignId).map(hydrateEvent);
   }
   async getTrackingEventsByMessage(messageId: string) {
-    return trackingEventsData.filter(e => e.messageId === messageId);
+    return db.prepare('SELECT * FROM tracking_events WHERE messageId = ? ORDER BY createdAt ASC').all(messageId).map(hydrateEvent);
   }
   async getAllTrackingEvents(organizationId: string, limit = 50) {
-    // Get all campaign IDs for this organization
-    const orgCampaignIds = new Set(
-      campaignsData.filter(c => c.organizationId === organizationId).map(c => c.id)
-    );
-    return trackingEventsData
-      .filter(e => orgCampaignIds.has(e.campaignId))
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-      .slice(0, limit);
+    return db.prepare(`SELECT te.* FROM tracking_events te
+      INNER JOIN campaigns c ON te.campaignId = c.id
+      WHERE c.organizationId = ? ORDER BY te.createdAt DESC LIMIT ?`).all(organizationId, limit).map(hydrateEvent);
   }
 
-  // ========== Enriched Campaign Messages (with tracking events) ==========
+  // ========== Enriched Campaign Messages ==========
   async getCampaignMessagesEnriched(campaignId: string, limit = 200, offset = 0) {
-    const messages = messagesData
-      .filter(m => m.campaignId === campaignId)
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-      .slice(offset, offset + limit);
-
-    return messages.map(m => {
-      const events = trackingEventsData.filter(e => e.messageId === m.id);
-      const contact = contactsData.find(c => c.id === m.contactId);
+    const messages = db.prepare('SELECT * FROM messages WHERE campaignId = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(campaignId, limit, offset);
+    return messages.map((m: any) => {
+      const events = db.prepare('SELECT * FROM tracking_events WHERE messageId = ? ORDER BY createdAt ASC').all(m.id).map(hydrateEvent);
+      const contact = m.contactId ? hydrateContact(db.prepare('SELECT * FROM contacts WHERE id = ?').get(m.contactId)) : null;
       return {
         ...m,
         contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company } : null,
         events,
-        openCount: events.filter(e => e.type === 'open').length,
-        clickCount: events.filter(e => e.type === 'click').length,
-        replyCount: events.filter(e => e.type === 'reply').length,
-        firstOpenedAt: events.find(e => e.type === 'open')?.createdAt || null,
-        firstClickedAt: events.find(e => e.type === 'click')?.createdAt || null,
-        firstRepliedAt: events.find(e => e.type === 'reply')?.createdAt || null,
+        openCount: events.filter((e: any) => e.type === 'open').length,
+        clickCount: events.filter((e: any) => e.type === 'click').length,
+        replyCount: events.filter((e: any) => e.type === 'reply').length,
+        firstOpenedAt: events.find((e: any) => e.type === 'open')?.createdAt || null,
+        firstClickedAt: events.find((e: any) => e.type === 'click')?.createdAt || null,
+        firstRepliedAt: events.find((e: any) => e.type === 'reply')?.createdAt || null,
       };
     });
   }
-
   async getCampaignMessagesTotalCount(campaignId: string) {
-    return messagesData.filter(m => m.campaignId === campaignId).length;
+    return (db.prepare('SELECT COUNT(*) as c FROM messages WHERE campaignId = ?').get(campaignId) as any).c;
   }
 
   // ========== Unsubscribes ==========
   async addUnsubscribe(data: any) {
-    const n = { id: genId(), ...data, createdAt: new Date() };
-    unsubscribesData.push(n);
-    // Update contact status
+    const id = genId();
+    db.prepare('INSERT INTO unsubscribes (id, organizationId, email, contactId, campaignId, reason, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+      id, data.organizationId || null, data.email || null, data.contactId || null, data.campaignId || null, data.reason || null, now()
+    );
     if (data.contactId) {
-      const idx = contactsData.findIndex(c => c.id === data.contactId);
-      if (idx >= 0) contactsData[idx].status = 'unsubscribed';
+      db.prepare("UPDATE contacts SET status = 'unsubscribed' WHERE id = ?").run(data.contactId);
     }
-    return n;
+    return { id, ...data, createdAt: now() };
   }
   async isUnsubscribed(organizationId: string, email: string) {
-    return !!unsubscribesData.find(u => u.organizationId === organizationId && u.email === email);
+    return !!(db.prepare('SELECT 1 FROM unsubscribes WHERE organizationId = ? AND email = ?').get(organizationId, email));
   }
   async getUnsubscribes(organizationId: string) {
-    return unsubscribesData.filter(u => u.organizationId === organizationId);
+    return db.prepare('SELECT * FROM unsubscribes WHERE organizationId = ?').all(organizationId);
   }
 
   // ========== Integrations ==========
-  async getIntegrations(organizationId: string) { return integrationsData.filter(i => i.organizationId === organizationId); }
-  async getIntegration(id: string) { return integrationsData.find(i => i.id === id); }
-  async createIntegration(integration: any) { const n = { id: genId(), ...integration, createdAt: new Date(), updatedAt: new Date() }; integrationsData.push(n); return n; }
+  async getIntegrations(organizationId: string) { return db.prepare('SELECT * FROM integrations WHERE organizationId = ?').all(organizationId); }
+  async getIntegration(id: string) { return db.prepare('SELECT * FROM integrations WHERE id = ?').get(id) || null; }
+  async createIntegration(integration: any) {
+    const id = genId(); const ts2 = now();
+    db.prepare('INSERT INTO integrations (id, organizationId, type, name, isActive, syncCount, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, 0, ?, ?)').run(
+      id, integration.organizationId, integration.type, integration.name, integration.isActive ? 1 : 0, ts2, ts2
+    );
+    return this.getIntegration(id);
+  }
   async updateIntegration(id: string, data: any) {
-    const idx = integrationsData.findIndex(i => i.id === id);
-    if (idx >= 0) { integrationsData[idx] = { ...integrationsData[idx], ...data, updatedAt: new Date() }; return integrationsData[idx]; }
-    throw new Error('Integration not found');
+    const existing = await this.getIntegration(id);
+    if (!existing) throw new Error('Integration not found');
+    const m = { ...existing as any, ...data };
+    db.prepare('UPDATE integrations SET name=?, isActive=?, lastSyncAt=?, syncCount=?, updatedAt=? WHERE id=?').run(m.name, m.isActive ? 1 : 0, m.lastSyncAt, m.syncCount, now(), id);
+    return this.getIntegration(id);
   }
 
   // ========== Follow-up Sequences ==========
-  async getFollowupSequences(organizationId: string) { return followupSequencesData.filter(s => s.organizationId === organizationId); }
-  async getFollowupSequence(id: string) { return followupSequencesData.find(s => s.id === id); }
-  async createFollowupSequence(sequence: any) { const n = { id: genId(), ...sequence, isActive: true, createdAt: new Date(), updatedAt: new Date() }; followupSequencesData.push(n); return n; }
+  async getFollowupSequences(organizationId: string) { return db.prepare('SELECT * FROM followup_sequences WHERE organizationId = ?').all(organizationId); }
+  async getFollowupSequence(id: string) { return db.prepare('SELECT * FROM followup_sequences WHERE id = ?').get(id) || null; }
+  async createFollowupSequence(sequence: any) {
+    const id = genId(); const ts2 = now();
+    db.prepare('INSERT INTO followup_sequences (id, organizationId, name, description, isActive, createdBy, createdAt, updatedAt) VALUES (?, ?, ?, ?, 1, ?, ?, ?)').run(
+      id, sequence.organizationId, sequence.name, sequence.description || '', sequence.createdBy || null, ts2, ts2
+    );
+    return this.getFollowupSequence(id);
+  }
   async updateFollowupSequence(id: string, data: any) {
-    const idx = followupSequencesData.findIndex(s => s.id === id);
-    if (idx >= 0) { followupSequencesData[idx] = { ...followupSequencesData[idx], ...data, updatedAt: new Date() }; return followupSequencesData[idx]; }
-    throw new Error('Sequence not found');
+    const existing = await this.getFollowupSequence(id);
+    if (!existing) throw new Error('Sequence not found');
+    const m = { ...existing as any, ...data };
+    db.prepare('UPDATE followup_sequences SET name=?, description=?, isActive=?, updatedAt=? WHERE id=?').run(m.name, m.description, m.isActive ? 1 : 0, now(), id);
+    return this.getFollowupSequence(id);
   }
-  async deleteFollowupSequence(id: string) {
-    const idx = followupSequencesData.findIndex(s => s.id === id);
-    if (idx >= 0) { followupSequencesData.splice(idx, 1); return true; }
-    return false;
-  }
+  async deleteFollowupSequence(id: string) { db.prepare('DELETE FROM followup_sequences WHERE id = ?').run(id); return true; }
 
   // ========== Follow-up Steps ==========
-  async getFollowupSteps(sequenceId: string) { return followupStepsData.filter(s => s.sequenceId === sequenceId).sort((a, b) => a.stepNumber - b.stepNumber); }
-  async getFollowupStep(id: string) { return followupStepsData.find(s => s.id === id); }
-  async createFollowupStep(step: any) { const n = { id: genId(), ...step, isActive: true, createdAt: new Date() }; followupStepsData.push(n); return n; }
+  async getFollowupSteps(sequenceId: string) { return db.prepare('SELECT * FROM followup_steps WHERE sequenceId = ? ORDER BY stepNumber ASC').all(sequenceId); }
+  async getFollowupStep(id: string) { return db.prepare('SELECT * FROM followup_steps WHERE id = ?').get(id) || null; }
+  async createFollowupStep(step: any) {
+    const id = genId();
+    db.prepare('INSERT INTO followup_steps (id, sequenceId, stepNumber, trigger, delayDays, delayHours, subject, content, isActive, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)').run(
+      id, step.sequenceId, step.stepNumber || 0, step.trigger || 'no_reply', step.delayDays || 0, step.delayHours || 0, step.subject || '', step.content || '', now()
+    );
+    return this.getFollowupStep(id);
+  }
   async updateFollowupStep(id: string, data: any) {
-    const idx = followupStepsData.findIndex(s => s.id === id);
-    if (idx >= 0) { followupStepsData[idx] = { ...followupStepsData[idx], ...data }; return followupStepsData[idx]; }
-    throw new Error('Step not found');
+    const existing = await this.getFollowupStep(id);
+    if (!existing) throw new Error('Step not found');
+    const m = { ...existing as any, ...data };
+    db.prepare('UPDATE followup_steps SET stepNumber=?, trigger=?, delayDays=?, delayHours=?, subject=?, content=?, isActive=? WHERE id=?').run(
+      m.stepNumber, m.trigger, m.delayDays, m.delayHours, m.subject, m.content, m.isActive ? 1 : 0, id
+    );
+    return this.getFollowupStep(id);
   }
-  async deleteFollowupStep(id: string) {
-    const idx = followupStepsData.findIndex(s => s.id === id);
-    if (idx >= 0) { followupStepsData.splice(idx, 1); return true; }
-    return false;
-  }
+  async deleteFollowupStep(id: string) { db.prepare('DELETE FROM followup_steps WHERE id = ?').run(id); return true; }
 
   // ========== Campaign Follow-ups ==========
-  async getCampaignFollowups(campaignId: string) { return campaignFollowupsData.filter(f => f.campaignId === campaignId && f.isActive); }
-  async getActiveCampaignFollowups() { return campaignFollowupsData.filter(f => f.isActive); }
-  async createCampaignFollowup(followup: any) { const n = { id: genId(), ...followup, isActive: true, createdAt: new Date() }; campaignFollowupsData.push(n); return n; }
+  async getCampaignFollowups(campaignId: string) { return db.prepare('SELECT * FROM campaign_followups WHERE campaignId = ? AND isActive = 1').all(campaignId); }
+  async getActiveCampaignFollowups() { return db.prepare('SELECT * FROM campaign_followups WHERE isActive = 1').all(); }
+  async createCampaignFollowup(followup: any) {
+    const id = genId();
+    db.prepare('INSERT INTO campaign_followups (id, campaignId, sequenceId, isActive, createdAt) VALUES (?, ?, ?, 1, ?)').run(id, followup.campaignId, followup.sequenceId || null, now());
+    return db.prepare('SELECT * FROM campaign_followups WHERE id = ?').get(id);
+  }
 
   // ========== Follow-up Executions ==========
   async getFollowupExecution(campaignMessageId: string, stepId: string) {
-    return followupExecutionsData.find(e => e.campaignMessageId === campaignMessageId && e.stepId === stepId);
+    return db.prepare('SELECT * FROM followup_executions WHERE campaignMessageId = ? AND stepId = ?').get(campaignMessageId, stepId) || null;
   }
-  async getFollowupExecutionById(id: string) { return followupExecutionsData.find(e => e.id === id); }
+  async getFollowupExecutionById(id: string) { return db.prepare('SELECT * FROM followup_executions WHERE id = ?').get(id) || null; }
   async getPendingFollowupExecutions() {
-    return followupExecutionsData.filter(e => e.status === 'pending' && new Date(e.scheduledAt) <= new Date());
+    return db.prepare("SELECT * FROM followup_executions WHERE status = 'pending' AND scheduledAt <= ?").all(now());
   }
-  async createFollowupExecution(execution: any) { const n = { id: genId(), ...execution, createdAt: new Date() }; followupExecutionsData.push(n); return n; }
+  async createFollowupExecution(execution: any) {
+    const id = genId();
+    db.prepare('INSERT INTO followup_executions (id, campaignMessageId, stepId, contactId, campaignId, status, scheduledAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, execution.campaignMessageId || null, execution.stepId || null, execution.contactId || null, execution.campaignId || null, execution.status || 'pending', execution.scheduledAt || null, now()
+    );
+    return this.getFollowupExecutionById(id);
+  }
   async updateFollowupExecution(id: string, data: any) {
-    const idx = followupExecutionsData.findIndex(e => e.id === id);
-    if (idx >= 0) { followupExecutionsData[idx] = { ...followupExecutionsData[idx], ...data }; return followupExecutionsData[idx]; }
-    throw new Error('Execution not found');
+    const existing = await this.getFollowupExecutionById(id);
+    if (!existing) throw new Error('Execution not found');
+    const m = { ...existing as any, ...data };
+    db.prepare('UPDATE followup_executions SET status=?, executedAt=? WHERE id=?').run(m.status, m.executedAt || null, id);
+    return this.getFollowupExecutionById(id);
   }
   async cancelPendingFollowupsForContact(contactId: string, campaignId?: string) {
-    followupExecutionsData.forEach((e, idx) => {
-      if (e.contactId === contactId && e.status === 'pending') {
-        followupExecutionsData[idx] = { ...e, status: 'skipped' };
-      }
-    });
+    db.prepare("UPDATE followup_executions SET status = 'skipped' WHERE contactId = ? AND status = 'pending'").run(contactId);
   }
 
   // ========== Analytics Helpers ==========
   async getCampaignAnalytics(campaignId: string) {
-    const campaign = campaignsData.find(c => c.id === campaignId);
+    const campaign = await this.getCampaign(campaignId);
     if (!campaign) return null;
 
-    const messages = messagesData.filter(m => m.campaignId === campaignId);
-    const events = trackingEventsData.filter(e => e.campaignId === campaignId);
-
-    const totalSent = campaign.sentCount || messages.filter(m => m.status === 'sent').length;
-    const opened = campaign.openedCount || events.filter(e => e.type === 'open').length;
-    const clicked = campaign.clickedCount || events.filter(e => e.type === 'click').length;
+    const totalSent = campaign.sentCount || 0;
+    const opened = campaign.openedCount || 0;
+    const clicked = campaign.clickedCount || 0;
     const replied = campaign.repliedCount || 0;
-    const bounced = campaign.bouncedCount || messages.filter(m => m.status === 'bounced').length;
+    const bounced = campaign.bouncedCount || 0;
     const unsub = campaign.unsubscribedCount || 0;
 
     return {
       campaignId,
       campaignName: campaign.name,
-      totalSent,
-      delivered: totalSent - bounced,
-      opened,
-      clicked,
-      replied,
-      bounced,
-      unsubscribed: unsub,
+      totalSent, delivered: totalSent - bounced, opened, clicked, replied, bounced, unsubscribed: unsub,
       openRate: totalSent > 0 ? ((opened / totalSent) * 100).toFixed(1) : '0',
       clickRate: opened > 0 ? ((clicked / opened) * 100).toFixed(1) : '0',
       replyRate: totalSent > 0 ? ((replied / totalSent) * 100).toFixed(1) : '0',
@@ -726,43 +896,48 @@ export class DatabaseStorage {
   }
 
   async getOrganizationAnalytics(organizationId: string, days = 30) {
-    const orgCampaigns = campaignsData.filter(c => c.organizationId === organizationId);
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - days);
+    const cutoffStr = cutoff.toISOString();
 
-    const recentCampaigns = orgCampaigns.filter(c => new Date(c.createdAt) >= cutoff);
-    
-    const totalSent = recentCampaigns.reduce((sum, c) => sum + (c.sentCount || 0), 0);
-    const totalOpened = recentCampaigns.reduce((sum, c) => sum + (c.openedCount || 0), 0);
-    const totalClicked = recentCampaigns.reduce((sum, c) => sum + (c.clickedCount || 0), 0);
-    const totalReplied = recentCampaigns.reduce((sum, c) => sum + (c.repliedCount || 0), 0);
-    const totalBounced = recentCampaigns.reduce((sum, c) => sum + (c.bouncedCount || 0), 0);
-    const totalUnsub = recentCampaigns.reduce((sum, c) => sum + (c.unsubscribedCount || 0), 0);
+    const row = db.prepare(`SELECT
+      SUM(sentCount) as totalSent, SUM(openedCount) as totalOpened,
+      SUM(clickedCount) as totalClicked, SUM(repliedCount) as totalReplied,
+      SUM(bouncedCount) as totalBounced, SUM(unsubscribedCount) as totalUnsubscribed,
+      COUNT(*) as campaignCount
+    FROM campaigns WHERE organizationId = ? AND createdAt >= ?`).get(organizationId, cutoffStr) as any;
 
-    // Generate timeline data
+    const totalSent = row.totalSent || 0;
+    const totalOpened = row.totalOpened || 0;
+    const totalClicked = row.totalClicked || 0;
+    const totalReplied = row.totalReplied || 0;
+    const totalBounced = row.totalBounced || 0;
+    const totalUnsub = row.totalUnsubscribed || 0;
+
+    // Timeline
     const timeline: any[] = [];
     for (let i = days - 1; i >= 0; i--) {
       const date = new Date();
       date.setDate(date.getDate() - i);
       const dateStr = date.toISOString().split('T')[0];
-      const dayEvents = trackingEventsData.filter(e => 
-        e.createdAt && new Date(e.createdAt).toISOString().split('T')[0] === dateStr
-      );
+      const dayEvents = db.prepare(`SELECT type, COUNT(*) as c FROM tracking_events te
+        INNER JOIN campaigns ca ON te.campaignId = ca.id
+        WHERE ca.organizationId = ? AND te.createdAt LIKE ?
+        GROUP BY type`).all(organizationId, `${dateStr}%`) as any[];
+      const counts: any = {};
+      for (const e of dayEvents) counts[e.type] = e.c;
       timeline.push({
         date: dateStr,
-        opens: dayEvents.filter(e => e.type === 'open').length || Math.floor(Math.random() * 50),
-        clicks: dayEvents.filter(e => e.type === 'click').length || Math.floor(Math.random() * 20),
-        replies: Math.floor(Math.random() * 5),
+        opens: counts.open || 0,
+        clicks: counts.click || 0,
+        replies: counts.reply || 0,
       });
     }
 
+    const contactCount = (db.prepare('SELECT COUNT(*) as c FROM contacts WHERE organizationId = ?').get(organizationId) as any).c;
+
     return {
-      totalSent,
-      totalOpened,
-      totalClicked,
-      totalReplied,
-      totalBounced,
-      totalUnsubscribed: totalUnsub,
+      totalSent, totalOpened, totalClicked, totalReplied, totalBounced, totalUnsubscribed: totalUnsub,
       openRate: totalSent > 0 ? ((totalOpened / totalSent) * 100).toFixed(1) : '0',
       clickRate: totalOpened > 0 ? ((totalClicked / totalOpened) * 100).toFixed(1) : '0',
       replyRate: totalSent > 0 ? ((totalReplied / totalSent) * 100).toFixed(1) : '0',
@@ -770,8 +945,8 @@ export class DatabaseStorage {
       deliveryRate: totalSent > 0 ? (((totalSent - totalBounced) / totalSent) * 100).toFixed(1) : '0',
       unsubscribeRate: totalSent > 0 ? ((totalUnsub / totalSent) * 100).toFixed(1) : '0',
       timeline,
-      campaignCount: recentCampaigns.length,
-      contactCount: contactsData.filter(c => c.organizationId === organizationId).length,
+      campaignCount: row.campaignCount || 0,
+      contactCount,
     };
   }
 }
