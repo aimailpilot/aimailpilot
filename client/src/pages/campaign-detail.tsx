@@ -2,12 +2,17 @@ import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
+} from "@/components/ui/dialog";
+import {
   ArrowLeft, Send, Eye, MousePointerClick, Reply, AlertTriangle,
-  CheckCircle2, XCircle, Clock, Search, ChevronDown, ChevronUp,
-  Mail, Activity, Users, ExternalLink, RefreshCw,
-  MoreVertical, Play, Pause, Copy, Archive, X, Pencil,
-  Info, Zap, Ban, Calendar, Shield, Timer, Repeat, Check,
-  MailOpen, MousePointer, MessageSquare, AlertCircle, UserMinus
+  CheckCircle2, XCircle, Clock, Search, ChevronDown,
+  Mail, Users, RefreshCw,
+  Play, Pause, Copy, Archive, Pencil,
+  Info, Ban, Calendar, Shield, Timer, Repeat, Check,
+  MailOpen, MousePointer, MessageSquare, AlertCircle, UserMinus,
+  Bold, Italic, Underline, Link, Image, Code, List, ListOrdered,
+  AlignLeft, FileText, MoreVertical, Sparkles, Hash
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { CampaignDetail, CampaignMessage, TrackingEvent, StepAnalytics, ActivityTimelineItem } from "@/types";
@@ -24,8 +29,27 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [showActions, setShowActions] = useState(false);
-  const [showAllEmails, setShowAllEmails] = useState(false);
   const actionsRef = useRef<HTMLDivElement>(null);
+
+  // Rename state
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const [renameSaving, setRenameSaving] = useState(false);
+  const renameInputRef = useRef<HTMLInputElement>(null);
+
+  // Update campaign dialog state
+  const [showUpdateDialog, setShowUpdateDialog] = useState(false);
+  const [updateSubject, setUpdateSubject] = useState("");
+  const [updateContent, setUpdateContent] = useState("");
+  const [updateEmailAccountId, setUpdateEmailAccountId] = useState("");
+  const [updateSaving, setUpdateSaving] = useState(false);
+  const [updateError, setUpdateError] = useState("");
+  const [emailAccounts, setEmailAccounts] = useState<any[]>([]);
+  const editorRef = useRef<HTMLDivElement>(null);
+
+  // Expanded sections
+  const [showAllEmails, setShowAllEmails] = useState(true);
+  const [showTracking, setShowTracking] = useState(true);
 
   const fetchDetail = async () => {
     setLoading(true);
@@ -61,7 +85,108 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
     return () => document.removeEventListener('mousedown', handler);
   }, [showActions]);
 
-  // Action handlers
+  // Focus rename input when editing starts
+  useEffect(() => {
+    if (isRenaming && renameInputRef.current) {
+      renameInputRef.current.focus();
+      renameInputRef.current.select();
+    }
+  }, [isRenaming]);
+
+  // ========== RENAME HANDLERS ==========
+  const startRename = () => {
+    if (!detail) return;
+    setRenameValue(detail.campaign.name);
+    setIsRenaming(true);
+  };
+
+  const cancelRename = () => {
+    setIsRenaming(false);
+    setRenameValue("");
+  };
+
+  const saveRename = async () => {
+    if (!renameValue.trim() || renameValue.trim() === detail?.campaign.name) {
+      cancelRename();
+      return;
+    }
+    setRenameSaving(true);
+    try {
+      const res = await fetch(`/api/campaigns/${campaignId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ name: renameValue.trim() }),
+      });
+      if (res.ok) {
+        setIsRenaming(false);
+        fetchDetail();
+      }
+    } catch (e) { /* ignore */ }
+    setRenameSaving(false);
+  };
+
+  const handleRenameKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') saveRename();
+    if (e.key === 'Escape') cancelRename();
+  };
+
+  // ========== UPDATE DIALOG HANDLERS ==========
+  const openUpdateDialog = async () => {
+    setShowActions(false);
+    if (!detail) return;
+    setUpdateSubject(detail.campaign.subject || '');
+    setUpdateContent(detail.campaign.content || '');
+    setUpdateEmailAccountId(detail.campaign.emailAccountId || '');
+    setUpdateError('');
+    setShowUpdateDialog(true);
+
+    try {
+      const res = await fetch('/api/email-accounts', { credentials: 'include' });
+      if (res.ok) setEmailAccounts(await res.json());
+    } catch (e) { /* ignore */ }
+
+    setTimeout(() => {
+      if (editorRef.current) {
+        editorRef.current.innerHTML = detail.campaign.content || '';
+      }
+    }, 100);
+  };
+
+  const saveUpdate = async () => {
+    setUpdateSaving(true);
+    setUpdateError('');
+    try {
+      const content = editorRef.current?.innerHTML || updateContent;
+      const res = await fetch(`/api/campaigns/${campaignId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          subject: updateSubject,
+          content,
+          emailAccountId: updateEmailAccountId || undefined,
+        }),
+      });
+      if (res.ok) {
+        setShowUpdateDialog(false);
+        fetchDetail();
+      } else {
+        const data = await res.json();
+        setUpdateError(data.message || 'Failed to update campaign');
+      }
+    } catch (e) {
+      setUpdateError('Network error');
+    }
+    setUpdateSaving(false);
+  };
+
+  const execCommand = (cmd: string, value?: string) => {
+    document.execCommand(cmd, false, value);
+    editorRef.current?.focus();
+  };
+
+  // ========== ACTION HANDLERS ==========
   const handleDuplicate = async () => {
     setShowActions(false);
     try {
@@ -103,26 +228,31 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
     } catch (e) { /* ignore */ }
   };
 
+  // ========== LOADING STATE ==========
   if (loading) {
     return (
       <div className="flex items-center justify-center h-96">
         <div className="flex flex-col items-center gap-3">
           <div className="w-8 h-8 border-[3px] border-blue-600 border-t-transparent rounded-full animate-spin" />
-          <span className="text-sm text-gray-400">Loading campaign details...</span>
+          <span className="text-sm text-gray-400 font-medium">Loading campaign...</span>
         </div>
       </div>
     );
   }
 
+  // ========== ERROR STATE ==========
   if (error || !detail) {
     return (
       <div className="p-6">
-        <Button variant="ghost" size="sm" onClick={onBack} className="mb-4">
+        <Button variant="ghost" size="sm" onClick={onBack} className="mb-4 text-gray-500 hover:text-gray-900">
           <ArrowLeft className="h-4 w-4 mr-1" /> Back
         </Button>
-        <div className="text-center py-16">
+        <div className="text-center py-20">
           <AlertTriangle className="h-12 w-12 text-amber-400 mx-auto mb-3" />
-          <p className="text-gray-600">{error || 'Campaign not found'}</p>
+          <p className="text-gray-500 text-sm">{error || 'Campaign not found'}</p>
+          <Button variant="outline" size="sm" onClick={fetchDetail} className="mt-4">
+            <RefreshCw className="h-3.5 w-3.5 mr-1.5" /> Try again
+          </Button>
         </div>
       </div>
     );
@@ -130,23 +260,27 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
 
   const { campaign, analytics, messages, totalMessages, recentEvents, stepAnalytics, emailAccount, activityTimeline } = detail;
 
-  const getStatusBadge = (status: string) => {
-    const styles: Record<string, string> = {
-      active: 'bg-emerald-500 text-white',
-      completed: 'bg-gray-500 text-white',
-      ended: 'bg-gray-500 text-white',
-      draft: 'bg-slate-400 text-white',
-      scheduled: 'bg-blue-500 text-white',
-      paused: 'bg-amber-500 text-white',
-      archived: 'bg-gray-400 text-white',
+  // ========== COMPUTED VALUES ==========
+  const getStatusConfig = (status: string) => {
+    const configs: Record<string, { bg: string; text: string; label: string; dot: string }> = {
+      active: { bg: 'bg-emerald-50', text: 'text-emerald-700', label: 'Active', dot: 'bg-emerald-500' },
+      completed: { bg: 'bg-slate-100', text: 'text-slate-600', label: 'Ended', dot: 'bg-slate-400' },
+      ended: { bg: 'bg-slate-100', text: 'text-slate-600', label: 'Ended', dot: 'bg-slate-400' },
+      draft: { bg: 'bg-gray-100', text: 'text-gray-600', label: 'Draft', dot: 'bg-gray-400' },
+      scheduled: { bg: 'bg-blue-50', text: 'text-blue-700', label: 'Scheduled', dot: 'bg-blue-500' },
+      paused: { bg: 'bg-amber-50', text: 'text-amber-700', label: 'Paused', dot: 'bg-amber-500' },
+      archived: { bg: 'bg-gray-100', text: 'text-gray-500', label: 'Archived', dot: 'bg-gray-400' },
     };
-    return <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${styles[status] || styles.draft}`}>{status === 'completed' ? 'ended' : status}</span>;
+    return configs[status] || configs.draft;
   };
+
+  const statusConfig = getStatusConfig(campaign.status);
 
   const formatDateTime = (dateStr: string) => {
     if (!dateStr) return '-';
     const d = new Date(dateStr);
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) + ', ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) + ', ' +
+      d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
   };
 
   const formatRelativeTime = (dateStr: string) => {
@@ -157,39 +291,20 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
     if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
     if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
     if (diff < 172800000) return 'Yesterday';
-    if (diff < 604800000) return `${Math.floor(diff / 86400000)} days ago`;
+    if (diff < 604800000) return `${Math.floor(diff / 86400000)}d ago`;
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   };
 
-  // Overview stat emojis matching Mailmeteor style
   const overviewStats = [
-    {
-      label: 'Emails sent', value: analytics?.totalSent || campaign.sentCount || 0,
-      emoji: '📨', emojiBg: 'bg-red-50 border border-red-100', rate: null,
-    },
-    {
-      label: 'Opens', value: analytics?.opened || campaign.openedCount || 0,
-      emoji: '👀', emojiBg: 'bg-yellow-50 border border-yellow-100', rate: analytics?.openRate ? `${analytics.openRate}%` : null,
-    },
-    {
-      label: 'Clicks', value: analytics?.clicked || campaign.clickedCount || 0,
-      emoji: '🖱️', emojiBg: 'bg-teal-50 border border-teal-100', rate: analytics?.clickRate ? `${analytics.clickRate}%` : null,
-    },
-    {
-      label: 'Replied', value: analytics?.replied || campaign.repliedCount || 0,
-      emoji: '💬', emojiBg: 'bg-green-50 border border-green-100', rate: analytics?.replyRate ? `${analytics.replyRate}%` : null,
-    },
-    {
-      label: 'Bounces', value: analytics?.bounced || campaign.bouncedCount || 0,
-      emoji: '⚠️', emojiBg: 'bg-pink-50 border border-pink-100', rate: analytics?.bounceRate ? `${analytics.bounceRate}%` : null,
-    },
-    {
-      label: 'Unsubscribes', value: analytics?.unsubscribed || campaign.unsubscribedCount || 0,
-      emoji: '🚫', emojiBg: 'bg-gray-50 border border-gray-100', rate: analytics?.unsubscribeRate ? `${analytics.unsubscribeRate}%` : null,
-    },
+    { label: 'Emails sent', value: analytics?.totalSent || campaign.sentCount || 0, emoji: '📨', emojiBg: 'bg-rose-50 border-rose-100', rate: null },
+    { label: 'Opens', value: analytics?.opened || campaign.openedCount || 0, emoji: '👀', emojiBg: 'bg-amber-50 border-amber-100', rate: analytics?.openRate ? `${analytics.openRate}%` : null },
+    { label: 'Clicks', value: analytics?.clicked || campaign.clickedCount || 0, emoji: '🖱️', emojiBg: 'bg-teal-50 border-teal-100', rate: analytics?.clickRate ? `${analytics.clickRate}%` : null },
+    { label: 'Replied', value: analytics?.replied || campaign.repliedCount || 0, emoji: '💬', emojiBg: 'bg-blue-50 border-blue-100', rate: analytics?.replyRate ? `${analytics.replyRate}%` : null },
+    { label: 'Bounces', value: analytics?.bounced || campaign.bouncedCount || 0, emoji: '⚠️', emojiBg: 'bg-pink-50 border-pink-100', rate: analytics?.bounceRate ? `${analytics.bounceRate}%` : null },
+    { label: 'Unsubscribes', value: analytics?.unsubscribed || campaign.unsubscribedCount || 0, emoji: '🚫', emojiBg: 'bg-gray-50 border-gray-100', rate: analytics?.unsubscribeRate ? `${analytics.unsubscribeRate}%` : null },
   ];
 
-  // Filter messages for emails table
+  // Filter messages
   const filteredMessages = messages.filter((m: CampaignMessage) => {
     const matchesSearch =
       (m.contact?.email || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -203,7 +318,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
     return matchesSearch;
   });
 
-  // Group events by contact for tracking table
+  // Tracking rows
   const contactEventMap = new Map<string, { contact: any; email: string; events: TrackingEvent[]; lastActivity: string }>();
   for (const msg of messages) {
     if (!msg.contact) continue;
@@ -212,13 +327,10 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
       contactEventMap.set(key, { contact: msg.contact, email: msg.subject || '', events: [], lastActivity: msg.sentAt || msg.createdAt });
     }
     const entry = contactEventMap.get(key)!;
-    if (msg.events) {
-      entry.events.push(...msg.events);
-    }
-    // Track latest activity
+    if (msg.events) entry.events.push(...msg.events);
     const lastTime = msg.sentAt || msg.createdAt;
     if (lastTime > entry.lastActivity) entry.lastActivity = lastTime;
-    if (msg.events && msg.events.length > 0) {
+    if (msg.events?.length) {
       const latestEventTime = msg.events.reduce((max, e) => e.createdAt > max ? e.createdAt : max, msg.events[0].createdAt);
       if (latestEventTime > entry.lastActivity) entry.lastActivity = latestEventTime;
     }
@@ -232,574 +344,736 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
   const isPaused = campaign.status === 'paused';
   const isEnded = campaign.status === 'completed' || campaign.status === 'archived';
 
-  // Delivery progress bar
+  // Progress
   const totalSent = analytics?.totalSent || campaign.sentCount || 0;
   const totalRecip = campaign.totalRecipients || totalMessages || 1;
   const deliveryPct = totalRecip > 0 ? Math.min(100, (totalSent / totalRecip) * 100) : 0;
-  const openPct = totalSent > 0 ? ((analytics?.opened || campaign.openedCount || 0) / totalSent) * 100 : 0;
+  const openPct = totalSent > 0 ? Math.min(100, ((analytics?.opened || campaign.openedCount || 0) / totalSent) * 100) : 0;
+  const endedDate = isEnded && campaign.updatedAt ? campaign.updatedAt : null;
 
   return (
-    <div className="max-w-5xl mx-auto">
-      {/* ==================== HEADER ==================== */}
-      <div className="px-6 py-5 border-b border-gray-100">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4 min-w-0 flex-1">
-            <button onClick={onBack} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 flex-shrink-0">
-              <ArrowLeft className="h-4 w-4" />
-            </button>
-            <div className="min-w-0 flex-1">
-              <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider flex items-center gap-1.5 mb-1">
-                <Play className="h-3 w-3" /> Campaign
+    <div className="max-w-[960px] mx-auto pb-16">
+
+      {/* ===================== HEADER ===================== */}
+      <div className="px-6 pt-6 pb-5">
+        {/* Breadcrumb */}
+        <div className="flex items-center gap-2 mb-4">
+          <button onClick={onBack} className="p-1.5 -ml-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors">
+            <ArrowLeft className="h-4 w-4" />
+          </button>
+          <span className="text-[11px] font-bold text-gray-400 uppercase tracking-[0.08em] flex items-center gap-1.5">
+            <Send className="h-3 w-3" /> Campaign
+          </span>
+        </div>
+
+        {/* Title + Actions row */}
+        <div className="flex items-start justify-between gap-6">
+          <div className="min-w-0 flex-1">
+            {/* Editable title */}
+            {isRenaming ? (
+              <div className="flex items-center gap-2 mb-1">
+                <input
+                  ref={renameInputRef}
+                  value={renameValue}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  onKeyDown={handleRenameKeyDown}
+                  onBlur={saveRename}
+                  className="text-2xl font-bold text-gray-900 border-b-2 border-blue-500 outline-none bg-transparent w-full max-w-xl leading-tight py-px"
+                  disabled={renameSaving}
+                />
+                {renameSaving && <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin flex-shrink-0" />}
               </div>
-              <h1 className="text-xl font-bold text-gray-900 truncate">{campaign.name}</h1>
-              <div className="flex items-center gap-4 mt-1.5 text-xs text-gray-400 flex-wrap">
-                <span><strong className="text-gray-600">Created</strong> {formatDateTime(campaign.createdAt)}</span>
-                {isEnded && campaign.updatedAt && (
-                  <span><strong className="text-gray-600">Ended</strong> {formatDateTime(campaign.updatedAt)}</span>
-                )}
-                <span><strong className="text-gray-600">Status</strong> {getStatusBadge(campaign.status)}</span>
+            ) : (
+              <div className="flex items-center gap-2 group mb-1">
+                <h1 className="text-2xl font-bold text-gray-900 truncate leading-tight">{campaign.name}</h1>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      onClick={startRename}
+                      className="p-1 rounded-md hover:bg-gray-100 text-gray-300 hover:text-gray-500 opacity-0 group-hover:opacity-100 transition-all flex-shrink-0"
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top"><p className="text-xs font-medium">Rename campaign</p></TooltipContent>
+                </Tooltip>
               </div>
+            )}
+
+            {/* Metadata */}
+            <div className="flex items-center gap-2 mt-2 flex-wrap">
+              <span className="text-xs text-gray-400">
+                Created <span className="text-gray-500 font-medium">{formatDateTime(campaign.createdAt)}</span>
+              </span>
+              {endedDate && (
+                <>
+                  <span className="text-gray-300">·</span>
+                  <span className="text-xs text-gray-400">
+                    Ended <span className="text-gray-500 font-medium">{formatDateTime(endedDate)}</span>
+                  </span>
+                </>
+              )}
+              <span className="text-gray-300">·</span>
+              <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold ${statusConfig.bg} ${statusConfig.text}`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${statusConfig.dot}`} />
+                {statusConfig.label}
+              </span>
             </div>
           </div>
 
           {/* Actions dropdown */}
-          <div className="relative flex-shrink-0" ref={actionsRef}>
-            <Button
+          <div className="relative flex-shrink-0 pt-0.5" ref={actionsRef}>
+            <button
               onClick={() => setShowActions(!showActions)}
-              className="bg-orange-500 hover:bg-orange-600 text-white shadow-sm"
-              size="sm"
+              className="inline-flex items-center gap-1.5 h-9 px-4 rounded-lg text-[13px] font-semibold text-white bg-gray-900 hover:bg-gray-800 shadow-sm transition-colors"
             >
-              Actions <ChevronDown className="h-3.5 w-3.5 ml-1" />
-            </Button>
+              Actions <ChevronDown className={`h-3.5 w-3.5 transition-transform ${showActions ? 'rotate-180' : ''}`} />
+            </button>
             {showActions && (
-              <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-xl shadow-xl py-1 w-48 z-50">
-                <button onClick={() => { setShowActions(false); /* TODO: open edit */ }}
-                  className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2.5">
-                  <Pencil className="h-3.5 w-3.5" /> Update
-                </button>
+              <div className="absolute right-0 top-full mt-1.5 bg-white border border-gray-200/80 rounded-xl shadow-lg shadow-gray-200/60 py-1 w-52 z-50 animate-in fade-in slide-in-from-top-1 duration-100">
+                <ActionItem icon={<Pencil className="h-3.5 w-3.5" />} label="Update" onClick={openUpdateDialog} />
                 {isActive ? (
-                  <button onClick={handlePause}
-                    className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2.5">
-                    <Pause className="h-3.5 w-3.5" /> Pause sending
-                  </button>
+                  <ActionItem icon={<Pause className="h-3.5 w-3.5" />} label="Pause sending" onClick={handlePause} />
                 ) : isPaused ? (
-                  <button onClick={handleResume}
-                    className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2.5">
-                    <Play className="h-3.5 w-3.5" /> Resume sending
-                  </button>
+                  <ActionItem icon={<Play className="h-3.5 w-3.5" />} label="Resume sending" onClick={handleResume} />
                 ) : (
-                  <button disabled
-                    className="w-full text-left px-4 py-2.5 text-sm text-gray-300 cursor-not-allowed flex items-center gap-2.5">
-                    <Pause className="h-3.5 w-3.5" /> Pause sending
-                  </button>
+                  <ActionItem icon={<Pause className="h-3.5 w-3.5" />} label="Pause sending" disabled />
                 )}
-                <button onClick={handleDuplicate}
-                  className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2.5">
-                  <Copy className="h-3.5 w-3.5" /> Duplicate
-                </button>
+                <ActionItem icon={<Copy className="h-3.5 w-3.5" />} label="Duplicate" onClick={handleDuplicate} />
+                <div className="border-t border-gray-100 my-1" />
                 {(isActive || isPaused) ? (
-                  <button onClick={handleStop}
-                    className="w-full text-left px-4 py-2.5 text-sm text-amber-600 hover:bg-amber-50 flex items-center gap-2.5">
-                    <Ban className="h-3.5 w-3.5" /> Cancel
-                  </button>
+                  <ActionItem icon={<Ban className="h-3.5 w-3.5" />} label="Cancel" onClick={handleStop} destructive />
                 ) : (
-                  <button disabled
-                    className="w-full text-left px-4 py-2.5 text-sm text-gray-300 cursor-not-allowed flex items-center gap-2.5">
-                    <Ban className="h-3.5 w-3.5" /> Cancel
-                  </button>
+                  <ActionItem icon={<Ban className="h-3.5 w-3.5" />} label="Cancel" disabled />
                 )}
-                <button onClick={handleArchive}
-                  className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2.5">
-                  <Archive className="h-3.5 w-3.5" /> Archive
-                </button>
+                <ActionItem icon={<Archive className="h-3.5 w-3.5" />} label="Archive" onClick={handleArchive} />
               </div>
             )}
           </div>
         </div>
+      </div>
 
-        {/* Delivery progress bar */}
-        <div className="mt-4 h-2 bg-gray-100 rounded-full overflow-hidden">
+      {/* ===================== PROGRESS BAR ===================== */}
+      <div className="px-6 pb-6">
+        <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
           <div className="h-full rounded-full flex">
-            <div className="bg-emerald-400 transition-all duration-500" style={{ width: `${openPct}%` }} />
-            <div className="bg-blue-400 transition-all duration-500" style={{ width: `${Math.max(0, deliveryPct - openPct)}%` }} />
+            <div className="bg-emerald-400 transition-all duration-700 ease-out" style={{ width: `${openPct}%` }} />
+            <div className="bg-blue-400 transition-all duration-700 ease-out" style={{ width: `${Math.max(0, deliveryPct - openPct)}%` }} />
           </div>
         </div>
-        <div className="flex items-center gap-4 mt-1.5 text-[10px] text-gray-400">
-          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" /> Opened</span>
-          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-400 inline-block" /> Delivered</span>
-          <span className="ml-auto">{deliveryPct.toFixed(0)}% delivered</span>
+        <div className="flex items-center gap-4 mt-2 text-[10px] text-gray-400 font-medium">
+          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-emerald-400" /> Opened</span>
+          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-blue-400" /> Delivered</span>
+          <span className="ml-auto tabular-nums">{deliveryPct.toFixed(0)}% delivered</span>
         </div>
       </div>
 
-      {/* ==================== OVERVIEW WITH EMOJIS ==================== */}
+      <div className="border-t border-gray-100" />
+
+      {/* ===================== OVERVIEW ===================== */}
       <div className="px-6 py-6">
         <div className="flex items-center justify-between mb-5">
           <h2 className="text-base font-bold text-gray-900 flex items-center gap-2">
             Overview
             <Tooltip>
-              <TooltipTrigger>
-                <Info className="h-3.5 w-3.5 text-gray-300" />
-              </TooltipTrigger>
-              <TooltipContent><p className="text-xs">Campaign performance overview</p></TooltipContent>
+              <TooltipTrigger><Info className="h-3.5 w-3.5 text-gray-300 hover:text-gray-400 transition-colors" /></TooltipTrigger>
+              <TooltipContent><p className="text-xs">Campaign performance metrics</p></TooltipContent>
             </Tooltip>
           </h2>
-          <button onClick={fetchDetail} className="text-xs text-blue-600 hover:text-blue-700 font-medium flex items-center gap-1">
+          <button onClick={fetchDetail} className="text-xs text-blue-600 hover:text-blue-700 font-semibold flex items-center gap-1 transition-colors">
             <RefreshCw className="h-3 w-3" /> Refresh
           </button>
         </div>
 
-        <div className="grid grid-cols-3 lg:grid-cols-6 gap-4 mb-8">
+        {/* Stats grid */}
+        <div className="grid grid-cols-3 lg:grid-cols-6 gap-4">
           {overviewStats.map((stat) => (
-            <div key={stat.label} className="text-center">
-              <div className={`w-14 h-14 rounded-full ${stat.emojiBg} flex items-center justify-center mx-auto mb-2`}>
+            <div key={stat.label} className="text-center group">
+              <div className={`w-14 h-14 rounded-2xl border ${stat.emojiBg} flex items-center justify-center mx-auto mb-3 group-hover:scale-105 transition-transform`}>
                 <span className="text-2xl">{stat.emoji}</span>
               </div>
-              <div className="text-[11px] text-gray-500 mb-0.5 flex items-center justify-center gap-1">
+              <div className="text-[11px] text-gray-400 mb-1 font-medium flex items-center justify-center gap-1">
                 {stat.label}
                 <Tooltip>
-                  <TooltipTrigger>
-                    <Info className="h-2.5 w-2.5 text-gray-300" />
-                  </TooltipTrigger>
+                  <TooltipTrigger><Info className="h-2.5 w-2.5 text-gray-300" /></TooltipTrigger>
                   <TooltipContent><p className="text-xs">Total {stat.label.toLowerCase()}</p></TooltipContent>
                 </Tooltip>
               </div>
-              <div className="text-2xl font-bold text-gray-900">
-                {stat.value.toLocaleString()}
-                {stat.rate && <span className="text-sm font-medium text-gray-400 ml-1">{stat.rate}</span>}
+              <div className="flex items-baseline justify-center gap-1">
+                <span className="text-2xl font-bold text-gray-900 tabular-nums leading-none">{stat.value.toLocaleString()}</span>
+                {stat.rate && <span className="text-[11px] text-gray-400 font-medium">{stat.rate}</span>}
               </div>
             </div>
           ))}
         </div>
+      </div>
 
-        {/* ==================== STEP BREAKDOWN TABLE ==================== */}
-        {stepAnalytics && stepAnalytics.length > 0 && (
-          <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden mb-8">
+      {/* ===================== STEP ANALYTICS TABLE ===================== */}
+      {stepAnalytics && stepAnalytics.length > 0 && (
+        <div className="px-6 pb-6">
+          <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden">
             <table className="w-full">
               <thead>
-                <tr className="border-b border-gray-100 bg-gray-50/50">
-                  <th className="text-left px-5 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider w-1/3"></th>
-                  <th className="text-center px-4 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">Sent</th>
-                  <th className="text-center px-4 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">
+                <tr className="border-b border-gray-100 bg-gray-50/80">
+                  <th className="text-left px-5 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider w-[28%]"></th>
+                  <th className="text-center px-3 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">Sent</th>
+                  <th className="text-center px-3 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">
                     Opens <Info className="h-2.5 w-2.5 inline text-gray-300 ml-0.5" />
                   </th>
-                  <th className="text-center px-4 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">
+                  <th className="text-center px-3 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">
                     Clicks <Info className="h-2.5 w-2.5 inline text-gray-300 ml-0.5" />
                   </th>
-                  <th className="text-center px-4 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">
+                  <th className="text-center px-3 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">
                     Replies <Info className="h-2.5 w-2.5 inline text-gray-300 ml-0.5" />
                   </th>
-                  <th className="text-center px-4 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">
-                    Unsubscribes <Info className="h-2.5 w-2.5 inline text-gray-300 ml-0.5" />
+                  <th className="text-center px-3 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">
+                    Unsubs <Info className="h-2.5 w-2.5 inline text-gray-300 ml-0.5" />
                   </th>
                 </tr>
               </thead>
               <tbody>
                 {stepAnalytics.map((step: StepAnalytics, i: number) => (
-                  <tr key={i} className="border-b border-gray-50 hover:bg-gray-50/50 transition-colors">
+                  <tr key={i} className="border-b last:border-b-0 border-gray-50 hover:bg-gray-50/60 transition-colors">
                     <td className="px-5 py-4">
-                      <div className="text-sm font-semibold text-gray-900">{step.label}</div>
-                      <div className="text-xs text-gray-400 flex items-center gap-1 mt-0.5">
-                        {step.stepNumber === 0 ? (
-                          <>Sent at campaign creation</>
-                        ) : step.description ? (
-                          <>
-                            <span className="text-gray-400">↓</span>
-                            <span>{step.description.split('–')[0]?.trim()}</span>
-                            {step.description.includes('–') && (
-                              <span className="flex items-center gap-0.5">
-                                <Timer className="h-3 w-3 text-blue-400" />
-                                {step.description.split('–')[1]?.trim()}
+                      <div className="flex items-center gap-3">
+                        <div className="w-7 h-7 rounded-lg bg-blue-50 border border-blue-100 flex items-center justify-center flex-shrink-0">
+                          <Hash className="h-3.5 w-3.5 text-blue-500" />
+                        </div>
+                        <div>
+                          <div className="text-sm font-semibold text-gray-900">{step.label}</div>
+                          <div className="text-xs text-gray-400 mt-0.5">
+                            {step.stepNumber === 0 ? (
+                              'Sent at campaign creation'
+                            ) : step.description ? (
+                              <span className="flex items-center gap-1">
+                                <span className="text-gray-300">↓</span>
+                                {step.description.split('–')[0]?.trim()}
+                                {step.description.includes('–') && (
+                                  <span className="text-blue-500 font-medium flex items-center gap-0.5">
+                                    <Timer className="h-3 w-3" />
+                                    {step.description.split('–')[1]?.trim()}
+                                  </span>
+                                )}
                               </span>
+                            ) : (
+                              <span className="flex items-center gap-1"><Clock className="h-3 w-3" /> Follow-up</span>
                             )}
-                          </>
-                        ) : (
-                          <><Clock className="h-3 w-3" /> Follow-up</>
-                        )}
+                          </div>
+                        </div>
                       </div>
                     </td>
-                    <td className="text-center px-4 py-4">
-                      <span className="text-lg font-bold text-gray-900">{step.sent}</span>
+                    <td className="text-center px-3 py-4">
+                      <span className="text-lg font-bold text-gray-900 tabular-nums">{step.sent}</span>
                     </td>
-                    <td className="text-center px-4 py-4">
-                      <span className="text-lg font-bold text-gray-900">{step.opened}</span>
-                      <span className="text-xs text-gray-400 ml-1">{step.openRate}%</span>
+                    <td className="text-center px-3 py-4">
+                      <span className="text-lg font-bold text-gray-900 tabular-nums">{step.opened}</span>
+                      <span className="text-[11px] text-gray-400 ml-1">{step.openRate}%</span>
                     </td>
-                    <td className="text-center px-4 py-4">
-                      <span className="text-lg font-bold text-gray-900">{step.clicked}</span>
-                      <span className="text-xs text-gray-400 ml-1">{step.clickRate}%</span>
+                    <td className="text-center px-3 py-4">
+                      <span className="text-lg font-bold text-gray-900 tabular-nums">{step.clicked}</span>
+                      <span className="text-[11px] text-gray-400 ml-1">{step.clickRate}%</span>
                     </td>
-                    <td className="text-center px-4 py-4">
-                      <span className="text-lg font-bold text-gray-900">{step.replied}</span>
-                      <span className="text-xs text-gray-400 ml-1">{step.replyRate}%</span>
+                    <td className="text-center px-3 py-4">
+                      <span className="text-lg font-bold text-gray-900 tabular-nums">{step.replied}</span>
+                      <span className="text-[11px] text-gray-400 ml-1">{step.replyRate}%</span>
                     </td>
-                    <td className="text-center px-4 py-4">
-                      <span className="text-lg font-bold text-gray-900">{step.unsubscribed}</span>
-                      <span className="text-xs text-gray-400 ml-1">0%</span>
+                    <td className="text-center px-3 py-4">
+                      <span className="text-lg font-bold text-gray-900 tabular-nums">{step.unsubscribed}</span>
+                      <span className="text-[11px] text-gray-400 ml-1">0%</span>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-        )}
+        </div>
+      )}
 
-        {/* ==================== CAMPAIGN DETAILS + TIMELINE ==================== */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-          {/* Campaign details */}
-          <div>
+      {/* ===================== DETAILS + TIMELINE (2-column) ===================== */}
+      <div className="px-6 pb-6">
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+          {/* Campaign Details - 3 cols */}
+          <div className="lg:col-span-3">
             <h3 className="text-base font-bold text-gray-900 mb-4">Campaign details</h3>
-            <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+            <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden">
               <div className="divide-y divide-gray-50">
-                <DetailRow
-                  icon={<Users className="h-4 w-4" />}
-                  label="Total recipients"
-                  value={`${campaign.totalRecipients || totalMessages}`}
-                  tooltip="Total number of email recipients for this campaign"
-                />
-                <DetailRow
-                  icon={<Eye className="h-4 w-4" />}
-                  label="Tracking"
-                  value={campaign.trackOpens !== false ? 'Enabled' : 'Disabled'}
-                  valueColor={campaign.trackOpens !== false ? 'text-emerald-600' : 'text-gray-400'}
-                  tooltip="Whether email open and click tracking is enabled"
-                />
-                <DetailRow
-                  icon={<Shield className="h-4 w-4" />}
-                  label="Unsubscribe"
-                  value={campaign.includeUnsubscribe ? 'Enabled' : 'Disabled'}
-                  valueColor={campaign.includeUnsubscribe ? 'text-emerald-600' : 'text-gray-400'}
-                  tooltip="Whether an unsubscribe link is included in emails"
-                />
-                <DetailRow
-                  icon={<Timer className="h-4 w-4" />}
-                  label="Throttling"
-                  value="Every 2 seconds"
-                  tooltip="Delay between each email sent to avoid spam filters"
-                />
-                <DetailRow
-                  icon={<Mail className="h-4 w-4" />}
-                  label="Daily cap"
-                  value={emailAccount ? 'Max 500 emails/day' : 'Not configured'}
-                  tooltip="Maximum number of emails sent per day for this account"
-                />
-                <DetailRow
-                  icon={<Calendar className="h-4 w-4" />}
-                  label="Weekdays"
-                  value="Enabled"
-                  valueColor="text-emerald-600"
-                  tooltip="Emails are sent only on weekdays"
-                />
-                <DetailRow
-                  icon={<Repeat className="h-4 w-4" />}
-                  label="Follow-up"
-                  value={(detail.followupSequences?.length || 0) > 0 ? 'Enabled' : 'Disabled'}
-                  valueColor={(detail.followupSequences?.length || 0) > 0 ? 'text-emerald-600' : 'text-gray-400'}
-                  tooltip="Whether automatic follow-up emails are configured"
-                />
+                <DetailRow icon={<Users className="h-4 w-4" />} label="Total recipients" value={`${campaign.totalRecipients || totalMessages}`} />
+                <DetailRow icon={<Eye className="h-4 w-4" />} label="Tracking" value={campaign.trackOpens !== false ? 'Enabled' : 'Disabled'} valueColor={campaign.trackOpens !== false ? 'text-emerald-600' : 'text-gray-400'} />
+                <DetailRow icon={<Shield className="h-4 w-4" />} label="Unsubscribe" value={campaign.includeUnsubscribe ? 'Enabled' : 'Disabled'} valueColor={campaign.includeUnsubscribe ? 'text-emerald-600' : 'text-gray-400'} />
+                <DetailRow icon={<Timer className="h-4 w-4" />} label="Throttling" value={`Every ${(campaign as any).throttleDelay || 300} seconds`} />
+                <DetailRow icon={<Mail className="h-4 w-4" />} label="Daily cap" value={`Max ${(campaign as any).dailyCap || 500} emails/day`} />
+                <DetailRow icon={<Calendar className="h-4 w-4" />} label="Weekdays" value="Enabled" valueColor="text-emerald-600" />
+                <DetailRow icon={<Repeat className="h-4 w-4" />} label="Follow-up" value={(detail.followupSequences?.length || 0) > 0 ? `${detail.followupSequences?.length} sequence${(detail.followupSequences?.length || 0) > 1 ? 's' : ''}` : 'None'} valueColor={(detail.followupSequences?.length || 0) > 0 ? 'text-emerald-600' : 'text-gray-400'} />
                 {emailAccount && (
-                  <DetailRow
-                    icon={<Send className="h-4 w-4" />}
-                    label="Sender"
-                    value={`${emailAccount.displayName || emailAccount.email} (${emailAccount.provider})`}
-                    tooltip="Email account used to send this campaign"
-                  />
+                  <DetailRow icon={<Send className="h-4 w-4" />} label="Sender" value={`${emailAccount.displayName || emailAccount.email}`} sub={`via ${emailAccount.provider || 'Email'}`} />
                 )}
               </div>
             </div>
           </div>
 
-          {/* Activity timeline */}
-          <div>
+          {/* Activity Timeline - 2 cols */}
+          <div className="lg:col-span-2">
             <h3 className="text-base font-bold text-gray-900 mb-4">Activity</h3>
-            <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+            <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm p-5">
               <div className="relative">
-                {/* Timeline vertical line */}
-                <div className="absolute left-[13px] top-4 bottom-4 w-px bg-gray-200" />
-
-                <div className="space-y-5">
-                  {(activityTimeline || []).map((item: ActivityTimelineItem, i: number) => (
-                    <div key={i} className="flex items-start gap-3 relative">
-                      <div className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 z-10 ${
-                        item.icon === 'check' ? 'bg-emerald-100' :
-                        item.icon === 'edit' ? 'bg-gray-100' :
-                        item.icon === 'pause' ? 'bg-amber-100' :
-                        item.icon === 'clock' ? 'bg-blue-100' :
-                        'bg-blue-100'
-                      }`}>
-                        {item.icon === 'check' ? <Check className="h-3.5 w-3.5 text-emerald-600" /> :
-                         item.icon === 'edit' ? <Pencil className="h-3.5 w-3.5 text-gray-500" /> :
-                         item.icon === 'pause' ? <Pause className="h-3.5 w-3.5 text-amber-600" /> :
-                         item.icon === 'clock' ? <Clock className="h-3.5 w-3.5 text-blue-600" /> :
-                         <Play className="h-3.5 w-3.5 text-blue-600" />}
+                {(activityTimeline || []).length > 1 && (
+                  <div className="absolute left-[13px] top-5 bottom-5 w-px bg-gray-100" />
+                )}
+                <div className="space-y-4">
+                  {(activityTimeline || []).map((item: ActivityTimelineItem, i: number) => {
+                    const iconConfig: Record<string, { bg: string; color: string; Icon: any }> = {
+                      check: { bg: 'bg-emerald-50', color: 'text-emerald-600', Icon: Check },
+                      edit: { bg: 'bg-gray-100', color: 'text-gray-500', Icon: Pencil },
+                      pause: { bg: 'bg-amber-50', color: 'text-amber-600', Icon: Pause },
+                      clock: { bg: 'bg-blue-50', color: 'text-blue-600', Icon: Clock },
+                      start: { bg: 'bg-blue-50', color: 'text-blue-600', Icon: Play },
+                    };
+                    const cfg = iconConfig[item.icon] || iconConfig.start;
+                    return (
+                      <div key={i} className="flex items-start gap-3 relative">
+                        <div className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 z-10 ${cfg.bg}`}>
+                          <cfg.Icon className={`h-3.5 w-3.5 ${cfg.color}`} />
+                        </div>
+                        <div className="pt-0.5">
+                          <div className="text-sm font-medium text-gray-800">{item.label}</div>
+                          <div className="text-xs text-gray-400 mt-0.5">{formatDateTime(item.timestamp)}</div>
+                        </div>
                       </div>
-                      <div>
-                        <div className="text-sm font-medium text-gray-900">{item.label}</div>
-                        <div className="text-xs text-gray-400">{formatDateTime(item.timestamp)}</div>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
-
                 {recentEvents.length > 0 && (
-                  <div className="pt-3 mt-3 border-t border-gray-100 text-xs text-gray-400 pl-10">
-                    ...and {recentEvents.length} tracking event{recentEvents.length > 1 ? 's' : ''}
+                  <div className="pt-4 mt-4 border-t border-gray-100 text-xs text-gray-400 pl-10">
+                    + {recentEvents.length} tracking event{recentEvents.length > 1 ? 's' : ''} recorded
                   </div>
                 )}
               </div>
             </div>
           </div>
         </div>
+      </div>
 
-        {/* ==================== TRACKING TABLE ==================== */}
-        <div className="mb-8">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-base font-bold text-gray-900">Tracking</h3>
-            {trackingRows.length > 0 && (
-              <button
-                onClick={() => setShowAllEmails(true)}
-                className="text-xs text-blue-600 hover:text-blue-700 font-medium"
-              >
-                View all
-              </button>
-            )}
+      {/* ===================== TRACKING TABLE ===================== */}
+      <div className="px-6 pb-6">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-base font-bold text-gray-900 flex items-center gap-2">
+            Tracking
+            <span className="text-[11px] font-normal text-gray-400 bg-gray-100 rounded-md px-1.5 py-0.5">{trackingRows.length}</span>
+          </h3>
+          {trackingRows.length > 0 && (
+            <button className="text-xs text-blue-600 hover:text-blue-700 font-semibold transition-colors">View all</button>
+          )}
+        </div>
+
+        {trackingRows.length === 0 ? (
+          <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm p-16 text-center">
+            <div className="w-14 h-14 rounded-2xl bg-gray-50 border border-gray-100 flex items-center justify-center mx-auto mb-4">
+              <Eye className="h-6 w-6 text-gray-300" />
+            </div>
+            <p className="text-sm font-medium text-gray-500 mb-1">No tracking events yet</p>
+            <p className="text-xs text-gray-400">Events will appear here as recipients interact with your emails</p>
           </div>
+        ) : (
+          <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-gray-100 bg-gray-50/80">
+                  <th className="text-left px-5 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">Recipient</th>
+                  <th className="text-left px-4 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">Subject</th>
+                  <th className="text-left px-4 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">Events</th>
+                  <th className="text-right px-5 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">Last activity</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trackingRows.map((row, i) => {
+                  const opens = row.events.filter(e => e.type === 'open').length;
+                  const clicks = row.events.filter(e => e.type === 'click').length;
+                  const replies = row.events.filter(e => e.type === 'reply').length;
+                  return (
+                    <tr key={i} className="border-b border-gray-50 last:border-b-0 hover:bg-blue-50/30 transition-colors">
+                      <td className="px-5 py-3.5">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-7 h-7 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white text-[10px] font-bold flex-shrink-0">
+                            {(row.contact.firstName?.[0] || row.contact.email?.[0] || '?').toUpperCase()}
+                          </div>
+                          <div className="min-w-0">
+                            <span className="text-sm font-medium text-gray-900 truncate block max-w-[180px]">
+                              {row.contact.firstName || row.contact.lastName
+                                ? `${row.contact.firstName || ''} ${row.contact.lastName || ''}`.trim()
+                                : row.contact.email}
+                            </span>
+                            <span className="text-[11px] text-gray-400 truncate block max-w-[180px]">{row.contact.email}</span>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3.5">
+                        <span className="text-sm text-gray-600 truncate block max-w-[200px]">{row.email || campaign.subject || '-'}</span>
+                      </td>
+                      <td className="px-4 py-3.5">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {opens > 0 && <EventBadge type="open" count={opens} />}
+                          {clicks > 0 && <EventBadge type="click" count={clicks} />}
+                          {replies > 0 && <EventBadge type="reply" count={replies} />}
+                        </div>
+                      </td>
+                      <td className="px-5 py-3.5 text-right">
+                        <span className="text-xs text-gray-400">{formatRelativeTime(row.lastActivity)}</span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
 
-          {trackingRows.length === 0 ? (
-            <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-12 text-center">
-              <Eye className="h-10 w-10 text-gray-200 mx-auto mb-3" />
-              <p className="text-sm text-gray-400">No tracking events yet</p>
-              <p className="text-xs text-gray-300 mt-1">Events will appear here as recipients interact with your emails</p>
-              {detail.trackingBaseUrl && (
-                <p className="text-[10px] text-gray-300 mt-3">
-                  Tracking URL: <code className="bg-gray-50 px-1 py-0.5 rounded text-gray-400">{detail.trackingBaseUrl}</code>
+      {/* ===================== ALL EMAILS TABLE ===================== */}
+      <div className="px-6 pb-6">
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
+          <h3 className="text-base font-bold text-gray-900 flex items-center gap-2">
+            All Emails
+            <span className="text-[11px] font-normal text-gray-400 bg-gray-100 rounded-md px-1.5 py-0.5">{totalMessages}</span>
+          </h3>
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 h-3.5 w-3.5" />
+              <input
+                placeholder="Search recipients..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="pl-8 pr-3 h-8 text-xs border border-gray-200 rounded-lg w-44 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-50 bg-white transition-all"
+              />
+            </div>
+            <div className="flex items-center bg-gray-100 rounded-lg p-0.5">
+              {['all', 'opened', 'clicked', 'replied', 'bounced'].map(f => (
+                <button key={f} onClick={() => setStatusFilter(f)}
+                  className={`px-2.5 py-1 text-[11px] font-semibold rounded-md transition-all capitalize ${
+                    statusFilter === f ? 'bg-white text-gray-900 shadow-sm ring-1 ring-gray-200/60' : 'text-gray-500 hover:text-gray-700'
+                  }`}>{f}</button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {filteredMessages.length === 0 ? (
+          <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm p-16 text-center">
+            <div className="w-14 h-14 rounded-2xl bg-gray-50 border border-gray-100 flex items-center justify-center mx-auto mb-4">
+              <Mail className="h-6 w-6 text-gray-300" />
+            </div>
+            <p className="text-sm font-medium text-gray-500 mb-1">{messages.length === 0 ? 'No emails sent yet' : 'No emails match your filters'}</p>
+            <p className="text-xs text-gray-400">Try adjusting your search or filter criteria</p>
+          </div>
+        ) : (
+          <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden">
+            {/* Table header */}
+            <div className="grid grid-cols-[2fr_80px_70px_70px_70px_90px] gap-1 px-5 py-2.5 border-b border-gray-100 bg-gray-50/80 text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+              <div>Recipient</div>
+              <div className="text-center">Status</div>
+              <div className="text-center">Opens</div>
+              <div className="text-center">Clicks</div>
+              <div className="text-center">Reply</div>
+              <div className="text-right">Sent</div>
+            </div>
+
+            {/* Table rows */}
+            {filteredMessages.slice(0, 50).map((msg: CampaignMessage) => {
+              const statusLabel = msg.repliedAt || (msg.replyCount && msg.replyCount > 0) ? 'Replied' :
+                msg.clickedAt || (msg.clickCount && msg.clickCount > 0) ? 'Clicked' :
+                msg.openedAt || (msg.openCount && msg.openCount > 0) ? 'Opened' :
+                msg.status === 'sent' ? 'Delivered' : msg.status === 'failed' ? 'Failed' : 'Sending';
+
+              const statusStyles: Record<string, string> = {
+                Replied: 'bg-amber-50 text-amber-700 border-amber-200',
+                Clicked: 'bg-purple-50 text-purple-700 border-purple-200',
+                Opened: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+                Delivered: 'bg-blue-50 text-blue-700 border-blue-200',
+                Failed: 'bg-red-50 text-red-700 border-red-200',
+                Sending: 'bg-gray-50 text-gray-600 border-gray-200',
+              };
+
+              return (
+                <div key={msg.id}
+                  className="grid grid-cols-[2fr_80px_70px_70px_70px_90px] gap-1 px-5 py-3 border-b border-gray-50 last:border-b-0 hover:bg-blue-50/20 items-center transition-colors">
+                  <div className="min-w-0 flex items-center gap-2.5">
+                    <div className="w-7 h-7 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white text-[10px] font-bold flex-shrink-0">
+                      {(msg.contact?.firstName?.[0] || msg.contact?.email?.[0] || '?').toUpperCase()}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-gray-900 truncate">
+                        {msg.contact?.firstName || msg.contact?.lastName
+                          ? `${msg.contact?.firstName || ''} ${msg.contact?.lastName || ''}`.trim()
+                          : msg.contact?.email || 'Unknown'}
+                      </div>
+                      <div className="text-[11px] text-gray-400 truncate">{msg.contact?.email || ''}</div>
+                      {msg.stepNumber > 0 && (
+                        <span className="inline-flex items-center gap-0.5 text-[10px] text-blue-500 font-semibold mt-0.5">
+                          <Hash className="h-2.5 w-2.5" /> Step {msg.stepNumber + 1}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="text-center">
+                    <Badge variant="outline" className={`text-[10px] font-semibold px-1.5 py-0 ${statusStyles[statusLabel] || statusStyles.Sending}`}>
+                      {statusLabel}
+                    </Badge>
+                  </div>
+                  <div className="text-center">
+                    {(msg.openCount || 0) > 0
+                      ? <span className="text-sm font-bold text-emerald-600 tabular-nums">{msg.openCount}</span>
+                      : <span className="text-xs text-gray-300">–</span>}
+                  </div>
+                  <div className="text-center">
+                    {(msg.clickCount || 0) > 0
+                      ? <span className="text-sm font-bold text-purple-600 tabular-nums">{msg.clickCount}</span>
+                      : <span className="text-xs text-gray-300">–</span>}
+                  </div>
+                  <div className="text-center">
+                    {(msg.replyCount || 0) > 0
+                      ? <span className="text-sm font-bold text-amber-600 tabular-nums">{msg.replyCount}</span>
+                      : msg.repliedAt
+                        ? <Reply className="h-3.5 w-3.5 text-amber-600 mx-auto" />
+                        : <span className="text-xs text-gray-300">–</span>}
+                  </div>
+                  <div className="text-right">
+                    <span className="text-xs text-gray-400">
+                      {msg.sentAt ? formatRelativeTime(msg.sentAt) : msg.createdAt ? formatRelativeTime(msg.createdAt) : '–'}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {filteredMessages.length > 50 && (
+          <div className="text-xs text-gray-400 text-center mt-3 font-medium">
+            Showing 50 of {filteredMessages.length} emails
+          </div>
+        )}
+      </div>
+
+      {/* ===================== UPDATE CAMPAIGN DIALOG ===================== */}
+      <Dialog open={showUpdateDialog} onOpenChange={setShowUpdateDialog}>
+        <DialogContent className="sm:max-w-[700px] max-h-[92vh] overflow-y-auto p-0 gap-0 rounded-2xl">
+          <DialogHeader className="px-6 pt-6 pb-0">
+            <div className="flex items-center justify-between">
+              <DialogTitle className="text-lg font-bold text-gray-900">Update campaign</DialogTitle>
+              <button onClick={() => setShowUpdateDialog(false)} className="text-blue-600 hover:text-blue-700 text-sm font-semibold transition-colors">
+                Show preview
+              </button>
+            </div>
+            <DialogDescription className="sr-only">Update your campaign settings, recipients, and message content.</DialogDescription>
+          </DialogHeader>
+
+          <div className="px-6 pt-5 pb-6 space-y-6">
+            {/* Status banners */}
+            {isEnded && (
+              <div className="flex items-start gap-3 px-4 py-3.5 bg-amber-50 border border-amber-200/80 rounded-xl">
+                <AlertCircle className="h-4 w-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                <span className="text-sm text-amber-800 leading-relaxed">This campaign has ended on {formatDateTime(endedDate || campaign.updatedAt)}.</span>
+              </div>
+            )}
+            {isActive && (
+              <div className="flex items-start gap-3 px-4 py-3.5 bg-emerald-50 border border-emerald-200/80 rounded-xl">
+                <CheckCircle2 className="h-4 w-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                <span className="text-sm text-emerald-800 leading-relaxed">This campaign is currently active. Changes will apply to unsent emails only.</span>
+              </div>
+            )}
+            {isPaused && (
+              <div className="flex items-start gap-3 px-4 py-3.5 bg-blue-50 border border-blue-200/80 rounded-xl">
+                <Pause className="h-4 w-4 text-blue-600 flex-shrink-0 mt-0.5" />
+                <span className="text-sm text-blue-800 leading-relaxed">This campaign is paused. Changes will apply when you resume sending.</span>
+              </div>
+            )}
+
+            {/* Recipients section */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-base font-bold text-gray-900">Recipients</h3>
+                <button className="text-gray-400 hover:text-gray-600 transition-colors p-1 rounded-md hover:bg-gray-100">
+                  <MoreVertical className="h-4 w-4" />
+                </button>
+              </div>
+              <p className="text-sm text-gray-600">
+                <span className="font-semibold text-gray-900">{campaign.totalRecipients || totalMessages}</span> recipients in your list
+                <span className="text-gray-300 mx-1.5">–</span>
+                <button className="text-blue-600 hover:text-blue-700 font-semibold transition-colors">Add recipients</button>
+              </p>
+            </div>
+
+            <div className="border-t border-gray-100" />
+
+            {/* Messages section */}
+            <div>
+              <h3 className="text-base font-bold text-gray-900 mb-4">Messages</h3>
+
+              {/* From field */}
+              <div className="flex items-center gap-3 mb-3">
+                <label className="text-sm text-gray-500 w-16 flex-shrink-0 font-medium">From</label>
+                <div className="flex-1 relative">
+                  <select
+                    value={updateEmailAccountId}
+                    onChange={(e) => setUpdateEmailAccountId(e.target.value)}
+                    className="w-full h-10 px-3 pr-8 text-sm border border-gray-200 rounded-lg bg-white focus:border-blue-400 focus:ring-2 focus:ring-blue-50 outline-none appearance-none cursor-pointer transition-all"
+                  >
+                    {emailAccounts.length === 0 && emailAccount && (
+                      <option value={emailAccount.id}>{emailAccount.displayName || emailAccount.email} &lt;{emailAccount.email}&gt;</option>
+                    )}
+                    {emailAccounts.map((a: any) => (
+                      <option key={a.id} value={a.id}>{a.displayName || a.email} &lt;{a.email}&gt;</option>
+                    ))}
+                  </select>
+                  <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
+                </div>
+              </div>
+
+              {/* Subject field */}
+              <div className="flex items-center gap-3 mb-4">
+                <label className="text-sm text-gray-500 w-16 flex-shrink-0 font-medium">Subject</label>
+                <input
+                  value={updateSubject}
+                  onChange={(e) => setUpdateSubject(e.target.value)}
+                  className="flex-1 h-10 px-3 text-sm border border-gray-200 rounded-lg bg-white focus:border-blue-400 focus:ring-2 focus:ring-blue-50 outline-none transition-all"
+                  placeholder="Email subject line"
+                />
+              </div>
+
+              {/* Rich text editor */}
+              <div className="border border-gray-200 rounded-xl overflow-hidden">
+                <div className="flex items-center gap-0.5 px-2 py-1.5 bg-gray-50/80 border-b border-gray-200 flex-wrap">
+                  <ToolbarBtn icon={<Bold className="h-3.5 w-3.5" />} onClick={() => execCommand('bold')} title="Bold" />
+                  <ToolbarBtn icon={<Italic className="h-3.5 w-3.5" />} onClick={() => execCommand('italic')} title="Italic" />
+                  <ToolbarBtn icon={<Underline className="h-3.5 w-3.5" />} onClick={() => execCommand('underline')} title="Underline" />
+                  <ToolbarSep />
+                  <ToolbarBtn icon={<Link className="h-3.5 w-3.5" />} onClick={() => {
+                    const url = prompt('Enter URL:');
+                    if (url) execCommand('createLink', url);
+                  }} title="Insert link" />
+                  <ToolbarBtn icon={<Image className="h-3.5 w-3.5" />} onClick={() => {
+                    const url = prompt('Image URL:');
+                    if (url) execCommand('insertImage', url);
+                  }} title="Insert image" />
+                  <ToolbarBtn icon={<Code className="h-3.5 w-3.5" />} onClick={() => {
+                    const tag = prompt('Variable name (e.g. firstName, lastName, company):');
+                    if (tag) execCommand('insertText', `{{${tag}}}`);
+                  }} title="Merge tag {{}}" />
+                  <ToolbarSep />
+                  <ToolbarBtn icon={<List className="h-3.5 w-3.5" />} onClick={() => execCommand('insertUnorderedList')} title="Bullet list" />
+                  <ToolbarBtn icon={<ListOrdered className="h-3.5 w-3.5" />} onClick={() => execCommand('insertOrderedList')} title="Numbered list" />
+                  <ToolbarBtn icon={<AlignLeft className="h-3.5 w-3.5" />} onClick={() => execCommand('justifyLeft')} title="Align left" />
+                  <ToolbarSep />
+                  <ToolbarBtn icon={<FileText className="h-3.5 w-3.5" />} onClick={() => execCommand('removeFormat')} title="Clear formatting" />
+                </div>
+
+                <div
+                  ref={editorRef}
+                  contentEditable
+                  className="min-h-[300px] max-h-[420px] overflow-y-auto px-4 py-3 text-sm text-gray-800 focus:outline-none leading-relaxed [&_a]:text-blue-600 [&_a]:underline [&_img]:max-w-full [&_img]:rounded-lg"
+                  style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' }}
+                  suppressContentEditableWarning
+                />
+              </div>
+
+              {updateError && (
+                <p className="text-sm text-red-600 mt-3 flex items-center gap-1.5 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                  <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" /> {updateError}
                 </p>
               )}
             </div>
-          ) : (
-            <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-gray-100 bg-gray-50/50">
-                    <th className="text-left px-5 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">Recipient</th>
-                    <th className="text-left px-4 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">Email</th>
-                    <th className="text-left px-4 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">Events</th>
-                    <th className="text-right px-5 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">Last activity</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {trackingRows.map((row, i) => {
-                    const opens = row.events.filter(e => e.type === 'open').length;
-                    const clicks = row.events.filter(e => e.type === 'click').length;
-                    const replies = row.events.filter(e => e.type === 'reply').length;
-                    return (
-                      <tr key={i} className="border-b border-gray-50 hover:bg-gray-50/50 transition-colors">
-                        <td className="px-5 py-3">
-                          <span className="text-sm text-gray-900 font-medium truncate block max-w-[200px]">
-                            {row.contact.firstName || row.contact.lastName
-                              ? `${row.contact.firstName || ''} ${row.contact.lastName || ''}`.trim()
-                              : row.contact.email}
-                          </span>
-                          <span className="text-xs text-gray-400 truncate block max-w-[200px]">{row.contact.email}</span>
-                        </td>
-                        <td className="px-4 py-3">
-                          <span className="text-sm text-gray-600 truncate block max-w-[200px]">{row.email || campaign.subject || '-'}</span>
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            {opens > 0 && (
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-50 text-emerald-700 rounded-full text-xs font-medium border border-emerald-100">
-                                <MailOpen className="h-3 w-3" />
-                                {opens} open{opens > 1 ? 's' : ''}
-                              </span>
-                            )}
-                            {clicks > 0 && (
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-50 text-purple-700 rounded-full text-xs font-medium border border-purple-100">
-                                <MousePointer className="h-3 w-3" />
-                                {clicks} click{clicks > 1 ? 's' : ''}
-                              </span>
-                            )}
-                            {replies > 0 && (
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-amber-50 text-amber-700 rounded-full text-xs font-medium border border-amber-100">
-                                <MessageSquare className="h-3 w-3" />
-                                {replies} repl{replies > 1 ? 'ies' : 'y'}
-                              </span>
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-5 py-3 text-right">
-                          <span className="text-xs text-gray-400">
-                            {formatRelativeTime(row.events.length > 0
-                              ? row.events.reduce((latest, e) => e.createdAt > latest ? e.createdAt : latest, row.events[0].createdAt)
-                              : row.lastActivity)}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-
-        {/* ==================== ALL EMAILS TABLE ==================== */}
-        <div>
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-base font-bold text-gray-900">
-              All Emails <span className="text-sm font-normal text-gray-400">({totalMessages})</span>
-            </h3>
-            <div className="flex items-center gap-2">
-              <div className="relative">
-                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 h-3.5 w-3.5" />
-                <input
-                  placeholder="Search recipients..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="pl-8 h-8 text-xs border border-gray-200 rounded-lg w-48 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
-                />
-              </div>
-              <div className="flex items-center gap-0.5 bg-gray-100 rounded-lg p-0.5">
-                {[
-                  { key: 'all', label: 'All' },
-                  { key: 'opened', label: 'Opened' },
-                  { key: 'clicked', label: 'Clicked' },
-                  { key: 'replied', label: 'Replied' },
-                  { key: 'bounced', label: 'Bounced' },
-                ].map(f => (
-                  <button key={f.key} onClick={() => setStatusFilter(f.key)}
-                    className={`px-2.5 py-1 text-[11px] font-medium rounded-md transition-all ${
-                      statusFilter === f.key ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-                    }`}>
-                    {f.label}
-                  </button>
-                ))}
-              </div>
-            </div>
           </div>
 
-          {filteredMessages.length === 0 ? (
-            <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-12 text-center">
-              <Mail className="h-10 w-10 text-gray-200 mx-auto mb-3" />
-              <p className="text-sm text-gray-400">{messages.length === 0 ? 'No emails sent yet' : 'No emails match your filters'}</p>
+          <DialogFooter className="px-6 py-4 border-t border-gray-100 bg-gray-50/60">
+            <div className="flex items-center justify-end gap-3 w-full">
+              <Button variant="outline" onClick={() => setShowUpdateDialog(false)} className="px-5 rounded-lg font-semibold">
+                Cancel
+              </Button>
+              <Button onClick={saveUpdate} disabled={updateSaving} className="bg-gray-900 hover:bg-gray-800 text-white px-5 rounded-lg font-semibold shadow-sm">
+                {updateSaving ? (
+                  <span className="flex items-center gap-2">
+                    <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" /> Saving...
+                  </span>
+                ) : 'Update campaign'}
+              </Button>
             </div>
-          ) : (
-            <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-              <div className="grid grid-cols-[2fr_80px_80px_80px_80px_100px] gap-2 px-5 py-2.5 border-b border-gray-100 bg-gray-50/50 text-[11px] font-semibold uppercase tracking-wider text-gray-400">
-                <div>Recipient</div>
-                <div className="text-center">Status</div>
-                <div className="text-center">Opens</div>
-                <div className="text-center">Clicks</div>
-                <div className="text-center">Reply</div>
-                <div className="text-right">Sent</div>
-              </div>
-              {filteredMessages.slice(0, 50).map((msg: CampaignMessage) => {
-                const statusLabel = msg.repliedAt || (msg.replyCount && msg.replyCount > 0) ? 'Replied' :
-                  msg.clickedAt || (msg.clickCount && msg.clickCount > 0) ? 'Clicked' :
-                  msg.openedAt || (msg.openCount && msg.openCount > 0) ? 'Opened' :
-                  msg.status === 'sent' ? 'Delivered' :
-                  msg.status === 'failed' ? 'Failed' : 'Sending';
-                const statusColors: Record<string, string> = {
-                  Replied: 'bg-amber-50 text-amber-700 border-amber-200',
-                  Clicked: 'bg-purple-50 text-purple-700 border-purple-200',
-                  Opened: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-                  Delivered: 'bg-blue-50 text-blue-700 border-blue-200',
-                  Failed: 'bg-red-50 text-red-700 border-red-200',
-                  Sending: 'bg-gray-50 text-gray-600 border-gray-200',
-                };
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
 
-                return (
-                  <div key={msg.id} className="grid grid-cols-[2fr_80px_80px_80px_80px_100px] gap-2 px-5 py-3 border-b border-gray-50 hover:bg-blue-50/20 items-center transition-colors">
-                    <div className="min-w-0 flex items-center gap-2.5">
-                      <div className="w-7 h-7 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white text-[10px] font-bold flex-shrink-0">
-                        {(msg.contact?.firstName?.[0] || msg.contact?.email?.[0] || '?').toUpperCase()}
-                      </div>
-                      <div className="min-w-0">
-                        <div className="text-sm font-medium text-gray-900 truncate">
-                          {msg.contact?.firstName || msg.contact?.lastName
-                            ? `${msg.contact?.firstName || ''} ${msg.contact?.lastName || ''}`.trim()
-                            : msg.contact?.email || 'Unknown'}
-                        </div>
-                        <div className="text-xs text-gray-400 truncate">{msg.contact?.email || ''}</div>
-                        {msg.stepNumber > 0 && (
-                          <div className="text-[10px] text-blue-500 font-medium">Step {msg.stepNumber + 1}</div>
-                        )}
-                      </div>
-                    </div>
-                    <div className="text-center">
-                      <Badge variant="outline" className={`text-[10px] font-medium ${statusColors[statusLabel] || statusColors.Sending}`}>
-                        {statusLabel}
-                      </Badge>
-                    </div>
-                    <div className="text-center">
-                      {(msg.openCount || 0) > 0 ? (
-                        <Tooltip>
-                          <TooltipTrigger>
-                            <span className="text-sm font-semibold text-emerald-600">{msg.openCount}</span>
-                          </TooltipTrigger>
-                          <TooltipContent><p className="text-xs">First opened: {msg.firstOpenedAt ? formatDateTime(msg.firstOpenedAt) : formatDateTime(msg.openedAt || '')}</p></TooltipContent>
-                        </Tooltip>
-                      ) : (
-                        <span className="text-xs text-gray-300">-</span>
-                      )}
-                    </div>
-                    <div className="text-center">
-                      {(msg.clickCount || 0) > 0 ? (
-                        <Tooltip>
-                          <TooltipTrigger>
-                            <span className="text-sm font-semibold text-purple-600">{msg.clickCount}</span>
-                          </TooltipTrigger>
-                          <TooltipContent><p className="text-xs">First click: {msg.firstClickedAt ? formatDateTime(msg.firstClickedAt) : formatDateTime(msg.clickedAt || '')}</p></TooltipContent>
-                        </Tooltip>
-                      ) : (
-                        <span className="text-xs text-gray-300">-</span>
-                      )}
-                    </div>
-                    <div className="text-center">
-                      {(msg.replyCount || 0) > 0 ? (
-                        <span className="text-sm font-semibold text-amber-600">{msg.replyCount}</span>
-                      ) : msg.repliedAt ? (
-                        <Reply className="h-3.5 w-3.5 text-amber-600 mx-auto" />
-                      ) : (
-                        <span className="text-xs text-gray-300">-</span>
-                      )}
-                    </div>
-                    <div className="text-right">
-                      <span className="text-xs text-gray-400">{msg.sentAt ? formatRelativeTime(msg.sentAt) : msg.createdAt ? formatRelativeTime(msg.createdAt) : '-'}</span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
 
-          {filteredMessages.length > 50 && (
-            <div className="text-xs text-gray-400 text-center mt-3">
-              Showing 50 of {filteredMessages.length} emails
-            </div>
-          )}
-        </div>
+// ========== HELPER COMPONENTS ==========
+
+function ActionItem({ icon, label, onClick, disabled, destructive }: {
+  icon: React.ReactNode; label: string; onClick?: () => void; disabled?: boolean; destructive?: boolean;
+}) {
+  return (
+    <button
+      onClick={disabled ? undefined : onClick}
+      disabled={disabled}
+      className={`w-full text-left px-4 py-2.5 text-[13px] flex items-center gap-2.5 transition-colors ${
+        disabled
+          ? 'text-gray-300 cursor-not-allowed'
+          : destructive
+            ? 'text-amber-600 hover:bg-amber-50'
+            : 'text-gray-700 hover:bg-gray-50'
+      }`}
+    >
+      <span className={disabled ? '' : destructive ? '' : 'text-gray-400'}>{icon}</span>
+      {label}
+    </button>
+  );
+}
+
+function DetailRow({ icon, label, value, valueColor, sub }: {
+  icon: React.ReactNode; label: string; value: string; valueColor?: string; sub?: string;
+}) {
+  return (
+    <div className="flex items-center justify-between px-5 py-3.5">
+      <div className="flex items-center gap-2.5 text-sm text-gray-600">
+        <span className="text-gray-400">{icon}</span>
+        <span className="font-medium">{label}</span>
+      </div>
+      <div className="text-right">
+        <span className={`text-sm font-semibold ${valueColor || 'text-gray-900'}`}>{value}</span>
+        {sub && <div className="text-[10px] text-gray-400 mt-0.5">{sub}</div>}
       </div>
     </div>
   );
 }
 
-// Helper component for campaign details row
-function DetailRow({ icon, label, value, valueColor, tooltip }: { icon: React.ReactNode; label: string; value: string; valueColor?: string; tooltip?: string }) {
+function EventBadge({ type, count }: { type: 'open' | 'click' | 'reply'; count: number }) {
+  const configs = {
+    open: { bg: 'bg-emerald-50 border-emerald-100 text-emerald-700', icon: <MailOpen className="h-3 w-3" />, label: `${count} open${count > 1 ? 's' : ''}` },
+    click: { bg: 'bg-purple-50 border-purple-100 text-purple-700', icon: <MousePointer className="h-3 w-3" />, label: `${count} click${count > 1 ? 's' : ''}` },
+    reply: { bg: 'bg-amber-50 border-amber-100 text-amber-700', icon: <MessageSquare className="h-3 w-3" />, label: `${count} repl${count > 1 ? 'ies' : 'y'}` },
+  };
+  const cfg = configs[type];
   return (
-    <div className="flex items-center justify-between px-5 py-3">
-      <div className="flex items-center gap-2.5 text-sm text-gray-600">
-        <span className="text-gray-400">{icon}</span>
-        {label}
-        {tooltip && (
-          <Tooltip>
-            <TooltipTrigger>
-              <Info className="h-3 w-3 text-gray-300" />
-            </TooltipTrigger>
-            <TooltipContent><p className="text-xs">{tooltip}</p></TooltipContent>
-          </Tooltip>
-        )}
-      </div>
-      <span className={`text-sm font-semibold ${valueColor || 'text-gray-900'}`}>{value}</span>
-    </div>
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold border ${cfg.bg}`}>
+      {cfg.icon}{cfg.label}
+    </span>
   );
+}
+
+function ToolbarBtn({ icon, onClick, title }: { icon: React.ReactNode; onClick: () => void; title: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          onMouseDown={(e) => { e.preventDefault(); onClick(); }}
+          className="p-1.5 rounded-md hover:bg-gray-200/80 text-gray-500 hover:text-gray-800 transition-colors"
+        >
+          {icon}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="top"><p className="text-xs">{title}</p></TooltipContent>
+    </Tooltip>
+  );
+}
+
+function ToolbarSep() {
+  return <div className="w-px h-5 bg-gray-200 mx-0.5" />;
 }
