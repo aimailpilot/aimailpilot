@@ -262,29 +262,48 @@ export default function ContactsManager() {
 
     const reader = new FileReader();
     reader.onload = (event) => {
-      const text = event.target?.result as string;
-      const lines = text.split('\n').filter(l => l.trim());
-      if (lines.length < 2) return;
-      const headers = parseCSVLine(lines[0]);
-      const rows = lines.slice(1).map(line => {
-        const values = parseCSVLine(line);
-        const row: Record<string, string> = {};
-        headers.forEach((h, i) => { row[h] = values[i] || ''; });
-        return row;
-      });
-      setCsvHeaders(headers);
-      setCsvData(rows);
-      const mapping: Record<string, string> = {};
-      headers.forEach(h => {
-        const lower = h.toLowerCase();
-        if (lower.includes('email') || lower === 'e-mail') mapping.email = h;
-        else if ((lower.includes('first') && lower.includes('name')) || lower === 'first') mapping.firstName = h;
-        else if ((lower.includes('last') && lower.includes('name')) || lower === 'last' || lower === 'surname') mapping.lastName = h;
-        else if (lower === 'name' || lower === 'full name' || lower === 'fullname') mapping.firstName = h;
-        else if (lower.includes('company') || lower.includes('organization') || lower === 'org') mapping.company = h;
-        else if (lower.includes('title') || lower.includes('position') || lower === 'role') mapping.jobTitle = h;
-      });
-      setCsvMapping(mapping);
+      try {
+        let text = event.target?.result as string;
+        if (!text) return;
+        // Strip BOM if present
+        if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+
+        const lines = text.split(/\r?\n/).filter(l => l.trim());
+        if (lines.length < 2) {
+          console.warn('[CSV] File has fewer than 2 lines');
+          return;
+        }
+        const headers = parseCSVLine(lines[0]).filter(h => h.trim());
+        if (headers.length === 0) {
+          console.warn('[CSV] No headers found');
+          return;
+        }
+        const rows = lines.slice(1).map(line => {
+          const values = parseCSVLine(line);
+          const row: Record<string, string> = {};
+          headers.forEach((h, i) => { row[h] = values[i] || ''; });
+          return row;
+        }).filter(row => Object.values(row).some(v => v.trim()));
+
+        console.log('[CSV] Parsed:', headers.length, 'columns,', rows.length, 'rows');
+        setCsvHeaders(headers);
+        setCsvData(rows);
+
+        const mapping: Record<string, string> = {};
+        headers.forEach(h => {
+          const lower = h.toLowerCase().trim();
+          if (lower.includes('email') || lower === 'e-mail') mapping.email = h;
+          else if ((lower.includes('first') && lower.includes('name')) || lower === 'first') mapping.firstName = h;
+          else if ((lower.includes('last') && lower.includes('name')) || lower === 'last' || lower === 'surname') mapping.lastName = h;
+          else if (lower === 'name' || lower === 'full name' || lower === 'fullname') mapping.firstName = h;
+          else if (lower.includes('company') || lower.includes('organization') || lower === 'org') mapping.company = h;
+          else if (lower.includes('title') || lower.includes('position') || lower === 'role' || lower.includes('designation')) mapping.jobTitle = h;
+        });
+        setCsvMapping(mapping);
+        console.log('[CSV] Auto-mapped:', mapping);
+      } catch (err) {
+        console.error('[CSV] Parse error:', err);
+      }
     };
     reader.readAsText(file);
   };
@@ -610,7 +629,7 @@ export default function ContactsManager() {
                   <Plus className="h-4 w-4 mr-2 text-green-500" /> Create List
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => { setShowImportDialog(true); setCsvData([]); setCsvHeaders([]); setImportResult(null); setImportListName(''); setImportFileName(''); setImportToExistingList(''); }}>
+                <DropdownMenuItem onClick={() => { setShowImportDialog(true); setCsvData([]); setCsvHeaders([]); setCsvMapping({}); setImportResult(null); setImportListName(''); setImportFileName(''); setImportToExistingList(''); if (fileInputRef.current) fileInputRef.current.value = ''; }}>
                   <Upload className="h-4 w-4 mr-2 text-violet-500" /> Import CSV
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => {
@@ -1158,7 +1177,7 @@ export default function ContactsManager() {
                   className="h-10"
                 />
               ) : (
-                <Select value={importToExistingList === '_select' ? '' : importToExistingList} onValueChange={(v) => setImportToExistingList(v)}>
+                <Select value={importToExistingList === '_select' ? undefined : importToExistingList} onValueChange={(v) => setImportToExistingList(v)}>
                   <SelectTrigger className="h-10"><SelectValue placeholder="Choose a list..." /></SelectTrigger>
                   <SelectContent>
                     {contactLists.map(l => (
@@ -1188,7 +1207,7 @@ export default function ContactsManager() {
                   <p className="text-xs text-gray-400">Supports .csv files with any columns</p>
                 </>
               )}
-              <input type="file" ref={fileInputRef} accept=".csv" onChange={handleFileUpload} className="hidden" />
+              <input type="file" ref={fileInputRef} accept=".csv" onChange={handleFileUpload} onClick={(e) => { (e.target as HTMLInputElement).value = ''; }} className="hidden" />
             </div>
 
             {csvHeaders.length > 0 && renderColumnMapping(csvHeaders, csvData, csvMapping, setCsvMapping, 'csv')}
@@ -1306,7 +1325,7 @@ export default function ContactsManager() {
                     )}
                   </div>
                 ) : (
-                  <Select value={gsToExistingList === '_select' ? '' : gsToExistingList} onValueChange={(v) => setGsToExistingList(v)}>
+                  <Select value={gsToExistingList === '_select' ? undefined : gsToExistingList} onValueChange={(v) => setGsToExistingList(v)}>
                     <SelectTrigger className="h-10"><SelectValue placeholder="Choose a list..." /></SelectTrigger>
                     <SelectContent>
                       {contactLists.map(l => (
@@ -1371,13 +1390,12 @@ export default function ContactsManager() {
     setMapping: (fn: any) => void,
     type: 'csv' | 'sheets'
   ) {
-    const color = type === 'sheets' ? 'green' : 'emerald';
     return (
       <div className="space-y-3">
         <div>
           <div className="flex items-center justify-between mb-2">
             <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Detected Columns ({headers.length})</h4>
-            <Badge className={`bg-${color}-50 text-${color}-700 border-${color}-200`}>{data.length} rows</Badge>
+            <Badge className={type === 'sheets' ? 'bg-green-50 text-green-700 border-green-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}>{data.length} rows</Badge>
           </div>
           <div className="flex flex-wrap gap-1.5 p-3 bg-gray-50 rounded-lg">
             {headers.map((h, i) => {
@@ -1403,11 +1421,11 @@ export default function ContactsManager() {
                   {field === 'firstName' ? 'First Name' : field === 'lastName' ? 'Last Name' : field === 'jobTitle' ? 'Job Title' : field}
                   {field === 'email' && <span className="text-red-500 ml-0.5">*</span>}
                 </Label>
-                <Select value={mapping[field] || ''} onValueChange={(v) => setMapping((prev: any) => ({ ...prev, [field]: v }))}>
+                <Select value={mapping[field] || '__skip__'} onValueChange={(v) => setMapping((prev: any) => ({ ...prev, [field]: v === '__skip__' ? '' : v }))}>
                   <SelectTrigger className="h-8 text-sm bg-white"><SelectValue placeholder="Select column" /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">-- Skip --</SelectItem>
-                    {headers.map(h => <SelectItem key={h} value={h}>{h}</SelectItem>)}
+                    <SelectItem value="__skip__">-- Skip --</SelectItem>
+                    {headers.filter(h => h && h.trim()).map(h => <SelectItem key={h} value={h}>{h}</SelectItem>)}
                   </SelectContent>
                 </Select>
               </div>
