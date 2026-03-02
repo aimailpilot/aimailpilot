@@ -9,7 +9,7 @@ import {
   Eye, EyeOff, Send, Sparkles, Server, Shield, ExternalLink,
   AlertTriangle, Info, RefreshCw, Copy, Mail, LogIn, Globe
 } from "lucide-react";
-import { FaGoogle } from "react-icons/fa";
+import { FaGoogle, FaMicrosoft } from "react-icons/fa";
 
 interface AzureOpenAIConfig {
   azure_openai_endpoint: string;
@@ -27,6 +27,11 @@ interface ElasticEmailConfig {
 interface GoogleOAuthConfig {
   google_oauth_client_id: string;
   google_oauth_client_secret: string;
+}
+
+interface MicrosoftOAuthConfig {
+  microsoft_oauth_client_id: string;
+  microsoft_oauth_client_secret: string;
 }
 
 export default function AdvancedSettings() {
@@ -50,6 +55,15 @@ export default function AdvancedSettings() {
   const [showGoogleSecret, setShowGoogleSecret] = useState(false);
   const [googleOAuthSaving, setGoogleOAuthSaving] = useState(false);
   const [googleOAuthConfigured, setGoogleOAuthConfigured] = useState(false);
+
+  // Microsoft OAuth state
+  const [microsoftOAuthConfig, setMicrosoftOAuthConfig] = useState<MicrosoftOAuthConfig>({
+    microsoft_oauth_client_id: '',
+    microsoft_oauth_client_secret: '',
+  });
+  const [showMicrosoftSecret, setShowMicrosoftSecret] = useState(false);
+  const [microsoftOAuthSaving, setMicrosoftOAuthSaving] = useState(false);
+  const [microsoftOAuthConfigured, setMicrosoftOAuthConfigured] = useState(false);
 
   // Elastic Email state
   const [elasticConfig, setElasticConfig] = useState<ElasticEmailConfig>({
@@ -96,9 +110,16 @@ export default function AdvancedSettings() {
           google_oauth_client_id: data.google_oauth_client_id || '',
           google_oauth_client_secret: data.google_oauth_client_secret || '',
         });
+        setMicrosoftOAuthConfig({
+          microsoft_oauth_client_id: data.microsoft_oauth_client_id || '',
+          microsoft_oauth_client_secret: data.microsoft_oauth_client_secret || '',
+        });
         // Check if OAuth is configured
         if (data.google_oauth_client_id) {
           setGoogleOAuthConfigured(true);
+        }
+        if (data.microsoft_oauth_client_id) {
+          setMicrosoftOAuthConfigured(true);
         }
       }
     } catch (e) {
@@ -127,6 +148,28 @@ export default function AdvancedSettings() {
       console.error('Failed to save Google OAuth settings:', e);
     } finally {
       setGoogleOAuthSaving(false);
+    }
+  };
+
+  const saveMicrosoftOAuthSettings = async () => {
+    setMicrosoftOAuthSaving(true);
+    setSaveSuccess(null);
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(microsoftOAuthConfig),
+      });
+      if (res.ok) {
+        setSaveSuccess('microsoft-oauth');
+        setMicrosoftOAuthConfigured(!!microsoftOAuthConfig.microsoft_oauth_client_id);
+        setTimeout(() => setSaveSuccess(null), 3000);
+      }
+    } catch (e) {
+      console.error('Failed to save Microsoft OAuth settings:', e);
+    } finally {
+      setMicrosoftOAuthSaving(false);
     }
   };
 
@@ -392,6 +435,138 @@ export default function AdvancedSettings() {
             {saveSuccess === 'google-oauth' && (
               <span className="text-sm text-green-600 flex items-center gap-1">
                 <CheckCircle2 className="h-4 w-4" /> Saved! Sign-in with Google is now active.
+              </span>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* ==================== MICROSOFT OAUTH SECTION ==================== */}
+      <Card className="border-gray-200 shadow-sm overflow-hidden">
+        <CardHeader className="bg-gradient-to-r from-blue-50 to-cyan-50 border-b">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-lg bg-white border border-gray-200 flex items-center justify-center shadow-sm">
+                <FaMicrosoft className="h-5 w-5 text-[#00A4EF]" />
+              </div>
+              <div>
+                <CardTitle className="text-lg">Microsoft / Outlook OAuth Sign-In</CardTitle>
+                <CardDescription>Enable Outlook authentication for user login & email access</CardDescription>
+              </div>
+            </div>
+            {microsoftOAuthConfigured ? (
+              <Badge className="bg-green-50 text-green-700 border-green-200">
+                <CheckCircle2 className="h-3 w-3 mr-1" /> Configured
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="text-gray-500">
+                Not configured
+              </Badge>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent className="p-6 space-y-5">
+          {/* Setup Guide */}
+          <div className="flex gap-3 p-3 bg-blue-50 rounded-lg text-sm">
+            <Info className="h-4 w-4 text-blue-600 flex-shrink-0 mt-0.5" />
+            <div className="text-blue-800">
+              <strong>Setup Microsoft OAuth:</strong>
+              <ol className="list-decimal ml-4 mt-1 space-y-0.5">
+                <li>Go to <a href="https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" rel="noopener noreferrer" className="underline font-medium inline-flex items-center gap-0.5">
+                  Azure App Registrations <ExternalLink className="h-3 w-3" />
+                </a></li>
+                <li>Create a new registration (select <strong>Accounts in any organizational directory and personal Microsoft accounts</strong>)</li>
+                <li>Under <strong>Authentication</strong> &gt; Add a platform &gt; <strong>Web</strong></li>
+                <li>Add the Redirect URIs shown below</li>
+                <li>Under <strong>Certificates & secrets</strong> &gt; New client secret</li>
+                <li>Under <strong>API permissions</strong> &gt; Add: <code className="bg-blue-100 px-1 rounded">User.Read</code>, <code className="bg-blue-100 px-1 rounded">Mail.Read</code>, <code className="bg-blue-100 px-1 rounded">Mail.Send</code>, <code className="bg-blue-100 px-1 rounded">offline_access</code></li>
+                <li>Copy the Application (client) ID and Client Secret below</li>
+              </ol>
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            {/* Client ID */}
+            <div>
+              <Label htmlFor="ms-client-id" className="text-sm font-medium text-gray-700">
+                Application (Client) ID <span className="text-red-500">*</span>
+              </Label>
+              <Input
+                id="ms-client-id"
+                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                value={microsoftOAuthConfig.microsoft_oauth_client_id}
+                onChange={e => setMicrosoftOAuthConfig(prev => ({ ...prev, microsoft_oauth_client_id: e.target.value }))}
+                className="mt-1.5 font-mono text-sm"
+              />
+            </div>
+
+            {/* Client Secret */}
+            <div>
+              <Label htmlFor="ms-client-secret" className="text-sm font-medium text-gray-700">
+                Client Secret <span className="text-red-500">*</span>
+              </Label>
+              <div className="relative mt-1.5">
+                <Input
+                  id="ms-client-secret"
+                  type={showMicrosoftSecret ? 'text' : 'password'}
+                  placeholder="Enter your client secret value"
+                  value={microsoftOAuthConfig.microsoft_oauth_client_secret}
+                  onChange={e => setMicrosoftOAuthConfig(prev => ({ ...prev, microsoft_oauth_client_secret: e.target.value }))}
+                  className="pr-10 font-mono text-sm"
+                />
+                <button
+                  onClick={() => setShowMicrosoftSecret(!showMicrosoftSecret)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                >
+                  {showMicrosoftSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Redirect URIs Info */}
+          <div className="p-3 bg-gray-50 rounded-lg text-sm">
+            <h4 className="font-medium text-gray-700 mb-2 flex items-center gap-1.5">
+              <Globe className="h-4 w-4" /> Redirect URIs (add in Azure Portal &gt; Authentication)
+            </h4>
+            <p className="text-xs text-gray-500 mb-2">Add these URIs as Web platform redirect URIs:</p>
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <code className="text-xs bg-gray-100 px-2 py-1 rounded text-gray-800 flex-1">
+                  https://mailsbellaward.com/api/auth/microsoft/callback
+                </code>
+                <button
+                  onClick={() => navigator.clipboard.writeText('https://mailsbellaward.com/api/auth/microsoft/callback')}
+                  className="text-gray-400 hover:text-gray-600"
+                  title="Copy"
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <div className="flex items-center gap-2">
+                <code className="text-xs bg-gray-100 px-2 py-1 rounded text-gray-800 flex-1">
+                  {window.location.origin}/api/auth/microsoft/callback
+                </code>
+                <button
+                  onClick={() => navigator.clipboard.writeText(`${window.location.origin}/api/auth/microsoft/callback`)}
+                  className="text-gray-400 hover:text-gray-600"
+                  title="Copy"
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Actions */}
+          <div className="flex items-center gap-3 pt-2">
+            <Button onClick={saveMicrosoftOAuthSettings} disabled={microsoftOAuthSaving} className="bg-[#0078D4] hover:bg-[#106EBE]">
+              {microsoftOAuthSaving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Shield className="h-4 w-4 mr-2" />}
+              Save Microsoft OAuth Settings
+            </Button>
+            {saveSuccess === 'microsoft-oauth' && (
+              <span className="text-sm text-green-600 flex items-center gap-1">
+                <CheckCircle2 className="h-4 w-4" /> Saved! Sign-in with Microsoft is now active.
               </span>
             )}
           </div>

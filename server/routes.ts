@@ -292,7 +292,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const cookieOpts: any = { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, sameSite: 'lax', secure: false, path: '/' };
       // Use secure cookies in production
       const host = req.headers['host'] || '';
-      if (host.includes(PRODUCTION_DOMAIN) || host.includes('.pages.dev')) {
+      if (host.includes(PRODUCTION_DOMAIN) || host.includes('.pages.dev') || host.includes('.sandbox.novita.ai')) {
         cookieOpts.secure = true;
         cookieOpts.sameSite = 'lax';
       }
@@ -310,16 +310,205 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Microsoft login (keep as demo for now)
-  app.get('/api/auth/microsoft', (req, res) => {
-    const userId = 'microsoft-demo-user';
-    const mockUser = { id: userId, email: 'demo@mailflow.app', name: 'Demo User', picture: '', provider: 'microsoft', access_token: 'demo-ms-token' };
-    loggedInUsers.add(userId);
-    res.cookie('user_id', userId, { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
-    res.cookie('user_data', JSON.stringify(mockUser), { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
-    (req.session as any).userId = userId;
-    (req.session as any).user = mockUser;
-    req.session.save(() => { res.redirect('/?connected=true'); });
+  // ===== REAL MICROSOFT / OUTLOOK OAUTH 2.0 =====
+  // Step 1: Redirect user to Microsoft's consent screen
+  app.get('/api/auth/microsoft', async (req: any, res) => {
+    try {
+      const baseUrl = getBaseUrlFromRequest(req);
+      const redirectUri = `${baseUrl}/api/auth/microsoft/callback`;
+
+      // Load credentials from api_settings first, then env vars
+      let clientId = process.env.MICROSOFT_CLIENT_ID || '';
+      let clientSecret = process.env.MICROSOFT_CLIENT_SECRET || '';
+
+      try {
+        const settings = await storage.getApiSettings('550e8400-e29b-41d4-a716-446655440001');
+        if (settings.microsoft_oauth_client_id) clientId = settings.microsoft_oauth_client_id;
+        if (settings.microsoft_oauth_client_secret) clientSecret = settings.microsoft_oauth_client_secret;
+      } catch (e) { /* ignore - use env vars */ }
+
+      if (!clientId || !clientSecret) {
+        // No OAuth configured - fall back to demo login
+        console.warn('[Auth] Microsoft OAuth not configured, falling back to demo login');
+        const userId = 'microsoft-demo-user';
+        const mockUser = { id: userId, email: 'demo@mailflow.app', name: 'Demo User', picture: '', provider: 'microsoft', access_token: 'demo-ms-token' };
+        loggedInUsers.add(userId);
+        res.cookie('user_id', userId, { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
+        res.cookie('user_data', JSON.stringify(mockUser), { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
+        (req.session as any).userId = userId;
+        (req.session as any).user = mockUser;
+        return req.session.save(() => { res.redirect('/?connected=true'); });
+      }
+
+      // Microsoft OAuth 2.0 authorization URL (using 'common' tenant for multi-tenant support)
+      const scopes = [
+        'openid',
+        'profile',
+        'email',
+        'offline_access',
+        'https://graph.microsoft.com/User.Read',
+        'https://graph.microsoft.com/Mail.Read',
+        'https://graph.microsoft.com/Mail.Send',
+      ];
+
+      const authUrl = new URL('https://login.microsoftonline.com/common/oauth2/v2.0/authorize');
+      authUrl.searchParams.set('client_id', clientId);
+      authUrl.searchParams.set('response_type', 'code');
+      authUrl.searchParams.set('redirect_uri', redirectUri);
+      authUrl.searchParams.set('response_mode', 'query');
+      authUrl.searchParams.set('scope', scopes.join(' '));
+      authUrl.searchParams.set('prompt', 'consent');
+      authUrl.searchParams.set('state', JSON.stringify({ redirectUri }));
+
+      console.log('[Auth] Redirecting to Microsoft OAuth, redirect_uri:', redirectUri);
+      res.redirect(authUrl.toString());
+    } catch (error) {
+      console.error('[Auth] Microsoft OAuth init error:', error);
+      res.redirect('/?error=ms_oauth_init_failed');
+    }
+  });
+
+  // Step 2: Handle Microsoft OAuth callback
+  app.get('/api/auth/microsoft/callback', async (req: any, res) => {
+    try {
+      const { code, state, error: oauthError, error_description } = req.query;
+
+      if (oauthError) {
+        console.error('[Auth] Microsoft OAuth error:', oauthError, error_description);
+        return res.redirect('/?error=ms_oauth_denied');
+      }
+
+      if (!code) {
+        return res.redirect('/?error=ms_no_code');
+      }
+
+      // Parse state to get the redirect URI used during initiation
+      let redirectUri = `${getBaseUrlFromRequest(req)}/api/auth/microsoft/callback`;
+      try {
+        if (state) {
+          const parsed = JSON.parse(state as string);
+          if (parsed.redirectUri) redirectUri = parsed.redirectUri;
+        }
+      } catch (e) { /* use default */ }
+
+      // Load credentials
+      let clientId = process.env.MICROSOFT_CLIENT_ID || '';
+      let clientSecret = process.env.MICROSOFT_CLIENT_SECRET || '';
+
+      try {
+        const settings = await storage.getApiSettings('550e8400-e29b-41d4-a716-446655440001');
+        if (settings.microsoft_oauth_client_id) clientId = settings.microsoft_oauth_client_id;
+        if (settings.microsoft_oauth_client_secret) clientSecret = settings.microsoft_oauth_client_secret;
+      } catch (e) { /* use env vars */ }
+
+      // Exchange authorization code for tokens
+      const tokenResponse = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: clientId,
+          client_secret: clientSecret,
+          code: code as string,
+          redirect_uri: redirectUri,
+          grant_type: 'authorization_code',
+          scope: 'openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.Send',
+        }).toString(),
+      });
+
+      if (!tokenResponse.ok) {
+        const errBody = await tokenResponse.text();
+        console.error('[Auth] Microsoft token exchange failed:', tokenResponse.status, errBody);
+        return res.redirect('/?error=ms_token_failed');
+      }
+
+      const tokens = await tokenResponse.json() as any;
+      console.log('[Auth] Microsoft token exchange successful');
+
+      // Get user info from Microsoft Graph
+      const userInfoResponse = await fetch('https://graph.microsoft.com/v1.0/me', {
+        headers: { Authorization: `Bearer ${tokens.access_token}` },
+      });
+
+      if (!userInfoResponse.ok) {
+        console.error('[Auth] Failed to get Microsoft user info:', userInfoResponse.status);
+        return res.redirect('/?error=ms_user_info_failed');
+      }
+
+      const msUser = await userInfoResponse.json() as any;
+      const email = msUser.mail || msUser.userPrincipalName || '';
+      const name = msUser.displayName || email;
+      const firstName = msUser.givenName || name.split(' ')[0] || '';
+      const lastName = msUser.surname || name.split(' ').slice(1).join(' ') || '';
+
+      console.log('[Auth] Microsoft OAuth success for:', email);
+
+      // Upsert user in database
+      const defaultOrgId = '550e8400-e29b-41d4-a716-446655440001';
+      let dbUser = await storage.getUserByEmail(email) as any;
+      if (!dbUser) {
+        dbUser = await storage.createUser({
+          email,
+          firstName,
+          lastName,
+          role: 'admin',
+          organizationId: defaultOrgId,
+          isActive: true,
+        });
+        console.log('[Auth] Created new Microsoft user:', dbUser.id, email);
+      } else {
+        await storage.updateUser(dbUser.id, { firstName, lastName });
+        console.log('[Auth] Updated existing Microsoft user:', dbUser.id, email);
+      }
+
+      const userId = dbUser.id;
+      const userObj = {
+        id: userId,
+        email,
+        name,
+        picture: '',
+        provider: 'microsoft',
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token || null,
+      };
+
+      // Store Microsoft tokens in api_settings for future use (mail send, read, etc.)
+      try {
+        if (tokens.access_token) {
+          await storage.setApiSetting(defaultOrgId, 'microsoft_access_token', tokens.access_token);
+        }
+        if (tokens.refresh_token) {
+          await storage.setApiSetting(defaultOrgId, 'microsoft_refresh_token', tokens.refresh_token);
+        }
+        if (tokens.expires_in) {
+          const expiryDate = Date.now() + (tokens.expires_in * 1000);
+          await storage.setApiSetting(defaultOrgId, 'microsoft_token_expiry', String(expiryDate));
+        }
+        await storage.setApiSetting(defaultOrgId, 'microsoft_user_email', email);
+        console.log('[Auth] Stored Microsoft tokens for mail integration');
+      } catch (tokenStoreError) {
+        console.error('[Auth] Failed to store Microsoft tokens:', tokenStoreError);
+      }
+
+      // Set session and cookies
+      loggedInUsers.add(userId);
+      const cookieOpts: any = { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, sameSite: 'lax', secure: false, path: '/' };
+      const host = req.headers['host'] || '';
+      if (host.includes(PRODUCTION_DOMAIN) || host.includes('.pages.dev') || host.includes('.sandbox.novita.ai')) {
+        cookieOpts.secure = true;
+        cookieOpts.sameSite = 'lax';
+      }
+      res.cookie('user_id', userId, cookieOpts);
+      res.cookie('user_data', JSON.stringify(userObj), cookieOpts);
+      (req.session as any).userId = userId;
+      (req.session as any).user = userObj;
+
+      req.session.save(() => {
+        res.redirect('/?connected=true');
+      });
+    } catch (error) {
+      console.error('[Auth] Microsoft OAuth callback error:', error);
+      res.redirect('/?error=ms_oauth_failed');
+    }
   });
 
   app.get('/api/auth/google/status', async (req, res) => {
@@ -329,6 +518,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const session = req.session as any;
       const user = session?.user;
       return res.json({ connected: true, email: user?.email || 'unknown', demo: !user?.access_token || user?.access_token === 'demo-token' });
+    }
+    res.json({ connected: false });
+  });
+
+  app.get('/api/auth/microsoft/status', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    const userId = req.cookies?.user_id;
+    if (userId && loggedInUsers.has(userId)) {
+      const session = req.session as any;
+      const user = session?.user;
+      if (user?.provider === 'microsoft') {
+        return res.json({ connected: true, email: user?.email || 'unknown', demo: !user?.access_token || user?.access_token === 'demo-ms-token' });
+      }
+      // Also check if Microsoft tokens are stored (user logged in with Google but connected Outlook too)
+      try {
+        const settings = await storage.getApiSettings('550e8400-e29b-41d4-a716-446655440001');
+        if (settings.microsoft_access_token && settings.microsoft_user_email) {
+          return res.json({ connected: true, email: settings.microsoft_user_email, demo: false });
+        }
+      } catch (e) { /* ignore */ }
     }
     res.json({ connected: false });
   });
@@ -362,14 +571,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // OAuth config status check (for Advanced Settings UI)
   app.get('/api/auth/oauth-config-status', async (req: any, res) => {
     try {
-      let clientId = process.env.GOOGLE_CLIENT_ID || '';
+      let googleClientId = process.env.GOOGLE_CLIENT_ID || '';
+      let msClientId = process.env.MICROSOFT_CLIENT_ID || '';
       try {
         const settings = await storage.getApiSettings('550e8400-e29b-41d4-a716-446655440001');
-        if (settings.google_oauth_client_id) clientId = settings.google_oauth_client_id;
+        if (settings.google_oauth_client_id) googleClientId = settings.google_oauth_client_id;
+        if (settings.microsoft_oauth_client_id) msClientId = settings.microsoft_oauth_client_id;
       } catch (e) { /* ignore */ }
       res.json({
-        googleOAuth: !!clientId,
-        microsoftOAuth: false,
+        googleOAuth: !!googleClientId,
+        microsoftOAuth: !!msClientId,
         productionDomain: PRODUCTION_DOMAIN,
       });
     } catch (error) {

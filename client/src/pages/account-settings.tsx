@@ -110,6 +110,9 @@ export default function AccountSettings() {
   const [loadingReplyEvents, setLoadingReplyEvents] = useState(false);
   const [replyLookbackMinutes, setReplyLookbackMinutes] = useState('120');
 
+  // Microsoft/Outlook status
+  const [outlookStatus, setOutlookStatus] = useState<{ connected: boolean; email: string; demo: boolean } | null>(null);
+
   // Fetch quota data
   const fetchQuotas = async () => {
     setLoadingQuotas(true);
@@ -225,13 +228,22 @@ export default function AccountSettings() {
     } catch (e) {}
   };
 
+  // Fetch Outlook status
+  const fetchOutlookStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/auth/microsoft/status', { credentials: 'include' });
+      if (res.ok) setOutlookStatus(await res.json());
+    } catch (e) {}
+  }, []);
+
   useEffect(() => {
     fetchQuotas();
     fetchUserInfo();
     fetchSenders();
     fetchReplyStatus();
     fetchReplyEvents();
-  }, [fetchReplyStatus, fetchReplyEvents]);
+    fetchOutlookStatus();
+  }, [fetchReplyStatus, fetchReplyEvents, fetchOutlookStatus]);
 
   // Auto-refresh reply events every 30 seconds when on reply tracking tab
   useEffect(() => {
@@ -1145,11 +1157,23 @@ export default function AccountSettings() {
                         <Mail className="h-5 w-5 text-blue-600" />
                       </div>
                       <div>
-                        <h3 className="font-medium">Outlook</h3>
-                        <p className="text-sm text-gray-600">Connect your Outlook account</p>
+                        <h3 className="font-medium">Outlook / Microsoft</h3>
+                        <p className="text-sm text-gray-600">Connect your Outlook account for email & mail read</p>
                       </div>
                     </div>
-                    <Button variant="outline">Connect</Button>
+                    {outlookStatus?.connected ? (
+                      <div className="flex items-center gap-2">
+                        <Badge className="bg-green-100 text-green-700 border-green-200">
+                          <CheckCircle className="h-3 w-3 mr-1" />
+                          Connected
+                        </Badge>
+                        {outlookStatus.email && (
+                          <span className="text-sm text-gray-500">{outlookStatus.email}</span>
+                        )}
+                      </div>
+                    ) : (
+                      <Button variant="outline" onClick={() => window.location.href = '/api/auth/microsoft'}>Connect</Button>
+                    )}
                   </div>
                 </div>
               </CardContent>
