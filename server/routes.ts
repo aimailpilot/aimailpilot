@@ -838,9 +838,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Campaign preview (personalize & preview before sending)
+  // Supports both single email preview and full sequence preview
   app.post('/api/campaigns/preview', async (req: any, res) => {
     try {
-      const { subject, content, contactId } = req.body;
+      const { subject, content, contactId, steps } = req.body;
       let contact = null;
       if (contactId) {
         contact = await storage.getContact(contactId);
@@ -860,16 +861,110 @@ export async function registerRoutes(app: Express): Promise<Server> {
         fullName: `${contact?.firstName || 'John'} ${contact?.lastName || 'Doe'}`,
       };
 
-      const personalizedSubject = campaignEngine.personalizeContent(subject || '', data);
-      const personalizedContent = campaignEngine.personalizeContent(content || '', data);
-
-      res.json({
-        subject: personalizedSubject,
-        content: personalizedContent,
-        contact: data,
-      });
+      // If steps array is provided, preview all steps (full sequence preview)
+      if (steps && Array.isArray(steps) && steps.length > 0) {
+        const previews = steps.map((step: any, index: number) => ({
+          stepIndex: index,
+          subject: campaignEngine.personalizeContent(step.subject || '', data),
+          content: campaignEngine.personalizeContent(step.content || '', data),
+          condition: step.condition || (index === 0 ? 'immediate' : 'if_no_reply'),
+          delayValue: step.delayValue || 0,
+          delayUnit: step.delayUnit || 'days',
+        }));
+        res.json({ previews, contact: data });
+      } else {
+        // Single email preview (backwards compatible)
+        const personalizedSubject = campaignEngine.personalizeContent(subject || '', data);
+        const personalizedContent = campaignEngine.personalizeContent(content || '', data);
+        res.json({ subject: personalizedSubject, content: personalizedContent, contact: data });
+      }
     } catch (error) {
       res.status(500).json({ message: 'Failed to preview' });
+    }
+  });
+
+  // Send test email with campaign content
+  app.post('/api/campaigns/send-test', async (req: any, res) => {
+    try {
+      const { emailAccountId, toEmail, subject, content, steps } = req.body;
+      if (!emailAccountId) return res.status(400).json({ success: false, error: 'Email account is required' });
+      if (!toEmail) return res.status(400).json({ success: false, error: 'Test email address is required' });
+
+      const account = await storage.getEmailAccount(emailAccountId);
+      if (!account) return res.status(404).json({ success: false, error: 'Email account not found' });
+      if (!account.smtpConfig) return res.status(400).json({ success: false, error: 'SMTP not configured for this account' });
+
+      // Get a sample contact for personalization
+      let contact: any = null;
+      const contacts = await storage.getContacts(req.user.organizationId, 1, 0);
+      contact = contacts[0];
+      const data = {
+        firstName: contact?.firstName || 'John',
+        lastName: contact?.lastName || 'Doe',
+        email: contact?.email || toEmail,
+        company: contact?.company || 'Example Corp',
+        jobTitle: contact?.jobTitle || 'CEO',
+        fullName: `${contact?.firstName || 'John'} ${contact?.lastName || 'Doe'}`,
+      };
+
+      // Build the test email - combine all steps into one email for preview
+      const emailSteps = steps && Array.isArray(steps) && steps.length > 0 ? steps : [{ subject, content, condition: 'immediate', delayValue: 0, delayUnit: 'days' }];
+
+      let combinedHtml = '';
+      const conditionLabels: Record<string, string> = {
+        immediate: 'Initial email - sent immediately',
+        if_no_reply: 'If no reply', if_no_click: 'If no click', if_no_open: 'If no open',
+        if_opened: 'If opened', if_clicked: 'If clicked', if_replied: 'If replied',
+        no_matter_what: 'No matter what',
+      };
+
+      for (let i = 0; i < emailSteps.length; i++) {
+        const step = emailSteps[i];
+        const pSubject = campaignEngine.personalizeContent(step.subject || '(No subject)', data);
+        const pContent = campaignEngine.personalizeContent(step.content || '', data);
+        const condLabel = i === 0 ? 'Initial email - sent immediately' : `${conditionLabels[step.condition] || step.condition} after ${step.delayValue} ${step.delayUnit}`;
+
+        combinedHtml += `
+          <div style="margin-bottom: 24px; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden;">
+            <div style="background: ${i === 0 ? '#2563eb' : '#6366f1'}; color: white; padding: 12px 20px; font-size: 13px;">
+              <strong>Step ${i + 1}:</strong> ${condLabel}
+            </div>
+            <div style="padding: 16px 20px; background: #f8fafc; border-bottom: 1px solid #e2e8f0;">
+              <span style="color: #64748b; font-size: 12px;">Subject:</span>
+              <strong style="color: #1e293b; font-size: 14px; margin-left: 8px;">${pSubject}</strong>
+            </div>
+            <div style="padding: 20px;">
+              ${pContent || '<p style="color: #94a3b8; font-style: italic;">No content</p>'}
+            </div>
+          </div>
+        `;
+      }
+
+      const fullHtml = `
+        <div style="font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto; padding: 20px;">
+          <div style="background: linear-gradient(135deg, #2563eb, #7c3aed); padding: 24px; border-radius: 12px; text-align: center; color: white; margin-bottom: 24px;">
+            <h2 style="margin: 0 0 8px 0; font-size: 18px;">MailFlow - Campaign Test Email</h2>
+            <p style="margin: 0; opacity: 0.9; font-size: 13px;">This is a preview of your complete email sequence (${emailSteps.length} step${emailSteps.length > 1 ? 's' : ''})</p>
+          </div>
+          ${combinedHtml}
+          <div style="text-align: center; padding: 16px; color: #94a3b8; font-size: 11px; border-top: 1px solid #e2e8f0; margin-top: 16px;">
+            This is a test email sent from MailFlow. Variables have been replaced with sample data.
+          </div>
+        </div>
+      `;
+
+      const firstSubject = campaignEngine.personalizeContent(emailSteps[0].subject || 'Test Email', data);
+      const result = await smtpEmailService.sendEmail(account.id, account.smtpConfig, {
+        to: toEmail,
+        subject: `[TEST] ${firstSubject}`,
+        html: fullHtml,
+      });
+
+      res.json({ ...result, stepsIncluded: emailSteps.length });
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : 'Unknown error';
+      console.error('Send test email error:', errMsg);
+      res.status(500).json({ success: false, error: errMsg });
     }
   });
 

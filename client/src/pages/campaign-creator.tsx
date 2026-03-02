@@ -84,8 +84,12 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
 
   // Preview
   const [showPreview, setShowPreview] = useState(false);
-  const [previewData, setPreviewData] = useState<{ subject: string; content: string; contact: any } | null>(null);
+  const [previewData, setPreviewData] = useState<{ previews: Array<{ stepIndex: number; subject: string; content: string; condition: string; delayValue: number; delayUnit: string }>; contact: any } | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewActiveStep, setPreviewActiveStep] = useState(0);
+  const [testEmailAddress, setTestEmailAddress] = useState('');
+  const [sendingTest, setSendingTest] = useState(false);
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
   // Dialogs
   const [showRecipients, setShowRecipients] = useState(false);
@@ -274,21 +278,27 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
   const recipientCount = selectedContacts.length;
   const selectedAccount = emailAccounts.find(a => a.id === emailAccountId);
 
-  // Preview email
+  // Preview email - now previews ALL steps
   const handleShowPreview = async () => {
     setPreviewLoading(true);
     setShowPreview(true);
+    setPreviewActiveStep(0);
+    setTestResult(null);
+    setTestEmailAddress(selectedAccount?.email || '');
     try {
-      // Get current content (from HTML mode if active)
-      const currentContent = editorMode === 'html' ? htmlSource : (activeStep?.content || '');
+      // Sync current step content if in HTML mode
+      const syncedSteps = steps.map((s, i) => ({
+        subject: s.subject,
+        content: i === activeStepIndex && editorMode === 'html' ? htmlSource : s.content,
+        condition: s.condition,
+        delayValue: s.delayValue,
+        delayUnit: s.delayUnit,
+      }));
       const res = await fetch('/api/campaigns/preview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({
-          subject: activeStep?.subject || '',
-          content: currentContent,
-        }),
+        body: JSON.stringify({ steps: syncedSteps }),
       });
       if (res.ok) {
         const data = await res.json();
@@ -298,6 +308,41 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
       console.error('Preview failed:', e);
     }
     setPreviewLoading(false);
+  };
+
+  // Send test email
+  const handleSendTestEmail = async () => {
+    if (!testEmailAddress.trim() || !emailAccountId) return;
+    setSendingTest(true);
+    setTestResult(null);
+    try {
+      const syncedSteps = steps.map((s, i) => ({
+        subject: s.subject,
+        content: i === activeStepIndex && editorMode === 'html' ? htmlSource : s.content,
+        condition: s.condition,
+        delayValue: s.delayValue,
+        delayUnit: s.delayUnit,
+      }));
+      const res = await fetch('/api/campaigns/send-test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          emailAccountId,
+          toEmail: testEmailAddress.trim(),
+          steps: syncedSteps,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setTestResult({ success: true, message: `Test email sent to ${testEmailAddress} (${data.stepsIncluded} step${data.stepsIncluded > 1 ? 's' : ''} included)` });
+      } else {
+        setTestResult({ success: false, message: data.error || 'Failed to send test email' });
+      }
+    } catch (e) {
+      setTestResult({ success: false, message: 'Failed to send test email' });
+    }
+    setSendingTest(false);
   };
 
   // Send campaign
@@ -1052,60 +1097,226 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
         )}
       </div>
 
-      {/* ==================== EMAIL PREVIEW DIALOG ==================== */}
+      {/* ==================== EMAIL PREVIEW DIALOG (Full Sequence) ==================== */}
       <Dialog open={showPreview} onOpenChange={setShowPreview}>
-        <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <div className="bg-blue-50 p-2 rounded-lg">
-                <Monitor className="h-4 w-4 text-blue-600" />
+        <DialogContent className="max-w-4xl max-h-[90vh] p-0 overflow-hidden">
+          <DialogTitle className="sr-only">Email Preview</DialogTitle>
+          <DialogDescription className="sr-only">Preview your complete email sequence with all follow-ups</DialogDescription>
+          <div className="flex h-[80vh]">
+            {/* Left sidebar - Step navigation */}
+            <div className="w-64 border-r border-gray-200 bg-gray-50/80 flex flex-col flex-shrink-0">
+              <div className="p-4 border-b border-gray-200">
+                <div className="flex items-center gap-2 mb-1">
+                  <div className="bg-blue-100 p-1.5 rounded-lg">
+                    <Monitor className="h-4 w-4 text-blue-600" />
+                  </div>
+                  <h3 className="text-sm font-bold text-gray-900">Email Preview</h3>
+                </div>
+                <p className="text-[11px] text-gray-400 mt-1">Preview your complete email sequence</p>
               </div>
-              Email Preview
-            </DialogTitle>
-            <DialogDescription>This is how your email will look to recipients. Variables are replaced with sample data.</DialogDescription>
-          </DialogHeader>
-          {previewLoading ? (
-            <div className="flex items-center justify-center py-12">
-              <Loader2 className="h-6 w-6 animate-spin text-blue-500" />
+
+              {/* Steps list */}
+              <div className="flex-1 overflow-y-auto p-3 space-y-1.5">
+                {previewData?.previews?.map((preview, i) => (
+                  <button key={i}
+                    onClick={() => setPreviewActiveStep(i)}
+                    className={`w-full text-left p-3 rounded-xl border transition-all ${
+                      previewActiveStep === i
+                        ? 'border-blue-300 bg-white shadow-sm'
+                        : 'border-transparent hover:border-gray-200 hover:bg-white'
+                    }`}>
+                    <div className="flex items-center gap-2 mb-1">
+                      <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold text-white ${
+                        i === 0 ? 'bg-blue-600' : 'bg-indigo-500'
+                      }`}>
+                        {i + 1}
+                      </div>
+                      <span className="text-xs font-semibold text-gray-900 truncate flex-1">
+                        {preview.subject || '(No subject)'}
+                      </span>
+                    </div>
+                    <div className="ml-8 text-[10px] text-gray-400 flex items-center gap-1">
+                      {i === 0 ? (
+                        <span className="flex items-center gap-1">
+                          <Send className="h-2.5 w-2.5" /> Sent immediately
+                        </span>
+                      ) : (
+                        <span className="flex items-center gap-1">
+                          <Clock className="h-2.5 w-2.5" />
+                          {conditionLabels[preview.condition] || preview.condition} after {preview.delayValue} {preview.delayUnit}
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                )) || (
+                  <div className="text-center py-6 text-xs text-gray-400">Loading...</div>
+                )}
+              </div>
+
+              {/* Send test email section */}
+              <div className="border-t border-gray-200 p-4">
+                <div className="flex items-center gap-2 mb-2.5">
+                  <Mail className="h-3.5 w-3.5 text-gray-500" />
+                  <span className="text-xs font-bold text-gray-700">Send Test Email</span>
+                </div>
+                <input
+                  type="email"
+                  value={testEmailAddress}
+                  onChange={e => { setTestEmailAddress(e.target.value); setTestResult(null); }}
+                  placeholder="Enter email address"
+                  className="w-full text-xs border border-gray-200 rounded-lg px-3 py-2 mb-2 outline-none focus:border-blue-400 bg-white"
+                />
+                <button
+                  onClick={handleSendTestEmail}
+                  disabled={sendingTest || !testEmailAddress.trim() || !emailAccountId}
+                  className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-lg hover:from-blue-700 hover:to-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                >
+                  {sendingTest ? (
+                    <><Loader2 className="h-3 w-3 animate-spin" /> Sending...</>
+                  ) : (
+                    <><Send className="h-3 w-3" /> Send test ({previewData?.previews?.length || 1} step{(previewData?.previews?.length || 1) > 1 ? 's' : ''})</>
+                  )}
+                </button>
+                {testResult && (
+                  <div className={`mt-2 text-[11px] p-2 rounded-lg flex items-start gap-1.5 ${
+                    testResult.success ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'
+                  }`}>
+                    {testResult.success ? <CheckCircle className="h-3 w-3 mt-0.5 flex-shrink-0" /> : <AlertCircle className="h-3 w-3 mt-0.5 flex-shrink-0" />}
+                    <span>{testResult.message}</span>
+                  </div>
+                )}
+                {!emailAccountId && (
+                  <p className="mt-1.5 text-[10px] text-amber-600">Select a sender account first</p>
+                )}
+              </div>
             </div>
-          ) : previewData ? (
-            <div className="space-y-4">
-              {/* Email header */}
-              <div className="bg-gray-50 rounded-xl p-4 border border-gray-100 space-y-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-gray-400 w-14">From:</span>
-                  <span className="text-sm text-gray-700 font-medium">{selectedAccount?.displayName || selectedAccount?.email || 'Sender'} &lt;{selectedAccount?.email || 'sender@example.com'}&gt;</span>
+
+            {/* Right content - Email preview */}
+            <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+              {previewLoading ? (
+                <div className="flex items-center justify-center flex-1">
+                  <div className="flex flex-col items-center gap-3">
+                    <Loader2 className="h-7 w-7 animate-spin text-blue-500" />
+                    <span className="text-sm text-gray-400">Loading preview...</span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-gray-400 w-14">To:</span>
-                  <span className="text-sm text-gray-700">{previewData.contact?.email || 'john@example.com'}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-gray-400 w-14">Subject:</span>
-                  <span className="text-sm text-gray-900 font-semibold">{previewData.subject}</span>
-                </div>
-              </div>
-              {/* Email body */}
-              <div className="border border-gray-200 rounded-xl bg-white overflow-hidden">
-                <div className="p-6">
-                  <div
-                    dangerouslySetInnerHTML={{ __html: previewData.content }}
-                    className="prose prose-sm max-w-none text-gray-800 [&_a]:text-blue-600 [&_img]:max-w-full"
-                  />
-                </div>
-              </div>
-              {/* Preview info */}
-              <div className="flex items-center gap-2 text-xs text-gray-400 bg-gray-50 rounded-lg p-3">
-                <Info className="h-3.5 w-3.5" />
-                <span>Sample contact used: {previewData.contact?.firstName} {previewData.contact?.lastName} ({previewData.contact?.email})</span>
-              </div>
+              ) : previewData && previewData.previews && previewData.previews[previewActiveStep] ? (
+                <>
+                  {/* Step info bar */}
+                  <div className="px-5 py-3 border-b border-gray-100 bg-white flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold text-white ${
+                        previewActiveStep === 0 ? 'bg-blue-600' : 'bg-indigo-500'
+                      }`}>
+                        {previewActiveStep + 1}
+                      </div>
+                      <div>
+                        <div className="text-sm font-semibold text-gray-900">
+                          {previewActiveStep === 0 ? 'Initial Email' : `Follow-up ${previewActiveStep}`}
+                        </div>
+                        <div className="text-[11px] text-gray-400 flex items-center gap-1">
+                          {previewActiveStep === 0 ? (
+                            <><Send className="h-2.5 w-2.5" /> Will be sent immediately</>
+                          ) : (
+                            <><Clock className="h-2.5 w-2.5" /> {conditionLabels[previewData.previews[previewActiveStep].condition] || previewData.previews[previewActiveStep].condition} after {previewData.previews[previewActiveStep].delayValue} {previewData.previews[previewActiveStep].delayUnit}</>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        disabled={previewActiveStep === 0}
+                        onClick={() => setPreviewActiveStep(prev => Math.max(0, prev - 1))}
+                        className="p-1.5 rounded-lg hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed text-gray-500">
+                        <ChevronLeft className="h-4 w-4" />
+                      </button>
+                      <span className="text-xs text-gray-400 font-medium min-w-[60px] text-center">
+                        {previewActiveStep + 1} of {previewData.previews.length}
+                      </span>
+                      <button
+                        disabled={previewActiveStep >= previewData.previews.length - 1}
+                        onClick={() => setPreviewActiveStep(prev => Math.min(previewData.previews.length - 1, prev + 1))}
+                        className="p-1.5 rounded-lg hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed text-gray-500">
+                        <ChevronRight className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Email content area */}
+                  <div className="flex-1 overflow-y-auto p-5">
+                    {/* Email envelope header */}
+                    <div className="bg-gray-50 rounded-xl p-4 border border-gray-100 space-y-2 mb-4">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-gray-400 w-14">From:</span>
+                        <span className="text-sm text-gray-700 font-medium">
+                          {selectedAccount?.displayName || selectedAccount?.email || 'Sender'} &lt;{selectedAccount?.email || 'sender@example.com'}&gt;
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-gray-400 w-14">To:</span>
+                        <span className="text-sm text-gray-700">{previewData.contact?.email || 'john@example.com'}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-gray-400 w-14">Subject:</span>
+                        <span className="text-sm text-gray-900 font-semibold">{previewData.previews[previewActiveStep].subject || '(No subject)'}</span>
+                      </div>
+                    </div>
+
+                    {/* Email body */}
+                    <div className="border border-gray-200 rounded-xl bg-white overflow-hidden">
+                      <div className="p-6">
+                        <div
+                          dangerouslySetInnerHTML={{ __html: previewData.previews[previewActiveStep].content }}
+                          className="prose prose-sm max-w-none text-gray-800 [&_a]:text-blue-600 [&_img]:max-w-full"
+                        />
+                        {!previewData.previews[previewActiveStep].content && (
+                          <p className="text-gray-400 italic text-sm">No content in this step</p>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Preview info */}
+                    <div className="flex items-center gap-2 text-xs text-gray-400 bg-gray-50 rounded-lg p-3 mt-4">
+                      <Info className="h-3.5 w-3.5 flex-shrink-0" />
+                      <span>Sample contact: {previewData.contact?.firstName} {previewData.contact?.lastName} ({previewData.contact?.email})</span>
+                    </div>
+                  </div>
+
+                  {/* Bottom bar with sequence visualization */}
+                  {previewData.previews.length > 1 && (
+                    <div className="border-t border-gray-100 bg-gray-50/50 px-5 py-3">
+                      <div className="flex items-center gap-1.5 overflow-x-auto">
+                        {previewData.previews.map((preview, i) => (
+                          <React.Fragment key={i}>
+                            <button
+                              onClick={() => setPreviewActiveStep(i)}
+                              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all whitespace-nowrap ${
+                                previewActiveStep === i
+                                  ? 'bg-blue-600 text-white shadow-sm'
+                                  : 'bg-white border border-gray-200 text-gray-600 hover:border-blue-300 hover:text-blue-600'
+                              }`}>
+                              <span className="font-bold">{i + 1}</span>
+                              <span className="max-w-[80px] truncate">{preview.subject || 'No subject'}</span>
+                            </button>
+                            {i < previewData.previews.length - 1 && (
+                              <div className="flex items-center gap-1 text-gray-300 flex-shrink-0">
+                                <div className="w-4 h-px bg-gray-300" />
+                                <Clock className="h-2.5 w-2.5" />
+                                <span className="text-[9px]">{previewData.previews[i + 1].delayValue}{previewData.previews[i + 1].delayUnit[0]}</span>
+                                <div className="w-4 h-px bg-gray-300" />
+                              </div>
+                            )}
+                          </React.Fragment>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="flex items-center justify-center flex-1 text-gray-400">No preview data available</div>
+              )}
             </div>
-          ) : (
-            <div className="text-center py-8 text-gray-400">No preview data available</div>
-          )}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowPreview(false)}>Close</Button>
-          </DialogFooter>
+          </div>
         </DialogContent>
       </Dialog>
 
