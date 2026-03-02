@@ -6,15 +6,47 @@ import cookieParser from "cookie-parser";
 import MemoryStore from "memorystore";
 import { smtpEmailService, SMTP_PRESETS, type SmtpConfig } from "./services/smtp-email-service";
 import { campaignEngine } from "./services/campaign-engine";
+import { OAuth2Client } from 'google-auth-library';
 
 // In-memory user store for simplified authentication
 const loggedInUsers = new Set<string>();
+
+// ========== Google OAuth 2.0 Helper ==========
+// Credentials can come from environment variables or api_settings (database)
+// Priority: env vars > api_settings
+const PRODUCTION_DOMAIN = 'mailsbellaward.com';
+
+function getGoogleOAuthConfig(overrides?: { clientId?: string; clientSecret?: string; redirectUri?: string }) {
+  const clientId = overrides?.clientId || process.env.GOOGLE_CLIENT_ID || '';
+  const clientSecret = overrides?.clientSecret || process.env.GOOGLE_CLIENT_SECRET || '';
+  const redirectUri = overrides?.redirectUri || process.env.GOOGLE_REDIRECT_URI || '';
+  return { clientId, clientSecret, redirectUri };
+}
+
+function createOAuth2Client(config: { clientId: string; clientSecret: string; redirectUri: string }) {
+  return new OAuth2Client(config.clientId, config.clientSecret, config.redirectUri);
+}
+
+// Detect public base URL from request headers
+function getBaseUrlFromRequest(req: any): string {
+  const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+  const host = req.headers['x-forwarded-host'] || req.headers['host'];
+  return `${proto}://${host}`;
+}
 
 // Simple auth middleware
 const requireAuth = (req: any, res: any, next: any) => {
   const userId = req.cookies?.user_id || req.session?.userId;
   if (userId && loggedInUsers.has(userId)) {
-    req.user = { id: userId, organizationId: '550e8400-e29b-41d4-a716-446655440001', role: 'admin' };
+    // Get user data from session
+    const sessionUser = (req.session as any)?.user;
+    req.user = { 
+      id: userId, 
+      organizationId: '550e8400-e29b-41d4-a716-446655440001', 
+      role: 'admin',
+      email: sessionUser?.email || 'unknown',
+      name: sessionUser?.name || 'Unknown',
+    };
     // Auto-detect public URL for tracking links
     const host = req.headers['x-forwarded-host'] || req.headers['host'];
     if (host && !host.includes('localhost')) {
@@ -42,17 +74,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
   
   const MemStore = MemoryStore(session);
+  
+  // Detect if running in production
+  const isProduction = process.env.NODE_ENV === 'production';
+  
   app.use(session({
     store: new MemStore({ checkPeriod: 86400000 }),
     secret: process.env.SESSION_SECRET || 'mailflow-dev-secret-key',
     resave: false,
     saveUninitialized: false,
-    cookie: { secure: false, httpOnly: true, maxAge: 24 * 60 * 60 * 1000, sameSite: 'lax' },
+    cookie: { 
+      secure: isProduction,  // Use secure cookies in production (HTTPS)
+      httpOnly: true, 
+      maxAge: 24 * 60 * 60 * 1000, 
+      sameSite: 'lax',
+      // In production, set domain for mailsbellaward.com
+      ...(isProduction && process.env.COOKIE_DOMAIN ? { domain: process.env.COOKIE_DOMAIN } : {}),
+    },
     name: 'connect.sid'
   }));
 
   // ========== AUTH ROUTES ==========
   
+  // Simple login (fallback/dev only)
   app.post('/api/auth/simple-login', (req, res) => {
     const userId = 'user-123';
     const mockUser = { id: userId, email: 'demo@mailflow.app', name: 'Demo User', picture: '', provider: 'google', access_token: 'demo-token' };
@@ -64,17 +108,170 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.json({ success: true, user: mockUser });
   });
 
-  app.get('/api/auth/google', (req, res) => {
-    const userId = 'google-demo-user';
-    const mockUser = { id: userId, email: 'demo@mailflow.app', name: 'Demo User', picture: '', provider: 'google', access_token: 'demo-google-token' };
-    loggedInUsers.add(userId);
-    res.cookie('user_id', userId, { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
-    res.cookie('user_data', JSON.stringify(mockUser), { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
-    (req.session as any).userId = userId;
-    (req.session as any).user = mockUser;
-    req.session.save(() => { res.redirect('/?connected=true'); });
+  // ===== REAL GOOGLE OAUTH 2.0 =====
+  // Step 1: Redirect user to Google's consent screen
+  app.get('/api/auth/google', async (req: any, res) => {
+    try {
+      // Determine redirect URI from the current request
+      const baseUrl = getBaseUrlFromRequest(req);
+      const redirectUri = `${baseUrl}/api/auth/google/callback`;
+
+      // Try to load credentials from api_settings first, then env vars
+      let clientId = process.env.GOOGLE_CLIENT_ID || '';
+      let clientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
+
+      try {
+        // Check api_settings for stored OAuth credentials (use a default org)
+        const settings = await storage.getApiSettings('550e8400-e29b-41d4-a716-446655440001');
+        if (settings.google_oauth_client_id) clientId = settings.google_oauth_client_id;
+        if (settings.google_oauth_client_secret) clientSecret = settings.google_oauth_client_secret;
+      } catch (e) { /* ignore - use env vars */ }
+
+      if (!clientId || !clientSecret) {
+        // No OAuth configured - fall back to demo login
+        console.warn('[Auth] Google OAuth not configured, falling back to demo login');
+        const userId = 'google-demo-user';
+        const mockUser = { id: userId, email: 'demo@mailflow.app', name: 'Demo User', picture: '', provider: 'google', access_token: 'demo-token' };
+        loggedInUsers.add(userId);
+        res.cookie('user_id', userId, { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
+        res.cookie('user_data', JSON.stringify(mockUser), { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
+        (req.session as any).userId = userId;
+        (req.session as any).user = mockUser;
+        return req.session.save(() => { res.redirect('/?connected=true'); });
+      }
+
+      const oauth2Client = createOAuth2Client({ clientId, clientSecret, redirectUri });
+      const authUrl = oauth2Client.generateAuthUrl({
+        access_type: 'offline',
+        prompt: 'consent',
+        scope: [
+          'https://www.googleapis.com/auth/userinfo.email',
+          'https://www.googleapis.com/auth/userinfo.profile',
+          'openid',
+        ],
+        state: JSON.stringify({ redirectUri }),
+      });
+
+      console.log('[Auth] Redirecting to Google OAuth, redirect_uri:', redirectUri);
+      res.redirect(authUrl);
+    } catch (error) {
+      console.error('[Auth] Google OAuth init error:', error);
+      res.redirect('/?error=oauth_init_failed');
+    }
   });
 
+  // Step 2: Handle Google OAuth callback
+  app.get('/api/auth/google/callback', async (req: any, res) => {
+    try {
+      const { code, state, error: oauthError } = req.query;
+
+      if (oauthError) {
+        console.error('[Auth] Google OAuth error:', oauthError);
+        return res.redirect('/?error=oauth_denied');
+      }
+
+      if (!code) {
+        return res.redirect('/?error=no_code');
+      }
+
+      // Parse state to get the redirect URI used during initiation
+      let redirectUri = `${getBaseUrlFromRequest(req)}/api/auth/google/callback`;
+      try {
+        if (state) {
+          const parsed = JSON.parse(state as string);
+          if (parsed.redirectUri) redirectUri = parsed.redirectUri;
+        }
+      } catch (e) { /* use default */ }
+
+      // Load credentials
+      let clientId = process.env.GOOGLE_CLIENT_ID || '';
+      let clientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
+
+      try {
+        const settings = await storage.getApiSettings('550e8400-e29b-41d4-a716-446655440001');
+        if (settings.google_oauth_client_id) clientId = settings.google_oauth_client_id;
+        if (settings.google_oauth_client_secret) clientSecret = settings.google_oauth_client_secret;
+      } catch (e) { /* use env vars */ }
+
+      const oauth2Client = createOAuth2Client({ clientId, clientSecret, redirectUri });
+
+      // Exchange authorization code for tokens
+      const { tokens } = await oauth2Client.getToken(code as string);
+      oauth2Client.setCredentials(tokens);
+
+      // Get user info from Google
+      const userInfoResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+        headers: { Authorization: `Bearer ${tokens.access_token}` },
+      });
+
+      if (!userInfoResponse.ok) {
+        console.error('[Auth] Failed to get Google user info:', userInfoResponse.status);
+        return res.redirect('/?error=user_info_failed');
+      }
+
+      const googleUser = await userInfoResponse.json() as any;
+      const email = googleUser.email;
+      const name = googleUser.name || email;
+      const picture = googleUser.picture || '';
+      const firstName = googleUser.given_name || name.split(' ')[0] || '';
+      const lastName = googleUser.family_name || name.split(' ').slice(1).join(' ') || '';
+
+      console.log('[Auth] Google OAuth success for:', email);
+
+      // Upsert user in database
+      const defaultOrgId = '550e8400-e29b-41d4-a716-446655440001';
+      let dbUser = await storage.getUserByEmail(email) as any;
+      if (!dbUser) {
+        dbUser = await storage.createUser({
+          email,
+          firstName,
+          lastName,
+          role: 'admin',
+          organizationId: defaultOrgId,
+          isActive: true,
+        });
+        console.log('[Auth] Created new user:', dbUser.id, email);
+      } else {
+        // Update name/picture if changed
+        await storage.updateUser(dbUser.id, { firstName, lastName });
+        console.log('[Auth] Updated existing user:', dbUser.id, email);
+      }
+
+      const userId = dbUser.id;
+      const userObj = {
+        id: userId,
+        email,
+        name,
+        picture,
+        provider: 'google',
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token || null,
+      };
+
+      // Set session and cookies
+      loggedInUsers.add(userId);
+      const cookieOpts: any = { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, sameSite: 'lax', secure: false, path: '/' };
+      // Use secure cookies in production
+      const host = req.headers['host'] || '';
+      if (host.includes(PRODUCTION_DOMAIN) || host.includes('.pages.dev')) {
+        cookieOpts.secure = true;
+        cookieOpts.sameSite = 'lax';
+      }
+      res.cookie('user_id', userId, cookieOpts);
+      res.cookie('user_data', JSON.stringify(userObj), cookieOpts);
+      (req.session as any).userId = userId;
+      (req.session as any).user = userObj;
+
+      req.session.save(() => {
+        res.redirect('/?connected=true');
+      });
+    } catch (error) {
+      console.error('[Auth] Google OAuth callback error:', error);
+      res.redirect('/?error=oauth_callback_failed');
+    }
+  });
+
+  // Microsoft login (keep as demo for now)
   app.get('/api/auth/microsoft', (req, res) => {
     const userId = 'microsoft-demo-user';
     const mockUser = { id: userId, email: 'demo@mailflow.app', name: 'Demo User', picture: '', provider: 'microsoft', access_token: 'demo-ms-token' };
@@ -86,11 +283,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
     req.session.save(() => { res.redirect('/?connected=true'); });
   });
 
-  app.get('/api/auth/google/status', (req, res) => {
+  app.get('/api/auth/google/status', async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     const userId = req.cookies?.user_id;
     if (userId && loggedInUsers.has(userId)) {
-      return res.json({ connected: true, email: 'demo@mailflow.app', demo: true });
+      const session = req.session as any;
+      const user = session?.user;
+      return res.json({ connected: true, email: user?.email || 'unknown', demo: !user?.access_token || user?.access_token === 'demo-token' });
     }
     res.json({ connected: false });
   });
@@ -119,6 +318,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.clearCookie('connect.sid');
     if (req.session) req.session.destroy(() => {});
     res.json({ success: true });
+  });
+
+  // OAuth config status check (for Advanced Settings UI)
+  app.get('/api/auth/oauth-config-status', async (req: any, res) => {
+    try {
+      let clientId = process.env.GOOGLE_CLIENT_ID || '';
+      try {
+        const settings = await storage.getApiSettings('550e8400-e29b-41d4-a716-446655440001');
+        if (settings.google_oauth_client_id) clientId = settings.google_oauth_client_id;
+      } catch (e) { /* ignore */ }
+      res.json({
+        googleOAuth: !!clientId,
+        microsoftOAuth: false,
+        productionDomain: PRODUCTION_DOMAIN,
+      });
+    } catch (error) {
+      res.json({ googleOAuth: false, microsoftOAuth: false });
+    }
   });
 
   app.get('/api/test', (req, res) => {
@@ -1068,10 +1285,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get('/api/account/info', async (req: any, res) => {
     const accounts = await storage.getEmailAccounts(req.user.organizationId);
     const totalQuota = accounts.reduce((sum: number, a: any) => sum + (a.dailyLimit || 500), 0) || 500;
+    const sessionUser = (req.session as any)?.user;
     
     res.json({
-      name: 'Demo User',
-      email: 'demo@mailflow.app',
+      name: sessionUser?.name || req.user.name || 'MailFlow User',
+      email: sessionUser?.email || req.user.email || 'user@mailflow.app',
+      picture: sessionUser?.picture || '',
+      provider: sessionUser?.provider || 'google',
       quota: { used: 0, total: totalQuota, resetsAt: 'Tomorrow at 12:00 AM' },
       billing: { plan: 'MailFlow Pro', isEducation: false, members: 'Invite teammates to join' },
       emailAccounts: accounts.length,

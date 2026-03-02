@@ -7,8 +7,9 @@ import { Label } from "@/components/ui/label";
 import { 
   Brain, Key, Zap, CheckCircle2, XCircle, Loader2, 
   Eye, EyeOff, Send, Sparkles, Server, Shield, ExternalLink,
-  AlertTriangle, Info, RefreshCw, Copy, Mail
+  AlertTriangle, Info, RefreshCw, Copy, Mail, LogIn, Globe
 } from "lucide-react";
+import { FaGoogle } from "react-icons/fa";
 
 interface AzureOpenAIConfig {
   azure_openai_endpoint: string;
@@ -23,6 +24,11 @@ interface ElasticEmailConfig {
   elastic_email_default_from_name: string;
 }
 
+interface GoogleOAuthConfig {
+  google_oauth_client_id: string;
+  google_oauth_client_secret: string;
+}
+
 export default function AdvancedSettings() {
   // Azure OpenAI state
   const [azureConfig, setAzureConfig] = useState<AzureOpenAIConfig>({
@@ -35,6 +41,15 @@ export default function AdvancedSettings() {
   const [azureTestResult, setAzureTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [azureTesting, setAzureTesting] = useState(false);
   const [azureSaving, setAzureSaving] = useState(false);
+
+  // Google OAuth state
+  const [googleOAuthConfig, setGoogleOAuthConfig] = useState<GoogleOAuthConfig>({
+    google_oauth_client_id: '',
+    google_oauth_client_secret: '',
+  });
+  const [showGoogleSecret, setShowGoogleSecret] = useState(false);
+  const [googleOAuthSaving, setGoogleOAuthSaving] = useState(false);
+  const [googleOAuthConfigured, setGoogleOAuthConfigured] = useState(false);
 
   // Elastic Email state
   const [elasticConfig, setElasticConfig] = useState<ElasticEmailConfig>({
@@ -77,11 +92,41 @@ export default function AdvancedSettings() {
           elastic_email_default_from: data.elastic_email_default_from || '',
           elastic_email_default_from_name: data.elastic_email_default_from_name || '',
         });
+        setGoogleOAuthConfig({
+          google_oauth_client_id: data.google_oauth_client_id || '',
+          google_oauth_client_secret: data.google_oauth_client_secret || '',
+        });
+        // Check if OAuth is configured
+        if (data.google_oauth_client_id) {
+          setGoogleOAuthConfigured(true);
+        }
       }
     } catch (e) {
       console.error('Failed to load settings:', e);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const saveGoogleOAuthSettings = async () => {
+    setGoogleOAuthSaving(true);
+    setSaveSuccess(null);
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(googleOAuthConfig),
+      });
+      if (res.ok) {
+        setSaveSuccess('google-oauth');
+        setGoogleOAuthConfigured(!!googleOAuthConfig.google_oauth_client_id);
+        setTimeout(() => setSaveSuccess(null), 3000);
+      }
+    } catch (e) {
+      console.error('Failed to save Google OAuth settings:', e);
+    } finally {
+      setGoogleOAuthSaving(false);
     }
   };
 
@@ -221,6 +266,137 @@ export default function AdvancedSettings() {
         </h2>
         <p className="text-gray-500 mt-1">Configure API integrations for AI-powered features and email delivery</p>
       </div>
+
+      {/* ==================== GOOGLE OAUTH SECTION ==================== */}
+      <Card className="border-gray-200 shadow-sm overflow-hidden">
+        <CardHeader className="bg-gradient-to-r from-red-50 to-orange-50 border-b">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-lg bg-white border border-gray-200 flex items-center justify-center shadow-sm">
+                <FaGoogle className="h-5 w-5 text-[#4285F4]" />
+              </div>
+              <div>
+                <CardTitle className="text-lg">Google OAuth Sign-In</CardTitle>
+                <CardDescription>Enable Gmail authentication for user login</CardDescription>
+              </div>
+            </div>
+            {googleOAuthConfigured ? (
+              <Badge className="bg-green-50 text-green-700 border-green-200">
+                <CheckCircle2 className="h-3 w-3 mr-1" /> Configured
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="text-gray-500">
+                Not configured
+              </Badge>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent className="p-6 space-y-5">
+          {/* Setup Guide */}
+          <div className="flex gap-3 p-3 bg-blue-50 rounded-lg text-sm">
+            <Info className="h-4 w-4 text-blue-600 flex-shrink-0 mt-0.5" />
+            <div className="text-blue-800">
+              <strong>Setup Google OAuth:</strong>
+              <ol className="list-decimal ml-4 mt-1 space-y-0.5">
+                <li>Go to <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer" className="underline font-medium inline-flex items-center gap-0.5">
+                  Google Cloud Console <ExternalLink className="h-3 w-3" />
+                </a></li>
+                <li>Create a new project or select existing one</li>
+                <li>Create <strong>OAuth 2.0 Client ID</strong> (Web Application)</li>
+                <li>Add <code className="bg-blue-100 px-1 rounded">https://mailsbellaward.com/api/auth/google/callback</code> as an Authorized Redirect URI</li>
+                <li>Also add your sandbox URL callback if testing locally</li>
+                <li>Copy the Client ID and Client Secret below</li>
+              </ol>
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            {/* Client ID */}
+            <div>
+              <Label htmlFor="google-client-id" className="text-sm font-medium text-gray-700">
+                Google Client ID <span className="text-red-500">*</span>
+              </Label>
+              <Input
+                id="google-client-id"
+                placeholder="123456789.apps.googleusercontent.com"
+                value={googleOAuthConfig.google_oauth_client_id}
+                onChange={e => setGoogleOAuthConfig(prev => ({ ...prev, google_oauth_client_id: e.target.value }))}
+                className="mt-1.5 font-mono text-sm"
+              />
+            </div>
+
+            {/* Client Secret */}
+            <div>
+              <Label htmlFor="google-client-secret" className="text-sm font-medium text-gray-700">
+                Google Client Secret <span className="text-red-500">*</span>
+              </Label>
+              <div className="relative mt-1.5">
+                <Input
+                  id="google-client-secret"
+                  type={showGoogleSecret ? 'text' : 'password'}
+                  placeholder="GOCSPX-xxxxxxxxxxxxxxxx"
+                  value={googleOAuthConfig.google_oauth_client_secret}
+                  onChange={e => setGoogleOAuthConfig(prev => ({ ...prev, google_oauth_client_secret: e.target.value }))}
+                  className="pr-10 font-mono text-sm"
+                />
+                <button
+                  onClick={() => setShowGoogleSecret(!showGoogleSecret)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                >
+                  {showGoogleSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Redirect URIs Info */}
+          <div className="p-3 bg-gray-50 rounded-lg text-sm">
+            <h4 className="font-medium text-gray-700 mb-2 flex items-center gap-1.5">
+              <Globe className="h-4 w-4" /> Authorized Redirect URIs
+            </h4>
+            <p className="text-xs text-gray-500 mb-2">Add these URIs in your Google Cloud Console OAuth client settings:</p>
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <code className="text-xs bg-gray-100 px-2 py-1 rounded text-gray-800 flex-1">
+                  https://mailsbellaward.com/api/auth/google/callback
+                </code>
+                <button
+                  onClick={() => navigator.clipboard.writeText('https://mailsbellaward.com/api/auth/google/callback')}
+                  className="text-gray-400 hover:text-gray-600"
+                  title="Copy"
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <div className="flex items-center gap-2">
+                <code className="text-xs bg-gray-100 px-2 py-1 rounded text-gray-800 flex-1">
+                  {window.location.origin}/api/auth/google/callback
+                </code>
+                <button
+                  onClick={() => navigator.clipboard.writeText(`${window.location.origin}/api/auth/google/callback`)}
+                  className="text-gray-400 hover:text-gray-600"
+                  title="Copy"
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Actions */}
+          <div className="flex items-center gap-3 pt-2">
+            <Button onClick={saveGoogleOAuthSettings} disabled={googleOAuthSaving} className="bg-red-600 hover:bg-red-700">
+              {googleOAuthSaving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Shield className="h-4 w-4 mr-2" />}
+              Save Google OAuth Settings
+            </Button>
+            {saveSuccess === 'google-oauth' && (
+              <span className="text-sm text-green-600 flex items-center gap-1">
+                <CheckCircle2 className="h-4 w-4" /> Saved! Sign-in with Google is now active.
+              </span>
+            )}
+          </div>
+        </CardContent>
+      </Card>
 
       {/* ==================== AZURE OPENAI SECTION ==================== */}
       <Card className="border-gray-200 shadow-sm overflow-hidden">
