@@ -11,8 +11,11 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   Users, Plus, Search, Upload, Trash2, Edit, Download,
   Mail, Building, Briefcase, CheckCircle, Loader2, XCircle, Filter, UserPlus,
-  MoreHorizontal, Star, TrendingUp, ArrowUpDown, FileSpreadsheet, List, FolderOpen, X, Eye, Tag
+  MoreHorizontal, Star, TrendingUp, ArrowUpDown, FileSpreadsheet, List, FolderOpen, X, Eye, Tag,
+  AlertTriangle, Ban, Link2, Sheet, Pencil, ExternalLink, ShieldX, ListX, LayoutList,
+  Copy, ArrowRight, ChevronDown, Info, Sparkles, RefreshCw
 } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 
 interface Contact {
@@ -40,6 +43,8 @@ interface ContactList {
   createdAt: string;
 }
 
+type TabType = 'all' | 'unsubscribers' | 'blocklist' | 'lists';
+
 export default function ContactsManager() {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [total, setTotal] = useState(0);
@@ -56,6 +61,9 @@ export default function ContactsManager() {
   const [editContact, setEditContact] = useState<Contact | null>(null);
   const [importResult, setImportResult] = useState<any>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Active tab
+  const [activeTab, setActiveTab] = useState<TabType>('all');
 
   // Contact lists
   const [contactLists, setContactLists] = useState<ContactList[]>([]);
@@ -78,6 +86,35 @@ export default function ContactsManager() {
   const [importLoading, setImportLoading] = useState(false);
   const [importListName, setImportListName] = useState('');
   const [importFileName, setImportFileName] = useState('');
+  const [importToExistingList, setImportToExistingList] = useState<string>('');
+
+  // Create list dialog state
+  const [showCreateListDialog, setShowCreateListDialog] = useState(false);
+  const [newListName, setNewListName] = useState('');
+  const [newListDescription, setNewListDescription] = useState('');
+  const [createListLoading, setCreateListLoading] = useState(false);
+
+  // Rename list dialog
+  const [showRenameListDialog, setShowRenameListDialog] = useState(false);
+  const [renameListId, setRenameListId] = useState<string | null>(null);
+  const [renameListValue, setRenameListValue] = useState('');
+
+  // Google Sheets import state
+  const [showGoogleSheetsDialog, setShowGoogleSheetsDialog] = useState(false);
+  const [gsUrl, setGsUrl] = useState('');
+  const [gsSheets, setGsSheets] = useState<any[]>([]);
+  const [gsSelectedSheet, setGsSelectedSheet] = useState<any>(null);
+  const [gsData, setGsData] = useState<any[]>([]);
+  const [gsHeaders, setGsHeaders] = useState<string[]>([]);
+  const [gsMapping, setGsMapping] = useState<Record<string, string>>({});
+  const [gsLoading, setGsLoading] = useState(false);
+  const [gsDataLoading, setGsDataLoading] = useState(false);
+  const [gsImportLoading, setGsImportLoading] = useState(false);
+  const [gsListName, setGsListName] = useState('');
+  const [gsSheetTitle, setGsSheetTitle] = useState('');
+  const [gsError, setGsError] = useState('');
+  const [gsImportResult, setGsImportResult] = useState<any>(null);
+  const [gsToExistingList, setGsToExistingList] = useState<string>('');
 
   // Debounced search
   useEffect(() => {
@@ -85,7 +122,7 @@ export default function ContactsManager() {
     return () => clearTimeout(timer);
   }, [search]);
 
-  useEffect(() => { fetchContacts(); }, [debouncedSearch, statusFilter, activeListId]);
+  useEffect(() => { fetchContacts(); }, [debouncedSearch, statusFilter, activeListId, activeTab]);
   useEffect(() => { fetchContactLists(); }, []);
 
   const fetchContacts = async () => {
@@ -93,9 +130,20 @@ export default function ContactsManager() {
     try {
       const params = new URLSearchParams();
       if (debouncedSearch) params.set('search', debouncedSearch);
-      if (statusFilter !== 'all') params.set('status', statusFilter);
-      if (activeListId) params.set('listId', activeListId);
-      params.set('limit', '100');
+
+      // Tab-based filtering
+      if (activeTab === 'unsubscribers') {
+        params.set('status', 'unsubscribed');
+      } else if (activeTab === 'blocklist') {
+        params.set('status', 'bounced');
+      } else if (activeTab === 'lists' && activeListId) {
+        params.set('listId', activeListId);
+        if (statusFilter !== 'all') params.set('status', statusFilter);
+      } else if (activeTab === 'all') {
+        if (statusFilter !== 'all') params.set('status', statusFilter);
+      }
+
+      params.set('limit', '200');
       const res = await fetch(`/api/contacts?${params}`, { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
@@ -123,9 +171,15 @@ export default function ContactsManager() {
     try {
       const res = await fetch('/api/contacts', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-        body: JSON.stringify({ email: formEmail, firstName: formFirstName, lastName: formLastName, company: formCompany, jobTitle: formJobTitle, tags: formTags.split(',').map(t => t.trim()).filter(Boolean), status: 'cold' }),
+        body: JSON.stringify({
+          email: formEmail, firstName: formFirstName, lastName: formLastName,
+          company: formCompany, jobTitle: formJobTitle,
+          tags: formTags.split(',').map(t => t.trim()).filter(Boolean),
+          status: 'cold',
+          listId: activeTab === 'lists' && activeListId ? activeListId : undefined,
+        }),
       });
-      if (res.ok) { setShowAddDialog(false); resetForm(); await fetchContacts(); }
+      if (res.ok) { setShowAddDialog(false); resetForm(); await fetchContacts(); await fetchContactLists(); }
       else { const err = await res.json(); setFormError(err.message || 'Failed to add contact'); }
     } catch (e) { setFormError('Network error'); }
     setFormLoading(false);
@@ -156,6 +210,7 @@ export default function ContactsManager() {
     await fetch('/api/contacts/delete-bulk', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ ids: selectedIds }) });
     setSelectedIds([]);
     await fetchContacts();
+    await fetchContactLists();
   };
 
   const handleDeleteList = async (listId: string) => {
@@ -163,6 +218,20 @@ export default function ContactsManager() {
     await fetch(`/api/contact-lists/${listId}`, { method: 'DELETE', credentials: 'include' });
     if (activeListId === listId) setActiveListId(null);
     await fetchContactLists();
+  };
+
+  const handleRenameList = async () => {
+    if (!renameListId || !renameListValue.trim()) return;
+    setCreateListLoading(true);
+    try {
+      await fetch(`/api/contact-lists/${renameListId}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ name: renameListValue.trim() }),
+      });
+      setShowRenameListDialog(false);
+      await fetchContactLists();
+    } catch (e) { /* ignore */ }
+    setCreateListLoading(false);
   };
 
   const openEdit = (contact: Contact) => {
@@ -220,7 +289,6 @@ export default function ContactsManager() {
     reader.readAsText(file);
   };
 
-  // Improved CSV line parser that handles quoted fields
   const parseCSVLine = (line: string): string[] => {
     const result: string[] = [];
     let current = '';
@@ -246,35 +314,31 @@ export default function ContactsManager() {
     setImportLoading(true);
     setImportResult(null);
 
-    // Build contacts preserving ALL columns
     const contacts = csvData.map(row => {
       const contact: Record<string, any> = {};
-      // Map known fields
       if (csvMapping.email) contact.email = (row[csvMapping.email] || '').trim();
       if (csvMapping.firstName) contact.firstName = (row[csvMapping.firstName] || '').trim();
       if (csvMapping.lastName) contact.lastName = (row[csvMapping.lastName] || '').trim();
       if (csvMapping.company) contact.company = (row[csvMapping.company] || '').trim();
       if (csvMapping.jobTitle) contact.jobTitle = (row[csvMapping.jobTitle] || '').trim();
-
-      // Store ALL unmapped columns in customFields
       const mappedColumns = new Set(Object.values(csvMapping).filter(Boolean));
       csvHeaders.forEach(header => {
-        if (!mappedColumns.has(header) && row[header]) {
-          contact[header] = row[header].trim();
-        }
+        if (!mappedColumns.has(header) && row[header]) contact[header] = row[header].trim();
       });
-
       return contact;
     }).filter(c => c.email && c.email.includes('@'));
 
     try {
+      const listName = importToExistingList
+        ? undefined
+        : (importListName || importFileName || 'Imported Contacts');
+
       const res = await fetch('/api/contacts/import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
         body: JSON.stringify({
           contacts,
-          listName: importListName || importFileName || 'Imported Contacts',
+          listName,
+          existingListId: importToExistingList || undefined,
           headers: csvHeaders,
           source: 'csv',
         }),
@@ -289,20 +353,145 @@ export default function ContactsManager() {
     setImportLoading(false);
   };
 
+  // ========== CREATE LIST ==========
+  const handleCreateList = async () => {
+    if (!newListName.trim()) return;
+    setCreateListLoading(true);
+    try {
+      const res = await fetch('/api/contact-lists', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ name: newListName.trim() }),
+      });
+      if (res.ok) {
+        const list = await res.json();
+        setShowCreateListDialog(false);
+        setNewListName('');
+        setNewListDescription('');
+        await fetchContactLists();
+        // Switch to Your Lists tab and select the new list
+        setActiveTab('lists');
+        setActiveListId(list.id);
+      }
+    } catch (e) { /* ignore */ }
+    setCreateListLoading(false);
+  };
+
+  // ========== GOOGLE SHEETS IMPORT ==========
+  const handleGsFetchInfo = async () => {
+    if (!gsUrl.trim()) return;
+    setGsLoading(true); setGsError(''); setGsSheets([]); setGsSelectedSheet(null); setGsData([]); setGsImportResult(null);
+    try {
+      const res = await fetch('/api/sheets/fetch-info', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ url: gsUrl.trim() }),
+      });
+      const data = await res.json();
+      if (data.valid && data.sheets?.length > 0) {
+        setGsSheets(data.sheets);
+        setGsSelectedSheet(data.sheets[0]);
+        // Auto-set list name from the spreadsheet title
+        const autoName = data.title || data.sheets[0]?.name || 'Google Sheet Import';
+        setGsSheetTitle(autoName);
+        setGsListName(autoName);
+        // Auto-load the first sheet's data
+        handleGsLoadData(data.sheets[0], data.title);
+      } else {
+        setGsError(data.error || 'Could not access the spreadsheet. Make sure it is shared publicly.');
+      }
+    } catch (e) {
+      setGsError('Failed to connect to Google Sheets');
+    }
+    setGsLoading(false);
+  };
+
+  const handleGsLoadData = async (sheet: any, sheetTitle?: string) => {
+    setGsSelectedSheet(sheet); setGsDataLoading(true); setGsData([]); setGsHeaders([]);
+    try {
+      const res = await fetch('/api/sheets/fetch-data', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ url: gsUrl.trim(), gid: sheet.id, sheetName: sheet.name }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.headers && data.rows) {
+          setGsHeaders(data.headers);
+          setGsData(data.rows);
+          const mapping: Record<string, string> = {};
+          data.headers.forEach((h: string) => {
+            const lower = h.toLowerCase();
+            if (lower.includes('email') || lower === 'e-mail') mapping.email = h;
+            else if ((lower.includes('first') && lower.includes('name')) || lower === 'first') mapping.firstName = h;
+            else if ((lower.includes('last') && lower.includes('name')) || lower === 'last' || lower === 'surname') mapping.lastName = h;
+            else if (lower === 'name' || lower === 'full name') mapping.firstName = h;
+            else if (lower.includes('company') || lower.includes('organization')) mapping.company = h;
+            else if (lower.includes('title') || lower.includes('position')) mapping.jobTitle = h;
+          });
+          setGsMapping(mapping);
+          // Auto-set list name: prefer sheet title, then sheet tab name
+          const title = sheetTitle || gsSheetTitle;
+          const autoName = title || sheet.name || 'Google Sheet Import';
+          if (!gsListName || gsListName === 'Google Sheet Import') setGsListName(autoName);
+        }
+      }
+    } catch (e) { /* ignore */ }
+    setGsDataLoading(false);
+  };
+
+  const handleGsImport = async () => {
+    if (gsData.length === 0 || !gsMapping.email) return;
+    setGsImportLoading(true); setGsImportResult(null);
+    const contacts = gsData.map(row => {
+      const contact: Record<string, any> = {};
+      if (gsMapping.email) contact.email = (row[gsMapping.email] || '').trim();
+      if (gsMapping.firstName) contact.firstName = (row[gsMapping.firstName] || '').trim();
+      if (gsMapping.lastName) contact.lastName = (row[gsMapping.lastName] || '').trim();
+      if (gsMapping.company) contact.company = (row[gsMapping.company] || '').trim();
+      if (gsMapping.jobTitle) contact.jobTitle = (row[gsMapping.jobTitle] || '').trim();
+      const mappedCols = new Set(Object.values(gsMapping).filter(Boolean));
+      gsHeaders.forEach(h => { if (!mappedCols.has(h) && row[h]) contact[h] = row[h].trim(); });
+      return contact;
+    }).filter(c => c.email && c.email.includes('@'));
+
+    try {
+      const listName = gsToExistingList
+        ? undefined
+        : (gsListName || gsSelectedSheet?.name || 'Google Sheet Import');
+
+      const res = await fetch('/api/contacts/import', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({
+          contacts,
+          listName,
+          existingListId: gsToExistingList || undefined,
+          headers: gsHeaders,
+          source: 'google_sheets',
+        }),
+      });
+      if (res.ok) {
+        const result = await res.json();
+        setGsImportResult(result);
+        await fetchContacts(); await fetchContactLists();
+      } else {
+        setGsImportResult({ success: false, message: 'Import failed' });
+      }
+    } catch (e) { setGsImportResult({ success: false, message: 'Network error' }); }
+    setGsImportLoading(false);
+  };
+
+  // Helpers
   const getStatusConfig = (status: string) => {
-    const configs: Record<string, { bg: string; text: string; dot: string; label: string }> = {
-      hot: { bg: 'bg-red-50', text: 'text-red-700', dot: 'bg-red-500', label: 'Hot' },
-      warm: { bg: 'bg-orange-50', text: 'text-orange-700', dot: 'bg-orange-500', label: 'Warm' },
-      cold: { bg: 'bg-blue-50', text: 'text-blue-700', dot: 'bg-blue-500', label: 'Cold' },
-      replied: { bg: 'bg-emerald-50', text: 'text-emerald-700', dot: 'bg-emerald-500', label: 'Replied' },
-      unsubscribed: { bg: 'bg-gray-100', text: 'text-gray-500', dot: 'bg-gray-400', label: 'Unsubscribed' },
+    const configs: Record<string, { bg: string; text: string; dot: string; label: string; icon: any }> = {
+      hot: { bg: 'bg-red-50', text: 'text-red-700', dot: 'bg-red-500', label: 'Hot', icon: TrendingUp },
+      warm: { bg: 'bg-orange-50', text: 'text-orange-700', dot: 'bg-orange-500', label: 'Warm', icon: Star },
+      cold: { bg: 'bg-blue-50', text: 'text-blue-700', dot: 'bg-blue-500', label: 'Cold', icon: Mail },
+      replied: { bg: 'bg-emerald-50', text: 'text-emerald-700', dot: 'bg-emerald-500', label: 'Replied', icon: CheckCircle },
+      bounced: { bg: 'bg-red-50', text: 'text-red-600', dot: 'bg-red-400', label: 'Bounced', icon: Ban },
+      unsubscribed: { bg: 'bg-gray-100', text: 'text-gray-500', dot: 'bg-gray-400', label: 'Unsubscribed', icon: ShieldX },
     };
     return configs[status] || configs.cold;
   };
 
-  const getInitials = (first: string, last: string) => {
-    return `${(first || '?')[0]}${(last || '')[0] || ''}`.toUpperCase();
-  };
+  const getInitials = (first: string, last: string) => `${(first || '?')[0]}${(last || '')[0] || ''}`.toUpperCase();
 
   const getAvatarColor = (email: string) => {
     const colors = [
@@ -314,344 +503,315 @@ export default function ContactsManager() {
     return colors[hash % colors.length];
   };
 
-  const getScoreColor = (score: number) => {
-    if (score >= 80) return 'bg-emerald-500';
-    if (score >= 60) return 'bg-blue-500';
-    if (score >= 40) return 'bg-amber-500';
-    return 'bg-gray-300';
-  };
-
   const toggleSelect = (id: string) => { setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]); };
   const toggleSelectAll = () => { setSelectedIds(selectedIds.length === contacts.length ? [] : contacts.map(c => c.id)); };
 
   const activeList = contactLists.find(l => l.id === activeListId);
 
-  const statusCounts = {
-    all: total,
-    cold: contacts.filter(c => c.status === 'cold').length,
-    warm: contacts.filter(c => c.status === 'warm').length,
-    hot: contacts.filter(c => c.status === 'hot').length,
-    replied: contacts.filter(c => c.status === 'replied').length,
+  const totalBounced = contacts.filter(c => c.status === 'bounced').length;
+  const totalUnsub = contacts.filter(c => c.status === 'unsubscribed').length;
+
+  // Tab counts (from the full set)
+  const [tabCounts, setTabCounts] = useState({ all: 0, unsubscribers: 0, blocklist: 0, lists: 0 });
+  useEffect(() => {
+    const fetchCounts = async () => {
+      try {
+        const [allRes, unsubRes, bouncedRes] = await Promise.all([
+          fetch('/api/contacts?limit=1', { credentials: 'include' }),
+          fetch('/api/contacts?status=unsubscribed&limit=1', { credentials: 'include' }),
+          fetch('/api/contacts?status=bounced&limit=1', { credentials: 'include' }),
+        ]);
+        const allData = allRes.ok ? await allRes.json() : { total: 0 };
+        const unsubData = unsubRes.ok ? await unsubRes.json() : { total: 0 };
+        const bouncedData = bouncedRes.ok ? await bouncedRes.json() : { total: 0 };
+        setTabCounts({
+          all: allData.total || 0,
+          unsubscribers: unsubData.total || 0,
+          blocklist: bouncedData.total || 0,
+          lists: contactLists.length,
+        });
+      } catch {}
+    };
+    fetchCounts();
+  }, [contacts, contactLists]);
+
+  // Format date helper
+  const fmtDate = (d: string) => {
+    try {
+      return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(d));
+    } catch { return d; }
   };
 
   return (
-    <div className="p-6 space-y-5">
-      {/* Stats Row */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        {[
-          { label: 'Total Contacts', value: total, icon: Users, bg: 'bg-blue-50', text: 'text-blue-600' },
-          { label: 'Hot Leads', value: statusCounts.hot, icon: TrendingUp, bg: 'bg-red-50', text: 'text-red-600' },
-          { label: 'Import Lists', value: contactLists.length, icon: FolderOpen, bg: 'bg-violet-50', text: 'text-violet-600' },
-          { label: 'Replied', value: statusCounts.replied, icon: Mail, bg: 'bg-emerald-50', text: 'text-emerald-600' },
-        ].map((stat) => (
-          <Card key={stat.label} className="border-gray-200/60 shadow-sm">
-            <CardContent className="p-4 flex items-center gap-3">
-              <div className={`p-2.5 rounded-xl ${stat.bg}`}>
-                <stat.icon className={`h-4 w-4 ${stat.text}`} />
-              </div>
-              <div>
-                <div className="text-2xl font-bold text-gray-900">{stat.value}</div>
-                <div className="text-[11px] text-gray-400 font-medium">{stat.label}</div>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
+    <div className="flex-1 flex flex-col h-full">
+      {/* ── Page Header ── */}
+      <div className="px-6 pt-6 pb-0">
+        <div className="flex items-center justify-between mb-5">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Contacts</h1>
+            <p className="text-sm text-gray-400 mt-0.5">Manage your email lists, contacts, and subscriptions</p>
+          </div>
 
-      {/* Contact Lists Bar */}
-      {contactLists.length > 0 && (
-        <div className="flex items-center gap-2 overflow-x-auto pb-1">
-          <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider flex-shrink-0 mr-1">Lists:</span>
-          <button
-            onClick={() => setActiveListId(null)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-all flex-shrink-0 ${
-              !activeListId ? 'bg-blue-100 text-blue-700 shadow-sm' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'
-            }`}
-          >
-            <Users className="h-3 w-3" /> All Contacts
-          </button>
-          {contactLists.map(list => (
-            <div key={list.id} className="flex items-center gap-0 flex-shrink-0">
-              <button
-                onClick={() => setActiveListId(activeListId === list.id ? null : list.id)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-l-lg transition-all ${
-                  activeListId === list.id ? 'bg-blue-100 text-blue-700 shadow-sm' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'
-                }`}
-              >
-                <List className="h-3 w-3" />
-                {list.name}
-                <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
-                  activeListId === list.id ? 'bg-blue-200/80 text-blue-800' : 'bg-gray-200/80 text-gray-400'
-                }`}>{list.contactCount}</span>
-              </button>
-              <button
-                onClick={(e) => { e.stopPropagation(); handleDeleteList(list.id); }}
-                className={`px-1.5 py-1.5 text-xs rounded-r-lg transition-all ${
-                  activeListId === list.id ? 'bg-blue-100 text-blue-400 hover:text-red-500' : 'bg-gray-50 text-gray-300 hover:text-red-500'
-                }`}
-              >
-                <X className="h-3 w-3" />
-              </button>
-            </div>
+          {/* Actions dropdown */}
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" className="h-9 text-gray-600 border-gray-200" onClick={() => fetchContacts()}>
+              <RefreshCw className="h-3.5 w-3.5 mr-1.5" /> Refresh
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button size="sm" className="h-9 bg-blue-600 hover:bg-blue-700 text-white shadow-sm">
+                  Actions <ChevronDown className="h-3.5 w-3.5 ml-1.5" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-52">
+                <DropdownMenuItem onClick={() => { resetForm(); setShowAddDialog(true); }}>
+                  <UserPlus className="h-4 w-4 mr-2 text-blue-500" /> Add Contact
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => { setNewListName(''); setNewListDescription(''); setShowCreateListDialog(true); }}>
+                  <Plus className="h-4 w-4 mr-2 text-green-500" /> Create List
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={() => { setShowImportDialog(true); setCsvData([]); setCsvHeaders([]); setImportResult(null); setImportListName(''); setImportFileName(''); setImportToExistingList(''); }}>
+                  <Upload className="h-4 w-4 mr-2 text-violet-500" /> Import CSV
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => {
+                  setGsUrl(''); setGsSheets([]); setGsSelectedSheet(null); setGsData([]); setGsHeaders([]);
+                  setGsMapping({}); setGsListName(''); setGsSheetTitle(''); setGsError(''); setGsImportResult(null); setGsToExistingList('');
+                  setShowGoogleSheetsDialog(true);
+                }}>
+                  <FileSpreadsheet className="h-4 w-4 mr-2 text-green-600" /> Import Google Sheets
+                </DropdownMenuItem>
+                {selectedIds.length > 0 && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={handleBulkDelete} className="text-red-600">
+                      <Trash2 className="h-4 w-4 mr-2" /> Delete Selected ({selectedIds.length})
+                    </DropdownMenuItem>
+                  </>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        </div>
+
+        {/* ── Tabs ── */}
+        <div className="flex items-center border-b border-gray-200">
+          {([
+            { key: 'all' as TabType, label: 'All', count: tabCounts.all, icon: Users },
+            { key: 'unsubscribers' as TabType, label: 'Unsubscribers', count: tabCounts.unsubscribers, icon: ShieldX },
+            { key: 'blocklist' as TabType, label: 'Blocklist', count: tabCounts.blocklist, icon: Ban },
+            { key: 'lists' as TabType, label: 'Your lists', count: tabCounts.lists, icon: LayoutList },
+          ]).map((tab) => (
+            <button
+              key={tab.key}
+              onClick={() => { setActiveTab(tab.key); setActiveListId(null); setSelectedIds([]); setSearch(''); setStatusFilter('all'); }}
+              className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-all -mb-[1px] ${
+                activeTab === tab.key
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              <tab.icon className="h-4 w-4" />
+              {tab.label}
+              {tab.count > 0 && (
+                <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${
+                  activeTab === tab.key ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-500'
+                }`}>{tab.count}</span>
+              )}
+            </button>
           ))}
         </div>
-      )}
-
-      {/* Active list info banner */}
-      {activeList && (
-        <div className="flex items-center gap-3 px-4 py-2.5 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-100 rounded-xl">
-          <FolderOpen className="h-4 w-4 text-blue-500" />
-          <div className="flex-1">
-            <span className="text-sm font-semibold text-blue-800">{activeList.name}</span>
-            <span className="text-xs text-blue-400 ml-2">
-              {activeList.contactCount} contacts &middot; Source: {activeList.source || 'CSV'} &middot; {activeList.headers?.length || 0} columns
-            </span>
-          </div>
-          {activeList.headers && activeList.headers.length > 0 && (
-            <div className="flex items-center gap-1 flex-wrap">
-              {activeList.headers.slice(0, 5).map((h, i) => (
-                <span key={i} className="text-[9px] px-1.5 py-0.5 bg-blue-100 text-blue-600 rounded font-mono">{h}</span>
-              ))}
-              {activeList.headers.length > 5 && (
-                <span className="text-[9px] text-blue-400">+{activeList.headers.length - 5} more</span>
-              )}
-            </div>
-          )}
-          <Button variant="ghost" size="sm" className="h-6 px-2 text-blue-400 hover:text-blue-700" onClick={() => setActiveListId(null)}>
-            <X className="h-3 w-3" />
-          </Button>
-        </div>
-      )}
-
-      {/* Header Bar */}
-      <div className="flex items-center justify-between gap-4">
-        <div className="flex items-center gap-3 flex-1">
-          {/* Search */}
-          <div className="relative flex-1 max-w-md">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400" />
-            <Input 
-              placeholder="Search by name, email, company, tags, or any field..." 
-              value={search} 
-              onChange={(e) => setSearch(e.target.value)} 
-              className="pl-9 h-9 text-sm bg-white border-gray-200 focus:border-blue-300 focus:ring-blue-200"
-            />
-            {search && (
-              <button 
-                onClick={() => setSearch('')}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-300 hover:text-gray-500"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            )}
-          </div>
-
-          {/* Status Filter Tabs */}
-          <div className="flex items-center gap-0.5 bg-gray-100/80 rounded-lg p-0.5">
-            {(['all', 'cold', 'warm', 'hot', 'replied'] as const).map((status) => {
-              const sc = status !== 'all' ? getStatusConfig(status) : null;
-              return (
-                <button key={status} onClick={() => setStatusFilter(status)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
-                    statusFilter === status ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-                  }`}>
-                  {sc && <div className={`w-1.5 h-1.5 rounded-full ${sc.dot}`} />}
-                  <span className="capitalize">{status}</span>
-                  <span className={`text-[10px] ${statusFilter === status ? 'text-gray-400' : 'text-gray-300'}`}>
-                    {(statusCounts as any)[status] || 0}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Actions */}
-        <div className="flex gap-2">
-          {selectedIds.length > 0 && (
-            <Button variant="outline" size="sm" onClick={handleBulkDelete} className="text-red-600 border-red-200 hover:bg-red-50">
-              <Trash2 className="h-3.5 w-3.5 mr-1.5" /> Delete ({selectedIds.length})
-            </Button>
-          )}
-          <Button variant="outline" size="sm" onClick={() => { setShowImportDialog(true); setCsvData([]); setCsvHeaders([]); setImportResult(null); setImportListName(''); setImportFileName(''); }}>
-            <Upload className="h-3.5 w-3.5 mr-1.5" /> Import
-          </Button>
-          <Button size="sm" className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 shadow-sm shadow-blue-200/50" onClick={() => { resetForm(); setShowAddDialog(true); }}>
-            <UserPlus className="h-3.5 w-3.5 mr-1.5" /> Add Contact
-          </Button>
-        </div>
       </div>
 
-      {/* Search results indicator */}
-      {debouncedSearch && (
-        <div className="flex items-center gap-2 px-3 py-2 bg-amber-50/60 border border-amber-100 rounded-lg">
-          <Search className="h-3.5 w-3.5 text-amber-500" />
-          <span className="text-xs text-amber-700">
-            Found <strong>{contacts.length}</strong> results for "<strong>{debouncedSearch}</strong>"
-            {activeList && <span className="text-amber-500"> in {activeList.name}</span>}
-          </span>
-          <button onClick={() => setSearch('')} className="ml-auto text-xs text-amber-500 hover:text-amber-700 font-medium">Clear</button>
-        </div>
-      )}
-
-      {/* Contact Table */}
-      {loading ? (
-        <div className="flex items-center justify-center py-20">
-          <div className="flex flex-col items-center gap-3">
-            <div className="w-8 h-8 border-[3px] border-blue-600 border-t-transparent rounded-full animate-spin" />
-            <span className="text-sm text-gray-400">Loading contacts...</span>
-          </div>
-        </div>
-      ) : contacts.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-24">
-          <div className="bg-gradient-to-br from-blue-50 to-indigo-50 w-20 h-20 rounded-2xl flex items-center justify-center mb-5 shadow-sm">
-            <Users className="h-10 w-10 text-blue-400" />
-          </div>
-          <h3 className="text-lg font-semibold text-gray-900 mb-1.5">
-            {debouncedSearch ? 'No matching contacts' : 'No contacts yet'}
-          </h3>
-          <p className="text-sm text-gray-400 mb-6 max-w-sm text-center">
-            {debouncedSearch ? `No contacts match "${debouncedSearch}"` : 'Import your contacts from a CSV file or add them manually to get started'}
-          </p>
-          {!debouncedSearch && (
-            <div className="flex gap-3">
-              <Button variant="outline" onClick={() => { setShowImportDialog(true); setCsvData([]); setCsvHeaders([]); setImportResult(null); setImportListName(''); }}>
-                <FileSpreadsheet className="h-4 w-4 mr-2" /> Import CSV
-              </Button>
-              <Button className="bg-gradient-to-r from-blue-600 to-indigo-600 shadow-sm" onClick={() => { resetForm(); setShowAddDialog(true); }}>
-                <Plus className="h-4 w-4 mr-2" /> Add Contact
+      {/* ── Tab content ── */}
+      <div className="flex-1 overflow-auto px-6 py-4">
+        {/* ── Lists tab ── */}
+        {activeTab === 'lists' && !activeListId && (
+          <div className="space-y-4">
+            {/* Lists header */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Search className="h-4 w-4 text-gray-400" />
+                <Input
+                  placeholder="Search lists..."
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  className="h-9 w-72 text-sm border-gray-200"
+                />
+              </div>
+              <Button size="sm" onClick={() => { setNewListName(''); setNewListDescription(''); setShowCreateListDialog(true); }}
+                className="h-9 bg-blue-600 hover:bg-blue-700">
+                <Plus className="h-3.5 w-3.5 mr-1.5" /> Create List
               </Button>
             </div>
-          )}
-        </div>
-      ) : (
-        <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden">
-          {/* Table Header */}
-          <div className="grid grid-cols-[40px_1fr_1fr_130px_90px_80px_48px] gap-3 px-4 py-2.5 border-b border-gray-100 bg-gray-50/60">
-            <div className="flex items-center">
-              <input type="checkbox" checked={selectedIds.length === contacts.length && contacts.length > 0} onChange={toggleSelectAll} className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
-            </div>
-            <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Contact</div>
-            <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Company</div>
-            <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Tags</div>
-            <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Status</div>
-            <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 text-center">Score</div>
-            <div></div>
-          </div>
 
-          {/* Table Body */}
-          {contacts.map((contact) => {
-            const sc = getStatusConfig(contact.status);
-            const isSelected = selectedIds.includes(contact.id);
-            const listName = contactLists.find(l => l.id === contact.listId)?.name;
-            return (
-              <div 
-                key={contact.id} 
-                onClick={() => openDetail(contact)}
-                className={`grid grid-cols-[40px_1fr_1fr_130px_90px_80px_48px] gap-3 px-4 py-3 border-b border-gray-50 items-center transition-all group cursor-pointer ${
-                  isSelected ? 'bg-blue-50/50' : 'hover:bg-gray-50/80'
-                }`}
-              >
-                <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
-                  <input 
-                    type="checkbox" 
-                    checked={isSelected} 
-                    onChange={() => toggleSelect(contact.id)} 
-                    className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500" 
-                  />
+            {contactLists.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-24">
+                <div className="bg-gradient-to-br from-violet-50 to-indigo-50 w-20 h-20 rounded-2xl flex items-center justify-center mb-5 shadow-sm">
+                  <LayoutList className="h-10 w-10 text-violet-400" />
                 </div>
-                <div className="flex items-center gap-3 min-w-0">
-                  <Avatar className="h-9 w-9 flex-shrink-0 shadow-sm">
-                    <AvatarFallback className={`bg-gradient-to-br ${getAvatarColor(contact.email)} text-white text-[11px] font-semibold`}>
-                      {getInitials(contact.firstName, contact.lastName)}
-                    </AvatarFallback>
-                  </Avatar>
-                  <div className="min-w-0">
-                    <div className="text-sm font-semibold text-gray-900 truncate">{contact.firstName} {contact.lastName}</div>
-                    <div className="text-xs text-gray-400 truncate flex items-center gap-1">
-                      <Mail className="h-3 w-3 flex-shrink-0" />
-                      {contact.email}
-                    </div>
-                  </div>
-                </div>
-                <div className="min-w-0">
-                  {contact.company ? (
-                    <>
-                      <div className="text-sm text-gray-700 truncate flex items-center gap-1.5">
-                        <Building className="h-3 w-3 text-gray-400 flex-shrink-0" />
-                        {contact.company}
-                      </div>
-                      {contact.jobTitle && (
-                        <div className="text-xs text-gray-400 truncate ml-4.5">{contact.jobTitle}</div>
-                      )}
-                    </>
-                  ) : (
-                    <span className="text-xs text-gray-300">--</span>
-                  )}
-                </div>
-                <div className="flex flex-wrap gap-1">
-                  {listName && (
-                    <span className="text-[10px] px-2 py-0.5 bg-violet-50 text-violet-500 rounded-full font-medium flex items-center gap-0.5">
-                      <List className="h-2.5 w-2.5" />{listName}
-                    </span>
-                  )}
-                  {(contact.tags || []).slice(0, 1).map((tag, i) => (
-                    <span key={i} className="text-[10px] px-2 py-0.5 bg-gray-100 text-gray-500 rounded-full font-medium">{tag}</span>
-                  ))}
-                  {((contact.tags || []).length > 1 || (listName && (contact.tags || []).length > 0)) && (
-                    <span className="text-[10px] text-gray-300 px-1">+{(contact.tags || []).length - (listName ? 0 : 1)}</span>
-                  )}
-                </div>
-                <div>
-                  <Badge variant="outline" className={`text-[10px] font-semibold capitalize ${sc.bg} ${sc.text} border-0 shadow-none`}>
-                    <div className={`w-1.5 h-1.5 rounded-full ${sc.dot} mr-1`} />
-                    {contact.status}
-                  </Badge>
-                </div>
-                <div className="flex items-center justify-center">
-                  <div className="flex items-center gap-1.5">
-                    <div className="w-10 bg-gray-100 rounded-full h-1.5 overflow-hidden">
-                      <div className={`h-full rounded-full transition-all ${getScoreColor(contact.score)}`} style={{ width: `${contact.score}%` }} />
-                    </div>
-                    <span className="text-[10px] font-semibold text-gray-400 w-5 text-right">{contact.score}</span>
-                  </div>
-                </div>
-                <div className="flex justify-center" onClick={(e) => e.stopPropagation()}>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="ghost" size="sm" className="h-7 w-7 p-0 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <MoreHorizontal className="h-3.5 w-3.5" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="w-40">
-                      <DropdownMenuItem onClick={() => openDetail(contact)}>
-                        <Eye className="h-3.5 w-3.5 mr-2" /> View Details
-                      </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => openEdit(contact)}>
-                        <Edit className="h-3.5 w-3.5 mr-2" /> Edit
-                      </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem onClick={() => handleDelete(contact.id)} className="text-red-600">
-                        <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                <h3 className="text-lg font-semibold text-gray-900 mb-1.5">No lists yet</h3>
+                <p className="text-sm text-gray-400 mb-6 max-w-sm text-center">Create a contact list to organize your contacts into groups for email campaigns</p>
+                <div className="flex gap-3">
+                  <Button variant="outline" onClick={() => { setShowImportDialog(true); setCsvData([]); setCsvHeaders([]); setImportResult(null); setImportListName(''); }}>
+                    <Upload className="h-4 w-4 mr-2" /> Import CSV
+                  </Button>
+                  <Button className="bg-blue-600 hover:bg-blue-700" onClick={() => { setNewListName(''); setShowCreateListDialog(true); }}>
+                    <Plus className="h-4 w-4 mr-2" /> Create List
+                  </Button>
                 </div>
               </div>
-            );
-          })}
-
-          {/* Table Footer */}
-          <div className="px-4 py-3 bg-gray-50/40 border-t border-gray-100">
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-gray-400">
-                Showing {contacts.length} of {total} contacts
-                {activeList && <span className="text-violet-500 font-medium ml-2">in "{activeList.name}"</span>}
-                {selectedIds.length > 0 && <span className="text-blue-600 font-medium ml-2">({selectedIds.length} selected)</span>}
-              </span>
-            </div>
+            ) : (
+              <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden">
+                {/* List table header */}
+                <div className="grid grid-cols-[1fr_120px_120px_120px_48px] gap-4 px-5 py-3 border-b border-gray-100 bg-gray-50/60">
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">List Name</div>
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Source</div>
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 text-center">Contacts</div>
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Created</div>
+                  <div></div>
+                </div>
+                {contactLists
+                  .filter(l => !search || l.name.toLowerCase().includes(search.toLowerCase()))
+                  .map(list => (
+                  <div
+                    key={list.id}
+                    className="grid grid-cols-[1fr_120px_120px_120px_48px] gap-4 px-5 py-3.5 border-b border-gray-50 items-center hover:bg-blue-50/30 cursor-pointer transition-all group"
+                    onClick={() => setActiveListId(list.id)}
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="bg-violet-50 p-2 rounded-lg">
+                        <List className="h-4 w-4 text-violet-500" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold text-gray-900 truncate">{list.name}</div>
+                        {list.headers && list.headers.length > 0 && (
+                          <div className="text-[10px] text-gray-400 truncate mt-0.5">
+                            {list.headers.slice(0, 4).join(', ')}{list.headers.length > 4 ? ` +${list.headers.length - 4}` : ''}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <div>
+                      <Badge variant="outline" className={`text-[10px] font-medium capitalize ${
+                        list.source === 'google_sheets' ? 'bg-green-50 text-green-600 border-green-200'
+                          : list.source === 'csv' ? 'bg-blue-50 text-blue-600 border-blue-200'
+                          : 'bg-gray-50 text-gray-500 border-gray-200'
+                      }`}>
+                        {list.source === 'google_sheets' ? 'Google Sheets' : list.source === 'csv' ? 'CSV' : list.source || 'Manual'}
+                      </Badge>
+                    </div>
+                    <div className="text-center">
+                      <span className="text-sm font-bold text-gray-900">{list.contactCount}</span>
+                    </div>
+                    <div className="text-xs text-gray-400">{fmtDate(list.createdAt)}</div>
+                    <div className="flex justify-center" onClick={e => e.stopPropagation()}>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" size="sm" className="h-7 w-7 p-0 opacity-0 group-hover:opacity-100">
+                            <MoreHorizontal className="h-3.5 w-3.5" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="w-40">
+                          <DropdownMenuItem onClick={() => setActiveListId(list.id)}>
+                            <Eye className="h-3.5 w-3.5 mr-2" /> View Contacts
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => { setRenameListId(list.id); setRenameListValue(list.name); setShowRenameListDialog(true); }}>
+                            <Pencil className="h-3.5 w-3.5 mr-2" /> Rename
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem onClick={() => handleDeleteList(list.id)} className="text-red-600">
+                            <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
-        </div>
-      )}
+        )}
+
+        {/* ── Active list view (within lists tab) ── */}
+        {activeTab === 'lists' && activeListId && activeList && (
+          <div className="space-y-4">
+            {/* Breadcrumb back */}
+            <div className="flex items-center gap-2">
+              <button onClick={() => setActiveListId(null)} className="text-sm text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1">
+                <ArrowRight className="h-3.5 w-3.5 rotate-180" /> Back to all lists
+              </button>
+              <span className="text-gray-300">/</span>
+              <span className="text-sm font-semibold text-gray-700">{activeList.name}</span>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button onClick={() => { setRenameListId(activeList.id); setRenameListValue(activeList.name); setShowRenameListDialog(true); }}>
+                    <Pencil className="h-3 w-3 text-gray-400 hover:text-blue-500 transition-colors" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent><p className="text-xs">Rename list</p></TooltipContent>
+              </Tooltip>
+            </div>
+
+            {/* List info banner */}
+            <div className="flex items-center gap-3 px-4 py-3 bg-gradient-to-r from-violet-50 to-indigo-50 border border-violet-100 rounded-xl">
+              <div className="bg-violet-100 p-2.5 rounded-xl">
+                <FolderOpen className="h-5 w-5 text-violet-600" />
+              </div>
+              <div className="flex-1">
+                <h3 className="text-sm font-bold text-violet-900">{activeList.name}</h3>
+                <div className="text-xs text-violet-500 flex items-center gap-3 mt-0.5">
+                  <span>{activeList.contactCount} contacts</span>
+                  <span>Source: {activeList.source === 'google_sheets' ? 'Google Sheets' : activeList.source || 'Manual'}</span>
+                  {activeList.headers?.length > 0 && <span>{activeList.headers.length} columns</span>}
+                </div>
+              </div>
+              {activeList.headers && activeList.headers.length > 0 && (
+                <div className="flex items-center gap-1 flex-wrap max-w-xs">
+                  {activeList.headers.slice(0, 4).map((h, i) => (
+                    <span key={i} className="text-[9px] px-1.5 py-0.5 bg-violet-100 text-violet-600 rounded font-mono">{h}</span>
+                  ))}
+                  {activeList.headers.length > 4 && (
+                    <span className="text-[9px] text-violet-400">+{activeList.headers.length - 4}</span>
+                  )}
+                </div>
+              )}
+              <Button variant="ghost" size="sm" className="h-7 text-violet-400 hover:text-red-500" onClick={() => setActiveListId(null)}>
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+
+            {renderContactsTable()}
+          </div>
+        )}
+
+        {/* ── All / Unsubscribers / Blocklist tabs ── */}
+        {(activeTab === 'all' || activeTab === 'unsubscribers' || activeTab === 'blocklist') && (
+          <div className="space-y-4">
+            {/* Info banners for special tabs */}
+            {activeTab === 'unsubscribers' && (
+              <Alert className="border-amber-200 bg-amber-50">
+                <ShieldX className="h-4 w-4 text-amber-600" />
+                <AlertDescription className="text-sm text-amber-700">
+                  These contacts have unsubscribed and will be <strong>automatically excluded</strong> from all future email campaigns, even if they are selected as recipients.
+                </AlertDescription>
+              </Alert>
+            )}
+            {activeTab === 'blocklist' && (
+              <Alert className="border-red-200 bg-red-50">
+                <Ban className="h-4 w-4 text-red-600" />
+                <AlertDescription className="text-sm text-red-700">
+                  These contacts have bounced and are on the blocklist. They will be <strong>automatically excluded</strong> from all future email campaigns to protect your sender reputation.
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {renderContactsTable()}
+          </div>
+        )}
+      </div>
+
+      {/* ====== DIALOGS ====== */}
 
       {/* Contact Detail Dialog */}
       <Dialog open={showContactDetail} onOpenChange={setShowContactDetail}>
@@ -676,7 +836,16 @@ export default function ContactsManager() {
           </DialogHeader>
           {detailContact && (
             <div className="space-y-4 py-2">
-              {/* Basic Info */}
+              {/* Bounced/Unsubscribed warning */}
+              {(detailContact.status === 'bounced' || detailContact.status === 'unsubscribed') && (
+                <Alert className={detailContact.status === 'bounced' ? 'border-red-200 bg-red-50' : 'border-amber-200 bg-amber-50'}>
+                  {detailContact.status === 'bounced' ? <Ban className="h-4 w-4 text-red-500" /> : <ShieldX className="h-4 w-4 text-amber-500" />}
+                  <AlertDescription className={`text-sm ${detailContact.status === 'bounced' ? 'text-red-700' : 'text-amber-700'}`}>
+                    This contact is <strong>{detailContact.status}</strong> and will be automatically excluded from all future campaigns.
+                  </AlertDescription>
+                </Alert>
+              )}
+
               <div className="grid grid-cols-2 gap-3">
                 {[
                   { label: 'Company', value: detailContact.company, icon: Building },
@@ -695,12 +864,9 @@ export default function ContactsManager() {
                 ))}
               </div>
 
-              {/* Tags */}
               {detailContact.tags && detailContact.tags.length > 0 && (
                 <div>
-                  <div className="text-[10px] text-gray-400 uppercase font-semibold tracking-wide mb-2 flex items-center gap-1">
-                    <Tag className="h-3 w-3" /> Tags
-                  </div>
+                  <div className="text-[10px] text-gray-400 uppercase font-semibold tracking-wide mb-2 flex items-center gap-1"><Tag className="h-3 w-3" /> Tags</div>
                   <div className="flex flex-wrap gap-1.5">
                     {detailContact.tags.map((tag, i) => (
                       <Badge key={i} variant="outline" className="text-xs bg-gray-50">{tag}</Badge>
@@ -709,27 +875,19 @@ export default function ContactsManager() {
                 </div>
               )}
 
-              {/* List Info */}
               {detailContact.listId && (
                 <div>
-                  <div className="text-[10px] text-gray-400 uppercase font-semibold tracking-wide mb-2 flex items-center gap-1">
-                    <List className="h-3 w-3" /> Import List
-                  </div>
+                  <div className="text-[10px] text-gray-400 uppercase font-semibold tracking-wide mb-2 flex items-center gap-1"><List className="h-3 w-3" /> Import List</div>
                   <div className="flex items-center gap-2 p-2.5 bg-violet-50 rounded-lg">
                     <FolderOpen className="h-4 w-4 text-violet-500" />
-                    <span className="text-sm font-medium text-violet-700">
-                      {contactLists.find(l => l.id === detailContact.listId)?.name || 'Unknown List'}
-                    </span>
+                    <span className="text-sm font-medium text-violet-700">{contactLists.find(l => l.id === detailContact.listId)?.name || 'Unknown List'}</span>
                   </div>
                 </div>
               )}
 
-              {/* Custom Fields (imported columns) */}
               {detailContact.customFields && Object.keys(detailContact.customFields).length > 0 && (
                 <div>
-                  <div className="text-[10px] text-gray-400 uppercase font-semibold tracking-wide mb-2 flex items-center gap-1">
-                    <FileSpreadsheet className="h-3 w-3" /> Additional Data (Imported Columns)
-                  </div>
+                  <div className="text-[10px] text-gray-400 uppercase font-semibold tracking-wide mb-2 flex items-center gap-1"><FileSpreadsheet className="h-3 w-3" /> Additional Data</div>
                   <div className="bg-gray-50 rounded-lg p-3 space-y-1.5">
                     {Object.entries(detailContact.customFields).map(([key, value]) => (
                       <div key={key} className="flex items-center justify-between text-xs">
@@ -742,7 +900,7 @@ export default function ContactsManager() {
               )}
 
               <div className="text-[10px] text-gray-300 pt-2">
-                Created: {new Date(detailContact.createdAt).toLocaleDateString()} &middot; ID: {detailContact.id.slice(0, 8)}
+                Created: {fmtDate(detailContact.createdAt)} &middot; ID: {detailContact.id.slice(0, 8)}
               </div>
             </div>
           )}
@@ -760,14 +918,10 @@ export default function ContactsManager() {
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <div className="bg-blue-50 p-2 rounded-lg">
-                <UserPlus className="h-4 w-4 text-blue-600" />
-              </div>
+              <div className="bg-blue-50 p-2 rounded-lg"><UserPlus className="h-4 w-4 text-blue-600" /></div>
               Add New Contact
             </DialogTitle>
-            <DialogDescription className="text-sm text-gray-500">
-              Add a new contact to your database
-            </DialogDescription>
+            <DialogDescription className="text-sm text-gray-500">Add a new contact to your database</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div>
@@ -807,7 +961,7 @@ export default function ContactsManager() {
           </div>
           <DialogFooter className="gap-2 sm:gap-0">
             <Button variant="outline" onClick={() => setShowAddDialog(false)}>Cancel</Button>
-            <Button onClick={handleAddContact} disabled={formLoading} className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700">
+            <Button onClick={handleAddContact} disabled={formLoading} className="bg-blue-600 hover:bg-blue-700">
               {formLoading ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : <UserPlus className="h-4 w-4 mr-1.5" />} Add Contact
             </Button>
           </DialogFooter>
@@ -819,14 +973,10 @@ export default function ContactsManager() {
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <div className="bg-blue-50 p-2 rounded-lg">
-                <Edit className="h-4 w-4 text-blue-600" />
-              </div>
+              <div className="bg-blue-50 p-2 rounded-lg"><Edit className="h-4 w-4 text-blue-600" /></div>
               Edit Contact
             </DialogTitle>
-            <DialogDescription className="text-sm text-gray-500">
-              Update contact information
-            </DialogDescription>
+            <DialogDescription className="text-sm text-gray-500">Update contact information</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div>
@@ -860,8 +1010,68 @@ export default function ContactsManager() {
           </div>
           <DialogFooter className="gap-2 sm:gap-0">
             <Button variant="outline" onClick={() => setShowEditDialog(false)}>Cancel</Button>
-            <Button onClick={handleEditContact} disabled={formLoading} className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700">
+            <Button onClick={handleEditContact} disabled={formLoading} className="bg-blue-600 hover:bg-blue-700">
               {formLoading && <Loader2 className="h-4 w-4 animate-spin mr-1.5" />} Save Changes
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Create Contact List Dialog */}
+      <Dialog open={showCreateListDialog} onOpenChange={setShowCreateListDialog}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-lg">Create a contact list</DialogTitle>
+            <DialogDescription className="text-sm text-gray-500">Organize your contacts into named lists for targeted campaigns</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-3">
+            <div>
+              <Label className="text-sm font-medium text-gray-700">Name</Label>
+              <Input
+                value={newListName}
+                onChange={(e) => setNewListName(e.target.value)}
+                placeholder="List name"
+                className="mt-1.5 h-10"
+                autoFocus
+                onKeyDown={(e) => { if (e.key === 'Enter') handleCreateList(); }}
+              />
+            </div>
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button variant="outline" onClick={() => setShowCreateListDialog(false)}>Cancel</Button>
+            <Button
+              onClick={handleCreateList}
+              disabled={createListLoading || !newListName.trim()}
+              className="bg-blue-600 hover:bg-blue-700"
+            >
+              {createListLoading ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : null}
+              Create
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Rename List Dialog */}
+      <Dialog open={showRenameListDialog} onOpenChange={setShowRenameListDialog}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Rename list</DialogTitle>
+            <DialogDescription className="text-sm text-gray-500">Enter a new name for this contact list</DialogDescription>
+          </DialogHeader>
+          <div className="py-3">
+            <Label className="text-sm font-medium text-gray-700">Name</Label>
+            <Input
+              value={renameListValue}
+              onChange={(e) => setRenameListValue(e.target.value)}
+              className="mt-1.5 h-10"
+              autoFocus
+              onKeyDown={(e) => { if (e.key === 'Enter') handleRenameList(); }}
+            />
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button variant="outline" onClick={() => setShowRenameListDialog(false)}>Cancel</Button>
+            <Button onClick={handleRenameList} disabled={createListLoading || !renameListValue.trim()} className="bg-blue-600 hover:bg-blue-700">
+              {createListLoading ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : null} Save
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -872,32 +1082,57 @@ export default function ContactsManager() {
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <div className="bg-emerald-50 p-2 rounded-lg">
-                <FileSpreadsheet className="h-4 w-4 text-emerald-600" />
-              </div>
-              Import Contacts
+              <div className="bg-emerald-50 p-2 rounded-lg"><FileSpreadsheet className="h-4 w-4 text-emerald-600" /></div>
+              Import from CSV
             </DialogTitle>
             <DialogDescription className="text-sm text-gray-500">
-              Upload a CSV file to bulk import contacts. All columns will be saved.
+              Upload a CSV file to import contacts. All columns will be preserved.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
-            {/* List Name */}
-            <div>
-              <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide">
-                List Name <span className="text-amber-500">(contacts will be grouped under this name)</span>
-              </Label>
-              <Input 
-                value={importListName} 
-                onChange={(e) => setImportListName(e.target.value)} 
-                placeholder="e.g., Tech Leads Q4, Conference Attendees..." 
-                className="mt-1.5 h-10" 
-              />
+            {/* Save to list options */}
+            <div className="space-y-3">
+              <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Save to list</Label>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setImportToExistingList('')}
+                  className={`flex-1 px-3 py-2.5 rounded-lg border text-sm font-medium transition-all ${
+                    !importToExistingList ? 'border-blue-300 bg-blue-50 text-blue-700' : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  <Plus className="h-3.5 w-3.5 inline mr-1.5" /> Create new list
+                </button>
+                <button
+                  onClick={() => setImportToExistingList('_select')}
+                  className={`flex-1 px-3 py-2.5 rounded-lg border text-sm font-medium transition-all ${
+                    importToExistingList ? 'border-blue-300 bg-blue-50 text-blue-700' : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  <FolderOpen className="h-3.5 w-3.5 inline mr-1.5" /> Add to existing list
+                </button>
+              </div>
+              {!importToExistingList ? (
+                <Input
+                  value={importListName}
+                  onChange={(e) => setImportListName(e.target.value)}
+                  placeholder="e.g., Tech Leads Q4, Conference Attendees..."
+                  className="h-10"
+                />
+              ) : (
+                <Select value={importToExistingList === '_select' ? '' : importToExistingList} onValueChange={(v) => setImportToExistingList(v)}>
+                  <SelectTrigger className="h-10"><SelectValue placeholder="Choose a list..." /></SelectTrigger>
+                  <SelectContent>
+                    {contactLists.map(l => (
+                      <SelectItem key={l.id} value={l.id}>{l.name} ({l.contactCount} contacts)</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
             </div>
 
             {/* File Upload */}
-            <div 
-              className="border-2 border-dashed border-gray-200 rounded-xl p-8 text-center bg-gradient-to-br from-gray-50/50 to-white hover:border-blue-300 hover:bg-blue-50/20 transition-all cursor-pointer group" 
+            <div
+              className="border-2 border-dashed border-gray-200 rounded-xl p-8 text-center bg-gradient-to-br from-gray-50/50 to-white hover:border-blue-300 hover:bg-blue-50/20 transition-all cursor-pointer group"
               onClick={() => fileInputRef.current?.click()}
             >
               <div className="bg-blue-50 w-14 h-14 rounded-xl flex items-center justify-center mx-auto mb-3 group-hover:scale-110 transition-transform">
@@ -911,89 +1146,21 @@ export default function ContactsManager() {
               ) : (
                 <>
                   <p className="text-sm font-semibold text-gray-700 mb-1">Drop your CSV file here or click to browse</p>
-                  <p className="text-xs text-gray-400">All columns will be imported and preserved</p>
+                  <p className="text-xs text-gray-400">Supports .csv files with any columns</p>
                 </>
               )}
               <input type="file" ref={fileInputRef} accept=".csv" onChange={handleFileUpload} className="hidden" />
             </div>
 
-            {csvHeaders.length > 0 && (
-              <div className="space-y-3">
-                {/* All headers display */}
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Detected Columns ({csvHeaders.length})</h4>
-                    <Badge className="bg-blue-50 text-blue-700 border-blue-200">{csvData.length} rows</Badge>
-                  </div>
-                  <div className="flex flex-wrap gap-1.5 p-3 bg-gray-50 rounded-lg">
-                    {csvHeaders.map((h, i) => {
-                      const isMapped = Object.values(csvMapping).includes(h);
-                      return (
-                        <span key={i} className={`text-[10px] px-2 py-1 rounded-md font-mono ${
-                          isMapped ? 'bg-emerald-100 text-emerald-700 ring-1 ring-emerald-200' : 'bg-white text-gray-500 ring-1 ring-gray-200'
-                        }`}>
-                          {h}
-                          {isMapped && <CheckCircle className="h-2.5 w-2.5 ml-1 inline" />}
-                        </span>
-                      );
-                    })}
-                  </div>
-                  <p className="text-[10px] text-gray-400 mt-1">
-                    Green = mapped to standard field. All columns (mapped + unmapped) will be saved.
-                  </p>
-                </div>
-
-                {/* Column Mapping */}
-                <div>
-                  <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Map Key Columns</h4>
-                  <div className="bg-gray-50 rounded-lg p-3 space-y-2.5">
-                    {['email', 'firstName', 'lastName', 'company', 'jobTitle'].map((field) => (
-                      <div key={field} className="flex items-center gap-3">
-                        <Label className="w-24 text-xs font-semibold text-gray-500 uppercase tracking-wide">
-                          {field === 'firstName' ? 'First Name' : field === 'lastName' ? 'Last Name' : field === 'jobTitle' ? 'Job Title' : field}
-                          {field === 'email' && <span className="text-red-500 ml-0.5">*</span>}
-                        </Label>
-                        <Select value={csvMapping[field] || ''} onValueChange={(v) => setCsvMapping(prev => ({ ...prev, [field]: v }))}>
-                          <SelectTrigger className="h-8 text-sm bg-white"><SelectValue placeholder="Select column" /></SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="">-- Skip --</SelectItem>
-                            {csvHeaders.map(h => <SelectItem key={h} value={h}>{h}</SelectItem>)}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Preview */}
-                {csvData.length > 0 && (
-                  <div className="border rounded-lg p-3 bg-white">
-                    <div className="text-[10px] font-semibold uppercase text-gray-400 mb-2">Preview (first 3 rows)</div>
-                    <div className="space-y-1.5">
-                      {csvData.slice(0, 3).map((row, i) => (
-                        <div key={i} className="text-xs text-gray-600 flex items-center gap-2 p-1.5 bg-gray-50/80 rounded">
-                          <span className="text-gray-300 w-4">{i+1}.</span>
-                          <span className="font-medium text-gray-800">{csvMapping.email && row[csvMapping.email]}</span>
-                          {csvMapping.firstName && <span className="text-gray-400">| {row[csvMapping.firstName]}</span>}
-                          {csvMapping.lastName && <span className="text-gray-400">{row[csvMapping.lastName]}</span>}
-                          {csvMapping.company && <span className="text-gray-300">@ {row[csvMapping.company]}</span>}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
+            {csvHeaders.length > 0 && renderColumnMapping(csvHeaders, csvData, csvMapping, setCsvMapping, 'csv')}
 
             {importResult && (
-              <Alert className={`${importResult.success ? 'border-emerald-200 bg-emerald-50' : 'border-red-200 bg-red-50'}`}>
-                {importResult.success ? <CheckCircle className="h-4 w-4 text-emerald-600" /> : <XCircle className="h-4 w-4 text-red-600" />}
+              <Alert className={`${importResult.success !== false ? 'border-emerald-200 bg-emerald-50' : 'border-red-200 bg-red-50'}`}>
+                {importResult.success !== false ? <CheckCircle className="h-4 w-4 text-emerald-600" /> : <XCircle className="h-4 w-4 text-red-600" />}
                 <AlertDescription className="text-sm">
                   {importResult.message || `Imported ${importResult.imported} contacts, ${importResult.skipped} skipped`}
                   {importResult.listName && (
-                    <span className="block text-xs mt-1 text-emerald-600">
-                      Saved to list: "{importResult.listName}"
-                    </span>
+                    <span className="block text-xs mt-1 text-emerald-600">Saved to list: "{importResult.listName}"</span>
                   )}
                 </AlertDescription>
               </Alert>
@@ -1002,7 +1169,7 @@ export default function ContactsManager() {
           <DialogFooter className="gap-2 sm:gap-0">
             <Button variant="outline" onClick={() => setShowImportDialog(false)}>{importResult ? 'Done' : 'Cancel'}</Button>
             {!importResult && csvData.length > 0 && (
-              <Button onClick={handleImportCSV} disabled={importLoading || !csvMapping.email} className="bg-gradient-to-r from-emerald-600 to-emerald-700 hover:from-emerald-700 hover:to-emerald-800">
+              <Button onClick={handleImportCSV} disabled={importLoading || !csvMapping.email} className="bg-emerald-600 hover:bg-emerald-700">
                 {importLoading ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : <Upload className="h-4 w-4 mr-1.5" />}
                 Import {csvData.length} Contacts
               </Button>
@@ -1010,6 +1177,463 @@ export default function ContactsManager() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Google Sheets Import Dialog */}
+      <Dialog open={showGoogleSheetsDialog} onOpenChange={setShowGoogleSheetsDialog}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <div className="bg-green-50 p-2 rounded-lg"><FileSpreadsheet className="h-4 w-4 text-green-600" /></div>
+              Import from Google Sheets
+            </DialogTitle>
+            <DialogDescription className="text-sm text-gray-500">
+              Paste a public Google Sheets URL. The sheet must be shared with "Anyone with the link".
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            {/* URL input */}
+            <div>
+              <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Google Sheets URL</Label>
+              <div className="flex gap-2 mt-1.5">
+                <Input
+                  value={gsUrl}
+                  onChange={(e) => setGsUrl(e.target.value)}
+                  placeholder="https://docs.google.com/spreadsheets/d/..."
+                  className="h-10 flex-1"
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleGsFetchInfo(); }}
+                />
+                <Button size="sm" onClick={handleGsFetchInfo} disabled={gsLoading || !gsUrl.trim()} className="h-10 px-4 bg-green-600 hover:bg-green-700">
+                  {gsLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />}
+                </Button>
+              </div>
+            </div>
+
+            {gsError && (
+              <Alert variant="destructive" className="py-2">
+                <XCircle className="h-4 w-4" />
+                <AlertDescription className="text-sm">{gsError}</AlertDescription>
+              </Alert>
+            )}
+
+            {/* Sheet selector */}
+            {gsSheets.length > 0 && (
+              <div>
+                <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Select Sheet</Label>
+                <div className="flex gap-1.5 mt-1.5 flex-wrap">
+                  {gsSheets.map((s: any) => (
+                    <button
+                      key={s.id}
+                      onClick={() => handleGsLoadData(s)}
+                      className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-all ${
+                        gsSelectedSheet?.id === s.id ? 'bg-green-100 text-green-700 shadow-sm ring-1 ring-green-200' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'
+                      }`}
+                    >
+                      {s.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* List name (auto-populated from sheet name) */}
+            {gsSheets.length > 0 && (
+              <div className="space-y-3">
+                <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Save to list</Label>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setGsToExistingList('')}
+                    className={`flex-1 px-3 py-2.5 rounded-lg border text-sm font-medium transition-all ${
+                      !gsToExistingList ? 'border-green-300 bg-green-50 text-green-700' : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50'
+                    }`}
+                  >
+                    <Plus className="h-3.5 w-3.5 inline mr-1.5" /> Create new list
+                  </button>
+                  <button
+                    onClick={() => setGsToExistingList('_select')}
+                    className={`flex-1 px-3 py-2.5 rounded-lg border text-sm font-medium transition-all ${
+                      gsToExistingList ? 'border-green-300 bg-green-50 text-green-700' : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50'
+                    }`}
+                  >
+                    <FolderOpen className="h-3.5 w-3.5 inline mr-1.5" /> Add to existing list
+                  </button>
+                </div>
+                {!gsToExistingList ? (
+                  <div>
+                    <Input value={gsListName} onChange={(e) => setGsListName(e.target.value)} placeholder="e.g., My Contact List" className="h-10" />
+                    {gsSheetTitle && gsListName === gsSheetTitle && (
+                      <p className="text-[10px] text-green-600 mt-1 flex items-center gap-1">
+                        <Sparkles className="h-3 w-3" /> Auto-saved with Google Sheet name: "{gsSheetTitle}"
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <Select value={gsToExistingList === '_select' ? '' : gsToExistingList} onValueChange={(v) => setGsToExistingList(v)}>
+                    <SelectTrigger className="h-10"><SelectValue placeholder="Choose a list..." /></SelectTrigger>
+                    <SelectContent>
+                      {contactLists.map(l => (
+                        <SelectItem key={l.id} value={l.id}>{l.name} ({l.contactCount} contacts)</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+              </div>
+            )}
+
+            {gsDataLoading && (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 className="h-6 w-6 animate-spin text-green-500" />
+                <span className="ml-2 text-sm text-gray-500">Loading sheet data...</span>
+              </div>
+            )}
+
+            {gsHeaders.length > 0 && !gsDataLoading && renderColumnMapping(gsHeaders, gsData, gsMapping, setGsMapping, 'sheets')}
+
+            {gsImportResult && (
+              <Alert className={`${gsImportResult.success !== false ? 'border-emerald-200 bg-emerald-50' : 'border-red-200 bg-red-50'}`}>
+                {gsImportResult.success !== false ? <CheckCircle className="h-4 w-4 text-emerald-600" /> : <XCircle className="h-4 w-4 text-red-600" />}
+                <AlertDescription className="text-sm">
+                  {gsImportResult.message || `Imported ${gsImportResult.imported} contacts`}
+                  {gsImportResult.listName && (
+                    <span className="block text-xs mt-1 text-emerald-600">Saved to list: "{gsImportResult.listName}"</span>
+                  )}
+                </AlertDescription>
+              </Alert>
+            )}
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button variant="outline" onClick={() => setShowGoogleSheetsDialog(false)}>{gsImportResult ? 'Done' : 'Cancel'}</Button>
+            {!gsImportResult && gsData.length > 0 && gsMapping.email && (
+              <Button onClick={handleGsImport} disabled={gsImportLoading} className="bg-green-600 hover:bg-green-700">
+                {gsImportLoading ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : <Upload className="h-4 w-4 mr-1.5" />}
+                Import {gsData.length} Contacts
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
+
+  // ========== SHARED RENDER HELPERS ==========
+
+  function renderColumnMapping(
+    headers: string[], data: any[],
+    mapping: Record<string, string>,
+    setMapping: (fn: any) => void,
+    type: 'csv' | 'sheets'
+  ) {
+    const color = type === 'sheets' ? 'green' : 'emerald';
+    return (
+      <div className="space-y-3">
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Detected Columns ({headers.length})</h4>
+            <Badge className={`bg-${color}-50 text-${color}-700 border-${color}-200`}>{data.length} rows</Badge>
+          </div>
+          <div className="flex flex-wrap gap-1.5 p-3 bg-gray-50 rounded-lg">
+            {headers.map((h, i) => {
+              const isMapped = Object.values(mapping).includes(h);
+              return (
+                <span key={i} className={`text-[10px] px-2 py-1 rounded-md font-mono ${
+                  isMapped ? 'bg-emerald-100 text-emerald-700 ring-1 ring-emerald-200' : 'bg-white text-gray-500 ring-1 ring-gray-200'
+                }`}>
+                  {h} {isMapped && <CheckCircle className="h-2.5 w-2.5 ml-1 inline" />}
+                </span>
+              );
+            })}
+          </div>
+          <p className="text-[10px] text-gray-400 mt-1">Green = mapped to standard field. All columns are saved.</p>
+        </div>
+
+        <div>
+          <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Map Key Columns</h4>
+          <div className="bg-gray-50 rounded-lg p-3 space-y-2.5">
+            {['email', 'firstName', 'lastName', 'company', 'jobTitle'].map((field) => (
+              <div key={field} className="flex items-center gap-3">
+                <Label className="w-24 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                  {field === 'firstName' ? 'First Name' : field === 'lastName' ? 'Last Name' : field === 'jobTitle' ? 'Job Title' : field}
+                  {field === 'email' && <span className="text-red-500 ml-0.5">*</span>}
+                </Label>
+                <Select value={mapping[field] || ''} onValueChange={(v) => setMapping((prev: any) => ({ ...prev, [field]: v }))}>
+                  <SelectTrigger className="h-8 text-sm bg-white"><SelectValue placeholder="Select column" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">-- Skip --</SelectItem>
+                    {headers.map(h => <SelectItem key={h} value={h}>{h}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {data.length > 0 && (
+          <div className="border rounded-lg p-3 bg-white">
+            <div className="text-[10px] font-semibold uppercase text-gray-400 mb-2">Preview (first 3 rows)</div>
+            <div className="space-y-1.5">
+              {data.slice(0, 3).map((row, i) => (
+                <div key={i} className="text-xs text-gray-600 flex items-center gap-2 p-1.5 bg-gray-50/80 rounded">
+                  <span className="text-gray-300 w-4">{i+1}.</span>
+                  <span className="font-medium text-gray-800">{mapping.email && row[mapping.email]}</span>
+                  {mapping.firstName && <span className="text-gray-400">| {row[mapping.firstName]}</span>}
+                  {mapping.lastName && <span className="text-gray-400">{row[mapping.lastName]}</span>}
+                  {mapping.company && <span className="text-gray-300">@ {row[mapping.company]}</span>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderContactsTable() {
+    const isSpecialTab = activeTab === 'unsubscribers' || activeTab === 'blocklist';
+    return (
+      <div className="space-y-3">
+        {/* Search & Filter bar */}
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3 flex-1">
+            <div className="relative flex-1 max-w-md">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400" />
+              <Input
+                placeholder="Search by name, email, company..."
+                value={search} onChange={(e) => setSearch(e.target.value)}
+                className="pl-9 h-9 text-sm bg-white border-gray-200"
+              />
+              {search && (
+                <button onClick={() => setSearch('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-300 hover:text-gray-500">
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+
+            {/* Status Filter (for All and Lists tab only) */}
+            {!isSpecialTab && (
+              <div className="flex items-center gap-0.5 bg-gray-100/80 rounded-lg p-0.5">
+                {(['all', 'cold', 'warm', 'hot', 'replied'] as const).map((status) => {
+                  const sc = status !== 'all' ? getStatusConfig(status) : null;
+                  return (
+                    <button key={status} onClick={() => setStatusFilter(status)}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
+                        statusFilter === status ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                      }`}>
+                      {sc && <div className={`w-1.5 h-1.5 rounded-full ${sc.dot}`} />}
+                      <span className="capitalize">{status}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {selectedIds.length > 0 && (
+            <Button variant="outline" size="sm" onClick={handleBulkDelete} className="text-red-600 border-red-200 hover:bg-red-50">
+              <Trash2 className="h-3.5 w-3.5 mr-1.5" /> Delete ({selectedIds.length})
+            </Button>
+          )}
+        </div>
+
+        {/* Search results indicator */}
+        {debouncedSearch && (
+          <div className="flex items-center gap-2 px-3 py-2 bg-amber-50/60 border border-amber-100 rounded-lg">
+            <Search className="h-3.5 w-3.5 text-amber-500" />
+            <span className="text-xs text-amber-700">Found <strong>{contacts.length}</strong> results for "<strong>{debouncedSearch}</strong>"</span>
+            <button onClick={() => setSearch('')} className="ml-auto text-xs text-amber-500 hover:text-amber-700 font-medium">Clear</button>
+          </div>
+        )}
+
+        {/* Table */}
+        {loading ? (
+          <div className="flex items-center justify-center py-20">
+            <div className="flex flex-col items-center gap-3">
+              <div className="w-8 h-8 border-[3px] border-blue-600 border-t-transparent rounded-full animate-spin" />
+              <span className="text-sm text-gray-400">Loading contacts...</span>
+            </div>
+          </div>
+        ) : contacts.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-24">
+            <div className="bg-gradient-to-br from-blue-50 to-indigo-50 w-20 h-20 rounded-2xl flex items-center justify-center mb-5 shadow-sm">
+              {isSpecialTab ? (
+                activeTab === 'unsubscribers' ? <ShieldX className="h-10 w-10 text-amber-400" /> : <Ban className="h-10 w-10 text-red-400" />
+              ) : (
+                <Users className="h-10 w-10 text-blue-400" />
+              )}
+            </div>
+            <h3 className="text-lg font-semibold text-gray-900 mb-1.5">
+              {isSpecialTab
+                ? `No ${activeTab === 'unsubscribers' ? 'unsubscribers' : 'blocked contacts'}`
+                : (debouncedSearch ? 'No matching contacts' : 'No contacts yet')
+              }
+            </h3>
+            <p className="text-sm text-gray-400 mb-6 max-w-sm text-center">
+              {isSpecialTab
+                ? `Great news! No contacts are ${activeTab === 'unsubscribers' ? 'unsubscribed' : 'on the blocklist'}.`
+                : (debouncedSearch ? `No contacts match "${debouncedSearch}"` : 'Import your contacts from a CSV file or add them manually')
+              }
+            </p>
+            {!isSpecialTab && !debouncedSearch && (
+              <div className="flex gap-3">
+                <Button variant="outline" onClick={() => { setShowImportDialog(true); setCsvData([]); setCsvHeaders([]); setImportResult(null); setImportListName(''); }}>
+                  <Upload className="h-4 w-4 mr-2" /> Import CSV
+                </Button>
+                <Button className="bg-blue-600 hover:bg-blue-700" onClick={() => { resetForm(); setShowAddDialog(true); }}>
+                  <Plus className="h-4 w-4 mr-2" /> Add Contact
+                </Button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden">
+            {/* Table Header */}
+            <div className={`grid ${isSpecialTab
+              ? 'grid-cols-[40px_1fr_160px_48px]'
+              : 'grid-cols-[40px_1fr_1fr_130px_100px_48px]'
+            } gap-3 px-4 py-2.5 border-b border-gray-100 bg-gray-50/60`}>
+              <div className="flex items-center">
+                <input type="checkbox" checked={selectedIds.length === contacts.length && contacts.length > 0} onChange={toggleSelectAll} className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600" />
+              </div>
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+                {isSpecialTab ? 'Email address' : 'Contact'}
+              </div>
+              {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Company</div>}
+              {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Tags</div>}
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1">
+                Created <ArrowUpDown className="h-2.5 w-2.5" />
+              </div>
+              <div></div>
+            </div>
+
+            {/* Rows */}
+            {contacts.map((contact) => {
+              const sc = getStatusConfig(contact.status);
+              const isSelected = selectedIds.includes(contact.id);
+              const isFlagged = contact.status === 'bounced' || contact.status === 'unsubscribed';
+
+              return (
+                <div
+                  key={contact.id}
+                  onClick={() => openDetail(contact)}
+                  className={`grid ${isSpecialTab
+                    ? 'grid-cols-[40px_1fr_160px_48px]'
+                    : 'grid-cols-[40px_1fr_1fr_130px_100px_48px]'
+                  } gap-3 px-4 py-3 border-b border-gray-50 items-center transition-all group cursor-pointer ${
+                    isSelected ? 'bg-blue-50/50' : isFlagged ? 'bg-red-50/20' : 'hover:bg-gray-50/80'
+                  }`}
+                >
+                  <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
+                    <input type="checkbox" checked={isSelected} onChange={() => toggleSelect(contact.id)} className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600" />
+                  </div>
+
+                  {/* Contact / Email column */}
+                  <div className="flex items-center gap-3 min-w-0">
+                    {!isSpecialTab && (
+                      <Avatar className="h-8 w-8 flex-shrink-0 shadow-sm">
+                        <AvatarFallback className={`bg-gradient-to-br ${getAvatarColor(contact.email)} text-white text-[11px] font-semibold`}>
+                          {getInitials(contact.firstName, contact.lastName)}
+                        </AvatarFallback>
+                      </Avatar>
+                    )}
+                    <div className="min-w-0">
+                      {!isSpecialTab && (contact.firstName || contact.lastName) && (
+                        <div className="text-sm font-semibold text-gray-900 truncate flex items-center gap-2">
+                          {contact.firstName} {contact.lastName}
+                          {isFlagged && (
+                            <Tooltip>
+                              <TooltipTrigger>
+                                <Badge variant="outline" className={`text-[9px] font-semibold capitalize ${sc.bg} ${sc.text} border-0 shadow-none py-0 px-1.5`}>
+                                  <div className={`w-1 h-1 rounded-full ${sc.dot} mr-1`} />
+                                  {contact.status}
+                                </Badge>
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                <p className="text-xs">This contact is {contact.status} and will be excluded from all campaigns</p>
+                              </TooltipContent>
+                            </Tooltip>
+                          )}
+                          {!isFlagged && (
+                            <Badge variant="outline" className={`text-[9px] font-semibold capitalize ${sc.bg} ${sc.text} border-0 shadow-none py-0 px-1.5`}>
+                              <div className={`w-1 h-1 rounded-full ${sc.dot} mr-1`} />
+                              {contact.status}
+                            </Badge>
+                          )}
+                        </div>
+                      )}
+                      <div className={`${isSpecialTab ? 'text-sm text-gray-900' : 'text-xs text-gray-400'} truncate`}>
+                        {contact.email}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Company (not in special tabs) */}
+                  {!isSpecialTab && (
+                    <div className="min-w-0">
+                      {contact.company ? (
+                        <>
+                          <div className="text-sm text-gray-700 truncate flex items-center gap-1.5">
+                            <Building className="h-3 w-3 text-gray-400 flex-shrink-0" />
+                            {contact.company}
+                          </div>
+                          {contact.jobTitle && <div className="text-xs text-gray-400 truncate ml-4.5">{contact.jobTitle}</div>}
+                        </>
+                      ) : <span className="text-xs text-gray-300">--</span>}
+                    </div>
+                  )}
+
+                  {/* Tags (not in special tabs) */}
+                  {!isSpecialTab && (
+                    <div className="flex flex-wrap gap-1">
+                      {contactLists.find(l => l.id === contact.listId) && (
+                        <span className="text-[10px] px-2 py-0.5 bg-violet-50 text-violet-500 rounded-full font-medium flex items-center gap-0.5">
+                          <List className="h-2.5 w-2.5" />{contactLists.find(l => l.id === contact.listId)?.name}
+                        </span>
+                      )}
+                      {(contact.tags || []).slice(0, 1).map((tag, i) => (
+                        <span key={i} className="text-[10px] px-2 py-0.5 bg-gray-100 text-gray-500 rounded-full font-medium">{tag}</span>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Created date */}
+                  <div className="text-xs text-gray-400">{fmtDate(contact.createdAt)}</div>
+
+                  {/* Actions */}
+                  <div className="flex justify-center" onClick={e => e.stopPropagation()}>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="ghost" size="sm" className="h-7 w-7 p-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <MoreHorizontal className="h-3.5 w-3.5" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-40">
+                        <DropdownMenuItem onClick={() => openDetail(contact)}>
+                          <Eye className="h-3.5 w-3.5 mr-2" /> View Details
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => openEdit(contact)}>
+                          <Edit className="h-3.5 w-3.5 mr-2" /> Edit
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onClick={() => handleDelete(contact.id)} className="text-red-600">
+                          <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                </div>
+              );
+            })}
+
+            {/* Table Footer */}
+            <div className="px-4 py-3 bg-gray-50/40 border-t border-gray-100">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-gray-400">
+                  Showing {contacts.length} of {total} contacts
+                  {selectedIds.length > 0 && <span className="text-blue-600 font-medium ml-2">({selectedIds.length} selected)</span>}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
 }

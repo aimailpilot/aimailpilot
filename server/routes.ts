@@ -1122,6 +1122,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Create a new (empty) contact list
+  app.post('/api/contact-lists', async (req: any, res) => {
+    try {
+      const { name } = req.body;
+      if (!name || !name.trim()) return res.status(400).json({ message: 'Name is required' });
+      const list = await storage.createContactList({
+        organizationId: req.user.organizationId,
+        name: name.trim(),
+        source: 'manual',
+        headers: [],
+        contactCount: 0,
+      });
+      res.status(201).json(list);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to create contact list' });
+    }
+  });
+
+  // Rename / update a contact list
+  app.put('/api/contact-lists/:id', async (req: any, res) => {
+    try {
+      const updated = await storage.updateContactList(req.params.id, req.body);
+      res.json(updated);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to update contact list' });
+    }
+  });
+
   app.delete('/api/contact-lists/:id', async (req: any, res) => {
     try {
       await storage.deleteContactList(req.params.id);
@@ -1183,16 +1211,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Bulk import contacts with list name and all column headers
+  // Supports both creating a new list (listName) and adding to an existing list (existingListId)
   app.post('/api/contacts/import', async (req: any, res) => {
     try {
-      const { contacts: contactList, listName, headers, source } = req.body;
+      const { contacts: contactList, listName, existingListId, headers, source } = req.body;
       if (!Array.isArray(contactList) || contactList.length === 0) {
         return res.status(400).json({ message: 'contacts array is required' });
       }
 
-      // Create a contact list if a listName is provided
+      // Determine which list to use: existing or create new
       let contactListRecord: any = null;
-      if (listName) {
+      let targetListId: string | null = null;
+
+      if (existingListId) {
+        // Add to an existing list
+        contactListRecord = await storage.getContactList(existingListId);
+        targetListId = existingListId;
+      } else if (listName) {
+        // Create a new contact list
         contactListRecord = await storage.createContactList({
           organizationId: req.user.organizationId,
           name: listName,
@@ -1200,6 +1236,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           headers: headers || [],
           contactCount: 0, // Will update after import
         });
+        targetListId = contactListRecord?.id || null;
       }
 
       const contactsToCreate = contactList.map((c: any) => {
@@ -1215,28 +1252,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
           status: status || 'cold',
           tags: tags || [],
           source: cSource || source || 'import',
-          listId: contactListRecord?.id || null,
+          listId: targetListId,
           customFields: extraFields || {},
         };
       });
 
-      const results = await storage.createContactsBulk(contactsToCreate, contactListRecord?.id);
+      const results = await storage.createContactsBulk(contactsToCreate, targetListId);
       const imported = results.filter((r: any) => !r._skipped).length;
       const skipped = results.filter((r: any) => r._skipped).length;
 
       // Update the contact list count
-      if (contactListRecord) {
-        await storage.updateContactList(contactListRecord.id, { contactCount: imported });
+      if (contactListRecord && targetListId) {
+        const existingCount = existingListId ? (contactListRecord.contactCount || 0) : 0;
+        await storage.updateContactList(targetListId, { contactCount: existingCount + imported });
       }
+
+      const listDisplayName = contactListRecord?.name || null;
 
       res.json({
         success: true,
         imported,
         skipped,
         total: contactList.length,
-        listId: contactListRecord?.id || null,
-        listName: contactListRecord?.name || null,
-        message: `Imported ${imported} contacts${contactListRecord ? ` to list "${contactListRecord.name}"` : ''}, ${skipped} duplicates skipped`,
+        listId: targetListId,
+        listName: listDisplayName,
+        message: `Imported ${imported} contacts${listDisplayName ? ` to list "${listDisplayName}"` : ''}, ${skipped} duplicates skipped`,
       });
     } catch (error) {
       console.error('Import error:', error);
@@ -1461,6 +1501,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
             campaignId: message.campaignId,
             reason: 'user_requested',
           });
+
+          // Tag the contact as unsubscribed so they're excluded from future campaigns
+          try { await storage.updateContact(contact.id, { status: 'unsubscribed' }); } catch (e) {}
           
           if (campaign) {
             await storage.updateCampaign(message.campaignId, {

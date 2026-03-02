@@ -98,8 +98,8 @@ export class CampaignEngine {
         contacts = await storage.getContacts(campaign.organizationId, 10000, 0);
       }
 
-      // Filter out unsubscribed
-      contacts = contacts.filter(c => c.status !== 'unsubscribed');
+      // Filter out unsubscribed and bounced contacts
+      contacts = contacts.filter(c => c.status !== 'unsubscribed' && c.status !== 'bounced');
 
       if (contacts.length === 0) return { success: false, error: 'No contacts to send to' };
 
@@ -285,6 +285,9 @@ export class CampaignEngine {
             stepNumber,
             metadata: { error: result.error },
           });
+
+          // Tag the contact as bounced so they're excluded from future campaigns
+          try { await storage.updateContact(contact.id, { status: 'bounced' }); } catch (e) {}
         }
       } catch (emailError) {
         // Log the error but continue to next email — don't crash the entire campaign loop
