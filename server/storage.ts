@@ -282,6 +282,9 @@ const followupStepsData: any[] = [];
 const campaignFollowupsData: any[] = [];
 const followupExecutionsData: any[] = [];
 
+// Contact Lists (stores list name + imported column headers)
+const contactListsData: any[] = [];
+
 // Tracking data stores
 const trackingEventsData: any[] = [];
 const unsubscribesData: any[] = [];
@@ -340,12 +343,42 @@ export class DatabaseStorage {
     throw new Error('LLM config not found');
   }
 
-  // ========== Contacts ==========
-  async getContacts(organizationId: string, limit = 50, offset = 0) {
-    return contactsData.filter(c => c.organizationId === organizationId).slice(offset, offset + limit);
+  // ========== Contact Lists ==========
+  async getContactLists(organizationId: string) {
+    return contactListsData.filter(l => l.organizationId === organizationId)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
-  async getContactsCount(organizationId: string) {
-    return contactsData.filter(c => c.organizationId === organizationId).length;
+  async getContactList(id: string) { return contactListsData.find(l => l.id === id); }
+  async createContactList(list: any) {
+    const n = { id: genId(), ...list, contactCount: list.contactCount || 0, createdAt: new Date(), updatedAt: new Date() };
+    contactListsData.push(n);
+    return n;
+  }
+  async updateContactList(id: string, data: any) {
+    const idx = contactListsData.findIndex(l => l.id === id);
+    if (idx >= 0) { contactListsData[idx] = { ...contactListsData[idx], ...data, updatedAt: new Date() }; return contactListsData[idx]; }
+    throw new Error('Contact list not found');
+  }
+  async deleteContactList(id: string) {
+    const idx = contactListsData.findIndex(l => l.id === id);
+    if (idx >= 0) { contactListsData.splice(idx, 1); return true; }
+    return false;
+  }
+
+  // ========== Contacts ==========
+  async getContacts(organizationId: string, limit = 50, offset = 0, filters?: { listId?: string }) {
+    let result = contactsData.filter(c => c.organizationId === organizationId);
+    if (filters?.listId) {
+      result = result.filter(c => c.listId === filters.listId);
+    }
+    return result.slice(offset, offset + limit);
+  }
+  async getContactsCount(organizationId: string, filters?: { listId?: string }) {
+    let result = contactsData.filter(c => c.organizationId === organizationId);
+    if (filters?.listId) {
+      result = result.filter(c => c.listId === filters.listId);
+    }
+    return result.length;
   }
   async getContact(id: string) { return contactsData.find(c => c.id === id); }
   async getContactByEmail(organizationId: string, email: string) {
@@ -356,16 +389,21 @@ export class DatabaseStorage {
     contactsData.push(n);
     return n;
   }
-  async createContactsBulk(contacts: any[]) {
+  async createContactsBulk(contacts: any[], listId?: string) {
     const results: any[] = [];
     for (const contact of contacts) {
       // Skip if email already exists
       const exists = contactsData.find(c => c.organizationId === contact.organizationId && c.email === contact.email);
       if (exists) {
+        // Update existing contact's listId if importing to a new list
+        if (listId && !exists.listId) {
+          exists.listId = listId;
+          exists.updatedAt = new Date();
+        }
         results.push({ ...exists, _skipped: true });
         continue;
       }
-      const n = { id: genId(), ...contact, score: contact.score || 0, tags: contact.tags || [], customFields: contact.customFields || {}, createdAt: new Date(), updatedAt: new Date() };
+      const n = { id: genId(), ...contact, listId: listId || contact.listId || null, score: contact.score || 0, tags: contact.tags || [], customFields: contact.customFields || {}, createdAt: new Date(), updatedAt: new Date() };
       contactsData.push(n);
       results.push(n);
     }
@@ -388,14 +426,22 @@ export class DatabaseStorage {
     }
     return true;
   }
-  async searchContacts(organizationId: string, query: string) {
+  async searchContacts(organizationId: string, query: string, filters?: { listId?: string }) {
     const q = query.toLowerCase();
-    return contactsData.filter(c => c.organizationId === organizationId && (
+    let result = contactsData.filter(c => c.organizationId === organizationId && (
       (c.firstName || '').toLowerCase().includes(q) ||
       (c.lastName || '').toLowerCase().includes(q) ||
       c.email.toLowerCase().includes(q) ||
-      (c.company || '').toLowerCase().includes(q)
-    )).slice(0, 50);
+      (c.company || '').toLowerCase().includes(q) ||
+      (c.jobTitle || '').toLowerCase().includes(q) ||
+      (c.tags || []).some((t: string) => t.toLowerCase().includes(q)) ||
+      // Search across customFields values
+      Object.values(c.customFields || {}).some((v: any) => String(v).toLowerCase().includes(q))
+    ));
+    if (filters?.listId) {
+      result = result.filter(c => c.listId === filters.listId);
+    }
+    return result.slice(0, 100);
   }
   async getContactsBySegment(segmentId: string) {
     const segment = segmentsData.find(s => s.id === segmentId);

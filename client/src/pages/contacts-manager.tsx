@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -11,7 +11,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   Users, Plus, Search, Upload, Trash2, Edit, Download,
   Mail, Building, Briefcase, CheckCircle, Loader2, XCircle, Filter, UserPlus,
-  MoreHorizontal, Star, TrendingUp, ArrowUpDown, FileSpreadsheet
+  MoreHorizontal, Star, TrendingUp, ArrowUpDown, FileSpreadsheet, List, FolderOpen, X, Eye, Tag
 } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 
@@ -26,6 +26,17 @@ interface Contact {
   score: number;
   tags: string[];
   source: string;
+  listId?: string;
+  customFields?: Record<string, any>;
+  createdAt: string;
+}
+
+interface ContactList {
+  id: string;
+  name: string;
+  source: string;
+  headers: string[];
+  contactCount: number;
   createdAt: string;
 }
 
@@ -34,15 +45,23 @@ export default function ContactsManager() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [showImportDialog, setShowImportDialog] = useState(false);
   const [showEditDialog, setShowEditDialog] = useState(false);
+  const [showContactDetail, setShowContactDetail] = useState(false);
+  const [detailContact, setDetailContact] = useState<Contact | null>(null);
   const [editContact, setEditContact] = useState<Contact | null>(null);
   const [importResult, setImportResult] = useState<any>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Contact lists
+  const [contactLists, setContactLists] = useState<ContactList[]>([]);
+  const [activeListId, setActiveListId] = useState<string | null>(null);
+
+  // Form state
   const [formEmail, setFormEmail] = useState('');
   const [formFirstName, setFormFirstName] = useState('');
   const [formLastName, setFormLastName] = useState('');
@@ -52,19 +71,31 @@ export default function ContactsManager() {
   const [formLoading, setFormLoading] = useState(false);
   const [formError, setFormError] = useState('');
 
+  // CSV import state
   const [csvData, setCsvData] = useState<any[]>([]);
   const [csvHeaders, setCsvHeaders] = useState<string[]>([]);
   const [csvMapping, setCsvMapping] = useState<Record<string, string>>({});
   const [importLoading, setImportLoading] = useState(false);
+  const [importListName, setImportListName] = useState('');
+  const [importFileName, setImportFileName] = useState('');
 
-  useEffect(() => { fetchContacts(); }, [search, statusFilter]);
+  // Debounced search
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  useEffect(() => { fetchContacts(); }, [debouncedSearch, statusFilter, activeListId]);
+  useEffect(() => { fetchContactLists(); }, []);
 
   const fetchContacts = async () => {
     setLoading(true);
     try {
       const params = new URLSearchParams();
-      if (search) params.set('search', search);
+      if (debouncedSearch) params.set('search', debouncedSearch);
       if (statusFilter !== 'all') params.set('status', statusFilter);
+      if (activeListId) params.set('listId', activeListId);
+      params.set('limit', '100');
       const res = await fetch(`/api/contacts?${params}`, { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
@@ -73,6 +104,16 @@ export default function ContactsManager() {
       }
     } catch (e) { console.error('Failed to fetch contacts:', e); }
     setLoading(false);
+  };
+
+  const fetchContactLists = async () => {
+    try {
+      const res = await fetch('/api/contact-lists', { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        setContactLists(data);
+      }
+    } catch (e) { console.error('Failed to fetch contact lists:', e); }
   };
 
   const handleAddContact = async () => {
@@ -117,11 +158,23 @@ export default function ContactsManager() {
     await fetchContacts();
   };
 
+  const handleDeleteList = async (listId: string) => {
+    if (!confirm('Delete this list? Contacts will remain but lose their list association.')) return;
+    await fetch(`/api/contact-lists/${listId}`, { method: 'DELETE', credentials: 'include' });
+    if (activeListId === listId) setActiveListId(null);
+    await fetchContactLists();
+  };
+
   const openEdit = (contact: Contact) => {
     setEditContact(contact); setFormEmail(contact.email); setFormFirstName(contact.firstName);
     setFormLastName(contact.lastName); setFormCompany(contact.company);
     setFormJobTitle(contact.jobTitle); setFormTags(contact.tags?.join(', ') || '');
     setShowEditDialog(true);
+  };
+
+  const openDetail = (contact: Contact) => {
+    setDetailContact(contact);
+    setShowContactDetail(true);
   };
 
   const resetForm = () => {
@@ -133,14 +186,19 @@ export default function ContactsManager() {
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    setImportFileName(file.name);
+    // Auto-set list name from file name (without extension)
+    const nameWithoutExt = file.name.replace(/\.[^/.]+$/, '');
+    if (!importListName) setImportListName(nameWithoutExt);
+
     const reader = new FileReader();
     reader.onload = (event) => {
       const text = event.target?.result as string;
       const lines = text.split('\n').filter(l => l.trim());
       if (lines.length < 2) return;
-      const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
+      const headers = parseCSVLine(lines[0]);
       const rows = lines.slice(1).map(line => {
-        const values = line.split(',').map(v => v.trim().replace(/"/g, ''));
+        const values = parseCSVLine(line);
         const row: Record<string, string> = {};
         headers.forEach((h, i) => { row[h] = values[i] || ''; });
         return row;
@@ -150,30 +208,83 @@ export default function ContactsManager() {
       const mapping: Record<string, string> = {};
       headers.forEach(h => {
         const lower = h.toLowerCase();
-        if (lower.includes('email')) mapping.email = h;
-        else if (lower.includes('first') && lower.includes('name')) mapping.firstName = h;
-        else if (lower.includes('last') && lower.includes('name')) mapping.lastName = h;
-        else if (lower === 'name' || lower === 'full name') mapping.firstName = h;
-        else if (lower.includes('company') || lower.includes('organization')) mapping.company = h;
-        else if (lower.includes('title') || lower.includes('position')) mapping.jobTitle = h;
+        if (lower.includes('email') || lower === 'e-mail') mapping.email = h;
+        else if ((lower.includes('first') && lower.includes('name')) || lower === 'first') mapping.firstName = h;
+        else if ((lower.includes('last') && lower.includes('name')) || lower === 'last' || lower === 'surname') mapping.lastName = h;
+        else if (lower === 'name' || lower === 'full name' || lower === 'fullname') mapping.firstName = h;
+        else if (lower.includes('company') || lower.includes('organization') || lower === 'org') mapping.company = h;
+        else if (lower.includes('title') || lower.includes('position') || lower === 'role') mapping.jobTitle = h;
       });
       setCsvMapping(mapping);
     };
     reader.readAsText(file);
   };
 
+  // Improved CSV line parser that handles quoted fields
+  const parseCSVLine = (line: string): string[] => {
+    const result: string[] = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (inQuotes) {
+        if (ch === '"' && line[i + 1] === '"') { current += '"'; i++; }
+        else if (ch === '"') { inQuotes = false; }
+        else { current += ch; }
+      } else {
+        if (ch === '"') { inQuotes = true; }
+        else if (ch === ',') { result.push(current.trim()); current = ''; }
+        else { current += ch; }
+      }
+    }
+    result.push(current.trim());
+    return result;
+  };
+
   const handleImportCSV = async () => {
     if (csvData.length === 0 || !csvMapping.email) return;
     setImportLoading(true);
     setImportResult(null);
-    const contacts = csvData.map(row => ({
-      email: row[csvMapping.email] || '', firstName: row[csvMapping.firstName] || '',
-      lastName: row[csvMapping.lastName] || '', company: row[csvMapping.company] || '',
-      jobTitle: row[csvMapping.jobTitle] || '',
-    })).filter(c => c.email && c.email.includes('@'));
+
+    // Build contacts preserving ALL columns
+    const contacts = csvData.map(row => {
+      const contact: Record<string, any> = {};
+      // Map known fields
+      if (csvMapping.email) contact.email = (row[csvMapping.email] || '').trim();
+      if (csvMapping.firstName) contact.firstName = (row[csvMapping.firstName] || '').trim();
+      if (csvMapping.lastName) contact.lastName = (row[csvMapping.lastName] || '').trim();
+      if (csvMapping.company) contact.company = (row[csvMapping.company] || '').trim();
+      if (csvMapping.jobTitle) contact.jobTitle = (row[csvMapping.jobTitle] || '').trim();
+
+      // Store ALL unmapped columns in customFields
+      const mappedColumns = new Set(Object.values(csvMapping).filter(Boolean));
+      csvHeaders.forEach(header => {
+        if (!mappedColumns.has(header) && row[header]) {
+          contact[header] = row[header].trim();
+        }
+      });
+
+      return contact;
+    }).filter(c => c.email && c.email.includes('@'));
+
     try {
-      const res = await fetch('/api/contacts/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ contacts }) });
-      if (res.ok) { const result = await res.json(); setImportResult(result); await fetchContacts(); }
+      const res = await fetch('/api/contacts/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          contacts,
+          listName: importListName || importFileName || 'Imported Contacts',
+          headers: csvHeaders,
+          source: 'csv',
+        }),
+      });
+      if (res.ok) {
+        const result = await res.json();
+        setImportResult(result);
+        await fetchContacts();
+        await fetchContactLists();
+      }
     } catch (e) { setImportResult({ success: false, message: 'Import failed' }); }
     setImportLoading(false);
   };
@@ -213,6 +324,8 @@ export default function ContactsManager() {
   const toggleSelect = (id: string) => { setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]); };
   const toggleSelectAll = () => { setSelectedIds(selectedIds.length === contacts.length ? [] : contacts.map(c => c.id)); };
 
+  const activeList = contactLists.find(l => l.id === activeListId);
+
   const statusCounts = {
     all: total,
     cold: contacts.filter(c => c.status === 'cold').length,
@@ -228,7 +341,7 @@ export default function ContactsManager() {
         {[
           { label: 'Total Contacts', value: total, icon: Users, bg: 'bg-blue-50', text: 'text-blue-600' },
           { label: 'Hot Leads', value: statusCounts.hot, icon: TrendingUp, bg: 'bg-red-50', text: 'text-red-600' },
-          { label: 'Warm Leads', value: statusCounts.warm, icon: Star, bg: 'bg-orange-50', text: 'text-orange-600' },
+          { label: 'Import Lists', value: contactLists.length, icon: FolderOpen, bg: 'bg-violet-50', text: 'text-violet-600' },
           { label: 'Replied', value: statusCounts.replied, icon: Mail, bg: 'bg-emerald-50', text: 'text-emerald-600' },
         ].map((stat) => (
           <Card key={stat.label} className="border-gray-200/60 shadow-sm">
@@ -245,18 +358,91 @@ export default function ContactsManager() {
         ))}
       </div>
 
+      {/* Contact Lists Bar */}
+      {contactLists.length > 0 && (
+        <div className="flex items-center gap-2 overflow-x-auto pb-1">
+          <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider flex-shrink-0 mr-1">Lists:</span>
+          <button
+            onClick={() => setActiveListId(null)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-all flex-shrink-0 ${
+              !activeListId ? 'bg-blue-100 text-blue-700 shadow-sm' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'
+            }`}
+          >
+            <Users className="h-3 w-3" /> All Contacts
+          </button>
+          {contactLists.map(list => (
+            <div key={list.id} className="flex items-center gap-0 flex-shrink-0">
+              <button
+                onClick={() => setActiveListId(activeListId === list.id ? null : list.id)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-l-lg transition-all ${
+                  activeListId === list.id ? 'bg-blue-100 text-blue-700 shadow-sm' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'
+                }`}
+              >
+                <List className="h-3 w-3" />
+                {list.name}
+                <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+                  activeListId === list.id ? 'bg-blue-200/80 text-blue-800' : 'bg-gray-200/80 text-gray-400'
+                }`}>{list.contactCount}</span>
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); handleDeleteList(list.id); }}
+                className={`px-1.5 py-1.5 text-xs rounded-r-lg transition-all ${
+                  activeListId === list.id ? 'bg-blue-100 text-blue-400 hover:text-red-500' : 'bg-gray-50 text-gray-300 hover:text-red-500'
+                }`}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Active list info banner */}
+      {activeList && (
+        <div className="flex items-center gap-3 px-4 py-2.5 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-100 rounded-xl">
+          <FolderOpen className="h-4 w-4 text-blue-500" />
+          <div className="flex-1">
+            <span className="text-sm font-semibold text-blue-800">{activeList.name}</span>
+            <span className="text-xs text-blue-400 ml-2">
+              {activeList.contactCount} contacts &middot; Source: {activeList.source || 'CSV'} &middot; {activeList.headers?.length || 0} columns
+            </span>
+          </div>
+          {activeList.headers && activeList.headers.length > 0 && (
+            <div className="flex items-center gap-1 flex-wrap">
+              {activeList.headers.slice(0, 5).map((h, i) => (
+                <span key={i} className="text-[9px] px-1.5 py-0.5 bg-blue-100 text-blue-600 rounded font-mono">{h}</span>
+              ))}
+              {activeList.headers.length > 5 && (
+                <span className="text-[9px] text-blue-400">+{activeList.headers.length - 5} more</span>
+              )}
+            </div>
+          )}
+          <Button variant="ghost" size="sm" className="h-6 px-2 text-blue-400 hover:text-blue-700" onClick={() => setActiveListId(null)}>
+            <X className="h-3 w-3" />
+          </Button>
+        </div>
+      )}
+
       {/* Header Bar */}
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-3 flex-1">
           {/* Search */}
-          <div className="relative flex-1 max-w-sm">
+          <div className="relative flex-1 max-w-md">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400" />
             <Input 
-              placeholder="Search contacts..." 
+              placeholder="Search by name, email, company, tags, or any field..." 
               value={search} 
               onChange={(e) => setSearch(e.target.value)} 
-              className="pl-9 h-9 text-sm bg-white border-gray-200 focus:border-blue-300 focus:ring-blue-200" 
+              className="pl-9 h-9 text-sm bg-white border-gray-200 focus:border-blue-300 focus:ring-blue-200"
             />
+            {search && (
+              <button 
+                onClick={() => setSearch('')}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-300 hover:text-gray-500"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
           </div>
 
           {/* Status Filter Tabs */}
@@ -286,7 +472,7 @@ export default function ContactsManager() {
               <Trash2 className="h-3.5 w-3.5 mr-1.5" /> Delete ({selectedIds.length})
             </Button>
           )}
-          <Button variant="outline" size="sm" onClick={() => { setShowImportDialog(true); setCsvData([]); setCsvHeaders([]); setImportResult(null); }}>
+          <Button variant="outline" size="sm" onClick={() => { setShowImportDialog(true); setCsvData([]); setCsvHeaders([]); setImportResult(null); setImportListName(''); setImportFileName(''); }}>
             <Upload className="h-3.5 w-3.5 mr-1.5" /> Import
           </Button>
           <Button size="sm" className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 shadow-sm shadow-blue-200/50" onClick={() => { resetForm(); setShowAddDialog(true); }}>
@@ -294,6 +480,18 @@ export default function ContactsManager() {
           </Button>
         </div>
       </div>
+
+      {/* Search results indicator */}
+      {debouncedSearch && (
+        <div className="flex items-center gap-2 px-3 py-2 bg-amber-50/60 border border-amber-100 rounded-lg">
+          <Search className="h-3.5 w-3.5 text-amber-500" />
+          <span className="text-xs text-amber-700">
+            Found <strong>{contacts.length}</strong> results for "<strong>{debouncedSearch}</strong>"
+            {activeList && <span className="text-amber-500"> in {activeList.name}</span>}
+          </span>
+          <button onClick={() => setSearch('')} className="ml-auto text-xs text-amber-500 hover:text-amber-700 font-medium">Clear</button>
+        </div>
+      )}
 
       {/* Contact Table */}
       {loading ? (
@@ -308,16 +506,22 @@ export default function ContactsManager() {
           <div className="bg-gradient-to-br from-blue-50 to-indigo-50 w-20 h-20 rounded-2xl flex items-center justify-center mb-5 shadow-sm">
             <Users className="h-10 w-10 text-blue-400" />
           </div>
-          <h3 className="text-lg font-semibold text-gray-900 mb-1.5">No contacts yet</h3>
-          <p className="text-sm text-gray-400 mb-6 max-w-sm text-center">Import your contacts from a CSV file or add them manually to get started</p>
-          <div className="flex gap-3">
-            <Button variant="outline" onClick={() => setShowImportDialog(true)}>
-              <FileSpreadsheet className="h-4 w-4 mr-2" /> Import CSV
-            </Button>
-            <Button className="bg-gradient-to-r from-blue-600 to-indigo-600 shadow-sm" onClick={() => { resetForm(); setShowAddDialog(true); }}>
-              <Plus className="h-4 w-4 mr-2" /> Add Contact
-            </Button>
-          </div>
+          <h3 className="text-lg font-semibold text-gray-900 mb-1.5">
+            {debouncedSearch ? 'No matching contacts' : 'No contacts yet'}
+          </h3>
+          <p className="text-sm text-gray-400 mb-6 max-w-sm text-center">
+            {debouncedSearch ? `No contacts match "${debouncedSearch}"` : 'Import your contacts from a CSV file or add them manually to get started'}
+          </p>
+          {!debouncedSearch && (
+            <div className="flex gap-3">
+              <Button variant="outline" onClick={() => { setShowImportDialog(true); setCsvData([]); setCsvHeaders([]); setImportResult(null); setImportListName(''); }}>
+                <FileSpreadsheet className="h-4 w-4 mr-2" /> Import CSV
+              </Button>
+              <Button className="bg-gradient-to-r from-blue-600 to-indigo-600 shadow-sm" onClick={() => { resetForm(); setShowAddDialog(true); }}>
+                <Plus className="h-4 w-4 mr-2" /> Add Contact
+              </Button>
+            </div>
+          )}
         </div>
       ) : (
         <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden">
@@ -338,14 +542,16 @@ export default function ContactsManager() {
           {contacts.map((contact) => {
             const sc = getStatusConfig(contact.status);
             const isSelected = selectedIds.includes(contact.id);
+            const listName = contactLists.find(l => l.id === contact.listId)?.name;
             return (
               <div 
                 key={contact.id} 
-                className={`grid grid-cols-[40px_1fr_1fr_130px_90px_80px_48px] gap-3 px-4 py-3 border-b border-gray-50 items-center transition-all group ${
+                onClick={() => openDetail(contact)}
+                className={`grid grid-cols-[40px_1fr_1fr_130px_90px_80px_48px] gap-3 px-4 py-3 border-b border-gray-50 items-center transition-all group cursor-pointer ${
                   isSelected ? 'bg-blue-50/50' : 'hover:bg-gray-50/80'
                 }`}
               >
-                <div className="flex items-center">
+                <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
                   <input 
                     type="checkbox" 
                     checked={isSelected} 
@@ -383,11 +589,16 @@ export default function ContactsManager() {
                   )}
                 </div>
                 <div className="flex flex-wrap gap-1">
-                  {(contact.tags || []).slice(0, 2).map((tag, i) => (
+                  {listName && (
+                    <span className="text-[10px] px-2 py-0.5 bg-violet-50 text-violet-500 rounded-full font-medium flex items-center gap-0.5">
+                      <List className="h-2.5 w-2.5" />{listName}
+                    </span>
+                  )}
+                  {(contact.tags || []).slice(0, 1).map((tag, i) => (
                     <span key={i} className="text-[10px] px-2 py-0.5 bg-gray-100 text-gray-500 rounded-full font-medium">{tag}</span>
                   ))}
-                  {(contact.tags || []).length > 2 && (
-                    <span className="text-[10px] text-gray-300 px-1">+{contact.tags.length - 2}</span>
+                  {((contact.tags || []).length > 1 || (listName && (contact.tags || []).length > 0)) && (
+                    <span className="text-[10px] text-gray-300 px-1">+{(contact.tags || []).length - (listName ? 0 : 1)}</span>
                   )}
                 </div>
                 <div>
@@ -404,7 +615,7 @@ export default function ContactsManager() {
                     <span className="text-[10px] font-semibold text-gray-400 w-5 text-right">{contact.score}</span>
                   </div>
                 </div>
-                <div className="flex justify-center">
+                <div className="flex justify-center" onClick={(e) => e.stopPropagation()}>
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button variant="ghost" size="sm" className="h-7 w-7 p-0 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -412,6 +623,9 @@ export default function ContactsManager() {
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="w-40">
+                      <DropdownMenuItem onClick={() => openDetail(contact)}>
+                        <Eye className="h-3.5 w-3.5 mr-2" /> View Details
+                      </DropdownMenuItem>
                       <DropdownMenuItem onClick={() => openEdit(contact)}>
                         <Edit className="h-3.5 w-3.5 mr-2" /> Edit
                       </DropdownMenuItem>
@@ -431,12 +645,115 @@ export default function ContactsManager() {
             <div className="flex items-center justify-between">
               <span className="text-xs text-gray-400">
                 Showing {contacts.length} of {total} contacts
+                {activeList && <span className="text-violet-500 font-medium ml-2">in "{activeList.name}"</span>}
                 {selectedIds.length > 0 && <span className="text-blue-600 font-medium ml-2">({selectedIds.length} selected)</span>}
               </span>
             </div>
           </div>
         </div>
       )}
+
+      {/* Contact Detail Dialog */}
+      <Dialog open={showContactDetail} onOpenChange={setShowContactDetail}>
+        <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-3">
+              {detailContact && (
+                <>
+                  <Avatar className="h-10 w-10 shadow-sm">
+                    <AvatarFallback className={`bg-gradient-to-br ${getAvatarColor(detailContact.email)} text-white text-sm font-semibold`}>
+                      {getInitials(detailContact.firstName, detailContact.lastName)}
+                    </AvatarFallback>
+                  </Avatar>
+                  <div>
+                    <div className="text-base">{detailContact.firstName} {detailContact.lastName}</div>
+                    <div className="text-xs text-gray-400 font-normal">{detailContact.email}</div>
+                  </div>
+                </>
+              )}
+            </DialogTitle>
+            <DialogDescription className="sr-only">Contact details</DialogDescription>
+          </DialogHeader>
+          {detailContact && (
+            <div className="space-y-4 py-2">
+              {/* Basic Info */}
+              <div className="grid grid-cols-2 gap-3">
+                {[
+                  { label: 'Company', value: detailContact.company, icon: Building },
+                  { label: 'Job Title', value: detailContact.jobTitle, icon: Briefcase },
+                  { label: 'Status', value: detailContact.status, icon: CheckCircle },
+                  { label: 'Score', value: detailContact.score, icon: Star },
+                  { label: 'Source', value: detailContact.source || 'manual', icon: Download },
+                ].filter(f => f.value).map((field, i) => (
+                  <div key={i} className="flex items-start gap-2 p-2.5 bg-gray-50 rounded-lg">
+                    <field.icon className="h-3.5 w-3.5 text-gray-400 mt-0.5" />
+                    <div>
+                      <div className="text-[10px] text-gray-400 uppercase font-semibold tracking-wide">{field.label}</div>
+                      <div className="text-sm text-gray-700 capitalize">{String(field.value)}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Tags */}
+              {detailContact.tags && detailContact.tags.length > 0 && (
+                <div>
+                  <div className="text-[10px] text-gray-400 uppercase font-semibold tracking-wide mb-2 flex items-center gap-1">
+                    <Tag className="h-3 w-3" /> Tags
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {detailContact.tags.map((tag, i) => (
+                      <Badge key={i} variant="outline" className="text-xs bg-gray-50">{tag}</Badge>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* List Info */}
+              {detailContact.listId && (
+                <div>
+                  <div className="text-[10px] text-gray-400 uppercase font-semibold tracking-wide mb-2 flex items-center gap-1">
+                    <List className="h-3 w-3" /> Import List
+                  </div>
+                  <div className="flex items-center gap-2 p-2.5 bg-violet-50 rounded-lg">
+                    <FolderOpen className="h-4 w-4 text-violet-500" />
+                    <span className="text-sm font-medium text-violet-700">
+                      {contactLists.find(l => l.id === detailContact.listId)?.name || 'Unknown List'}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Custom Fields (imported columns) */}
+              {detailContact.customFields && Object.keys(detailContact.customFields).length > 0 && (
+                <div>
+                  <div className="text-[10px] text-gray-400 uppercase font-semibold tracking-wide mb-2 flex items-center gap-1">
+                    <FileSpreadsheet className="h-3 w-3" /> Additional Data (Imported Columns)
+                  </div>
+                  <div className="bg-gray-50 rounded-lg p-3 space-y-1.5">
+                    {Object.entries(detailContact.customFields).map(([key, value]) => (
+                      <div key={key} className="flex items-center justify-between text-xs">
+                        <span className="text-gray-500 font-mono">{key}</span>
+                        <span className="text-gray-700 font-medium truncate max-w-[200px]">{String(value)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="text-[10px] text-gray-300 pt-2">
+                Created: {new Date(detailContact.createdAt).toLocaleDateString()} &middot; ID: {detailContact.id.slice(0, 8)}
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => { setShowContactDetail(false); if (detailContact) openEdit(detailContact); }}>
+              <Edit className="h-3.5 w-3.5 mr-1.5" /> Edit
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => setShowContactDetail(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Add Contact Dialog */}
       <Dialog open={showAddDialog} onOpenChange={setShowAddDialog}>
@@ -561,10 +878,24 @@ export default function ContactsManager() {
               Import Contacts
             </DialogTitle>
             <DialogDescription className="text-sm text-gray-500">
-              Upload a CSV file to bulk import contacts
+              Upload a CSV file to bulk import contacts. All columns will be saved.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
+            {/* List Name */}
+            <div>
+              <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide">
+                List Name <span className="text-amber-500">(contacts will be grouped under this name)</span>
+              </Label>
+              <Input 
+                value={importListName} 
+                onChange={(e) => setImportListName(e.target.value)} 
+                placeholder="e.g., Tech Leads Q4, Conference Attendees..." 
+                className="mt-1.5 h-10" 
+              />
+            </div>
+
+            {/* File Upload */}
             <div 
               className="border-2 border-dashed border-gray-200 rounded-xl p-8 text-center bg-gradient-to-br from-gray-50/50 to-white hover:border-blue-300 hover:bg-blue-50/20 transition-all cursor-pointer group" 
               onClick={() => fileInputRef.current?.click()}
@@ -572,44 +903,80 @@ export default function ContactsManager() {
               <div className="bg-blue-50 w-14 h-14 rounded-xl flex items-center justify-center mx-auto mb-3 group-hover:scale-110 transition-transform">
                 <Upload className="h-6 w-6 text-blue-500" />
               </div>
-              <p className="text-sm font-semibold text-gray-700 mb-1">Drop your CSV file here or click to browse</p>
-              <p className="text-xs text-gray-400">Supports: email, first_name, last_name, company, job_title columns</p>
+              {importFileName ? (
+                <>
+                  <p className="text-sm font-semibold text-gray-700 mb-1">{importFileName}</p>
+                  <p className="text-xs text-gray-400">Click to choose a different file</p>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm font-semibold text-gray-700 mb-1">Drop your CSV file here or click to browse</p>
+                  <p className="text-xs text-gray-400">All columns will be imported and preserved</p>
+                </>
+              )}
               <input type="file" ref={fileInputRef} accept=".csv" onChange={handleFileUpload} className="hidden" />
             </div>
 
             {csvHeaders.length > 0 && (
               <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <h4 className="text-sm font-semibold text-gray-900">Map Columns</h4>
-                  <Badge className="bg-blue-50 text-blue-700 border-blue-200">{csvData.length} rows found</Badge>
+                {/* All headers display */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Detected Columns ({csvHeaders.length})</h4>
+                    <Badge className="bg-blue-50 text-blue-700 border-blue-200">{csvData.length} rows</Badge>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 p-3 bg-gray-50 rounded-lg">
+                    {csvHeaders.map((h, i) => {
+                      const isMapped = Object.values(csvMapping).includes(h);
+                      return (
+                        <span key={i} className={`text-[10px] px-2 py-1 rounded-md font-mono ${
+                          isMapped ? 'bg-emerald-100 text-emerald-700 ring-1 ring-emerald-200' : 'bg-white text-gray-500 ring-1 ring-gray-200'
+                        }`}>
+                          {h}
+                          {isMapped && <CheckCircle className="h-2.5 w-2.5 ml-1 inline" />}
+                        </span>
+                      );
+                    })}
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    Green = mapped to standard field. All columns (mapped + unmapped) will be saved.
+                  </p>
                 </div>
-                <div className="bg-gray-50 rounded-lg p-3 space-y-2.5">
-                  {['email', 'firstName', 'lastName', 'company', 'jobTitle'].map((field) => (
-                    <div key={field} className="flex items-center gap-3">
-                      <Label className="w-24 text-xs font-semibold text-gray-500 uppercase tracking-wide">
-                        {field === 'firstName' ? 'First Name' : field === 'lastName' ? 'Last Name' : field === 'jobTitle' ? 'Job Title' : field}
-                        {field === 'email' && <span className="text-red-500 ml-0.5">*</span>}
-                      </Label>
-                      <Select value={csvMapping[field] || ''} onValueChange={(v) => setCsvMapping(prev => ({ ...prev, [field]: v }))}>
-                        <SelectTrigger className="h-8 text-sm bg-white"><SelectValue placeholder="Select column" /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="">-- Skip --</SelectItem>
-                          {csvHeaders.map(h => <SelectItem key={h} value={h}>{h}</SelectItem>)}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  ))}
+
+                {/* Column Mapping */}
+                <div>
+                  <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Map Key Columns</h4>
+                  <div className="bg-gray-50 rounded-lg p-3 space-y-2.5">
+                    {['email', 'firstName', 'lastName', 'company', 'jobTitle'].map((field) => (
+                      <div key={field} className="flex items-center gap-3">
+                        <Label className="w-24 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                          {field === 'firstName' ? 'First Name' : field === 'lastName' ? 'Last Name' : field === 'jobTitle' ? 'Job Title' : field}
+                          {field === 'email' && <span className="text-red-500 ml-0.5">*</span>}
+                        </Label>
+                        <Select value={csvMapping[field] || ''} onValueChange={(v) => setCsvMapping(prev => ({ ...prev, [field]: v }))}>
+                          <SelectTrigger className="h-8 text-sm bg-white"><SelectValue placeholder="Select column" /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="">-- Skip --</SelectItem>
+                            {csvHeaders.map(h => <SelectItem key={h} value={h}>{h}</SelectItem>)}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    ))}
+                  </div>
                 </div>
+
+                {/* Preview */}
                 {csvData.length > 0 && (
                   <div className="border rounded-lg p-3 bg-white">
                     <div className="text-[10px] font-semibold uppercase text-gray-400 mb-2">Preview (first 3 rows)</div>
-                    <div className="space-y-1">
+                    <div className="space-y-1.5">
                       {csvData.slice(0, 3).map((row, i) => (
-                        <div key={i} className="text-xs text-gray-600 flex items-center gap-2">
+                        <div key={i} className="text-xs text-gray-600 flex items-center gap-2 p-1.5 bg-gray-50/80 rounded">
                           <span className="text-gray-300 w-4">{i+1}.</span>
-                          <span className="font-medium">{csvMapping.email && row[csvMapping.email]}</span>
+                          <span className="font-medium text-gray-800">{csvMapping.email && row[csvMapping.email]}</span>
                           {csvMapping.firstName && <span className="text-gray-400">| {row[csvMapping.firstName]}</span>}
                           {csvMapping.lastName && <span className="text-gray-400">{row[csvMapping.lastName]}</span>}
+                          {csvMapping.company && <span className="text-gray-300">@ {row[csvMapping.company]}</span>}
                         </div>
                       ))}
                     </div>
@@ -623,6 +990,11 @@ export default function ContactsManager() {
                 {importResult.success ? <CheckCircle className="h-4 w-4 text-emerald-600" /> : <XCircle className="h-4 w-4 text-red-600" />}
                 <AlertDescription className="text-sm">
                   {importResult.message || `Imported ${importResult.imported} contacts, ${importResult.skipped} skipped`}
+                  {importResult.listName && (
+                    <span className="block text-xs mt-1 text-emerald-600">
+                      Saved to list: "{importResult.listName}"
+                    </span>
+                  )}
                 </AlertDescription>
               </Alert>
             )}

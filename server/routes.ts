@@ -121,6 +121,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.use('/api/followup-sequences', requireAuth);
   app.use('/api/followup-steps', requireAuth);
   app.use('/api/segments', requireAuth);
+  app.use('/api/contact-lists', requireAuth);
   app.use('/api/tracking', requireAuth);
   app.use('/api/account', requireAuth);
 
@@ -632,25 +633,59 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // ========== CONTACTS ==========
 
+  // ========== CONTACT LISTS ==========
+
+  app.get('/api/contact-lists', async (req: any, res) => {
+    try {
+      const lists = await storage.getContactLists(req.user.organizationId);
+      res.json(lists);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch contact lists' });
+    }
+  });
+
+  app.get('/api/contact-lists/:id', async (req: any, res) => {
+    try {
+      const list = await storage.getContactList(req.params.id);
+      if (!list) return res.status(404).json({ message: 'Not found' });
+      res.json(list);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch contact list' });
+    }
+  });
+
+  app.delete('/api/contact-lists/:id', async (req: any, res) => {
+    try {
+      await storage.deleteContactList(req.params.id);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to delete contact list' });
+    }
+  });
+
+  // ========== CONTACTS ==========
+
   app.get('/api/contacts', async (req: any, res) => {
     try {
       const limit = parseInt(req.query.limit) || 50;
       const offset = parseInt(req.query.offset) || 0;
       const search = req.query.search as string;
       const status = req.query.status as string;
+      const listId = req.query.listId as string;
+      const filters = listId ? { listId } : undefined;
       
       let contacts;
       if (search) {
-        contacts = await storage.searchContacts(req.user.organizationId, search);
+        contacts = await storage.searchContacts(req.user.organizationId, search, filters);
       } else {
-        contacts = await storage.getContacts(req.user.organizationId, limit, offset);
+        contacts = await storage.getContacts(req.user.organizationId, limit, offset, filters);
       }
 
       if (status && status !== 'all') {
         contacts = contacts.filter((c: any) => c.status === status);
       }
 
-      const total = await storage.getContactsCount(req.user.organizationId);
+      const total = await storage.getContactsCount(req.user.organizationId, filters);
       res.json({ contacts, total, limit, offset });
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch contacts' });
@@ -679,38 +714,64 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Bulk import contacts
+  // Bulk import contacts with list name and all column headers
   app.post('/api/contacts/import', async (req: any, res) => {
     try {
-      const { contacts: contactList } = req.body;
+      const { contacts: contactList, listName, headers, source } = req.body;
       if (!Array.isArray(contactList) || contactList.length === 0) {
         return res.status(400).json({ message: 'contacts array is required' });
       }
 
-      const contactsToCreate = contactList.map((c: any) => ({
-        organizationId: req.user.organizationId,
-        email: c.email,
-        firstName: c.firstName || c.first_name || '',
-        lastName: c.lastName || c.last_name || '',
-        company: c.company || '',
-        jobTitle: c.jobTitle || c.job_title || '',
-        status: c.status || 'cold',
-        tags: c.tags || [],
-        source: c.source || 'import',
-      }));
+      // Create a contact list if a listName is provided
+      let contactListRecord: any = null;
+      if (listName) {
+        contactListRecord = await storage.createContactList({
+          organizationId: req.user.organizationId,
+          name: listName,
+          source: source || 'csv',
+          headers: headers || [],
+          contactCount: 0, // Will update after import
+        });
+      }
 
-      const results = await storage.createContactsBulk(contactsToCreate);
+      const contactsToCreate = contactList.map((c: any) => {
+        // Separate known fields from custom fields
+        const { email, firstName, first_name, lastName, last_name, company, jobTitle, job_title, status, tags, source: cSource, ...extraFields } = c;
+        return {
+          organizationId: req.user.organizationId,
+          email: email || '',
+          firstName: firstName || first_name || '',
+          lastName: lastName || last_name || '',
+          company: company || '',
+          jobTitle: jobTitle || job_title || '',
+          status: status || 'cold',
+          tags: tags || [],
+          source: cSource || source || 'import',
+          listId: contactListRecord?.id || null,
+          customFields: extraFields || {},
+        };
+      });
+
+      const results = await storage.createContactsBulk(contactsToCreate, contactListRecord?.id);
       const imported = results.filter((r: any) => !r._skipped).length;
       const skipped = results.filter((r: any) => r._skipped).length;
+
+      // Update the contact list count
+      if (contactListRecord) {
+        await storage.updateContactList(contactListRecord.id, { contactCount: imported });
+      }
 
       res.json({
         success: true,
         imported,
         skipped,
         total: contactList.length,
-        message: `Imported ${imported} contacts, ${skipped} duplicates skipped`,
+        listId: contactListRecord?.id || null,
+        listName: contactListRecord?.name || null,
+        message: `Imported ${imported} contacts${contactListRecord ? ` to list "${contactListRecord.name}"` : ''}, ${skipped} duplicates skipped`,
       });
     } catch (error) {
+      console.error('Import error:', error);
       res.status(500).json({ message: 'Failed to import contacts' });
     }
   });
@@ -1357,7 +1418,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const companyCol = headers.findIndex(h => /company|organization|org|business/i.test(h));
       const nameCol = headers.findIndex(h => /^name$/i.test(h));
 
-      // Build contacts from data
+      // Build contacts from data - include ALL column headers as fields
+      const mappedColIndices = new Set([emailCol, firstNameCol, lastNameCol, companyCol, nameCol].filter(i => i >= 0));
       const contacts = dataRows
         .filter(row => {
           const email = emailCol >= 0 ? row[emailCol] : '';
@@ -1374,15 +1436,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
             lastName = parts.slice(1).join(' ') || '';
           }
 
-          return {
+          // Build contact with all columns preserved
+          const contact: Record<string, any> = {
             email: emailCol >= 0 ? (row[emailCol] || '').trim() : '',
             firstName: firstName.trim(),
             lastName: lastName.trim(),
             company: companyCol >= 0 ? (row[companyCol] || '').trim() : '',
           };
+
+          // Add all unmapped columns as extra fields (preserved for import)
+          headers.forEach((header, idx) => {
+            if (!mappedColIndices.has(idx) && row[idx]) {
+              contact[header] = row[idx].trim();
+            }
+          });
+
+          return contact;
         });
 
-      console.log('[sheets/fetch-data] Found', contacts.length, 'contacts from', dataRows.length, 'rows');
+      console.log('[sheets/fetch-data] Found', contacts.length, 'contacts from', dataRows.length, 'rows with', headers.length, 'columns');
 
       return res.json({
         headers,
@@ -1390,6 +1462,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         contacts,
         totalRows: dataRows.length,
         validContacts: contacts.length,
+        allHeaders: headers,
         columnMapping: {
           email: emailCol >= 0 ? headers[emailCol] : null,
           firstName: firstNameCol >= 0 ? headers[firstNameCol] : (nameCol >= 0 ? headers[nameCol] : null),

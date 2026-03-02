@@ -124,7 +124,20 @@ export interface Contact {
   status: 'cold' | 'warm' | 'hot' | 'replied' | 'unsubscribed';
   score: number;
   tags?: string[];
+  listId?: string;
+  customFields?: Record<string, any>;
+  source?: string;
   createdAt: string;
+}
+
+export interface ContactList {
+  id: string;
+  name: string;
+  source: 'csv' | 'google-sheets' | 'manual';
+  headers: string[];
+  contactCount: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ContactSegment {
