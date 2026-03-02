@@ -30,8 +30,12 @@ function createOAuth2Client(config: { clientId: string; clientSecret: string; re
 
 // Detect public base URL from request headers
 function getBaseUrlFromRequest(req: any): string {
-  const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+  let proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
   const host = req.headers['x-forwarded-host'] || req.headers['host'];
+  // Force HTTPS for non-localhost hosts (sandbox proxies, production domains)
+  if (host && !host.startsWith('localhost') && !host.startsWith('127.0.0.1')) {
+    proto = 'https';
+  }
   return `${proto}://${host}`;
 }
 
