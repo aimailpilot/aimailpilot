@@ -31,6 +31,7 @@ import TemplateManager from "./template-manager";
 import FollowupSequenceBuilder from "./followup-builder";
 import CampaignDetailPage from "./campaign-detail";
 import AdvancedSettings from "./advanced-settings";
+import AccountSettings from "./account-settings";
 
 type ViewType = 'campaigns' | 'templates' | 'contacts' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings';
 
@@ -791,65 +792,9 @@ export default function MailMeteorDashboard() {
             <LiveTrackingFeed dashStats={dashStats} />
           )}
 
-          {/* Account */}
+          {/* Account - Full Account Settings with Quotas, AI Advisor, Reply Tracking */}
           {viewMode === 'dashboard' && currentView === 'account' && (
-            <div className="p-6">
-              <div className="max-w-2xl space-y-6">
-                <Card className="border-gray-200/60 overflow-hidden">
-                  <div className="bg-gradient-to-r from-blue-600 to-indigo-600 px-6 py-8">
-                    <div className="flex items-center gap-4">
-                      <Avatar className="h-16 w-16 border-2 border-white/30">
-                        {user?.picture ? <AvatarImage src={user.picture} /> : null}
-                        <AvatarFallback className="bg-white/20 text-white text-xl font-bold">
-                          {user?.name?.[0] || 'U'}
-                        </AvatarFallback>
-                      </Avatar>
-                      <div>
-                        <h2 className="text-xl font-bold text-white">{user?.name || 'Demo User'}</h2>
-                        <p className="text-blue-100 text-sm">{user?.email || 'demo@mailflow.app'}</p>
-                      </div>
-                    </div>
-                  </div>
-                  <CardContent className="p-6">
-                    <div className="divide-y divide-gray-100">
-                      {[
-                        { label: 'Plan', value: 'MailFlow Pro', extra: <Badge className="bg-blue-50 text-blue-700 border-blue-200 ml-2">Active</Badge> },
-                        { label: 'Daily Quota', value: '2,000 emails/day' },
-                        { label: 'Provider', value: user?.provider === 'google' ? 'Google' : user?.provider === 'microsoft' ? 'Microsoft' : 'Demo' },
-                        { label: 'Member Since', value: 'March 2026' },
-                      ].map((item, i) => (
-                        <div key={i} className="flex items-center justify-between py-3.5">
-                          <span className="text-sm text-gray-500">{item.label}</span>
-                          <span className="text-sm font-semibold text-gray-900 flex items-center">{item.value}{item.extra}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </CardContent>
-                </Card>
-
-                <Card className="border-gray-200/60">
-                  <CardContent className="p-6">
-                    <h3 className="font-semibold text-gray-900 mb-4">Quick Actions</h3>
-                    <div className="grid grid-cols-2 gap-3">
-                      <Button variant="outline" className="justify-start h-auto py-3" onClick={() => setCurrentView('setup')}>
-                        <Inbox className="h-4 w-4 mr-2 text-blue-600" />
-                        <div className="text-left">
-                          <div className="text-sm font-medium">Email Accounts</div>
-                          <div className="text-xs text-gray-400">Manage SMTP connections</div>
-                        </div>
-                      </Button>
-                      <Button variant="outline" className="justify-start h-auto py-3" onClick={() => setCurrentView('analytics')}>
-                        <BarChart3 className="h-4 w-4 mr-2 text-purple-600" />
-                        <div className="text-left">
-                          <div className="text-sm font-medium">Analytics</div>
-                          <div className="text-xs text-gray-400">View performance data</div>
-                        </div>
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
-              </div>
-            </div>
+            <AccountSettings />
           )}
 
           {/* Billing */}

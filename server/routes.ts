@@ -6,6 +6,7 @@ import cookieParser from "cookie-parser";
 import MemoryStore from "memorystore";
 import { smtpEmailService, SMTP_PRESETS, type SmtpConfig } from "./services/smtp-email-service";
 import { campaignEngine } from "./services/campaign-engine";
+import { gmailReplyTracker } from "./services/gmail-reply-tracker";
 import { OAuth2Client } from 'google-auth-library';
 
 // In-memory user store for simplified authentication
@@ -159,6 +160,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         scope: [
           'https://www.googleapis.com/auth/userinfo.email',
           'https://www.googleapis.com/auth/userinfo.profile',
+          'https://www.googleapis.com/auth/gmail.readonly',
           'openid',
         ],
         state: JSON.stringify({ redirectUri }),
@@ -259,6 +261,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token || null,
       };
+
+      // Store Gmail tokens in api_settings for reply tracking service
+      const defaultOrgIdForTokens = '550e8400-e29b-41d4-a716-446655440001';
+      try {
+        if (tokens.access_token) {
+          await storage.setApiSetting(defaultOrgIdForTokens, 'gmail_access_token', tokens.access_token);
+        }
+        if (tokens.refresh_token) {
+          await storage.setApiSetting(defaultOrgIdForTokens, 'gmail_refresh_token', tokens.refresh_token);
+        }
+        if (tokens.expiry_date) {
+          await storage.setApiSetting(defaultOrgIdForTokens, 'gmail_token_expiry', String(tokens.expiry_date));
+        }
+        await storage.setApiSetting(defaultOrgIdForTokens, 'gmail_user_email', email);
+        console.log('[Auth] Stored Gmail tokens for reply tracking');
+
+        // Start automatic reply checking
+        gmailReplyTracker.startAutoCheck(defaultOrgIdForTokens, 5);
+      } catch (tokenStoreError) {
+        console.error('[Auth] Failed to store Gmail tokens:', tokenStoreError);
+      }
 
       // Set session and cookies
       loggedInUsers.add(userId);
@@ -418,7 +441,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get('/api/email-accounts/:id', async (req: any, res) => {
+  app.get('/api/email-accounts/:id', async (req: any, res, next: any) => {
+    // Skip if this is a known static sub-path (handled by later routes)
+    if (['quota-summary', 'recommend'].includes(req.params.id)) {
+      return next();
+    }
     try {
       const account = await storage.getEmailAccount(req.params.id);
       if (!account) return res.status(404).json({ message: 'Not found' });
@@ -1159,6 +1186,89 @@ Which account should I use and why? If I need to split across accounts, provide 
     } catch (error) {
       console.error('Reply tracking error:', error);
       res.json({ success: false });
+    }
+  });
+
+  // ========== GMAIL REPLY TRACKING ==========
+
+  // Check for replies via Gmail API (manual trigger)
+  app.post('/api/reply-tracking/check', requireAuth, async (req: any, res) => {
+    try {
+      const lookbackMinutes = parseInt(req.body.lookbackMinutes) || 120;
+      const result = await gmailReplyTracker.checkForReplies(req.user.organizationId, lookbackMinutes);
+      res.json(result);
+    } catch (error) {
+      console.error('Reply check error:', error);
+      res.status(500).json({ message: 'Failed to check for replies' });
+    }
+  });
+
+  // Get reply tracking status
+  app.get('/api/reply-tracking/status', requireAuth, async (req: any, res) => {
+    try {
+      const status = gmailReplyTracker.getStatus();
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      const hasGmailToken = !!(settings.gmail_access_token || settings.gmail_refresh_token);
+      const gmailEmail = settings.gmail_user_email || null;
+
+      res.json({
+        ...status,
+        configured: hasGmailToken,
+        gmailEmail,
+        hasRefreshToken: !!settings.gmail_refresh_token,
+      });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to get tracking status' });
+    }
+  });
+
+  // Start auto-polling for replies
+  app.post('/api/reply-tracking/start', requireAuth, async (req: any, res) => {
+    try {
+      const intervalMinutes = parseInt(req.body.intervalMinutes) || 5;
+      gmailReplyTracker.startAutoCheck(req.user.organizationId, intervalMinutes);
+      res.json({ success: true, intervalMinutes });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to start reply tracking' });
+    }
+  });
+
+  // Stop auto-polling for replies
+  app.post('/api/reply-tracking/stop', requireAuth, async (req: any, res) => {
+    try {
+      gmailReplyTracker.stopAutoCheck();
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to stop reply tracking' });
+    }
+  });
+
+  // Get recent reply events (enriched)
+  app.get('/api/reply-tracking/recent', requireAuth, async (req: any, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 50;
+      // Get reply-type tracking events
+      const allEvents = await storage.getAllTrackingEvents(req.user.organizationId, 200);
+      const replyEvents = allEvents
+        .filter((e: any) => e.type === 'reply')
+        .slice(0, limit);
+      
+      // Enrich with contact and campaign info
+      const enriched = await Promise.all(replyEvents.map(async (event: any) => {
+        const contact = event.contactId ? await storage.getContact(event.contactId) : null;
+        const campaign = event.campaignId ? await storage.getCampaign(event.campaignId) : null;
+        const metadata = typeof event.metadata === 'string' ? JSON.parse(event.metadata) : event.metadata;
+        return {
+          ...event,
+          metadata,
+          contact: contact ? { email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company } : null,
+          campaignName: campaign?.name || 'Unknown Campaign',
+        };
+      }));
+      
+      res.json(enriched);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch reply events' });
     }
   });
 
@@ -2554,6 +2664,17 @@ Which account should I use and why? If I need to split across accounts, provide 
       secure: config.secure,
     })));
   });
+
+  // Start Gmail reply tracking auto-check if tokens are available
+  try {
+    const orgSettings = await storage.getApiSettings('550e8400-e29b-41d4-a716-446655440001');
+    if (orgSettings.gmail_access_token || orgSettings.gmail_refresh_token) {
+      console.log('[ReplyTracker] Gmail tokens found, starting auto-check...');
+      gmailReplyTracker.startAutoCheck('550e8400-e29b-41d4-a716-446655440001', 5);
+    }
+  } catch (e) {
+    console.error('[ReplyTracker] Failed to start auto-check on startup:', e);
+  }
 
   const httpServer = createServer(app);
   return httpServer;
