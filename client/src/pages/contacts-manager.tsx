@@ -329,7 +329,7 @@ export default function ContactsManager() {
     }).filter(c => c.email && c.email.includes('@'));
 
     try {
-      const listName = importToExistingList
+      const listName = (importToExistingList && importToExistingList !== '_select')
         ? undefined
         : (importListName || importFileName || 'Imported Contacts');
 
@@ -338,7 +338,7 @@ export default function ContactsManager() {
         body: JSON.stringify({
           contacts,
           listName,
-          existingListId: importToExistingList || undefined,
+          existingListId: (importToExistingList && importToExistingList !== '_select') ? importToExistingList : undefined,
           headers: csvHeaders,
           source: 'csv',
         }),
@@ -413,27 +413,66 @@ export default function ContactsManager() {
       });
       if (res.ok) {
         const data = await res.json();
-        if (data.headers && data.rows) {
-          setGsHeaders(data.headers);
-          setGsData(data.rows);
+        console.log('[GS] fetch-data response keys:', Object.keys(data));
+
+        // Backend returns: { headers, values (raw CSV rows), contacts (mapped), totalRows, validContacts, allHeaders, columnMapping }
+        // We need headers and row objects for the column mapping UI
+        const hdrs = data.headers || data.allHeaders || [];
+
+        // Build row objects from raw CSV values (values[0] = headers, rest = data rows)
+        let rowObjects: Record<string, string>[] = [];
+        if (data.values && data.values.length > 1) {
+          const headerRow = data.values[0];
+          rowObjects = data.values.slice(1).map((row: string[]) => {
+            const obj: Record<string, string> = {};
+            headerRow.forEach((h: string, i: number) => { obj[h] = row[i] || ''; });
+            return obj;
+          });
+        } else if (data.contacts && data.contacts.length > 0) {
+          // Fallback: use the pre-mapped contacts array
+          rowObjects = data.contacts;
+        } else if (data.rows && data.rows.length > 0) {
+          // Legacy format
+          rowObjects = data.rows;
+        }
+
+        if (hdrs.length > 0 && rowObjects.length > 0) {
+          setGsHeaders(hdrs);
+          setGsData(rowObjects);
+
+          // Auto-map columns: prefer backend's columnMapping, then do client-side detection
           const mapping: Record<string, string> = {};
-          data.headers.forEach((h: string) => {
+          if (data.columnMapping) {
+            if (data.columnMapping.email) mapping.email = data.columnMapping.email;
+            if (data.columnMapping.firstName) mapping.firstName = data.columnMapping.firstName;
+            if (data.columnMapping.lastName) mapping.lastName = data.columnMapping.lastName;
+            if (data.columnMapping.company) mapping.company = data.columnMapping.company;
+          }
+          // Fill in any missing mappings with client-side heuristics
+          hdrs.forEach((h: string) => {
             const lower = h.toLowerCase();
-            if (lower.includes('email') || lower === 'e-mail') mapping.email = h;
-            else if ((lower.includes('first') && lower.includes('name')) || lower === 'first') mapping.firstName = h;
-            else if ((lower.includes('last') && lower.includes('name')) || lower === 'last' || lower === 'surname') mapping.lastName = h;
-            else if (lower === 'name' || lower === 'full name') mapping.firstName = h;
-            else if (lower.includes('company') || lower.includes('organization')) mapping.company = h;
-            else if (lower.includes('title') || lower.includes('position')) mapping.jobTitle = h;
+            if (!mapping.email && (lower.includes('email') || lower === 'e-mail')) mapping.email = h;
+            else if (!mapping.firstName && ((lower.includes('first') && lower.includes('name')) || lower === 'first')) mapping.firstName = h;
+            else if (!mapping.lastName && ((lower.includes('last') && lower.includes('name')) || lower === 'last' || lower === 'surname')) mapping.lastName = h;
+            else if (!mapping.firstName && (lower === 'name' || lower === 'full name')) mapping.firstName = h;
+            else if (!mapping.company && (lower.includes('company') || lower.includes('organization'))) mapping.company = h;
+            else if (!mapping.jobTitle && (lower.includes('title') || lower.includes('position') || lower.includes('designation'))) mapping.jobTitle = h;
           });
           setGsMapping(mapping);
+
           // Auto-set list name: prefer sheet title, then sheet tab name
           const title = sheetTitle || gsSheetTitle;
           const autoName = title || sheet.name || 'Google Sheet Import';
           if (!gsListName || gsListName === 'Google Sheet Import') setGsListName(autoName);
+        } else if (hdrs.length > 0) {
+          // Headers found but no data rows
+          setGsHeaders(hdrs);
+          setGsData([]);
         }
       }
-    } catch (e) { /* ignore */ }
+    } catch (e) {
+      console.error('[GS] Error loading sheet data:', e);
+    }
     setGsDataLoading(false);
   };
 
@@ -453,7 +492,7 @@ export default function ContactsManager() {
     }).filter(c => c.email && c.email.includes('@'));
 
     try {
-      const listName = gsToExistingList
+      const listName = (gsToExistingList && gsToExistingList !== '_select')
         ? undefined
         : (gsListName || gsSelectedSheet?.name || 'Google Sheet Import');
 
@@ -462,7 +501,7 @@ export default function ContactsManager() {
         body: JSON.stringify({
           contacts,
           listName,
-          existingListId: gsToExistingList || undefined,
+          existingListId: (gsToExistingList && gsToExistingList !== '_select') ? gsToExistingList : undefined,
           headers: gsHeaders,
           source: 'google_sheets',
         }),
@@ -1284,6 +1323,16 @@ export default function ContactsManager() {
                 <Loader2 className="h-6 w-6 animate-spin text-green-500" />
                 <span className="ml-2 text-sm text-gray-500">Loading sheet data...</span>
               </div>
+            )}
+
+            {/* Data loaded summary */}
+            {gsHeaders.length > 0 && gsData.length > 0 && !gsDataLoading && (
+              <Alert className="border-green-200 bg-green-50 py-2">
+                <CheckCircle className="h-4 w-4 text-green-600" />
+                <AlertDescription className="text-sm text-green-700">
+                  Loaded <strong>{gsData.length}</strong> rows with <strong>{gsHeaders.length}</strong> columns from sheet "{gsSelectedSheet?.name || 'Sheet'}"
+                </AlertDescription>
+              </Alert>
             )}
 
             {gsHeaders.length > 0 && !gsDataLoading && renderColumnMapping(gsHeaders, gsData, gsMapping, setGsMapping, 'sheets')}
