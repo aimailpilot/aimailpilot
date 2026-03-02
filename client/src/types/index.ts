@@ -19,7 +19,7 @@ export interface Campaign {
   id: string;
   name: string;
   description?: string;
-  status: 'draft' | 'scheduled' | 'active' | 'paused' | 'completed';
+  status: 'draft' | 'scheduled' | 'active' | 'paused' | 'completed' | 'archived';
   totalRecipients: number;
   sentCount: number;
   openedCount: number;
@@ -32,6 +32,10 @@ export interface Campaign {
   emailAccountId?: string;
   templateId?: string;
   contactIds?: string[];
+  trackOpens?: boolean;
+  trackClicks?: boolean;
+  includeUnsubscribe?: boolean;
+  scheduledAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -88,12 +92,39 @@ export interface TrackingEvent {
   campaignName?: string;
 }
 
+export interface StepAnalytics {
+  stepNumber: number;
+  label: string;
+  description: string | null;
+  sent: number;
+  opened: number;
+  clicked: number;
+  replied: number;
+  bounced: number;
+  unsubscribed: number;
+  openRate: string;
+  clickRate: string;
+  replyRate: string;
+}
+
+export interface ActivityTimelineItem {
+  type: string;
+  label: string;
+  timestamp: string;
+  icon: string;
+}
+
 export interface CampaignDetail {
   campaign: Campaign;
   analytics: CampaignAnalytics;
   messages: CampaignMessage[];
   totalMessages: number;
   recentEvents: TrackingEvent[];
+  stepAnalytics: StepAnalytics[];
+  followupSequences: any[];
+  emailAccount: { id: string; email: string; displayName?: string; provider: string } | null;
+  activityTimeline: ActivityTimelineItem[];
+  trackingBaseUrl?: string;
 }
 
 export interface CampaignAnalytics {

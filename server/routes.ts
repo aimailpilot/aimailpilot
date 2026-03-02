@@ -63,12 +63,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.set('trust proxy', 1);
   app.use(cookieParser());
 
+  // Load persisted tracking base URL from settings on startup
+  try {
+    const orgSettings = await storage.getApiSettings('550e8400-e29b-41d4-a716-446655440001');
+    if (orgSettings.tracking_base_url) {
+      campaignEngine.setPublicBaseUrl(orgSettings.tracking_base_url);
+      console.log('[Tracking] Loaded base URL from settings:', orgSettings.tracking_base_url);
+    }
+  } catch (e) { /* ignore on startup */ }
+
   // Auto-detect public URL on every request for tracking link generation
-  app.use((req: any, _res: any, next: any) => {
+  // Only auto-detect if no manual tracking_base_url is configured
+  app.use(async (req: any, _res: any, next: any) => {
     const host = req.headers['x-forwarded-host'] || req.headers['host'];
     if (host && !host.includes('localhost')) {
       const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
-      campaignEngine.setPublicBaseUrl(`${proto}://${host}`);
+      const detectedUrl = `${proto}://${host}`;
+      // Always update to latest detected URL (ensures HTTPS via setPublicBaseUrl)
+      campaignEngine.setPublicBaseUrl(detectedUrl);
     }
     next();
   });
@@ -762,15 +774,134 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const totalMessages = await storage.getCampaignMessagesTotalCount(req.params.id);
       const trackingEvents = await storage.getTrackingEvents(req.params.id);
 
+      // Step-by-step breakdown analytics
+      const stepNumbers = [...new Set(messages.map((m: any) => m.stepNumber || 0))].sort((a: number, b: number) => a - b);
+      const stepAnalytics = stepNumbers.map((stepNum: number) => {
+        const stepMsgs = messages.filter((m: any) => (m.stepNumber || 0) === stepNum);
+        const sent = stepMsgs.filter((m: any) => m.status === 'sent' || m.status === 'sending').length;
+        const opened = stepMsgs.filter((m: any) => m.openedAt || (m.openCount && m.openCount > 0)).length;
+        const clicked = stepMsgs.filter((m: any) => m.clickedAt || (m.clickCount && m.clickCount > 0)).length;
+        const replied = stepMsgs.filter((m: any) => m.repliedAt || (m.replyCount && m.replyCount > 0)).length;
+        const bounced = stepMsgs.filter((m: any) => m.status === 'failed' || m.status === 'bounced').length;
+        const unsub = 0; // tracked at campaign level
+        return {
+          stepNumber: stepNum,
+          label: stepNum === 0 ? 'Step 1' : `Step ${stepNum + 1}`,
+          description: stepNum === 0 ? 'Sent at campaign creation' : null, // Will be enhanced with followup info
+          sent, opened, clicked, replied, bounced, unsubscribed: unsub,
+          openRate: sent > 0 ? ((opened / sent) * 100).toFixed(1) : '0',
+          clickRate: sent > 0 ? ((clicked / sent) * 100).toFixed(1) : '0',
+          replyRate: sent > 0 ? ((replied / sent) * 100).toFixed(1) : '0',
+        };
+      });
+
+      // Get follow-up sequences for this campaign
+      let followupSequences: any[] = [];
+      try {
+        const campaignFollowups = await storage.getCampaignFollowups(req.params.id);
+        for (const cf of campaignFollowups) {
+          const seq = await storage.getFollowupSequence(cf.sequenceId);
+          if (seq) {
+            const steps = await storage.getFollowupSteps(seq.id);
+            followupSequences.push({ ...seq, steps });
+            // Enhance step analytics with follow-up info (Mailmeteor-style description)
+            for (const step of steps) {
+              const sa = stepAnalytics.find((s: any) => s.stepNumber === (step as any).stepNumber);
+              if (sa) {
+                const triggerLabels: Record<string, string> = {
+                  no_reply: 'If no reply', no_open: 'If no open', no_click: 'If no click',
+                  opened: 'If opened', clicked: 'If clicked', replied: 'If replied',
+                  always: 'Always',
+                };
+                const trigger = triggerLabels[(step as any).trigger] || (step as any).trigger;
+                const days = (step as any).delayDays || 0;
+                const hours = (step as any).delayHours || 0;
+                const delayParts = [];
+                if (days > 0) delayParts.push(`${days} day${days > 1 ? 's' : ''}`);
+                if (hours > 0) delayParts.push(`${hours} hour${hours > 1 ? 's' : ''}`);
+                const delayStr = delayParts.length > 0 ? delayParts.join(' ') : 'immediate';
+                sa.description = `${trigger} – ${delayStr}`;
+              }
+            }
+          }
+        }
+      } catch (e) { /* ignore */ }
+
+      // Get email account info
+      let emailAccount: any = null;
+      if (campaign.emailAccountId) {
+        try {
+          const acct = await storage.getEmailAccount(campaign.emailAccountId);
+          if (acct) emailAccount = { id: acct.id, email: acct.email, displayName: acct.displayName, provider: acct.provider };
+        } catch (e) { /* ignore */ }
+      }
+
+      // Build activity timeline from tracking events + campaign timestamps
+      const activityTimeline: any[] = [];
+      if (campaign.status === 'completed' || campaign.status === 'archived') {
+        activityTimeline.push({ type: 'ended', label: 'Campaign has ended', timestamp: campaign.updatedAt, icon: 'check' });
+      }
+      if (campaign.status === 'paused') {
+        activityTimeline.push({ type: 'paused', label: 'Campaign was paused', timestamp: campaign.updatedAt, icon: 'pause' });
+      }
+      if (campaign.updatedAt && campaign.updatedAt !== campaign.createdAt && campaign.status !== 'completed' && campaign.status !== 'archived' && campaign.status !== 'paused') {
+        activityTimeline.push({ type: 'updated', label: 'Campaign was updated', timestamp: campaign.updatedAt, icon: 'edit' });
+      }
+      if (campaign.scheduledAt) {
+        activityTimeline.push({ type: 'scheduled', label: 'Campaign was scheduled', timestamp: campaign.scheduledAt, icon: 'clock' });
+      }
+      activityTimeline.push({ type: 'created', label: 'Campaign started', timestamp: campaign.createdAt, icon: 'play' });
+
       res.json({
         campaign,
         analytics,
         messages,
         totalMessages,
         recentEvents: trackingEvents.slice(0, 50),
+        stepAnalytics,
+        followupSequences,
+        emailAccount,
+        activityTimeline,
+        trackingBaseUrl: campaignEngine.getBaseUrl(),
       });
     } catch (error) {
+      console.error('Campaign detail error:', error);
       res.status(500).json({ message: 'Failed to fetch campaign detail' });
+    }
+  });
+
+  // Duplicate a campaign
+  app.post('/api/campaigns/:id/duplicate', async (req: any, res) => {
+    try {
+      const original = await storage.getCampaign(req.params.id);
+      if (!original) return res.status(404).json({ message: 'Campaign not found' });
+      const dupe = await storage.createCampaign({
+        organizationId: original.organizationId,
+        name: `${original.name} (Copy)`,
+        description: original.description,
+        subject: original.subject,
+        content: original.content,
+        emailAccountId: original.emailAccountId,
+        templateId: original.templateId,
+        contactIds: original.contactIds,
+        segmentId: original.segmentId,
+        trackOpens: original.trackOpens,
+        trackClicks: original.trackClicks,
+        includeUnsubscribe: original.includeUnsubscribe,
+      });
+      res.json(dupe);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to duplicate campaign' });
+    }
+  });
+
+  // Archive a campaign
+  app.post('/api/campaigns/:id/archive', async (req: any, res) => {
+    try {
+      await storage.updateCampaign(req.params.id, { status: 'archived' });
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to archive campaign' });
     }
   });
 
@@ -1616,6 +1747,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json({ success: true, message: 'Settings saved successfully' });
     } catch (error) {
       res.status(500).json({ message: 'Failed to save settings' });
+    }
+  });
+
+  // Get/set tracking base URL
+  app.get('/api/settings/tracking-url', async (req: any, res) => {
+    try {
+      const currentUrl = campaignEngine.getBaseUrl();
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      res.json({
+        trackingBaseUrl: currentUrl,
+        configured: !!settings.tracking_base_url,
+        configuredUrl: settings.tracking_base_url || null,
+      });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch tracking URL' });
+    }
+  });
+
+  app.put('/api/settings/tracking-url', async (req: any, res) => {
+    try {
+      const { trackingBaseUrl } = req.body;
+      if (trackingBaseUrl) {
+        campaignEngine.setPublicBaseUrl(trackingBaseUrl);
+        await storage.setApiSettings(req.user.organizationId, { tracking_base_url: trackingBaseUrl });
+        res.json({ success: true, trackingBaseUrl: campaignEngine.getBaseUrl() });
+      } else {
+        // Clear manual config - will auto-detect from requests
+        await storage.setApiSettings(req.user.organizationId, { tracking_base_url: '' });
+        res.json({ success: true, trackingBaseUrl: campaignEngine.getBaseUrl() });
+      }
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to update tracking URL' });
     }
   });
 

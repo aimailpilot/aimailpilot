@@ -24,17 +24,30 @@ export class CampaignEngine {
 
   /**
    * Set the public base URL for tracking links (call from route handler with req info).
+   * Always forces HTTPS for non-localhost URLs since tracking pixels need to be loaded
+   * from external email clients which often require HTTPS.
    */
   setPublicBaseUrl(url: string): void {
-    this._publicBaseUrl = url.replace(/\/$/, '');
+    let cleanUrl = url.replace(/\/$/, '');
+    // Force HTTPS for any non-localhost URL (sandbox, production, etc.)
+    if (!cleanUrl.includes('localhost') && !cleanUrl.includes('127.0.0.1')) {
+      cleanUrl = cleanUrl.replace(/^http:\/\//, 'https://');
+    }
+    this._publicBaseUrl = cleanUrl;
   }
 
   /**
    * Get the base URL for tracking links.
-   * Uses the previously set public URL, env vars, or localhost as fallback.
+   * Priority: manually set URL > env vars > localhost fallback.
+   * All non-localhost URLs are forced to HTTPS.
    */
-  private getBaseUrl(): string {
-    return this._publicBaseUrl || process.env.BASE_URL || process.env.PUBLIC_URL || `http://localhost:${process.env.PORT || 3000}`;
+  getBaseUrl(): string {
+    const url = this._publicBaseUrl || process.env.BASE_URL || process.env.PUBLIC_URL || `http://localhost:${process.env.PORT || 3000}`;
+    // Force HTTPS for non-localhost
+    if (!url.includes('localhost') && !url.includes('127.0.0.1')) {
+      return url.replace(/^http:\/\//, 'https://');
+    }
+    return url;
   }
 
   /**
