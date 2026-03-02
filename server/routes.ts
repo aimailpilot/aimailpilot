@@ -616,6 +616,200 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // ========== EMAIL ACCOUNT QUOTA SUMMARY & AI RECOMMENDATION ==========
+
+  app.get('/api/email-accounts/quota-summary', async (req: any, res) => {
+    try {
+      const accounts = await storage.getEmailAccounts(req.user.organizationId);
+      const accountQuotas = accounts.map((a: any) => {
+        const quota = smtpEmailService.getDailyQuota(a.id, a.provider);
+        return {
+          id: a.id,
+          email: a.email,
+          displayName: a.displayName || a.email,
+          provider: a.provider,
+          isActive: a.isActive,
+          dailyLimit: quota.daily,
+          dailySent: quota.sent,
+          remaining: quota.remaining,
+          usagePercent: quota.daily > 0 ? Math.round((quota.sent / quota.daily) * 100) : 0,
+          resetTime: 'Midnight UTC',
+        };
+      });
+
+      const totalLimit = accountQuotas.reduce((s: number, a: any) => s + a.dailyLimit, 0);
+      const totalSent = accountQuotas.reduce((s: number, a: any) => s + a.dailySent, 0);
+      const totalRemaining = accountQuotas.reduce((s: number, a: any) => s + a.remaining, 0);
+
+      res.json({
+        accounts: accountQuotas,
+        summary: {
+          totalAccounts: accountQuotas.length,
+          activeAccounts: accountQuotas.filter((a: any) => a.isActive).length,
+          totalDailyLimit: totalLimit,
+          totalDailySent: totalSent,
+          totalRemaining,
+          overallUsagePercent: totalLimit > 0 ? Math.round((totalSent / totalLimit) * 100) : 0,
+        },
+      });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch quota summary' });
+    }
+  });
+
+  app.post('/api/email-accounts/recommend', async (req: any, res) => {
+    try {
+      const { recipientCount, campaignType, campaignName } = req.body;
+      const accounts = await storage.getEmailAccounts(req.user.organizationId);
+
+      const accountQuotas = accounts.map((a: any) => {
+        const quota = smtpEmailService.getDailyQuota(a.id, a.provider);
+        return {
+          id: a.id,
+          email: a.email,
+          displayName: a.displayName || a.email,
+          provider: a.provider,
+          isActive: a.isActive,
+          dailyLimit: quota.daily,
+          dailySent: quota.sent,
+          remaining: quota.remaining,
+          usagePercent: quota.daily > 0 ? Math.round((quota.sent / quota.daily) * 100) : 0,
+        };
+      });
+
+      // Try Azure OpenAI for intelligent recommendation
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      const endpoint = settings.azure_openai_endpoint;
+      const apiKey = settings.azure_openai_api_key;
+      const deploymentName = settings.azure_openai_deployment;
+      const apiVersion = settings.azure_openai_api_version || '2024-08-01-preview';
+
+      if (endpoint && apiKey && deploymentName) {
+        const systemPrompt = `You are an AI email campaign advisor. Analyze the user's email accounts and their quotas, then recommend the best account(s) to use for sending a campaign. Consider:
+1. Remaining daily quota vs number of recipients
+2. Provider reputation (Gmail has high deliverability, Outlook is good for business)
+3. Whether one account can handle all recipients or if splitting is needed
+4. Usage patterns - avoid accounts near their daily limit
+5. Account status (only recommend active accounts)
+
+Return a JSON response with this exact structure:
+{
+  "recommendedAccountId": "id of the best account",
+  "recommendedAccountEmail": "email of the best account",
+  "reason": "Brief explanation why this account is recommended",
+  "strategy": "single" or "split",
+  "splitPlan": [{"accountId": "...", "email": "...", "count": 123, "reason": "..."}] (only if strategy is split),
+  "warnings": ["any warnings about quota limits or risks"],
+  "tips": ["helpful tips for better deliverability"]
+}`;
+
+        const userPrompt = `I need to send a campaign "${campaignName || 'Email Campaign'}" (type: ${campaignType || 'marketing'}) to ${recipientCount || 'unknown number of'} recipients.
+
+Here are my email accounts and their current quotas:
+${JSON.stringify(accountQuotas, null, 2)}
+
+Which account should I use and why? If I need to split across accounts, provide a split plan.`;
+
+        try {
+          const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${deploymentName}/chat/completions?api-version=${apiVersion}`;
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'api-key': apiKey },
+            body: JSON.stringify({
+              messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: userPrompt },
+              ],
+              max_tokens: 800,
+              temperature: 0.3,
+              response_format: { type: 'json_object' },
+            }),
+          });
+
+          if (response.ok) {
+            const data = await response.json() as any;
+            const content = data?.choices?.[0]?.message?.content || '';
+            try {
+              const recommendation = JSON.parse(content);
+              return res.json({
+                ...recommendation,
+                accounts: accountQuotas,
+                provider: 'azure-openai',
+                model: data?.model || deploymentName,
+              });
+            } catch (parseError) {
+              // LLM returned non-JSON, use rule-based fallback
+              console.error('Failed to parse LLM recommendation:', content);
+            }
+          }
+        } catch (llmError) {
+          console.error('Azure OpenAI recommendation failed:', llmError);
+        }
+      }
+
+      // Fallback: rule-based recommendation
+      const activeAccounts = accountQuotas.filter((a: any) => a.isActive && a.remaining > 0);
+      if (activeAccounts.length === 0) {
+        return res.json({
+          recommendedAccountId: null,
+          recommendedAccountEmail: null,
+          reason: 'No active accounts with available quota. Please add an email account or wait for quota reset.',
+          strategy: 'none',
+          warnings: ['All accounts have exhausted their daily quota or are inactive.'],
+          tips: ['Add more email accounts to increase your sending capacity.', 'Wait until midnight UTC for quota reset.'],
+          accounts: accountQuotas,
+          provider: 'rule-based',
+        });
+      }
+
+      // Sort by remaining quota (descending)
+      activeAccounts.sort((a: any, b: any) => b.remaining - a.remaining);
+      const best = activeAccounts[0];
+      const count = recipientCount || 0;
+
+      if (count <= best.remaining) {
+        return res.json({
+          recommendedAccountId: best.id,
+          recommendedAccountEmail: best.email,
+          reason: `${best.email} has ${best.remaining} emails remaining today (${best.dailySent}/${best.dailyLimit} used). Enough capacity for ${count || 'your'} recipients.`,
+          strategy: 'single',
+          warnings: best.usagePercent > 70 ? [`${best.email} is at ${best.usagePercent}% of daily limit.`] : [],
+          tips: ['Consider sending during business hours for better open rates.'],
+          accounts: accountQuotas,
+          provider: 'rule-based',
+        });
+      }
+
+      // Need to split
+      const splitPlan: any[] = [];
+      let remaining = count;
+      for (const acct of activeAccounts) {
+        if (remaining <= 0) break;
+        const assign = Math.min(remaining, acct.remaining);
+        if (assign > 0) {
+          splitPlan.push({ accountId: acct.id, email: acct.email, count: assign, reason: `${acct.remaining} available` });
+          remaining -= assign;
+        }
+      }
+
+      const totalAvailable = activeAccounts.reduce((s: any, a: any) => s + a.remaining, 0);
+      return res.json({
+        recommendedAccountId: best.id,
+        recommendedAccountEmail: best.email,
+        reason: `No single account has enough quota for ${count} recipients. Recommend splitting across ${splitPlan.length} accounts.`,
+        strategy: remaining > 0 ? 'insufficient' : 'split',
+        splitPlan,
+        warnings: remaining > 0 ? [`Total available quota (${totalAvailable}) is less than recipients (${count}). ${remaining} emails won't be sent.`] : [],
+        tips: ['Consider splitting your campaign into multiple sends across different days.'],
+        accounts: accountQuotas,
+        provider: 'rule-based',
+      });
+    } catch (error) {
+      console.error('Recommendation error:', error);
+      res.status(500).json({ message: 'Failed to generate recommendation' });
+    }
+  });
+
   // ========== CAMPAIGNS ==========
 
   app.get('/api/campaigns', async (req: any, res) => {

@@ -143,6 +143,11 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
   // Template dialog
   const [templateTab, setTemplateTab] = useState<'recent' | 'all'>('recent');
 
+  // Quota & AI recommendation for account
+  const [accountQuotas, setAccountQuotas] = useState<Record<string, { dailyLimit: number; dailySent: number; remaining: number; usagePercent: number; provider: string }>>({});
+  const [aiRecBanner, setAiRecBanner] = useState<{ accountId: string; email: string; reason: string; provider: string } | null>(null);
+  const [loadingAiRec, setLoadingAiRec] = useState(false);
+
   // AI Generation
   const [showAiPanel, setShowAiPanel] = useState(false);
   const [aiPrompt, setAiPrompt] = useState('');
@@ -175,6 +180,17 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
           fetch('/api/templates', { credentials: 'include' }),
           fetch('/api/contacts', { credentials: 'include' }),
         ]);
+        // Fetch quotas
+        const quotaRes = await fetch('/api/email-accounts/quota-summary', { credentials: 'include' }).catch(() => null);
+        if (quotaRes?.ok) {
+          const qData = await quotaRes.json();
+          const qMap: Record<string, any> = {};
+          (qData.accounts || []).forEach((a: any) => {
+            qMap[a.id] = { dailyLimit: a.dailyLimit, dailySent: a.dailySent, remaining: a.remaining, usagePercent: a.usagePercent, provider: a.provider };
+          });
+          setAccountQuotas(qMap);
+        }
+
         if (acctRes.ok) {
           const accts = await acctRes.json();
           setEmailAccounts(accts);
@@ -277,6 +293,32 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
   // Recipient count
   const recipientCount = selectedContacts.length;
   const selectedAccount = emailAccounts.find(a => a.id === emailAccountId);
+  const selectedQuota = emailAccountId ? accountQuotas[emailAccountId] : null;
+
+  // AI account recommendation
+  const handleAiRecommend = async () => {
+    setLoadingAiRec(true);
+    setAiRecBanner(null);
+    try {
+      const res = await fetch('/api/email-accounts/recommend', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          recipientCount: recipientCount || 100,
+          campaignType: 'marketing',
+          campaignName: campaignName || 'Email Campaign',
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.recommendedAccountId) {
+          setAiRecBanner({ accountId: data.recommendedAccountId, email: data.recommendedAccountEmail, reason: data.reason, provider: data.provider });
+        }
+      }
+    } catch (e) {}
+    setLoadingAiRec(false);
+  };
 
   // Preview email - now previews ALL steps
   const handleShowPreview = async () => {
@@ -611,21 +653,35 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
             {/* From / To / Subject fields */}
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm mb-4">
               {/* From */}
-              <div className="flex items-center px-5 py-3 border-b border-gray-100">
-                <span className="text-sm text-gray-400 w-16 flex-shrink-0">From</span>
-                <select
-                  value={emailAccountId}
-                  onChange={e => setEmailAccountId(e.target.value)}
-                  className="flex-1 text-sm font-medium text-gray-900 bg-transparent border-0 outline-none cursor-pointer appearance-none"
-                >
-                  {emailAccounts.length === 0 && <option value="">No accounts -- add one in Accounts</option>}
-                  {emailAccounts.map(a => (
-                    <option key={a.id} value={a.id}>
-                      {a.displayName || a.email} &lt;{a.email}&gt;
-                    </option>
-                  ))}
-                </select>
-                {/* Three-dot menu */}
+              <div className="border-b border-gray-100">
+                <div className="flex items-center px-5 py-3">
+                  <span className="text-sm text-gray-400 w-16 flex-shrink-0">From</span>
+                  <select
+                    value={emailAccountId}
+                    onChange={e => { setEmailAccountId(e.target.value); setAiRecBanner(null); }}
+                    className="flex-1 text-sm font-medium text-gray-900 bg-transparent border-0 outline-none cursor-pointer appearance-none"
+                  >
+                    {emailAccounts.length === 0 && <option value="">No accounts -- add one in Accounts</option>}
+                    {emailAccounts.map(a => {
+                      const q = accountQuotas[a.id];
+                      return (
+                        <option key={a.id} value={a.id}>
+                          {a.displayName || a.email} &lt;{a.email}&gt;{q ? ` [${q.remaining}/${q.dailyLimit} left]` : ''}
+                        </option>
+                      );
+                    })}
+                  </select>
+                  {/* AI Recommend button */}
+                  <button
+                    onClick={handleAiRecommend}
+                    disabled={loadingAiRec || emailAccounts.length === 0}
+                    className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-purple-700 bg-purple-50 hover:bg-purple-100 rounded-md border border-purple-200 mr-2 transition-colors disabled:opacity-50"
+                    title="AI Recommend best account"
+                  >
+                    {loadingAiRec ? <Loader2 className="h-3 w-3 animate-spin" /> : <Brain className="h-3 w-3" />}
+                    AI
+                  </button>
+                  {/* Three-dot menu */}
                 <div className="relative" ref={moreMenuRef}>
                   <button onClick={() => setShowMoreMenu(!showMoreMenu)} className="p-1 rounded hover:bg-gray-100 text-gray-400">
                     <MoreVertical className="h-4 w-4" />
@@ -663,6 +719,59 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                     </div>
                   )}
                 </div>
+              </div>
+
+                {/* Quota indicator bar for selected account */}
+                {selectedQuota && (
+                  <div className="px-5 py-2 border-b border-gray-100 bg-gray-50/50">
+                    <div className="flex items-center gap-3">
+                      <span className="text-xs text-gray-500 flex-shrink-0">Quota:</span>
+                      <div className="flex-1 max-w-[200px]">
+                        <div className="h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                          <div 
+                            className={`h-full rounded-full transition-all ${
+                              selectedQuota.usagePercent >= 90 ? 'bg-red-500' : 
+                              selectedQuota.usagePercent >= 70 ? 'bg-amber-500' : 'bg-green-500'
+                            }`}
+                            style={{ width: `${Math.max(selectedQuota.usagePercent, 2)}%` }}
+                          />
+                        </div>
+                      </div>
+                      <span className={`text-xs font-medium ${
+                        selectedQuota.usagePercent >= 90 ? 'text-red-600' : 
+                        selectedQuota.usagePercent >= 70 ? 'text-amber-600' : 'text-green-600'
+                      }`}>
+                        {selectedQuota.remaining.toLocaleString()} of {selectedQuota.dailyLimit.toLocaleString()} remaining
+                      </span>
+                      {selectedQuota.usagePercent >= 80 && (
+                        <span className="text-[10px] text-red-500 font-medium flex items-center gap-0.5">
+                          <AlertCircle className="h-3 w-3" /> Near limit
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* AI Recommendation banner */}
+                {aiRecBanner && (
+                  <div className="px-5 py-2 border-b border-purple-100 bg-purple-50/70">
+                    <div className="flex items-center gap-2">
+                      <Brain className="h-3.5 w-3.5 text-purple-600 flex-shrink-0" />
+                      <span className="text-xs text-purple-700 flex-1">{aiRecBanner.reason}</span>
+                      {aiRecBanner.accountId !== emailAccountId && (
+                        <button 
+                          onClick={() => { setEmailAccountId(aiRecBanner.accountId); setAiRecBanner(null); }}
+                          className="text-xs font-medium text-purple-700 bg-purple-100 hover:bg-purple-200 px-2 py-0.5 rounded transition-colors"
+                        >
+                          Switch to {aiRecBanner.email}
+                        </button>
+                      )}
+                      <button onClick={() => setAiRecBanner(null)} className="text-purple-400 hover:text-purple-600">
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Cc row */}
