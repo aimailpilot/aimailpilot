@@ -27,8 +27,91 @@ export interface Campaign {
   repliedCount: number;
   bouncedCount: number;
   unsubscribedCount: number;
+  subject?: string;
+  content?: string;
+  emailAccountId?: string;
+  templateId?: string;
+  contactIds?: string[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface CampaignMessage {
+  id: string;
+  campaignId: string;
+  contactId: string;
+  subject: string;
+  content: string;
+  status: 'sending' | 'sent' | 'failed' | 'bounced';
+  trackingId: string;
+  stepNumber: number;
+  sentAt?: string;
+  openedAt?: string;
+  clickedAt?: string;
+  repliedAt?: string;
+  errorMessage?: string;
+  createdAt: string;
+  contact?: {
+    id: string;
+    email: string;
+    firstName?: string;
+    lastName?: string;
+    company?: string;
+  };
+  events?: TrackingEvent[];
+  openCount?: number;
+  clickCount?: number;
+  replyCount?: number;
+  firstOpenedAt?: string;
+  firstClickedAt?: string;
+  firstRepliedAt?: string;
+}
+
+export interface TrackingEvent {
+  id: string;
+  type: 'sent' | 'open' | 'click' | 'reply' | 'bounce' | 'unsubscribe';
+  campaignId: string;
+  messageId: string;
+  contactId: string;
+  trackingId: string;
+  url?: string;
+  userAgent?: string;
+  ip?: string;
+  metadata?: any;
+  createdAt: string;
+  contact?: {
+    email: string;
+    firstName?: string;
+    lastName?: string;
+    company?: string;
+  };
+  campaignName?: string;
+}
+
+export interface CampaignDetail {
+  campaign: Campaign;
+  analytics: CampaignAnalytics;
+  messages: CampaignMessage[];
+  totalMessages: number;
+  recentEvents: TrackingEvent[];
+}
+
+export interface CampaignAnalytics {
+  campaignId: string;
+  campaignName: string;
+  totalSent: number;
+  delivered: number;
+  opened: number;
+  clicked: number;
+  replied: number;
+  bounced: number;
+  unsubscribed: number;
+  openRate: string;
+  clickRate: string;
+  replyRate: string;
+  bounceRate: string;
+  unsubscribeRate: string;
+  deliveryRate: string;
 }
 
 export interface Contact {

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -11,7 +11,8 @@ import {
   GitBranch, Zap, Send, Eye, MousePointerClick, Reply,
   Bell, Activity, Inbox, MoreHorizontal, Pause, Play, Trash2,
   ArrowUp, ArrowDown, Calendar, Sparkles, CreditCard, Lightbulb,
-  Wrench, PieChart, Link2, Globe
+  Wrench, PieChart, Link2, Globe, RefreshCw, ExternalLink, XCircle,
+  AlertTriangle
 } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -19,6 +20,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useQuery } from "@tanstack/react-query";
 import { useCampaigns } from "@/hooks/use-campaigns";
 import type { Campaign } from "@/types";
+import type { TrackingEvent } from "@/types";
 
 // Import all page components
 import EmailAccountSetup from "./email-account-setup";
@@ -27,8 +29,155 @@ import ContactsManager from "./contacts-manager";
 import AnalyticsDashboard from "./analytics-dashboard";
 import TemplateManager from "./template-manager";
 import FollowupSequenceBuilder from "./followup-builder";
+import CampaignDetailPage from "./campaign-detail";
 
-type ViewType = 'campaigns' | 'templates' | 'contacts' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools';
+type ViewType = 'campaigns' | 'templates' | 'contacts' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail';
+
+// Live Tracking Feed component - fetches real tracking events
+function LiveTrackingFeed({ dashStats }: { dashStats: any }) {
+  const [events, setEvents] = useState<TrackingEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const fetchEvents = async () => {
+    try {
+      const res = await fetch('/api/tracking/events?limit=20', { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        setEvents(data);
+      }
+    } catch (e) {
+      // Silently fail
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchEvents();
+    const interval = setInterval(fetchEvents, 15000); // Refresh every 15s
+    return () => clearInterval(interval);
+  }, []);
+
+  const formatTime = (dateStr: string) => {
+    const d = new Date(dateStr);
+    const now = new Date();
+    const diff = now.getTime() - d.getTime();
+    if (diff < 60000) return 'Just now';
+    if (diff < 3600000) return `${Math.floor(diff / 60000)} min ago`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  };
+
+  const getEventConfig = (type: string): { label: string; icon: any; colorClass: string; bgClass: string } => {
+    switch (type) {
+      case 'sent': return { label: 'Email sent', icon: Send, colorClass: 'text-blue-600', bgClass: 'bg-blue-50' };
+      case 'open': return { label: 'Email opened', icon: Eye, colorClass: 'text-emerald-600', bgClass: 'bg-emerald-50' };
+      case 'click': return { label: 'Link clicked', icon: MousePointerClick, colorClass: 'text-purple-600', bgClass: 'bg-purple-50' };
+      case 'reply': return { label: 'Reply received', icon: Reply, colorClass: 'text-amber-600', bgClass: 'bg-amber-50' };
+      case 'bounce': return { label: 'Bounced', icon: XCircle, colorClass: 'text-red-600', bgClass: 'bg-red-50' };
+      case 'unsubscribe': return { label: 'Unsubscribed', icon: AlertTriangle, colorClass: 'text-gray-600', bgClass: 'bg-gray-50' };
+      default: return { label: type, icon: Mail, colorClass: 'text-gray-600', bgClass: 'bg-gray-50' };
+    }
+  };
+
+  const sent = dashStats?.totalSent || 0;
+  const opened = dashStats?.totalOpened || 0;
+  const clicked = dashStats?.totalClicked || 0;
+  const replied = dashStats?.totalReplied || 0;
+  const maxVal = Math.max(sent, 1);
+
+  return (
+    <div className="p-6">
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+            <Activity className="h-5 w-5 text-blue-600" /> Live Activity Feed
+          </h2>
+          <p className="text-sm text-gray-400 mt-0.5">Real-time tracking of email opens, clicks, and replies</p>
+        </div>
+        <Button variant="outline" size="sm" onClick={fetchEvents} className="text-xs">
+          <RefreshCw className="h-3.5 w-3.5 mr-1" /> Refresh
+        </Button>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Recent Activity */}
+        <Card className="border-gray-200/60">
+          <CardContent className="p-6">
+            <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
+              <Activity className="h-4 w-4 text-blue-600" /> Recent Activity
+            </h3>
+            {loading ? (
+              <div className="flex items-center justify-center py-8">
+                <div className="w-6 h-6 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+              </div>
+            ) : events.length === 0 ? (
+              <div className="text-center py-8">
+                <Activity className="h-10 w-10 text-gray-200 mx-auto mb-2" />
+                <p className="text-sm text-gray-400">No tracking events yet</p>
+                <p className="text-xs text-gray-300 mt-1">Send a campaign to see live activity</p>
+              </div>
+            ) : (
+              <div className="space-y-2 max-h-[400px] overflow-y-auto">
+                {events.map((event) => {
+                  const config = getEventConfig(event.type);
+                  const EventIcon = config.icon;
+                  return (
+                    <div key={event.id} className="flex items-center gap-3 py-2 hover:bg-gray-50/50 rounded-lg px-2 transition-colors">
+                      <div className={`p-2 rounded-lg ${config.bgClass}`}>
+                        <EventIcon className={`h-3.5 w-3.5 ${config.colorClass}`} />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-medium text-gray-900">{config.label}</div>
+                        <div className="text-xs text-gray-400 truncate">
+                          {event.contact?.email || 'Unknown contact'}
+                          {event.campaignName && <span className="text-gray-300"> &middot; {event.campaignName}</span>}
+                        </div>
+                        {event.url && (
+                          <div className="text-[10px] text-blue-500 truncate mt-0.5 flex items-center gap-1">
+                            <ExternalLink className="h-2.5 w-2.5 flex-shrink-0" /> {event.url}
+                          </div>
+                        )}
+                      </div>
+                      <span className="text-xs text-gray-400 flex-shrink-0">{formatTime(event.createdAt)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Performance Overview */}
+        <Card className="border-gray-200/60">
+          <CardContent className="p-6">
+            <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
+              <TrendingUp className="h-4 w-4 text-blue-600" /> Overall Performance
+            </h3>
+            <div className="space-y-5">
+              {[
+                { label: 'Emails Sent', value: sent, max: maxVal, color: 'bg-blue-500' },
+                { label: 'Opens', value: opened, max: maxVal, color: 'bg-emerald-500' },
+                { label: 'Clicks', value: clicked, max: maxVal, color: 'bg-purple-500' },
+                { label: 'Replies', value: replied, max: maxVal, color: 'bg-amber-500' },
+              ].map((item, i) => (
+                <div key={i}>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-sm font-medium text-gray-600">{item.label}</span>
+                    <span className="text-sm font-bold text-gray-900">{item.value.toLocaleString()}</span>
+                  </div>
+                  <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                    <div className={`h-full ${item.color} rounded-full transition-all`} style={{ width: `${item.max > 0 ? (item.value / item.max) * 100 : 0}%` }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}
 
 export default function MailMeteorDashboard() {
   const [searchQuery, setSearchQuery] = useState("");
@@ -38,6 +187,7 @@ export default function MailMeteorDashboard() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [insightsExpanded, setInsightsExpanded] = useState(false);
   const [toolsExpanded, setToolsExpanded] = useState(false);
+  const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(null);
   const [location, setLocation] = useLocation();
   
   const { campaigns, isLoading } = useCampaigns();
@@ -132,6 +282,7 @@ export default function MailMeteorDashboard() {
       setup: 'Email Accounts', analytics: 'Analytics', followups: 'Automations',
       verification: 'Email Verification', tracking: 'Live Activity Feed',
       account: 'Account', billing: 'Billing', insights: 'Insights', tools: 'Tools',
+      'campaign-detail': 'Campaign Detail',
     };
     return titles[currentView] || 'Dashboard';
   };
@@ -148,6 +299,9 @@ export default function MailMeteorDashboard() {
       tracking: 'Real-time email activity',
       account: 'Manage your account settings',
       billing: 'Billing and subscription',
+      insights: 'Performance insights',
+      tools: 'Campaign tools',
+      'campaign-detail': 'Campaign tracking details',
     };
     return descs[currentView] || '';
   };
@@ -531,12 +685,13 @@ export default function MailMeteorDashboard() {
                 </div>
               ) : (
                 <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden">
-                  <div className="grid grid-cols-[2fr_80px_90px_90px_90px_90px_44px] gap-3 px-5 py-3 border-b border-gray-100 bg-gray-50/50 text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+                  <div className="grid grid-cols-[2fr_80px_80px_80px_80px_80px_80px_44px] gap-2 px-5 py-3 border-b border-gray-100 bg-gray-50/50 text-[11px] font-semibold uppercase tracking-wider text-gray-400">
                     <div>Campaign</div>
                     <div>Status</div>
                     <div className="text-right">Sent</div>
                     <div className="text-right">Opens</div>
                     <div className="text-right">Clicks</div>
+                    <div className="text-right">Replies</div>
                     <div className="text-right">Date</div>
                     <div></div>
                   </div>
@@ -544,7 +699,11 @@ export default function MailMeteorDashboard() {
                   {filteredCampaigns.map((campaign: Campaign) => {
                     const openRate = campaign.sentCount ? ((campaign.openedCount || 0) / campaign.sentCount) * 100 : 0;
                     return (
-                      <div key={campaign.id} className="grid grid-cols-[2fr_80px_90px_90px_90px_90px_44px] gap-3 px-5 py-3.5 border-b border-gray-50 hover:bg-blue-50/30 items-center transition-colors group">
+                      <div 
+                        key={campaign.id} 
+                        className="grid grid-cols-[2fr_80px_80px_80px_80px_80px_80px_44px] gap-2 px-5 py-3.5 border-b border-gray-50 hover:bg-blue-50/30 items-center transition-colors group cursor-pointer"
+                        onClick={() => { setSelectedCampaignId(campaign.id); setCurrentView('campaign-detail'); }}
+                      >
                         <div className="min-w-0">
                           <div className="font-semibold text-sm text-gray-900 truncate">{campaign.name}</div>
                           {campaign.description && <div className="text-xs text-gray-400 truncate mt-0.5">{campaign.description}</div>}
@@ -560,9 +719,12 @@ export default function MailMeteorDashboard() {
                           <span className="text-sm font-medium text-gray-700">{formatPercentage(campaign.clickedCount || 0, campaign.sentCount || 0)}</span>
                         </div>
                         <div className="text-right">
+                          <span className="text-sm font-medium text-gray-700">{formatPercentage(campaign.repliedCount || 0, campaign.sentCount || 0)}</span>
+                        </div>
+                        <div className="text-right">
                           <span className="text-xs text-gray-400">{campaign.createdAt ? formatDate(campaign.createdAt) : '-'}</span>
                         </div>
-                        <div className="opacity-0 group-hover:opacity-100 transition-opacity">
+                        <div className="opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                               <Button variant="ghost" size="sm" className="h-7 w-7 p-0">
@@ -612,65 +774,17 @@ export default function MailMeteorDashboard() {
           {/* Analytics */}
           {viewMode === 'dashboard' && currentView === 'analytics' && <AnalyticsDashboard />}
 
+          {/* Campaign Detail */}
+          {viewMode === 'dashboard' && currentView === 'campaign-detail' && selectedCampaignId && (
+            <CampaignDetailPage 
+              campaignId={selectedCampaignId}
+              onBack={() => { setCurrentView('campaigns'); setSelectedCampaignId(null); }}
+            />
+          )}
+
           {/* Live Tracking */}
           {viewMode === 'dashboard' && currentView === 'tracking' && (
-            <div className="p-6">
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <Card className="border-gray-200/60">
-                  <CardContent className="p-6">
-                    <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                      <Activity className="h-4 w-4 text-blue-600" /> Recent Activity
-                    </h3>
-                    <div className="space-y-3">
-                      {[
-                        { action: 'Email opened', contact: 'john@techcorp.com', time: '2 min ago', icon: Eye, color: 'text-emerald-600 bg-emerald-50' },
-                        { action: 'Link clicked', contact: 'jane@startup.io', time: '5 min ago', icon: MousePointerClick, color: 'text-purple-600 bg-purple-50' },
-                        { action: 'Email sent', contact: 'mike@enterprise.com', time: '8 min ago', icon: Send, color: 'text-blue-600 bg-blue-50' },
-                        { action: 'Reply received', contact: 'sarah@consulting.com', time: '12 min ago', icon: Reply, color: 'text-amber-600 bg-amber-50' },
-                        { action: 'Email opened', contact: 'david@agency.co', time: '15 min ago', icon: Eye, color: 'text-emerald-600 bg-emerald-50' },
-                      ].map((event, i) => (
-                        <div key={i} className="flex items-center gap-3 py-2">
-                          <div className={`p-2 rounded-lg ${event.color.split(' ')[1]}`}>
-                            <event.icon className={`h-3.5 w-3.5 ${event.color.split(' ')[0]}`} />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="text-sm font-medium text-gray-900">{event.action}</div>
-                            <div className="text-xs text-gray-400">{event.contact}</div>
-                          </div>
-                          <span className="text-xs text-gray-400 flex-shrink-0">{event.time}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </CardContent>
-                </Card>
-
-                <Card className="border-gray-200/60">
-                  <CardContent className="p-6">
-                    <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                      <TrendingUp className="h-4 w-4 text-blue-600" /> Today's Performance
-                    </h3>
-                    <div className="space-y-5">
-                      {[
-                        { label: 'Emails Sent', value: 47, max: 100, color: 'bg-blue-500' },
-                        { label: 'Opens', value: 32, max: 47, color: 'bg-emerald-500' },
-                        { label: 'Clicks', value: 12, max: 47, color: 'bg-purple-500' },
-                        { label: 'Replies', value: 5, max: 47, color: 'bg-amber-500' },
-                      ].map((item, i) => (
-                        <div key={i}>
-                          <div className="flex items-center justify-between mb-1.5">
-                            <span className="text-sm font-medium text-gray-600">{item.label}</span>
-                            <span className="text-sm font-bold text-gray-900">{item.value}</span>
-                          </div>
-                          <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                            <div className={`h-full ${item.color} rounded-full transition-all`} style={{ width: `${(item.value / item.max) * 100}%` }} />
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </CardContent>
-                </Card>
-              </div>
-            </div>
+            <LiveTrackingFeed dashStats={dashStats} />
           )}
 
           {/* Account */}

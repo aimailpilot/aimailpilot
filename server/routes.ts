@@ -121,6 +121,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.use('/api/followup-sequences', requireAuth);
   app.use('/api/followup-steps', requireAuth);
   app.use('/api/segments', requireAuth);
+  app.use('/api/tracking', requireAuth);
   app.use('/api/account', requireAuth);
 
   // ========== DASHBOARD ==========
@@ -490,12 +491,106 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get('/api/campaigns/:id/messages', async (req: any, res) => {
     try {
-      const limit = parseInt(req.query.limit) || 100;
+      const limit = parseInt(req.query.limit) || 200;
       const offset = parseInt(req.query.offset) || 0;
+      const enriched = req.query.enriched === 'true';
+      
+      if (enriched) {
+        const messages = await storage.getCampaignMessagesEnriched(req.params.id, limit, offset);
+        const total = await storage.getCampaignMessagesTotalCount(req.params.id);
+        return res.json({ messages, total, limit, offset });
+      }
+      
       const messages = await storage.getCampaignMessages(req.params.id, limit, offset);
       res.json(messages);
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch messages' });
+    }
+  });
+
+  // Campaign detail: full campaign info + analytics + enriched messages
+  app.get('/api/campaigns/:id/detail', async (req: any, res) => {
+    try {
+      const campaign = await storage.getCampaign(req.params.id);
+      if (!campaign) return res.status(404).json({ message: 'Campaign not found' });
+
+      const analytics = await storage.getCampaignAnalytics(req.params.id);
+      const messages = await storage.getCampaignMessagesEnriched(req.params.id, 200, 0);
+      const totalMessages = await storage.getCampaignMessagesTotalCount(req.params.id);
+      const trackingEvents = await storage.getTrackingEvents(req.params.id);
+
+      res.json({
+        campaign,
+        analytics,
+        messages,
+        totalMessages,
+        recentEvents: trackingEvents.slice(0, 50),
+      });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch campaign detail' });
+    }
+  });
+
+  // Tracking events feed (all events for the organization)
+  app.get('/api/tracking/events', async (req: any, res) => {
+    try {
+      const limit = parseInt(req.query.limit) || 50;
+      const events = await storage.getAllTrackingEvents(req.user.organizationId, limit);
+      
+      // Enrich events with contact and campaign info
+      const enrichedEvents = await Promise.all(events.map(async (event: any) => {
+        const contact = event.contactId ? await storage.getContact(event.contactId) : null;
+        const campaign = event.campaignId ? await storage.getCampaign(event.campaignId) : null;
+        return {
+          ...event,
+          contact: contact ? { email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company } : null,
+          campaignName: campaign?.name || 'Unknown Campaign',
+        };
+      }));
+      
+      res.json(enrichedEvents);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch tracking events' });
+    }
+  });
+
+  // Reply tracking webhook
+  app.post('/api/track/reply/:trackingId', async (req, res) => {
+    try {
+      const { trackingId } = req.params;
+      const message = await storage.getCampaignMessageByTracking(trackingId);
+      
+      if (message) {
+        if (!message.repliedAt) {
+          await storage.updateCampaignMessage(message.id, { repliedAt: new Date() });
+          
+          const campaign = await storage.getCampaign(message.campaignId);
+          if (campaign) {
+            await storage.updateCampaign(message.campaignId, {
+              repliedCount: (campaign.repliedCount || 0) + 1,
+            });
+          }
+
+          // Update contact status to 'replied'
+          if (message.contactId) {
+            try { await storage.updateContact(message.contactId, { status: 'replied' }); } catch (e) {}
+          }
+        }
+
+        await storage.createTrackingEvent({
+          type: 'reply',
+          campaignId: message.campaignId,
+          messageId: message.id,
+          contactId: message.contactId,
+          trackingId,
+          metadata: req.body || {},
+        });
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Reply tracking error:', error);
+      res.json({ success: false });
     }
   });
 
@@ -741,18 +836,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const { trackingId } = req.params;
       const message = await storage.getCampaignMessageByTracking(trackingId);
       
-      if (message && !message.openedAt) {
-        await storage.updateCampaignMessage(message.id, { openedAt: new Date() });
-        
-        // Update campaign open count
-        const campaign = await storage.getCampaign(message.campaignId);
-        if (campaign) {
-          await storage.updateCampaign(message.campaignId, {
-            openedCount: (campaign.openedCount || 0) + 1,
-          });
-        }
-
-        // Record tracking event
+      if (message) {
+        // Always record tracking event (even repeat opens)
         await storage.createTrackingEvent({
           type: 'open',
           campaignId: message.campaignId,
@@ -762,6 +847,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
           userAgent: req.headers['user-agent'],
           ip: req.ip,
         });
+
+        // Only increment campaign count on first open
+        if (!message.openedAt) {
+          await storage.updateCampaignMessage(message.id, { openedAt: new Date() });
+          
+          const campaign = await storage.getCampaign(message.campaignId);
+          if (campaign) {
+            await storage.updateCampaign(message.campaignId, {
+              openedCount: (campaign.openedCount || 0) + 1,
+            });
+          }
+        }
       }
     } catch (error) {
       console.error('Tracking error:', error);

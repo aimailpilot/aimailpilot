@@ -39,13 +39,241 @@ const templatesData: any[] = [
   { id: genId(), organizationId: ORG_ID, name: 'Cold Outreach', category: 'outreach', subject: 'Hi {{firstName}}, quick question about {{company}}', content: '<p>Hi {{firstName}},</p><p>I came across {{company}} and was impressed by what you\'re building.</p><p>I\'d love to share how MailFlow can help {{company}} scale email outreach. Would you be open to a 15-min chat?</p><p>Best,<br/>{{senderName}}</p>', variables: ['firstName', 'company', 'senderName'], isPublic: false, usageCount: 12, createdAt: new Date('2025-09-10'), updatedAt: new Date('2025-09-10') },
 ];
 
+const CAMPAIGN_IDS = {
+  q4Launch: 'camp-q4-product-launch-001',
+  onboarding: 'camp-onboarding-series-002',
+  reengagement: 'camp-reengagement-003',
+  newsletter: 'camp-newsletter-aug-004',
+  coldOutreach: 'camp-cold-outreach-005',
+};
+
 const campaignsData: any[] = [
-  { id: genId(), organizationId: ORG_ID, name: 'Q4 Product Launch', description: 'New feature announcement', status: 'completed', totalRecipients: 1250, sentCount: 1180, openedCount: 720, clickedCount: 345, repliedCount: 89, bouncedCount: 12, unsubscribedCount: 5, subject: 'Exciting news from MailFlow!', content: '', emailAccountId: null, templateId: null, contactIds: [], segmentId: null, scheduledAt: null, createdAt: new Date('2025-08-15'), updatedAt: new Date() },
-  { id: genId(), organizationId: ORG_ID, name: 'Customer Onboarding Series', description: 'Welcome email sequence', status: 'completed', totalRecipients: 450, sentCount: 430, openedCount: 312, clickedCount: 156, repliedCount: 42, bouncedCount: 3, unsubscribedCount: 2, subject: '', content: '', emailAccountId: null, templateId: null, contactIds: [], segmentId: null, scheduledAt: null, createdAt: new Date('2025-08-20'), updatedAt: new Date() },
-  { id: genId(), organizationId: ORG_ID, name: 'Re-engagement Campaign', description: 'Win back inactive users', status: 'scheduled', totalRecipients: 890, sentCount: 0, openedCount: 0, clickedCount: 0, repliedCount: 0, bouncedCount: 0, unsubscribedCount: 0, subject: '', content: '', emailAccountId: null, templateId: null, contactIds: [], segmentId: null, scheduledAt: null, createdAt: new Date('2025-09-01'), updatedAt: new Date() },
-  { id: genId(), organizationId: ORG_ID, name: 'Newsletter - August', description: 'Monthly newsletter', status: 'completed', totalRecipients: 2400, sentCount: 2380, openedCount: 1450, clickedCount: 678, repliedCount: 120, bouncedCount: 20, unsubscribedCount: 15, subject: '', content: '', emailAccountId: null, templateId: null, contactIds: [], segmentId: null, scheduledAt: null, createdAt: new Date('2025-08-01'), updatedAt: new Date('2025-08-30') },
-  { id: genId(), organizationId: ORG_ID, name: 'Cold Outreach - Tech', description: 'Tech industry outreach', status: 'draft', totalRecipients: 0, sentCount: 0, openedCount: 0, clickedCount: 0, repliedCount: 0, bouncedCount: 0, unsubscribedCount: 0, subject: '', content: '', emailAccountId: null, templateId: null, contactIds: [], segmentId: null, scheduledAt: null, createdAt: new Date('2025-09-02'), updatedAt: new Date() },
+  { id: CAMPAIGN_IDS.q4Launch, organizationId: ORG_ID, name: 'Q4 Product Launch', description: 'New feature announcement', status: 'completed', totalRecipients: 1250, sentCount: 1180, openedCount: 720, clickedCount: 345, repliedCount: 89, bouncedCount: 12, unsubscribedCount: 5, subject: 'Exciting news from MailFlow!', content: '<p>Hi {{firstName}},</p><p>We have exciting news to share about MailFlow.</p>', emailAccountId: null, templateId: null, contactIds: [], segmentId: null, scheduledAt: null, createdAt: new Date('2025-08-15'), updatedAt: new Date() },
+  { id: CAMPAIGN_IDS.onboarding, organizationId: ORG_ID, name: 'Customer Onboarding Series', description: 'Welcome email sequence', status: 'completed', totalRecipients: 450, sentCount: 430, openedCount: 312, clickedCount: 156, repliedCount: 42, bouncedCount: 3, unsubscribedCount: 2, subject: 'Welcome to MailFlow!', content: '<p>Hi {{firstName}},</p><p>Welcome aboard!</p>', emailAccountId: null, templateId: null, contactIds: [], segmentId: null, scheduledAt: null, createdAt: new Date('2025-08-20'), updatedAt: new Date() },
+  { id: CAMPAIGN_IDS.reengagement, organizationId: ORG_ID, name: 'Re-engagement Campaign', description: 'Win back inactive users', status: 'scheduled', totalRecipients: 890, sentCount: 0, openedCount: 0, clickedCount: 0, repliedCount: 0, bouncedCount: 0, unsubscribedCount: 0, subject: '', content: '', emailAccountId: null, templateId: null, contactIds: [], segmentId: null, scheduledAt: null, createdAt: new Date('2025-09-01'), updatedAt: new Date() },
+  { id: CAMPAIGN_IDS.newsletter, organizationId: ORG_ID, name: 'Newsletter - August', description: 'Monthly newsletter', status: 'completed', totalRecipients: 2400, sentCount: 2380, openedCount: 1450, clickedCount: 678, repliedCount: 120, bouncedCount: 20, unsubscribedCount: 15, subject: 'MailFlow August Newsletter', content: '<p>Hi {{firstName}},</p><p>Here is your monthly update.</p>', emailAccountId: null, templateId: null, contactIds: [], segmentId: null, scheduledAt: null, createdAt: new Date('2025-08-01'), updatedAt: new Date('2025-08-30') },
+  { id: CAMPAIGN_IDS.coldOutreach, organizationId: ORG_ID, name: 'Cold Outreach - Tech', description: 'Tech industry outreach', status: 'draft', totalRecipients: 0, sentCount: 0, openedCount: 0, clickedCount: 0, repliedCount: 0, bouncedCount: 0, unsubscribedCount: 0, subject: '', content: '', emailAccountId: null, templateId: null, contactIds: [], segmentId: null, scheduledAt: null, createdAt: new Date('2025-09-02'), updatedAt: new Date() },
 ];
+
+// Generate seed messages and tracking events for completed campaigns
+function seedTrackingData() {
+  const sampleContacts = [
+    { id: 'seed-c1', email: 'alice@bigcorp.com', firstName: 'Alice', lastName: 'Chen', company: 'BigCorp Inc' },
+    { id: 'seed-c2', email: 'bob@techstart.io', firstName: 'Bob', lastName: 'Williams', company: 'TechStart' },
+    { id: 'seed-c3', email: 'carol@enterprise.co', firstName: 'Carol', lastName: 'Martinez', company: 'Enterprise Co' },
+    { id: 'seed-c4', email: 'dan@agency.com', firstName: 'Dan', lastName: 'Kim', company: 'Creative Agency' },
+    { id: 'seed-c5', email: 'eva@startup.ai', firstName: 'Eva', lastName: 'Patel', company: 'Startup AI' },
+    { id: 'seed-c6', email: 'frank@consulting.biz', firstName: 'Frank', lastName: 'Lopez', company: 'Consulting Group' },
+    { id: 'seed-c7', email: 'grace@fintech.io', firstName: 'Grace', lastName: 'Nguyen', company: 'FinTech Solutions' },
+    { id: 'seed-c8', email: 'henry@saas.dev', firstName: 'Henry', lastName: 'Brown', company: 'SaaS Dev Co' },
+    { id: 'seed-c9', email: 'irene@marketing.co', firstName: 'Irene', lastName: 'Taylor', company: 'Marketing Pro' },
+    { id: 'seed-c10', email: 'jack@venture.vc', firstName: 'Jack', lastName: 'Davis', company: 'Venture Capital' },
+  ];
+
+  // Add seed contacts to contacts data (skip if email exists)
+  for (const sc of sampleContacts) {
+    if (!contactsData.find(c => c.email === sc.email)) {
+      contactsData.push({
+        ...sc,
+        organizationId: ORG_ID,
+        status: 'warm',
+        score: Math.floor(Math.random() * 60) + 40,
+        tags: ['seed'],
+        customFields: {},
+        source: 'seed',
+        createdAt: new Date('2025-07-01'),
+        updatedAt: new Date(),
+      });
+    }
+  }
+
+  // Seed messages + events for Q4 Product Launch
+  const campaignId = CAMPAIGN_IDS.q4Launch;
+  const now = Date.now();
+  const dayMs = 86400000;
+
+  sampleContacts.forEach((contact, i) => {
+    const trackingId = `${campaignId}_${contact.id}_seed_${i}`;
+    const sentTime = new Date(now - (10 - i) * dayMs - Math.random() * dayMs);
+    const msgId = `msg-seed-${campaignId.slice(-3)}-${i}`;
+
+    // Determine status randomly
+    const rand = Math.random();
+    const hasOpen = rand < 0.7;
+    const hasClick = rand < 0.35;
+    const hasReply = rand < 0.12;
+    const isBounced = rand > 0.97;
+
+    const msg: any = {
+      id: msgId,
+      campaignId,
+      contactId: contact.id,
+      subject: `Exciting news from MailFlow!`,
+      content: `<p>Hi ${contact.firstName},</p><p>We have exciting news...</p>`,
+      status: isBounced ? 'failed' : 'sent',
+      trackingId,
+      emailAccountId: null,
+      stepNumber: 0,
+      sentAt: isBounced ? null : sentTime,
+      openedAt: hasOpen ? new Date(sentTime.getTime() + Math.random() * 3600000) : null,
+      clickedAt: hasClick ? new Date(sentTime.getTime() + Math.random() * 7200000) : null,
+      repliedAt: hasReply ? new Date(sentTime.getTime() + Math.random() * dayMs) : null,
+      createdAt: sentTime,
+    };
+
+    messagesData.push(msg);
+
+    // Create tracking events
+    trackingEventsData.push({
+      id: `evt-sent-${msgId}`,
+      type: 'sent',
+      campaignId,
+      messageId: msgId,
+      contactId: contact.id,
+      trackingId,
+      createdAt: sentTime,
+    });
+
+    if (hasOpen) {
+      const openTime = new Date(sentTime.getTime() + Math.random() * 3600000);
+      trackingEventsData.push({
+        id: `evt-open-${msgId}`,
+        type: 'open',
+        campaignId,
+        messageId: msgId,
+        contactId: contact.id,
+        trackingId,
+        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+        createdAt: openTime,
+      });
+      // Some opened twice
+      if (Math.random() < 0.3) {
+        trackingEventsData.push({
+          id: `evt-open2-${msgId}`,
+          type: 'open',
+          campaignId,
+          messageId: msgId,
+          contactId: contact.id,
+          trackingId,
+          createdAt: new Date(openTime.getTime() + Math.random() * 86400000),
+        });
+      }
+    }
+
+    if (hasClick) {
+      trackingEventsData.push({
+        id: `evt-click-${msgId}`,
+        type: 'click',
+        campaignId,
+        messageId: msgId,
+        contactId: contact.id,
+        trackingId,
+        url: 'https://mailflow.app/features',
+        createdAt: new Date(sentTime.getTime() + Math.random() * 7200000),
+      });
+    }
+
+    if (hasReply) {
+      trackingEventsData.push({
+        id: `evt-reply-${msgId}`,
+        type: 'reply',
+        campaignId,
+        messageId: msgId,
+        contactId: contact.id,
+        trackingId,
+        createdAt: new Date(sentTime.getTime() + Math.random() * dayMs),
+      });
+    }
+
+    if (isBounced) {
+      trackingEventsData.push({
+        id: `evt-bounce-${msgId}`,
+        type: 'bounce',
+        campaignId,
+        messageId: msgId,
+        contactId: contact.id,
+        trackingId,
+        metadata: { error: 'Mailbox not found' },
+        createdAt: sentTime,
+      });
+    }
+  });
+
+  // Also seed a few for Newsletter campaign
+  const nlCampaignId = CAMPAIGN_IDS.newsletter;
+  sampleContacts.slice(0, 6).forEach((contact, i) => {
+    const trackingId = `${nlCampaignId}_${contact.id}_seed_${i}`;
+    const sentTime = new Date(now - (15 + i) * dayMs);
+    const msgId = `msg-seed-nl-${i}`;
+    const hasOpen = Math.random() < 0.65;
+    const hasClick = Math.random() < 0.3;
+    const hasReply = Math.random() < 0.08;
+
+    messagesData.push({
+      id: msgId,
+      campaignId: nlCampaignId,
+      contactId: contact.id,
+      subject: `MailFlow August Newsletter`,
+      content: `<p>Hi ${contact.firstName},</p><p>Monthly update...</p>`,
+      status: 'sent',
+      trackingId,
+      emailAccountId: null,
+      stepNumber: 0,
+      sentAt: sentTime,
+      openedAt: hasOpen ? new Date(sentTime.getTime() + Math.random() * 7200000) : null,
+      clickedAt: hasClick ? new Date(sentTime.getTime() + Math.random() * 14400000) : null,
+      repliedAt: hasReply ? new Date(sentTime.getTime() + Math.random() * dayMs) : null,
+      createdAt: sentTime,
+    });
+
+    trackingEventsData.push({
+      id: `evt-sent-nl-${i}`,
+      type: 'sent',
+      campaignId: nlCampaignId,
+      messageId: msgId,
+      contactId: contact.id,
+      trackingId,
+      createdAt: sentTime,
+    });
+
+    if (hasOpen) {
+      trackingEventsData.push({
+        id: `evt-open-nl-${i}`,
+        type: 'open',
+        campaignId: nlCampaignId,
+        messageId: msgId,
+        contactId: contact.id,
+        trackingId,
+        createdAt: new Date(sentTime.getTime() + Math.random() * 7200000),
+      });
+    }
+
+    if (hasClick) {
+      trackingEventsData.push({
+        id: `evt-click-nl-${i}`,
+        type: 'click',
+        campaignId: nlCampaignId,
+        messageId: msgId,
+        contactId: contact.id,
+        trackingId,
+        url: 'https://mailflow.app/blog/august-update',
+        createdAt: new Date(sentTime.getTime() + Math.random() * 14400000),
+      });
+    }
+
+    if (hasReply) {
+      trackingEventsData.push({
+        id: `evt-reply-nl-${i}`,
+        type: 'reply',
+        campaignId: nlCampaignId,
+        messageId: msgId,
+        contactId: contact.id,
+        trackingId,
+        createdAt: new Date(sentTime.getTime() + Math.random() * dayMs),
+      });
+    }
+  });
+}
 
 const messagesData: any[] = [];
 const integrationsData: any[] = [];
@@ -57,6 +285,9 @@ const followupExecutionsData: any[] = [];
 // Tracking data stores
 const trackingEventsData: any[] = [];
 const unsubscribesData: any[] = [];
+
+// Run seed
+seedTrackingData();
 
 export class DatabaseStorage {
   // ========== Organization ==========
@@ -289,6 +520,44 @@ export class DatabaseStorage {
   }
   async getTrackingEventsByMessage(messageId: string) {
     return trackingEventsData.filter(e => e.messageId === messageId);
+  }
+  async getAllTrackingEvents(organizationId: string, limit = 50) {
+    // Get all campaign IDs for this organization
+    const orgCampaignIds = new Set(
+      campaignsData.filter(c => c.organizationId === organizationId).map(c => c.id)
+    );
+    return trackingEventsData
+      .filter(e => orgCampaignIds.has(e.campaignId))
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, limit);
+  }
+
+  // ========== Enriched Campaign Messages (with tracking events) ==========
+  async getCampaignMessagesEnriched(campaignId: string, limit = 200, offset = 0) {
+    const messages = messagesData
+      .filter(m => m.campaignId === campaignId)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(offset, offset + limit);
+
+    return messages.map(m => {
+      const events = trackingEventsData.filter(e => e.messageId === m.id);
+      const contact = contactsData.find(c => c.id === m.contactId);
+      return {
+        ...m,
+        contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company } : null,
+        events,
+        openCount: events.filter(e => e.type === 'open').length,
+        clickCount: events.filter(e => e.type === 'click').length,
+        replyCount: events.filter(e => e.type === 'reply').length,
+        firstOpenedAt: events.find(e => e.type === 'open')?.createdAt || null,
+        firstClickedAt: events.find(e => e.type === 'click')?.createdAt || null,
+        firstRepliedAt: events.find(e => e.type === 'reply')?.createdAt || null,
+      };
+    });
+  }
+
+  async getCampaignMessagesTotalCount(campaignId: string) {
+    return messagesData.filter(m => m.campaignId === campaignId).length;
   }
 
   // ========== Unsubscribes ==========

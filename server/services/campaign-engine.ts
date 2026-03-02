@@ -6,6 +6,7 @@ interface CampaignSendOptions {
   delayBetweenEmails?: number; // ms between each email (throttling)
   batchSize?: number;
   startTime?: Date;
+  stepNumber?: number; // which step in the sequence (0 = initial, 1+ = follow-ups)
 }
 
 interface PersonalizationData {
@@ -19,6 +20,14 @@ interface PersonalizationData {
 
 export class CampaignEngine {
   private activeCampaigns: Map<string, { timer: any; paused: boolean; progress: number; total: number }> = new Map();
+
+  /**
+   * Get the base URL for tracking links.
+   * In production, this should be the public URL of the server.
+   */
+  private getBaseUrl(): string {
+    return process.env.BASE_URL || process.env.PUBLIC_URL || `http://localhost:${process.env.PORT || 3000}`;
+  }
 
   /**
    * Personalize template content with contact data
@@ -40,7 +49,7 @@ export class CampaignEngine {
    * Start sending a campaign
    */
   async startCampaign(options: CampaignSendOptions): Promise<{ success: boolean; error?: string }> {
-    const { campaignId, delayBetweenEmails = 2000, batchSize = 10 } = options;
+    const { campaignId, delayBetweenEmails = 2000, batchSize = 10, stepNumber = 0 } = options;
 
     try {
       const campaign = await storage.getCampaign(campaignId);
@@ -99,7 +108,7 @@ export class CampaignEngine {
       });
 
       // Send emails in batches with throttling
-      this.sendBatched(campaignId, contacts, emailAccount, subject, content, delayBetweenEmails, batchSize);
+      this.sendBatched(campaignId, contacts, emailAccount, subject, content, delayBetweenEmails, batchSize, stepNumber);
 
       return { success: true };
     } catch (error) {
@@ -118,10 +127,12 @@ export class CampaignEngine {
     subject: string,
     content: string,
     delay: number,
-    batchSize: number
+    batchSize: number,
+    stepNumber: number = 0
   ): Promise<void> {
     const smtpConfig: SmtpConfig = emailAccount.smtpConfig;
     const tracker = this.activeCampaigns.get(campaignId);
+    const baseUrl = this.getBaseUrl();
 
     for (let i = 0; i < contacts.length; i++) {
       // Check if paused or stopped
@@ -157,13 +168,24 @@ export class CampaignEngine {
       // Generate tracking ID
       const trackingId = `${campaignId}_${contact.id}_${Date.now()}`;
 
-      // Add open tracking pixel
-      const trackedContent = this.addTrackingPixel(personalizedContent, trackingId);
+      // Add unsubscribe link if campaign has it enabled
+      let contentWithUnsub = personalizedContent;
+      const campaign = await storage.getCampaign(campaignId);
+      if (campaign?.includeUnsubscribe) {
+        const unsubUrl = `${baseUrl}/api/track/unsubscribe/${trackingId}`;
+        contentWithUnsub += `<p style="text-align:center;margin-top:30px;font-size:11px;color:#999;"><a href="${unsubUrl}" style="color:#999;text-decoration:underline;">Unsubscribe</a></p>`;
+      }
 
-      // Add click tracking to links
-      const clickTrackedContent = this.addClickTracking(trackedContent, trackingId);
+      // Add open tracking pixel (with absolute URL)
+      const trackedContent = this.addTrackingPixel(contentWithUnsub, trackingId, baseUrl);
 
-      // Create message record
+      // Add click tracking to links (with absolute URL)
+      const clickTrackedContent = this.addClickTracking(trackedContent, trackingId, baseUrl);
+
+      // Generate a unique Message-ID for reply tracking
+      const messageId = `<${trackingId}@${smtpConfig.fromEmail.split('@')[1] || 'mailflow.app'}>`;
+
+      // Create message record with step number
       const messageRecord = await storage.createCampaignMessage({
         campaignId,
         contactId: contact.id,
@@ -172,14 +194,23 @@ export class CampaignEngine {
         status: 'sending',
         trackingId,
         emailAccountId: emailAccount.id,
+        stepNumber,
+        messageId,
       });
 
-      // Send email
+      // Send email with custom Message-ID header for reply tracking
       const result: SendResult = await smtpEmailService.sendEmail(emailAccount.id, smtpConfig, {
         to: contact.email,
         subject: personalizedSubject,
         html: clickTrackedContent,
         trackingId,
+        headers: {
+          'Message-ID': messageId,
+          'X-Mailflow-Campaign': campaignId,
+          'X-Mailflow-Contact': contact.id,
+          'X-Mailflow-Tracking': trackingId,
+          'X-Mailflow-Step': String(stepNumber),
+        },
       });
 
       if (result.success) {
@@ -190,12 +221,22 @@ export class CampaignEngine {
         });
         
         // Update campaign stats
-        const campaign = await storage.getCampaign(campaignId);
-        if (campaign) {
+        const updatedCampaign = await storage.getCampaign(campaignId);
+        if (updatedCampaign) {
           await storage.updateCampaign(campaignId, {
-            sentCount: (campaign.sentCount || 0) + 1,
+            sentCount: (updatedCampaign.sentCount || 0) + 1,
           });
         }
+
+        // Create 'sent' tracking event
+        await storage.createTrackingEvent({
+          type: 'sent',
+          campaignId,
+          messageId: messageRecord.id,
+          contactId: contact.id,
+          trackingId,
+          stepNumber,
+        });
       } else {
         await storage.updateCampaignMessage(messageRecord.id, {
           status: 'failed',
@@ -203,12 +244,23 @@ export class CampaignEngine {
         });
         
         // Update bounce count
-        const campaign = await storage.getCampaign(campaignId);
-        if (campaign) {
+        const updatedCampaign = await storage.getCampaign(campaignId);
+        if (updatedCampaign) {
           await storage.updateCampaign(campaignId, {
-            bouncedCount: (campaign.bouncedCount || 0) + 1,
+            bouncedCount: (updatedCampaign.bouncedCount || 0) + 1,
           });
         }
+
+        // Create 'bounce' tracking event
+        await storage.createTrackingEvent({
+          type: 'bounce',
+          campaignId,
+          messageId: messageRecord.id,
+          contactId: contact.id,
+          trackingId,
+          stepNumber,
+          metadata: { error: result.error },
+        });
       }
 
       // Update progress
@@ -231,10 +283,10 @@ export class CampaignEngine {
   }
 
   /**
-   * Add open tracking pixel to HTML
+   * Add open tracking pixel to HTML (with absolute URL)
    */
-  private addTrackingPixel(html: string, trackingId: string): string {
-    const pixel = `<img src="/api/track/open/${trackingId}" width="1" height="1" style="display:none" alt="" />`;
+  private addTrackingPixel(html: string, trackingId: string, baseUrl: string): string {
+    const pixel = `<img src="${baseUrl}/api/track/open/${trackingId}" width="1" height="1" style="display:none;width:1px;height:1px;" alt="" />`;
     // Insert before closing body tag, or append
     if (html.includes('</body>')) {
       return html.replace('</body>', `${pixel}</body>`);
@@ -243,14 +295,16 @@ export class CampaignEngine {
   }
 
   /**
-   * Replace links with tracked URLs
+   * Replace links with tracked URLs (with absolute URL)
    */
-  private addClickTracking(html: string, trackingId: string): string {
+  private addClickTracking(html: string, trackingId: string, baseUrl: string): string {
     return html.replace(
       /href="(https?:\/\/[^"]+)"/gi,
       (match, url) => {
+        // Don't track unsubscribe links (they're already tracked)
+        if (url.includes('/api/track/')) return match;
         const encodedUrl = encodeURIComponent(url);
-        return `href="/api/track/click/${trackingId}?url=${encodedUrl}"`;
+        return `href="${baseUrl}/api/track/click/${trackingId}?url=${encodedUrl}"`;
       }
     );
   }
