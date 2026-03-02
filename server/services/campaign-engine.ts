@@ -20,13 +20,21 @@ interface PersonalizationData {
 
 export class CampaignEngine {
   private activeCampaigns: Map<string, { timer: any; paused: boolean; progress: number; total: number }> = new Map();
+  private _publicBaseUrl: string | null = null;
+
+  /**
+   * Set the public base URL for tracking links (call from route handler with req info).
+   */
+  setPublicBaseUrl(url: string): void {
+    this._publicBaseUrl = url.replace(/\/$/, '');
+  }
 
   /**
    * Get the base URL for tracking links.
-   * In production, this should be the public URL of the server.
+   * Uses the previously set public URL, env vars, or localhost as fallback.
    */
   private getBaseUrl(): string {
-    return process.env.BASE_URL || process.env.PUBLIC_URL || `http://localhost:${process.env.PORT || 3000}`;
+    return this._publicBaseUrl || process.env.BASE_URL || process.env.PUBLIC_URL || `http://localhost:${process.env.PORT || 3000}`;
   }
 
   /**

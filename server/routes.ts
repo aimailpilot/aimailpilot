@@ -15,6 +15,12 @@ const requireAuth = (req: any, res: any, next: any) => {
   const userId = req.cookies?.user_id || req.session?.userId;
   if (userId && loggedInUsers.has(userId)) {
     req.user = { id: userId, organizationId: '550e8400-e29b-41d4-a716-446655440001', role: 'admin' };
+    // Auto-detect public URL for tracking links
+    const host = req.headers['x-forwarded-host'] || req.headers['host'];
+    if (host && !host.includes('localhost')) {
+      const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+      campaignEngine.setPublicBaseUrl(`${proto}://${host}`);
+    }
     next();
   } else {
     res.status(401).json({ error: 'Not authenticated' });
@@ -24,6 +30,16 @@ const requireAuth = (req: any, res: any, next: any) => {
 export async function registerRoutes(app: Express): Promise<Server> {
   app.set('trust proxy', 1);
   app.use(cookieParser());
+
+  // Auto-detect public URL on every request for tracking link generation
+  app.use((req: any, _res: any, next: any) => {
+    const host = req.headers['x-forwarded-host'] || req.headers['host'];
+    if (host && !host.includes('localhost')) {
+      const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+      campaignEngine.setPublicBaseUrl(`${proto}://${host}`);
+    }
+    next();
+  });
   
   const MemStore = MemoryStore(session);
   app.use(session({
@@ -430,6 +446,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Campaign actions: send, pause, resume, stop, schedule
   app.post('/api/campaigns/:id/send', async (req: any, res) => {
     try {
+      // Detect public URL from the incoming request for tracking links
+      const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+      const host = req.headers['x-forwarded-host'] || req.headers['host'];
+      if (host && !host.includes('localhost')) {
+        campaignEngine.setPublicBaseUrl(`${proto}://${host}`);
+      }
+
       const result = await campaignEngine.startCampaign({
         campaignId: req.params.id,
         delayBetweenEmails: req.body.delayBetweenEmails || 2000,
