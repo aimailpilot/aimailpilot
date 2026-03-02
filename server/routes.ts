@@ -124,6 +124,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.use('/api/contact-lists', requireAuth);
   app.use('/api/tracking', requireAuth);
   app.use('/api/account', requireAuth);
+  app.use('/api/settings', requireAuth);
+  app.use('/api/llm', requireAuth);
 
   // ========== DASHBOARD ==========
   
@@ -1163,20 +1165,257 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.json(integrations);
   });
 
+  // ========== API SETTINGS ==========
+
+  app.get('/api/settings', async (req: any, res) => {
+    try {
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      // Mask sensitive values
+      const masked: Record<string, string> = {};
+      for (const [key, value] of Object.entries(settings)) {
+        if (key.includes('api_key') || key.includes('apiKey') || key.includes('password')) {
+          masked[key] = value ? '••••••••' + value.slice(-4) : '';
+        } else {
+          masked[key] = value;
+        }
+      }
+      res.json(masked);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch settings' });
+    }
+  });
+
+  // Return raw (unmasked) settings for internal use
+  app.get('/api/settings/raw', async (req: any, res) => {
+    try {
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      res.json(settings);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch settings' });
+    }
+  });
+
+  app.put('/api/settings', async (req: any, res) => {
+    try {
+      const settings = req.body;
+      if (!settings || typeof settings !== 'object') {
+        return res.status(400).json({ message: 'Settings object required' });
+      }
+      // Don't save masked values
+      const toSave: Record<string, string> = {};
+      for (const [key, value] of Object.entries(settings)) {
+        if (typeof value === 'string' && !value.startsWith('••••')) {
+          toSave[key] = value;
+        }
+      }
+      await storage.setApiSettings(req.user.organizationId, toSave);
+      res.json({ success: true, message: 'Settings saved successfully' });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to save settings' });
+    }
+  });
+
+  app.post('/api/settings/test-azure-openai', async (req: any, res) => {
+    try {
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      const endpoint = settings.azure_openai_endpoint;
+      const apiKey = settings.azure_openai_api_key;
+      const deploymentName = settings.azure_openai_deployment;
+      const apiVersion = settings.azure_openai_api_version || '2024-08-01-preview';
+
+      if (!endpoint || !apiKey || !deploymentName) {
+        return res.status(400).json({ success: false, error: 'Azure OpenAI endpoint, API key, and deployment name are required' });
+      }
+
+      const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${deploymentName}/chat/completions?api-version=${apiVersion}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'api-key': apiKey,
+        },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'Reply with: Connection successful' }],
+          max_tokens: 20,
+          temperature: 0,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        return res.json({ success: false, error: `Azure OpenAI returned ${response.status}: ${errorBody.slice(0, 200)}` });
+      }
+
+      const data = await response.json() as any;
+      const content = data?.choices?.[0]?.message?.content || '';
+      res.json({ success: true, message: `Connection successful. Model replied: "${content.slice(0, 100)}"`, model: data?.model });
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : 'Unknown error';
+      res.json({ success: false, error: `Connection test failed: ${errMsg}` });
+    }
+  });
+
+  app.post('/api/settings/test-elastic-email', async (req: any, res) => {
+    try {
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      const apiKey = settings.elastic_email_api_key;
+
+      if (!apiKey) {
+        return res.status(400).json({ success: false, error: 'Elastic Email API key is required' });
+      }
+
+      // Test the API key by fetching account info
+      const response = await fetch('https://api.elasticemail.com/v4/account', {
+        headers: { 'X-ElasticEmail-ApiKey': apiKey },
+      });
+
+      if (!response.ok) {
+        return res.json({ success: false, error: `Elastic Email API returned ${response.status}: Invalid API key or permissions` });
+      }
+
+      const data = await response.json() as any;
+      res.json({ 
+        success: true, 
+        message: `Connected to Elastic Email account: ${data?.email || 'unknown'}`,
+        email: data?.email,
+        plan: data?.marketingPlan?.typeName || data?.statusFormatted || 'Active',
+      });
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : 'Unknown error';
+      res.json({ success: false, error: `Connection test failed: ${errMsg}` });
+    }
+  });
+
   // ========== LLM ==========
 
-  app.post('/api/llm/generate', (req: any, res) => {
-    const { prompt } = req.body;
-    res.json({
-      content: `Here's a professionally crafted email based on your request:\n\nSubject: Quick Follow-up\n\nHi {{firstName}},\n\nI hope this message finds you well. I wanted to reach out regarding ${prompt || 'our recent discussion'}.\n\nI'd love to schedule a quick call to discuss further. Would you have 15 minutes this week?\n\nBest regards,\nThe MailFlow Team`,
-      model: 'demo',
-      tokens: 150
-    });
+  app.post('/api/llm/generate', async (req: any, res) => {
+    try {
+      const { prompt, type, context } = req.body;
+
+      // Try to use Azure OpenAI if configured
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      const endpoint = settings.azure_openai_endpoint;
+      const apiKey = settings.azure_openai_api_key;
+      const deploymentName = settings.azure_openai_deployment;
+      const apiVersion = settings.azure_openai_api_version || '2024-08-01-preview';
+
+      if (endpoint && apiKey && deploymentName) {
+        // Use Azure OpenAI
+        const systemPrompts: Record<string, string> = {
+          template: 'You are an expert email marketing copywriter. Generate professional email templates with personalization variables like {{firstName}}, {{company}}, {{jobTitle}}. Return only the email HTML content.',
+          campaign: 'You are an expert email campaign strategist. Generate compelling campaign email content that drives engagement. Use personalization variables like {{firstName}}, {{company}}. Return only the email HTML content.',
+          personalize: 'You are an AI email personalization expert. Take the provided template and personalize it for the specific recipient. Make it feel custom-written while maintaining the core message. Return only the personalized email content.',
+          subject: 'You are an email subject line expert. Generate 3-5 compelling subject line options. Return them as a numbered list.',
+          reply: 'You are a professional email assistant. Generate an appropriate, contextual reply to the provided email. Return only the reply content.',
+          default: 'You are an expert email marketing copywriter. Generate personalized, professional email content that drives engagement and responses.',
+        };
+
+        const systemPrompt = systemPrompts[type || 'default'] || systemPrompts.default;
+
+        const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${deploymentName}/chat/completions?api-version=${apiVersion}`;
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'api-key': apiKey,
+          },
+          body: JSON.stringify({
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: `${prompt || ''}\n\n${context ? 'Context: ' + JSON.stringify(context) : ''}` },
+            ],
+            max_tokens: 1500,
+            temperature: 0.7,
+          }),
+        });
+
+        if (response.ok) {
+          const data = await response.json() as any;
+          const content = data?.choices?.[0]?.message?.content || '';
+          return res.json({
+            content,
+            model: data?.model || deploymentName,
+            tokens: data?.usage?.total_tokens || 0,
+            provider: 'azure-openai',
+          });
+        }
+        
+        // If Azure fails, fall through to demo
+        console.error('Azure OpenAI generation failed:', response.status, await response.text());
+      }
+
+      // Fallback: demo response
+      res.json({
+        content: `Here's a professionally crafted email based on your request:\n\nSubject: Quick Follow-up\n\nHi {{firstName}},\n\nI hope this message finds you well. I wanted to reach out regarding ${prompt || 'our recent discussion'}.\n\nI'd love to schedule a quick call to discuss further. Would you have 15 minutes this week?\n\nBest regards,\nThe MailFlow Team`,
+        model: 'demo',
+        tokens: 150,
+        provider: 'demo',
+        note: 'Configure Azure OpenAI in Advanced Settings for real AI-powered generation.',
+      });
+    } catch (error) {
+      console.error('LLM generation error:', error);
+      res.status(500).json({ message: 'Failed to generate content' });
+    }
   });
 
   app.get('/api/llm-configs', async (req: any, res) => {
     const configs = await storage.getLlmConfigurations(req.user.organizationId);
     res.json(configs);
+  });
+
+  // AI-powered personalization preview
+  app.post('/api/llm/personalize-preview', async (req: any, res) => {
+    try {
+      const { subject, content, contact } = req.body;
+      if (!subject || !content) {
+        return res.status(400).json({ message: 'Subject and content are required' });
+      }
+
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      const endpoint = settings.azure_openai_endpoint;
+      const apiKey = settings.azure_openai_api_key;
+      const deploymentName = settings.azure_openai_deployment;
+      const apiVersion = settings.azure_openai_api_version || '2024-08-01-preview';
+
+      if (!endpoint || !apiKey || !deploymentName) {
+        return res.json({
+          subject,
+          content,
+          provider: 'none',
+          note: 'Configure Azure OpenAI in Advanced Settings for AI-powered personalization.',
+        });
+      }
+
+      const contactInfo = contact || { firstName: 'John', lastName: 'Doe', company: 'Acme Corp', jobTitle: 'Manager' };
+      const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${deploymentName}/chat/completions?api-version=${apiVersion}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'api-key': apiKey },
+        body: JSON.stringify({
+          messages: [
+            { role: 'system', content: 'You are an AI email personalization expert. Refine the given email to feel more personal and relevant to the recipient while preserving the core message and tone. Return ONLY the refined email content.' },
+            { role: 'user', content: `Personalize for ${contactInfo.firstName} ${contactInfo.lastName} (${contactInfo.jobTitle} at ${contactInfo.company}):\n\nSubject: ${subject}\n\nContent:\n${content}` },
+          ],
+          max_tokens: 1500,
+          temperature: 0.6,
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json() as any;
+        return res.json({
+          subject,
+          content: data?.choices?.[0]?.message?.content || content,
+          model: data?.model || deploymentName,
+          provider: 'azure-openai',
+        });
+      }
+
+      res.json({ subject, content, provider: 'error', note: 'Azure OpenAI request failed.' });
+    } catch (error) {
+      console.error('Personalization preview error:', error);
+      res.status(500).json({ message: 'Personalization preview failed' });
+    }
   });
 
   // ========== GOOGLE SHEETS INTEGRATION ==========

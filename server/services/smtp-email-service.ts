@@ -12,7 +12,7 @@ export interface SmtpConfig {
   fromName?: string;
   fromEmail: string;
   replyTo?: string;
-  provider: 'gmail' | 'outlook' | 'custom';
+  provider: 'gmail' | 'outlook' | 'elasticemail' | 'custom';
 }
 
 export interface EmailMessage {
@@ -61,6 +61,18 @@ export const SMTP_PRESETS: Record<string, Partial<SmtpConfig>> = {
   },
   yahoo: {
     host: 'smtp.mail.yahoo.com',
+    port: 465,
+    secure: true,
+    provider: 'custom',
+  },
+  elasticemail: {
+    host: 'smtp.elasticemail.com',
+    port: 2525,
+    secure: false,
+    provider: 'custom',
+  },
+  'elastic-email-ssl': {
+    host: 'smtp.elasticemail.com',
     port: 465,
     secure: true,
     provider: 'custom',
@@ -190,7 +202,7 @@ export class SmtpEmailService {
   async sendEmail(accountId: string, config: SmtpConfig, message: EmailMessage): Promise<SendResult> {
     try {
       // Check daily limit
-      const dailyLimit = config.provider === 'gmail' ? 2000 : config.provider === 'outlook' ? 300 : 500;
+      const dailyLimit = config.provider === 'gmail' ? 2000 : config.provider === 'outlook' ? 300 : config.provider === 'elasticemail' ? 100000 : 500;
       const today = new Date().toISOString().split('T')[0];
       const sentData = this.dailySentCounts.get(accountId);
       
@@ -279,7 +291,7 @@ export class SmtpEmailService {
    * Get daily quota info
    */
   getDailyQuota(accountId: string, provider: string): { daily: number; sent: number; remaining: number } {
-    const dailyLimit = provider === 'gmail' ? 2000 : provider === 'outlook' ? 300 : 500;
+    const dailyLimit = provider === 'gmail' ? 2000 : provider === 'outlook' ? 300 : provider === 'elasticemail' ? 100000 : 500;
     const today = new Date().toISOString().split('T')[0];
     const sentData = this.dailySentCounts.get(accountId);
     const sent = (sentData && sentData.date === today) ? sentData.count : 0;

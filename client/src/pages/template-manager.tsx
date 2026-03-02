@@ -10,7 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import {
   FileText, Plus, Edit, Trash2, Copy, Eye, Loader2, Search, Folder,
-  MoreHorizontal, Code, Sparkles, Tag, Clock, Hash
+  MoreHorizontal, Code, Sparkles, Tag, Clock, Hash, Brain, Wand2
 } from "lucide-react";
 
 interface Template {
@@ -42,6 +42,11 @@ export default function TemplateManager() {
   const [formSubject, setFormSubject] = useState('');
   const [formContent, setFormContent] = useState('');
   const [formLoading, setFormLoading] = useState(false);
+
+  // AI Generation state
+  const [aiPrompt, setAiPrompt] = useState('');
+  const [aiGenerating, setAiGenerating] = useState(false);
+  const [showAiSection, setShowAiSection] = useState(false);
 
   const categories = ['general', 'onboarding', 'follow-up', 'marketing', 'outreach', 'newsletter', 'transactional'];
 
@@ -390,12 +395,81 @@ export default function TemplateManager() {
               <Input value={formSubject} onChange={(e) => setFormSubject(e.target.value)} placeholder="e.g., Hi {{firstName}}, welcome!" className="mt-1.5" />
             </div>
             <div>
-              <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Email Content (HTML)</Label>
+              <div className="flex items-center justify-between mb-1.5">
+                <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Email Content (HTML)</Label>
+                <button
+                  onClick={() => setShowAiSection(!showAiSection)}
+                  className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg transition-colors font-medium ${
+                    showAiSection 
+                      ? 'bg-yellow-100 text-yellow-700 border border-yellow-300' 
+                      : 'bg-gray-100 text-gray-600 hover:bg-yellow-50 hover:text-yellow-600 border border-gray-200'
+                  }`}
+                >
+                  <Sparkles className="h-3 w-3" /> AI Generate
+                </button>
+              </div>
+
+              {/* AI Generation Section */}
+              {showAiSection && (
+                <div className="mb-3 p-3 bg-gradient-to-r from-yellow-50 to-orange-50 rounded-xl border border-yellow-200/60 space-y-2">
+                  <div className="flex items-center gap-2 mb-1">
+                    <Brain className="h-4 w-4 text-yellow-600" />
+                    <span className="text-xs font-semibold text-yellow-800">AI Template Generator</span>
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      value={aiPrompt}
+                      onChange={e => setAiPrompt(e.target.value)}
+                      placeholder="Describe the email template... (e.g., 'welcome email for new SaaS users')"
+                      className="flex-1 text-xs border border-yellow-200 rounded-lg px-3 py-2 bg-white outline-none focus:border-yellow-400"
+                      onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.closest('.space-y-2')?.querySelector<HTMLButtonElement>('button.ai-gen-btn')?.click(); }}
+                    />
+                    <button
+                      className="ai-gen-btn flex items-center gap-1 px-3 py-2 text-xs font-medium bg-gradient-to-r from-yellow-500 to-orange-500 text-white rounded-lg hover:from-yellow-600 hover:to-orange-600 disabled:opacity-50 whitespace-nowrap"
+                      disabled={aiGenerating || !aiPrompt.trim()}
+                      onClick={async () => {
+                        if (!aiPrompt.trim()) return;
+                        setAiGenerating(true);
+                        try {
+                          const res = await fetch('/api/llm/generate', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            credentials: 'include',
+                            body: JSON.stringify({ prompt: aiPrompt, type: 'template', context: { category: formCategory, name: formName } }),
+                          });
+                          if (res.ok) {
+                            const data = await res.json();
+                            setFormContent(data.content);
+                            // Try to extract subject from generated content
+                            const subjectMatch = data.content.match(/Subject:\s*(.+)/i);
+                            if (subjectMatch && !formSubject) {
+                              setFormSubject(subjectMatch[1].trim());
+                            }
+                          }
+                        } catch (e) { console.error('AI generation failed:', e); }
+                        setAiGenerating(false);
+                      }}
+                    >
+                      {aiGenerating ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wand2 className="h-3 w-3" />}
+                      {aiGenerating ? 'Generating...' : 'Generate'}
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {['Welcome onboarding email', 'Cold outreach for SaaS', 'Follow-up after meeting', 'Product launch announcement'].map(p => (
+                      <button key={p} onClick={() => setAiPrompt(p)}
+                        className="text-[10px] px-2 py-0.5 bg-white text-yellow-700 rounded-full border border-yellow-200 hover:bg-yellow-100 transition-colors">
+                        {p}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <Textarea
                 value={formContent}
                 onChange={(e) => setFormContent(e.target.value)}
                 rows={14}
-                className="font-mono text-sm mt-1.5 bg-gray-50"
+                className="font-mono text-sm bg-gray-50"
                 placeholder="<p>Hi {{firstName}},</p>\n<p>Your email content here...</p>"
               />
             </div>

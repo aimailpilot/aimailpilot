@@ -30,8 +30,9 @@ import AnalyticsDashboard from "./analytics-dashboard";
 import TemplateManager from "./template-manager";
 import FollowupSequenceBuilder from "./followup-builder";
 import CampaignDetailPage from "./campaign-detail";
+import AdvancedSettings from "./advanced-settings";
 
-type ViewType = 'campaigns' | 'templates' | 'contacts' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail';
+type ViewType = 'campaigns' | 'templates' | 'contacts' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings';
 
 // Live Tracking Feed component - fetches real tracking events
 function LiveTrackingFeed({ dashStats }: { dashStats: any }) {
@@ -272,6 +273,7 @@ export default function MailMeteorDashboard() {
 
   const sidebarBottomItems = [
     { key: 'account' as ViewType, label: 'Account', icon: Settings },
+    { key: 'advanced-settings' as ViewType, label: 'Advanced', icon: Wrench },
     { key: 'billing' as ViewType, label: 'Billing', icon: CreditCard },
   ];
 
@@ -283,6 +285,7 @@ export default function MailMeteorDashboard() {
       verification: 'Email Verification', tracking: 'Live Activity Feed',
       account: 'Account', billing: 'Billing', insights: 'Insights', tools: 'Tools',
       'campaign-detail': 'Campaign Detail',
+      'advanced-settings': 'Advanced Settings',
     };
     return titles[currentView] || 'Dashboard';
   };
@@ -302,6 +305,7 @@ export default function MailMeteorDashboard() {
       insights: 'Performance insights',
       tools: 'Campaign tools',
       'campaign-detail': 'Campaign tracking details',
+      'advanced-settings': 'Configure API integrations and advanced options',
     };
     return descs[currentView] || '';
   };
@@ -880,6 +884,11 @@ export default function MailMeteorDashboard() {
                 </Card>
               </div>
             </div>
+          )}
+
+          {/* Advanced Settings */}
+          {viewMode === 'dashboard' && currentView === 'advanced-settings' && (
+            <AdvancedSettings />
           )}
         </main>
       </div>

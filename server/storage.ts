@@ -292,6 +292,17 @@ db.exec(`
     executedAt TEXT,
     createdAt TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS api_settings (
+    id TEXT PRIMARY KEY,
+    organizationId TEXT NOT NULL,
+    settingKey TEXT NOT NULL,
+    settingValue TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL,
+    UNIQUE(organizationId, settingKey)
+  );
+  CREATE INDEX IF NOT EXISTS idx_api_settings_org ON api_settings(organizationId, settingKey);
 `);
 
 // ========== SEED DATA (only on first run) ==========
@@ -955,6 +966,54 @@ export class DatabaseStorage {
       campaignCount: row.campaignCount || 0,
       contactCount,
     };
+  }
+
+  // ========== API Settings ==========
+  async getApiSetting(organizationId: string, key: string): Promise<string | null> {
+    const row = db.prepare('SELECT settingValue FROM api_settings WHERE organizationId = ? AND settingKey = ?').get(organizationId, key) as any;
+    return row ? row.settingValue : null;
+  }
+
+  async getApiSettings(organizationId: string): Promise<Record<string, string>> {
+    const rows = db.prepare('SELECT settingKey, settingValue FROM api_settings WHERE organizationId = ?').all(organizationId) as any[];
+    const result: Record<string, string> = {};
+    for (const row of rows) {
+      result[row.settingKey] = row.settingValue;
+    }
+    return result;
+  }
+
+  async setApiSetting(organizationId: string, key: string, value: string): Promise<void> {
+    const ts = now();
+    const existing = db.prepare('SELECT id FROM api_settings WHERE organizationId = ? AND settingKey = ?').get(organizationId, key) as any;
+    if (existing) {
+      db.prepare('UPDATE api_settings SET settingValue = ?, updatedAt = ? WHERE id = ?').run(value, ts, existing.id);
+    } else {
+      db.prepare('INSERT INTO api_settings (id, organizationId, settingKey, settingValue, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)').run(
+        genId(), organizationId, key, value, ts, ts
+      );
+    }
+  }
+
+  async setApiSettings(organizationId: string, settings: Record<string, string>): Promise<void> {
+    const batch = db.transaction(() => {
+      for (const [key, value] of Object.entries(settings)) {
+        const ts = now();
+        const existing = db.prepare('SELECT id FROM api_settings WHERE organizationId = ? AND settingKey = ?').get(organizationId, key) as any;
+        if (existing) {
+          db.prepare('UPDATE api_settings SET settingValue = ?, updatedAt = ? WHERE id = ?').run(value || '', ts, existing.id);
+        } else {
+          db.prepare('INSERT INTO api_settings (id, organizationId, settingKey, settingValue, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)').run(
+            genId(), organizationId, key, value || '', ts, ts
+          );
+        }
+      }
+    });
+    batch();
+  }
+
+  async deleteApiSetting(organizationId: string, key: string): Promise<void> {
+    db.prepare('DELETE FROM api_settings WHERE organizationId = ? AND settingKey = ?').run(organizationId, key);
   }
 }
 

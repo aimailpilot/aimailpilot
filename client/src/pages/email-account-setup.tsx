@@ -248,6 +248,7 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
       gmail: { label: 'Gmail', color: 'from-red-500 to-red-600', bgGradient: 'from-red-50 to-red-100', bg: 'bg-red-50', text: 'text-red-700', limit: 2000, icon: <Mail className="h-5 w-5 text-red-500" /> },
       outlook: { label: 'Outlook', color: 'from-blue-500 to-blue-600', bgGradient: 'from-blue-50 to-blue-100', bg: 'bg-blue-50', text: 'text-blue-700', limit: 300, icon: <Mail className="h-5 w-5 text-blue-500" /> },
       office365: { label: 'Office 365', color: 'from-blue-600 to-indigo-600', bgGradient: 'from-indigo-50 to-indigo-100', bg: 'bg-indigo-50', text: 'text-indigo-700', limit: 10000, icon: <Mail className="h-5 w-5 text-indigo-500" /> },
+      elasticemail: { label: 'Elastic Email', color: 'from-orange-500 to-red-500', bgGradient: 'from-orange-50 to-orange-100', bg: 'bg-orange-50', text: 'text-orange-700', limit: 100000, icon: <Mail className="h-5 w-5 text-orange-500" /> },
       custom: { label: 'Custom', color: 'from-gray-500 to-gray-600', bgGradient: 'from-gray-50 to-gray-100', bg: 'bg-gray-50', text: 'text-gray-700', limit: 500, icon: <Server className="h-5 w-5 text-gray-500" /> },
     };
     return configs[provider] || configs.custom;
@@ -553,11 +554,12 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
             {/* Provider Selection */}
             <div>
               <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Email Provider</Label>
-              <div className="grid grid-cols-4 gap-2 mt-1.5">
+              <div className="grid grid-cols-5 gap-2 mt-1.5">
                 {[
                   { id: 'gmail', label: 'Gmail', icon: <Mail className="h-4 w-4 text-red-500" /> },
                   { id: 'outlook', label: 'Outlook', icon: <Mail className="h-4 w-4 text-blue-500" /> },
                   { id: 'office365', label: 'Office 365', icon: <Mail className="h-4 w-4 text-indigo-500" /> },
+                  { id: 'elasticemail', label: 'Elastic Email', icon: <Mail className="h-4 w-4 text-orange-500" /> },
                   { id: 'custom', label: 'Custom', icon: <Server className="h-4 w-4 text-gray-500" /> },
                 ].map((p) => (
                   <button
@@ -594,6 +596,16 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
                 <AlertCircle className="h-4 w-4 text-blue-600" />
                 <AlertDescription className="text-sm text-blue-800">
                   <strong>Enable SMTP auth</strong> in Outlook settings: Settings &gt; Mail &gt; Sync email &gt; enable POP/IMAP/SMTP.
+                </AlertDescription>
+              </Alert>
+            )}
+            {formProvider === 'elasticemail' && (
+              <Alert className="border-orange-200 bg-orange-50/50">
+                <AlertCircle className="h-4 w-4 text-orange-600" />
+                <AlertDescription className="text-sm text-orange-800">
+                  <strong>Elastic Email:</strong> Use your Elastic Email address as the SMTP username and your <strong>API key</strong> as the password.
+                  SMTP host: <code className="bg-orange-100 px-1 rounded text-xs">smtp.elasticemail.com</code>, Port: <code className="bg-orange-100 px-1 rounded text-xs">2525</code>.
+                  Configure your API key in <strong>Advanced Settings</strong>.
                 </AlertDescription>
               </Alert>
             )}

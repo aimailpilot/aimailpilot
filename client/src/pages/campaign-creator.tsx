@@ -14,7 +14,7 @@ import {
   AlignCenter, AlignRight, Type, Paperclip, Strikethrough, X,
   MoreVertical, ChevronDown, ChevronLeft, ChevronRight, Upload,
   Copy, Table, Trash2, ArrowLeft, Settings2, Rocket, Pencil,
-  SpellCheck, Palette
+  SpellCheck, Palette, Brain, Wand2
 } from "lucide-react";
 
 // ==================== TYPES ====================
@@ -129,6 +129,14 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
 
   // Template dialog
   const [templateTab, setTemplateTab] = useState<'recent' | 'all'>('recent');
+
+  // AI Generation
+  const [showAiPanel, setShowAiPanel] = useState(false);
+  const [aiPrompt, setAiPrompt] = useState('');
+  const [aiType, setAiType] = useState<'template' | 'campaign' | 'subject' | 'personalize'>('campaign');
+  const [aiGenerating, setAiGenerating] = useState(false);
+  const [aiResult, setAiResult] = useState<{ content: string; model: string; provider: string } | null>(null);
+  const [aiError, setAiError] = useState('');
 
   // Editor ref
   const editorRef = useRef<HTMLDivElement>(null);
@@ -796,7 +804,7 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
       <div className="w-64 border-l border-gray-200 bg-white flex-shrink-0 overflow-y-auto relative">
         {/* AI Sparkle button */}
         <div className="absolute top-3 right-3">
-          <button className="p-1.5 rounded-lg hover:bg-yellow-50 text-yellow-500 hover:text-yellow-600 transition-colors" title="AI Assistant">
+          <button onClick={() => setShowAiPanel(!showAiPanel)} className={`p-1.5 rounded-lg transition-colors ${showAiPanel ? 'bg-yellow-100 text-yellow-600' : 'hover:bg-yellow-50 text-yellow-500 hover:text-yellow-600'}`} title="AI Assistant">
             <Sparkles className="h-5 w-5" />
           </button>
         </div>
@@ -843,6 +851,147 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
             <Switch checked={unsubscribeLink} onCheckedChange={setUnsubscribeLink} />
           </div>
         </div>
+
+        {/* AI Generation Panel */}
+        {showAiPanel && (
+          <div className="border-t border-gray-100 p-4">
+            <div className="flex items-center gap-2 mb-3">
+              <div className="w-6 h-6 rounded-md bg-gradient-to-br from-yellow-400 to-orange-500 flex items-center justify-center">
+                <Brain className="h-3.5 w-3.5 text-white" />
+              </div>
+              <h3 className="text-sm font-bold text-gray-900">AI Assistant</h3>
+            </div>
+            
+            <div className="space-y-3">
+              <select
+                value={aiType}
+                onChange={e => setAiType(e.target.value as any)}
+                className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white"
+              >
+                <option value="campaign">Generate email body</option>
+                <option value="subject">Suggest subject lines</option>
+                <option value="personalize">Personalize content</option>
+                <option value="template">Create full template</option>
+              </select>
+              
+              <textarea
+                value={aiPrompt}
+                onChange={e => setAiPrompt(e.target.value)}
+                placeholder={aiType === 'subject' ? 'Describe your email topic...' : 'Describe what the email should say...'}
+                className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-2 resize-none h-20 outline-none focus:border-blue-300"
+              />
+              
+              <button
+                onClick={async () => {
+                  if (!aiPrompt.trim()) return;
+                  setAiGenerating(true);
+                  setAiError('');
+                  setAiResult(null);
+                  try {
+                    const res = await fetch('/api/llm/generate', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      credentials: 'include',
+                      body: JSON.stringify({ 
+                        prompt: aiPrompt, 
+                        type: aiType,
+                        context: { 
+                          subject: activeStep?.subject,
+                          recipients: selectedContacts.length,
+                        }
+                      }),
+                    });
+                    if (res.ok) {
+                      const data = await res.json();
+                      setAiResult({ content: data.content, model: data.model, provider: data.provider });
+                    } else {
+                      setAiError('Generation failed. Check Advanced Settings.');
+                    }
+                  } catch {
+                    setAiError('Could not reach server');
+                  } finally {
+                    setAiGenerating(false);
+                  }
+                }}
+                disabled={aiGenerating || !aiPrompt.trim()}
+                className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-gradient-to-r from-yellow-500 to-orange-500 text-white rounded-lg hover:from-yellow-600 hover:to-orange-600 disabled:opacity-50 transition-all"
+              >
+                {aiGenerating ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wand2 className="h-3 w-3" />}
+                {aiGenerating ? 'Generating...' : 'Generate'}
+              </button>
+
+              {aiError && (
+                <div className="text-xs text-red-600 bg-red-50 rounded-lg p-2">{aiError}</div>
+              )}
+
+              {aiResult && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-gray-400">
+                      {aiResult.provider === 'azure-openai' ? 'Azure OpenAI' : 'Demo'}
+                    </span>
+                  </div>
+                  <div className="text-xs text-gray-700 bg-gray-50 rounded-lg p-2.5 max-h-32 overflow-y-auto whitespace-pre-wrap border border-gray-100">
+                    {aiResult.content}
+                  </div>
+                  <div className="flex gap-1.5">
+                    {aiType === 'subject' ? (
+                      <button
+                        onClick={() => {
+                          const lines = aiResult.content.split('\n').filter(l => l.trim());
+                          const firstLine = lines[0]?.replace(/^\d+[\.\)]\s*/, '').replace(/^["']|["']$/g, '').trim();
+                          if (firstLine) updateActiveStep({ subject: firstLine });
+                        }}
+                        className="flex-1 text-[11px] px-2 py-1 bg-blue-50 text-blue-700 rounded-md hover:bg-blue-100 font-medium"
+                      >
+                        Use first suggestion
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => {
+                            updateActiveStep({ content: aiResult.content });
+                            if (editorRef.current) editorRef.current.innerHTML = aiResult.content;
+                          }}
+                          className="flex-1 text-[11px] px-2 py-1 bg-blue-50 text-blue-700 rounded-md hover:bg-blue-100 font-medium"
+                        >
+                          Replace content
+                        </button>
+                        <button
+                          onClick={() => {
+                            const curr = activeStep?.content || '';
+                            const updated = curr + '\n' + aiResult.content;
+                            updateActiveStep({ content: updated });
+                            if (editorRef.current) editorRef.current.innerHTML = updated;
+                          }}
+                          className="flex-1 text-[11px] px-2 py-1 bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200 font-medium"
+                        >
+                          Append
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Quick prompts */}
+              <div className="space-y-1">
+                <p className="text-[10px] text-gray-400 font-medium uppercase tracking-wider">Quick prompts</p>
+                {[
+                  'Cold outreach for SaaS product',
+                  'Follow-up after demo',
+                  'Re-engagement for inactive users',
+                  'Event invitation email',
+                ].map(p => (
+                  <button key={p} onClick={() => setAiPrompt(p)}
+                    className="w-full text-left text-[11px] text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded px-2 py-1 transition-colors">
+                    {p}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Sequence Section */}
         {steps.length > 0 && (

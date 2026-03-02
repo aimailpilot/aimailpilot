@@ -19,8 +19,8 @@ class OpenAIProvider implements LLMProvider {
   private client: OpenAI;
   private model: string;
 
-  constructor(apiKey: string, model = "gpt-4o") {
-    this.client = new OpenAI({ apiKey });
+  constructor(apiKey: string, model = "gpt-4o", baseURL?: string) {
+    this.client = new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });
     this.model = model;
   }
 
@@ -260,5 +260,31 @@ export class LLMService {
     }
     
     return statuses;
+  }
+
+  /**
+   * Load Azure OpenAI provider dynamically from database settings.
+   * This enables using Azure OpenAI without environment variables.
+   */
+  async loadAzureProvider(organizationId: string): Promise<boolean> {
+    try {
+      const settings = await storage.getApiSettings(organizationId);
+      const endpoint = settings.azure_openai_endpoint;
+      const apiKey = settings.azure_openai_api_key;
+      const deploymentName = settings.azure_openai_deployment;
+
+      if (!endpoint || !apiKey || !deploymentName) {
+        return false;
+      }
+
+      // Azure OpenAI uses a different base URL format
+      const baseURL = `${endpoint.replace(/\/$/, '')}/openai/deployments/${deploymentName}`;
+      const azureProvider = new OpenAIProvider(apiKey, deploymentName, baseURL);
+      this.providers.set('azure-openai', azureProvider);
+      return true;
+    } catch (error) {
+      console.error('Failed to load Azure OpenAI provider:', error);
+      return false;
+    }
   }
 }

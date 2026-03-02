@@ -388,6 +388,74 @@ export class PersonalizationEngine {
       variables
     };
   }
+
+  /**
+   * AI-powered email personalization via Azure OpenAI (optional enhancement).
+   * Falls back gracefully if Azure is not configured.
+   */
+  async aiPersonalizeEmail(
+    organizationId: string,
+    subject: string,
+    content: string,
+    context: PersonalizationContext
+  ): Promise<PersonalizationResult> {
+    // First do standard variable replacement
+    const basicResult = await this.personalizeEmail(subject, content, context);
+
+    try {
+      // Check if Azure OpenAI is configured
+      const settings = await storage.getApiSettings(organizationId);
+      const endpoint = settings.azure_openai_endpoint;
+      const apiKey = settings.azure_openai_api_key;
+      const deploymentName = settings.azure_openai_deployment;
+      const apiVersion = settings.azure_openai_api_version || '2024-08-01-preview';
+
+      if (!endpoint || !apiKey || !deploymentName) {
+        // Azure not configured, return basic personalization
+        return basicResult;
+      }
+
+      const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${deploymentName}/chat/completions?api-version=${apiVersion}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'api-key': apiKey,
+        },
+        body: JSON.stringify({
+          messages: [
+            {
+              role: 'system',
+              content: 'You are an AI email personalization expert. Refine the given email to feel more personal and relevant to the recipient while preserving the core message, tone, and all tracking links/images. Return ONLY the refined email HTML content without explanation.',
+            },
+            {
+              role: 'user',
+              content: `Personalize this email for ${context.contact.firstName || 'the recipient'} (${context.contact.jobTitle || 'professional'} at ${context.contact.company || 'their company'}):\n\nSubject: ${basicResult.subject}\n\nContent:\n${basicResult.content}`,
+            },
+          ],
+          max_tokens: 1500,
+          temperature: 0.6,
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json() as any;
+        const aiContent = data?.choices?.[0]?.message?.content;
+        if (aiContent) {
+          return {
+            subject: basicResult.subject,
+            content: aiContent,
+            variables: basicResult.variables,
+          };
+        }
+      }
+    } catch (error) {
+      console.error('AI personalization failed, using standard:', error);
+    }
+
+    // Fallback to basic personalization
+    return basicResult;
+  }
 }
 
 export const personalizationEngine = new PersonalizationEngine();
