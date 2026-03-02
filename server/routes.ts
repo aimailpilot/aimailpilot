@@ -1343,12 +1343,78 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.post('/api/followup-sequences', async (req: any, res) => {
-    const sequence = await storage.createFollowupSequence({
-      ...req.body,
-      organizationId: req.user.organizationId,
-      createdBy: req.user.id,
-    });
-    res.status(201).json(sequence);
+    try {
+      const { campaignId, trigger, subject, content, delayValue, delayUnit, stepOrder, name } = req.body;
+
+      // Convert delayValue + delayUnit to delayDays + delayHours
+      let delayDays = 0;
+      let delayHours = 0;
+      const val = parseInt(delayValue) || 0;
+      switch (delayUnit) {
+        case 'minutes': delayHours = 0; delayDays = 0; break; // minutes stored as fractional hours
+        case 'hours': delayHours = val; break;
+        case 'days': delayDays = val; break;
+        case 'weeks': delayDays = val * 7; break;
+        default: delayDays = val; break;
+      }
+      // For minutes, convert to hours (round up to at least 1 hour for practical sending)
+      if (delayUnit === 'minutes' && val > 0) {
+        delayHours = Math.max(1, Math.ceil(val / 60));
+      }
+
+      // Map condition names from campaign creator to followup engine triggers
+      const triggerMap: Record<string, string> = {
+        'if_no_reply': 'no_reply',
+        'if_no_click': 'no_click',
+        'if_no_open': 'no_open',
+        'if_opened': 'opened',
+        'if_clicked': 'clicked',
+        'if_replied': 'replied',
+        'no_matter_what': 'time_delay',
+      };
+      const mappedTrigger = triggerMap[trigger] || trigger || 'no_reply';
+
+      // Create or reuse a follow-up sequence for this campaign
+      const seqName = name || `Campaign Follow-up ${stepOrder || 1}`;
+      const sequence = await storage.createFollowupSequence({
+        organizationId: req.user.organizationId,
+        name: seqName,
+        description: `Auto-created follow-up: ${mappedTrigger} after ${delayDays}d ${delayHours}h`,
+        createdBy: req.user.id,
+      });
+
+      // Create the follow-up step
+      const step = await storage.createFollowupStep({
+        sequenceId: (sequence as any).id,
+        stepNumber: stepOrder || 1,
+        trigger: mappedTrigger,
+        delayDays,
+        delayHours,
+        subject: subject || '',
+        content: content || '',
+      });
+
+      // Link the campaign to this sequence
+      if (campaignId) {
+        await storage.createCampaignFollowup({
+          campaignId,
+          sequenceId: (sequence as any).id,
+        });
+        console.log(`[Followup] Created sequence "${seqName}" for campaign ${campaignId}: ${mappedTrigger} after ${delayDays}d ${delayHours}h`);
+      }
+
+      res.status(201).json({
+        ...(sequence as any),
+        step,
+        campaignId,
+        trigger: mappedTrigger,
+        delayDays,
+        delayHours,
+      });
+    } catch (error) {
+      console.error('[Followup] Error creating sequence:', error);
+      res.status(500).json({ message: 'Failed to create follow-up sequence' });
+    }
   });
 
   app.put('/api/followup-sequences/:id', async (req: any, res) => {

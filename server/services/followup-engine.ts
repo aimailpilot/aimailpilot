@@ -1,5 +1,6 @@
 import { storage } from "../storage";
 import { LLMService } from "./llm";
+import { smtpEmailService } from "./smtp-email-service";
 
 // Simple email interface since we need to integrate with existing email providers
 interface EmailMessage {
@@ -18,12 +19,28 @@ interface EmailResult {
 class EmailService {
   async sendEmail(emailAccountId: string, message: EmailMessage): Promise<EmailResult> {
     try {
-      // This would integrate with the existing email provider service
-      // For now, we'll simulate success
-      console.log(`Sending email via account ${emailAccountId} to ${message.to}`);
+      // Try real SMTP sending via the email account
+      const account = await storage.getEmailAccount(emailAccountId);
+      if (account?.smtpConfig) {
+        console.log(`[Followup] Sending email via SMTP account ${emailAccountId} to ${message.to}`);
+        const result = await smtpEmailService.sendEmail(emailAccountId, account.smtpConfig, {
+          to: message.to,
+          subject: message.subject,
+          html: message.html,
+          text: message.text || message.html.replace(/<[^>]*>/g, ''),
+        });
+        return {
+          success: result.success,
+          messageId: result.messageId || `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+          error: result.error,
+        };
+      }
+
+      // Fallback: log and simulate if no SMTP config
+      console.log(`[Followup] No SMTP config for account ${emailAccountId}, simulating send to ${message.to}`);
       return {
         success: true,
-        messageId: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+        messageId: `followup_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
       };
     } catch (error) {
       return {
@@ -55,21 +72,21 @@ export class FollowupEngine {
    */
   async processFollowupTriggers(): Promise<void> {
     try {
-      console.log("Starting follow-up trigger processing...");
-      
       // Get all campaigns with active follow-up sequences
       const activeCampaignFollowups = await storage.getActiveCampaignFollowups();
+      
+      if (activeCampaignFollowups.length > 0) {
+        console.log(`[Followup] Processing ${activeCampaignFollowups.length} active campaign follow-up configurations...`);
+      }
       
       for (const campaignFollowup of activeCampaignFollowups) {
         await this.processCampaignFollowups(campaignFollowup.campaignId, campaignFollowup.sequenceId);
       }
       
-      // Process time-based triggers
+      // Process time-based triggers (pending executions)
       await this.processScheduledFollowups();
-      
-      console.log("Follow-up trigger processing completed");
     } catch (error) {
-      console.error("Error processing follow-up triggers:", error);
+      console.error("[Followup] Error processing follow-up triggers:", error);
     }
   }
 
@@ -104,7 +121,11 @@ export class FollowupEngine {
   private async evaluateFollowupTrigger(message: any, step: any): Promise<boolean> {
     const now = new Date();
     const sentAt = new Date(message.sentAt);
-    const delayMs = (step.delayDays * 24 * 60 * 60 * 1000) + (step.delayHours * 60 * 60 * 1000);
+    
+    // Calculate delay in milliseconds - support days, hours
+    const delayDays = parseInt(step.delayDays) || 0;
+    const delayHours = parseInt(step.delayHours) || 0;
+    const delayMs = (delayDays * 24 * 60 * 60 * 1000) + (delayHours * 60 * 60 * 1000);
     const triggerTime = new Date(sentAt.getTime() + delayMs);
 
     // Check if enough time has passed
@@ -115,30 +136,38 @@ export class FollowupEngine {
     // Check trigger conditions
     switch (step.trigger) {
       case "no_reply":
+      case "if_no_reply":
         return !message.repliedAt;
         
       case "no_open":
-        return !message.openedAt && now.getTime() - sentAt.getTime() >= delayMs;
+      case "if_no_open":
+        return !message.openedAt;
         
       case "no_click":
-        return !message.clickedAt && now.getTime() - sentAt.getTime() >= delayMs;
+      case "if_no_click":
+        return !message.clickedAt;
         
       case "opened":
-        return !!message.openedAt && !await this.followupAlreadyExecuted(message.id, step.id);
+      case "if_opened":
+        return !!message.openedAt;
         
       case "clicked":
-        return !!message.clickedAt && !await this.followupAlreadyExecuted(message.id, step.id);
+      case "if_clicked":
+        return !!message.clickedAt;
         
       case "replied":
-        return !!message.repliedAt && !await this.followupAlreadyExecuted(message.id, step.id);
+      case "if_replied":
+        return !!message.repliedAt;
         
       case "bounced":
-        return !!message.bouncedAt && !await this.followupAlreadyExecuted(message.id, step.id);
+        return !!message.bouncedAt;
         
       case "time_delay":
-        return now >= triggerTime;
+      case "no_matter_what":
+        return true; // Always send after delay
         
       default:
+        console.log(`[Followup] Unknown trigger type: ${step.trigger}`);
         return false;
     }
   }

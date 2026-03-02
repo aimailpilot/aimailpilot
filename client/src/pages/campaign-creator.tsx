@@ -14,7 +14,7 @@ import {
   AlignCenter, AlignRight, Type, Paperclip, Strikethrough, X,
   MoreVertical, ChevronDown, ChevronLeft, ChevronRight, Upload,
   Copy, Table, Trash2, ArrowLeft, Settings2, Rocket, Pencil,
-  SpellCheck, Palette, Brain, Wand2
+  SpellCheck, Palette, Brain, Wand2, Play, Monitor
 } from "lucide-react";
 
 // ==================== TYPES ====================
@@ -29,7 +29,7 @@ interface SequenceStep {
   content: string;
   condition: 'immediate' | 'if_no_reply' | 'if_no_click' | 'if_no_open' | 'if_opened' | 'if_clicked' | 'if_replied' | 'no_matter_what';
   delayValue: number;
-  delayUnit: 'hours' | 'days' | 'weeks';
+  delayUnit: 'minutes' | 'hours' | 'days' | 'weeks';
 }
 
 interface DaySchedule {
@@ -77,6 +77,15 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
     { id: 'step-1', subject: '', content: '', condition: 'immediate', delayValue: 0, delayUnit: 'days' }
   ]);
   const [activeStepIndex, setActiveStepIndex] = useState(0);
+
+  // Editor mode: 'visual' or 'html'
+  const [editorMode, setEditorMode] = useState<'visual' | 'html'>('visual');
+  const [htmlSource, setHtmlSource] = useState('');
+
+  // Preview
+  const [showPreview, setShowPreview] = useState(false);
+  const [previewData, setPreviewData] = useState<{ subject: string; content: string; contact: any } | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
 
   // Dialogs
   const [showRecipients, setShowRecipients] = useState(false);
@@ -201,7 +210,27 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
     if (editorRef.current && activeStep) {
       editorRef.current.innerHTML = activeStep.content || '';
     }
+    if (activeStep) {
+      setHtmlSource(activeStep.content || '');
+    }
   }, [activeStepIndex]);
+
+  // Switch between visual and HTML modes
+  const toggleEditorMode = () => {
+    if (editorMode === 'visual') {
+      // Going to HTML mode - capture current visual content
+      const currentHtml = editorRef.current?.innerHTML || activeStep?.content || '';
+      setHtmlSource(currentHtml);
+      setEditorMode('html');
+    } else {
+      // Going back to visual - apply HTML source
+      updateActiveStep({ content: htmlSource });
+      if (editorRef.current) {
+        editorRef.current.innerHTML = htmlSource;
+      }
+      setEditorMode('visual');
+    }
+  };
 
   // Add follow-up step
   const addFollowUp = () => {
@@ -227,17 +256,49 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
   const insertTemplate = (template: any) => {
     updateActiveStep({ subject: template.subject || '', content: template.content || '' });
     if (editorRef.current) editorRef.current.innerHTML = template.content || '';
+    setHtmlSource(template.content || '');
     setShowTemplates(false);
   };
 
   // Insert variable
   const insertVariable = (varName: string) => {
-    execCmd('insertText', `{{${varName}}}`);
+    if (editorMode === 'html') {
+      setHtmlSource(prev => prev + `{{${varName}}}`);
+      updateActiveStep({ content: htmlSource + `{{${varName}}}` });
+    } else {
+      execCmd('insertText', `{{${varName}}}`);
+    }
   };
 
   // Recipient count
   const recipientCount = selectedContacts.length;
   const selectedAccount = emailAccounts.find(a => a.id === emailAccountId);
+
+  // Preview email
+  const handleShowPreview = async () => {
+    setPreviewLoading(true);
+    setShowPreview(true);
+    try {
+      // Get current content (from HTML mode if active)
+      const currentContent = editorMode === 'html' ? htmlSource : (activeStep?.content || '');
+      const res = await fetch('/api/campaigns/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          subject: activeStep?.subject || '',
+          content: currentContent,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPreviewData(data);
+      }
+    } catch (e) {
+      console.error('Preview failed:', e);
+    }
+    setPreviewLoading(false);
+  };
 
   // Send campaign
   const handleSend = async () => {
@@ -245,6 +306,11 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
     if (!emailAccountId) { setError('Please select a sender account'); return; }
     if (!steps[0].subject) { setError('Please enter a subject line'); return; }
     if (recipientCount === 0) { setError('Please select recipients'); return; }
+
+    // If in HTML mode, sync content first
+    if (editorMode === 'html') {
+      updateActiveStep({ content: htmlSource });
+    }
 
     setSending(true);
     try {
@@ -255,7 +321,8 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
         credentials: 'include',
         body: JSON.stringify({
           name, emailAccountId,
-          subject: steps[0].subject, content: steps[0].content,
+          subject: steps[0].subject,
+          content: editorMode === 'html' ? htmlSource : steps[0].content,
           contactIds: selectedContacts,
           totalRecipients: recipientCount,
           status: schedule.enabled ? 'scheduled' : 'draft',
@@ -325,135 +392,73 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
   // Google Sheets: validate URL and fetch sheet names
   const validateSheetUrl = useCallback(async (url: string) => {
     if (!url || !url.includes('docs.google.com/spreadsheets')) {
-      setSheetValid(null);
-      setAvailableSheets([]);
-      setSheetError('');
-      return;
+      setSheetValid(null); setAvailableSheets([]); setSheetError(''); return;
     }
-
-    setSheetValidating(true);
-    setSheetValid(null);
-    setSheetError('');
-    setAvailableSheets([]);
-    setSheetContacts([]);
-    setSheetPreview(null);
-    setSheetName('');
-
+    setSheetValidating(true); setSheetValid(null); setSheetError('');
+    setAvailableSheets([]); setSheetContacts([]); setSheetPreview(null); setSheetName('');
     try {
       const res = await fetch('/api/sheets/fetch-info', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
         body: JSON.stringify({ url }),
       });
       const data = await res.json();
-
-      if (res.ok && data.valid) {
-        setSheetValid(true);
-        setAvailableSheets(data.sheets || []);
-      } else {
-        setSheetValid(false);
-        setSheetError(data.error || 'Cannot access spreadsheet');
-      }
-    } catch (e) {
-      setSheetValid(false);
-      setSheetError('Failed to validate URL');
-    }
+      if (res.ok && data.valid) { setSheetValid(true); setAvailableSheets(data.sheets || []); }
+      else { setSheetValid(false); setSheetError(data.error || 'Cannot access spreadsheet'); }
+    } catch (e) { setSheetValid(false); setSheetError('Failed to validate URL'); }
     setSheetValidating(false);
   }, []);
 
-  // Debounce sheet URL validation
   useEffect(() => {
-    const timer = setTimeout(() => {
-      if (sheetUrl) validateSheetUrl(sheetUrl);
-    }, 800);
+    const timer = setTimeout(() => { if (sheetUrl) validateSheetUrl(sheetUrl); }, 800);
     return () => clearTimeout(timer);
   }, [sheetUrl, validateSheetUrl]);
 
-  // Google Sheets: fetch data when sheet is selected
   const fetchSheetData = useCallback(async (selectedSheet: string) => {
     if (!sheetUrl || !selectedSheet) return;
-
-    setSheetLoading(true);
-    setSheetContacts([]);
-    setSheetPreview(null);
-
+    setSheetLoading(true); setSheetContacts([]); setSheetPreview(null);
     try {
       const selectedSheetObj = availableSheets.find(s => s.name === selectedSheet);
       const res = await fetch('/api/sheets/fetch-data', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          url: sheetUrl,
-          sheetName: selectedSheet,
-          gid: selectedSheetObj?.id ?? 0,
-        }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ url: sheetUrl, sheetName: selectedSheet, gid: selectedSheetObj?.id ?? 0 }),
       });
       const data = await res.json();
-
       if (res.ok) {
-        setSheetPreview({
-          headers: data.headers || [],
-          values: data.values || [],
-          totalRows: data.totalRows || 0,
-          validContacts: data.validContacts || 0,
-        });
+        setSheetPreview({ headers: data.headers || [], values: data.values || [], totalRows: data.totalRows || 0, validContacts: data.validContacts || 0 });
         setSheetContacts(data.contacts || []);
-      } else {
-        setSheetError(data.error || 'Failed to fetch sheet data');
-      }
-    } catch (e) {
-      setSheetError('Failed to load sheet data');
-    }
+      } else { setSheetError(data.error || 'Failed to fetch sheet data'); }
+    } catch (e) { setSheetError('Failed to load sheet data'); }
     setSheetLoading(false);
   }, [sheetUrl, availableSheets]);
 
-  // Import contacts from Google Sheets
   const importSheetContacts = async () => {
     if (sheetContacts.length === 0) return;
-
     try {
       setSheetLoading(true);
-      // Import contacts via API
       const importRes = await fetch('/api/contacts/import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
         body: JSON.stringify({ contacts: sheetContacts }),
       });
       const result = await importRes.json();
-
       if (importRes.ok) {
-        // Refresh contacts list and select all imported
         const ctcRes = await fetch('/api/contacts', { credentials: 'include' });
         if (ctcRes.ok) {
           const data = await ctcRes.json();
           const allContacts = data.contacts || data || [];
           setContacts(allContacts);
-          // Select contacts that match imported emails
           const importedEmails = sheetContacts.map(c => c.email.toLowerCase());
-          const matchedIds = allContacts
-            .filter((c: any) => importedEmails.includes(c.email?.toLowerCase()))
-            .map((c: any) => c.id);
+          const matchedIds = allContacts.filter((c: any) => importedEmails.includes(c.email?.toLowerCase())).map((c: any) => c.id);
           setSelectedContacts(matchedIds);
         }
-        setError('');
-        setShowRecipients(false);
-      } else {
-        setSheetError(result.message || 'Failed to import contacts');
-      }
-    } catch (e) {
-      setSheetError('Failed to import contacts');
-    } finally {
-      setSheetLoading(false);
-    }
+        setError(''); setShowRecipients(false);
+      } else { setSheetError(result.message || 'Failed to import contacts'); }
+    } catch (e) { setSheetError('Failed to import contacts'); }
+    finally { setSheetLoading(false); }
   };
 
   // Autopilot summary
   const getAutopilotSummary = () => {
     const activeDays = Object.entries(autopilot.days).filter(([, v]) => v.enabled).length;
-    // Average hours per active day
     let totalHours = 0;
     Object.values(autopilot.days).forEach(d => {
       if (d.enabled) {
@@ -536,9 +541,7 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
           </div>
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" className="text-blue-600 border-blue-200 hover:bg-blue-50"
-              onClick={() => {
-                /* preview */
-              }}>
+              onClick={handleShowPreview}>
               <Eye className="h-3.5 w-3.5 mr-1.5" /> Show preview
             </Button>
             <Button size="sm" onClick={handleSend} disabled={sending}
@@ -570,7 +573,7 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                   onChange={e => setEmailAccountId(e.target.value)}
                   className="flex-1 text-sm font-medium text-gray-900 bg-transparent border-0 outline-none cursor-pointer appearance-none"
                 >
-                  {emailAccounts.length === 0 && <option value="">No accounts — add one in Accounts</option>}
+                  {emailAccounts.length === 0 && <option value="">No accounts -- add one in Accounts</option>}
                   {emailAccounts.map(a => (
                     <option key={a.id} value={a.id}>
                       {a.displayName || a.email} &lt;{a.email}&gt;
@@ -589,12 +592,10 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                         { label: 'Cc', action: () => { setShowCc(true); setShowMoreMenu(false); } },
                         { label: 'Bcc', action: () => { setShowBcc(true); setShowMoreMenu(false); } },
                         { label: 'Reply to', action: () => { setShowReplyTo(true); setShowMoreMenu(false); } },
-                        { label: 'Send a test email', action: () => { 
+                        { label: 'Send a test email', action: () => {
                           const testEmail = prompt('Enter test email address:', selectedAccount?.email || '');
-                          if (testEmail) {
-                            alert(`Test email would be sent to ${testEmail}`);
-                          }
-                          setShowMoreMenu(false); 
+                          if (testEmail) { alert(`Test email would be sent to ${testEmail}`); }
+                          setShowMoreMenu(false);
                         } },
                         { label: 'Select recipients', action: () => { setShowRecipients(true); setShowMoreMenu(false); } },
                       ].map(item => (
@@ -603,6 +604,17 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                           {item.label}
                         </button>
                       ))}
+                      <div className="border-t border-gray-100 my-1" />
+                      <button onClick={addFollowUp}
+                        className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50">
+                        Send another email
+                      </button>
+                      {activeStepIndex > 0 && (
+                        <button onClick={() => { removeStep(activeStepIndex); setShowMoreMenu(false); }}
+                          className="w-full text-left px-4 py-2.5 text-sm text-red-600 hover:bg-red-50">
+                          Remove step
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
@@ -617,7 +629,6 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                   <button onClick={() => { setShowCc(false); setCcValue(''); }} className="text-gray-300 hover:text-gray-500"><X className="h-3.5 w-3.5" /></button>
                 </div>
               )}
-              {/* Bcc row */}
               {showBcc && (
                 <div className="flex items-center px-5 py-2 border-b border-gray-100">
                   <span className="text-sm text-gray-400 w-16 flex-shrink-0">Bcc</span>
@@ -626,7 +637,6 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                   <button onClick={() => { setShowBcc(false); setBccValue(''); }} className="text-gray-300 hover:text-gray-500"><X className="h-3.5 w-3.5" /></button>
                 </div>
               )}
-              {/* Reply-to row */}
               {showReplyTo && (
                 <div className="flex items-center px-5 py-2 border-b border-gray-100">
                   <span className="text-sm text-gray-400 w-16 flex-shrink-0">Reply to</span>
@@ -671,122 +681,165 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
               </div>
             </div>
 
-            {/* Follow-up condition bar (for steps > 0) */}
+            {/* Follow-up condition bar (for steps > 0) - Mailmeteor style sentence builder */}
             {activeStepIndex > 0 && activeStep && (
-              <div className="bg-white rounded-xl border border-gray-200 shadow-sm mb-4 px-5 py-3 flex items-center gap-3 flex-wrap">
+              <div className="bg-white rounded-xl border border-blue-200 shadow-sm mb-4 px-5 py-3.5 flex items-center gap-2.5 flex-wrap">
                 <select value={activeStep.condition}
                   onChange={e => updateActiveStep({ condition: e.target.value as any })}
-                  className="text-sm border border-gray-200 rounded-lg px-3 py-1.5 bg-white">
-                  <option value="if_no_reply">If no reply</option>
-                  <option value="if_no_click">If no click</option>
-                  <option value="if_no_open">If no open</option>
-                  <option value="if_opened">If opened</option>
-                  <option value="if_clicked">If clicked</option>
-                  <option value="if_replied">If replied</option>
-                  <option value="no_matter_what">No matter what</option>
+                  className="text-sm font-medium border border-gray-200 rounded-lg px-3 py-1.5 bg-white text-gray-800 focus:border-blue-400 outline-none cursor-pointer">
+                  <option value="if_no_reply">if no reply</option>
+                  <option value="if_no_click">if no click</option>
+                  <option value="if_no_open">if no open</option>
+                  <option value="if_opened">if opened</option>
+                  <option value="if_clicked">if clicked</option>
+                  <option value="if_replied">if replied</option>
+                  <option value="no_matter_what">no matter what</option>
                 </select>
-                <span className="text-sm text-gray-500">after</span>
+                <span className="text-sm text-gray-500 font-medium">after</span>
                 <input type="number" min={1} max={365} value={activeStep.delayValue}
                   onChange={e => updateActiveStep({ delayValue: parseInt(e.target.value) || 1 })}
-                  className="w-16 text-sm text-center border border-gray-200 rounded-lg px-2 py-1.5" />
+                  className="w-16 text-sm text-center font-medium border border-gray-200 rounded-lg px-2 py-1.5 focus:border-blue-400 outline-none" />
                 <select value={activeStep.delayUnit}
                   onChange={e => updateActiveStep({ delayUnit: e.target.value as any })}
-                  className="text-sm border border-gray-200 rounded-lg px-3 py-1.5 bg-white">
+                  className="text-sm font-medium border border-gray-200 rounded-lg px-3 py-1.5 bg-white text-gray-800 focus:border-blue-400 outline-none cursor-pointer">
+                  <option value="minutes">minutes</option>
                   <option value="hours">hours</option>
                   <option value="days">days</option>
                   <option value="weeks">weeks</option>
                 </select>
-                <span className="text-sm text-gray-500">send this email</span>
+                <div className="flex items-center gap-1.5 text-sm text-blue-600 font-medium">
+                  <Play className="h-3 w-3 fill-blue-600" />
+                  <span>send this email</span>
+                </div>
               </div>
             )}
 
-            {/* Rich Text Editor */}
+            {/* Rich Text / HTML Editor */}
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-              {/* Toolbar */}
-              <div className="flex items-center gap-0.5 px-3 py-2 border-b border-gray-100 flex-wrap bg-gray-50/50">
-                <ToolbarBtn icon={<Bold className="h-4 w-4" />} onClick={() => execCmd('bold')} title="Bold" />
-                <ToolbarBtn icon={<Italic className="h-4 w-4" />} onClick={() => execCmd('italic')} title="Italic" />
-                <ToolbarBtn icon={<Underline className="h-4 w-4" />} onClick={() => execCmd('underline')} title="Underline" />
-                {/* Font color with dropdown indicator */}
-                <div className="relative group">
-                  <button className="p-1.5 rounded hover:bg-gray-200 text-gray-500 flex items-center gap-0" title="Font color">
-                    <span className="font-bold text-sm leading-none">A</span>
-                    <span className="block h-0.5 w-3 bg-red-500 -mt-0.5 ml-px"></span>
-                    <ChevronDown className="h-2.5 w-2.5 ml-0.5" />
-                  </button>
-                  <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg p-2 hidden group-hover:grid grid-cols-6 gap-1 z-50 w-36">
-                    {['#000000','#e53e3e','#dd6b20','#d69e2e','#38a169','#3182ce','#805ad5','#d53f8c','#718096','#e2e8f0'].map(color => (
-                      <button key={color} onClick={() => execCmd('foreColor', color)}
-                        className="w-5 h-5 rounded border border-gray-200 hover:scale-110 transition-transform"
-                        style={{ backgroundColor: color }} />
-                    ))}
-                  </div>
-                </div>
-                <ToolbarSep />
-                <ToolbarBtn icon={<Strikethrough className="h-4 w-4" />} onClick={() => execCmd('strikeThrough')} title="Strikethrough" />
-                <ToolbarBtn icon={<SpellCheck className="h-4 w-4" />} onClick={() => {}} title="Spell check" />
-                <ToolbarBtn icon={<Paperclip className="h-4 w-4" />} onClick={() => {}} title="Attach" />
-                <ToolbarBtn icon={<Link className="h-4 w-4" />} onClick={() => {
-                  const url = prompt('Enter URL:');
-                  if (url) execCmd('createLink', url);
-                }} title="Link" />
-                <ToolbarBtn icon={<Image className="h-4 w-4" />} onClick={() => {
-                  const url = prompt('Enter image URL:');
-                  if (url) execCmd('insertImage', url);
-                }} title="Image" />
-                {/* Merge tags */}
-                <div className="relative group">
-                  <button className="p-1.5 rounded hover:bg-gray-200 text-gray-500 flex items-center gap-0.5 text-sm font-mono" title="Variables">
-                    {'{ }'} <ChevronDown className="h-3 w-3" />
-                  </button>
-                  <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg py-1 w-44 hidden group-hover:block z-50">
-                    {['firstName', 'lastName', 'email', 'company', 'jobTitle', 'fullName'].map(v => (
-                      <button key={v} onClick={() => insertVariable(v)}
-                        className="w-full text-left px-3 py-1.5 text-xs hover:bg-blue-50 text-gray-700 font-mono">
-                        {`{{${v}}}`}
+              {/* Developer mode toggle + Toolbar */}
+              <div className="flex items-center justify-between px-3 py-1.5 border-b border-gray-100 bg-gray-50/80">
+                {editorMode === 'visual' ? (
+                  <div className="flex items-center gap-0.5 flex-wrap flex-1">
+                    <ToolbarBtn icon={<Bold className="h-4 w-4" />} onClick={() => execCmd('bold')} title="Bold" />
+                    <ToolbarBtn icon={<Italic className="h-4 w-4" />} onClick={() => execCmd('italic')} title="Italic" />
+                    <ToolbarBtn icon={<Underline className="h-4 w-4" />} onClick={() => execCmd('underline')} title="Underline" />
+                    {/* Font color */}
+                    <div className="relative group">
+                      <button className="p-1.5 rounded hover:bg-gray-200 text-gray-500 flex items-center gap-0" title="Font color">
+                        <span className="font-bold text-sm leading-none">A</span>
+                        <span className="block h-0.5 w-3 bg-red-500 -mt-0.5 ml-px"></span>
+                        <ChevronDown className="h-2.5 w-2.5 ml-0.5" />
                       </button>
-                    ))}
+                      <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg p-2 hidden group-hover:grid grid-cols-6 gap-1 z-50 w-36">
+                        {['#000000','#e53e3e','#dd6b20','#d69e2e','#38a169','#3182ce','#805ad5','#d53f8c','#718096','#e2e8f0'].map(color => (
+                          <button key={color} onClick={() => execCmd('foreColor', color)}
+                            className="w-5 h-5 rounded border border-gray-200 hover:scale-110 transition-transform"
+                            style={{ backgroundColor: color }} />
+                        ))}
+                      </div>
+                    </div>
+                    <ToolbarSep />
+                    <ToolbarBtn icon={<Strikethrough className="h-4 w-4" />} onClick={() => execCmd('strikeThrough')} title="Strikethrough" />
+                    <ToolbarBtn icon={<Link className="h-4 w-4" />} onClick={() => {
+                      const url = prompt('Enter URL:');
+                      if (url) execCmd('createLink', url);
+                    }} title="Link" />
+                    <ToolbarBtn icon={<Image className="h-4 w-4" />} onClick={() => {
+                      const url = prompt('Enter image URL:');
+                      if (url) execCmd('insertImage', url);
+                    }} title="Image" />
+                    {/* Merge tags */}
+                    <div className="relative group">
+                      <button className="p-1.5 rounded hover:bg-gray-200 text-gray-500 flex items-center gap-0.5 text-sm font-mono" title="Variables">
+                        {'{ }'} <ChevronDown className="h-3 w-3" />
+                      </button>
+                      <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg py-1 w-44 hidden group-hover:block z-50">
+                        {['firstName', 'lastName', 'email', 'company', 'jobTitle', 'fullName'].map(v => (
+                          <button key={v} onClick={() => insertVariable(v)}
+                            className="w-full text-left px-3 py-1.5 text-xs hover:bg-blue-50 text-gray-700 font-mono">
+                            {`{{${v}}}`}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <ToolbarSep />
+                    {/* Font family */}
+                    <select className="text-xs border-0 bg-transparent text-gray-500 cursor-pointer outline-none px-1"
+                      onChange={e => execCmd('fontName', e.target.value)}>
+                      <option>Sans Serif</option><option value="serif">Serif</option>
+                      <option value="monospace">Monospace</option><option value="Georgia">Georgia</option>
+                      <option value="Arial">Arial</option>
+                    </select>
+                    <ToolbarSep />
+                    <ToolbarBtn icon={<ListOrdered className="h-4 w-4" />} onClick={() => execCmd('insertOrderedList')} title="Numbered list" />
+                    <ToolbarBtn icon={<List className="h-4 w-4" />} onClick={() => execCmd('insertUnorderedList')} title="Bullet list" />
+                    <ToolbarBtn icon={<AlignLeft className="h-4 w-4" />} onClick={() => execCmd('justifyLeft')} title="Align left" />
+                    <ToolbarBtn icon={<AlignCenter className="h-4 w-4" />} onClick={() => execCmd('justifyCenter')} title="Center" />
+                    <ToolbarBtn icon={<AlignRight className="h-4 w-4" />} onClick={() => execCmd('justifyRight')} title="Align right" />
+                    <ToolbarSep />
+                    <ToolbarBtn icon={<Type className="h-3.5 w-3.5" />} onClick={() => execCmd('removeFormat')} title="Clear formatting" />
                   </div>
-                </div>
-                <ToolbarSep />
-                {/* Font family */}
-                <select className="text-xs border-0 bg-transparent text-gray-500 cursor-pointer outline-none px-1"
-                  onChange={e => execCmd('fontName', e.target.value)}>
-                  <option>Sans Serif</option>
-                  <option value="serif">Serif</option>
-                  <option value="monospace">Monospace</option>
-                  <option value="Georgia">Georgia</option>
-                  <option value="Arial">Arial</option>
-                </select>
-                {/* Font size */}
-                <select className="text-xs border-0 bg-transparent text-gray-500 cursor-pointer outline-none px-1"
-                  onChange={e => execCmd('fontSize', e.target.value)}>
-                  <option value="3">Tт</option>
-                  <option value="1">Small</option>
-                  <option value="3">Normal</option>
-                  <option value="5">Large</option>
-                  <option value="7">Huge</option>
-                </select>
-                <ToolbarSep />
-                <ToolbarBtn icon={<ListOrdered className="h-4 w-4" />} onClick={() => execCmd('insertOrderedList')} title="Numbered list" />
-                <ToolbarBtn icon={<List className="h-4 w-4" />} onClick={() => execCmd('insertUnorderedList')} title="Bullet list" />
-                <ToolbarBtn icon={<AlignLeft className="h-4 w-4" />} onClick={() => execCmd('justifyLeft')} title="Align left" />
-                <ToolbarBtn icon={<AlignCenter className="h-4 w-4" />} onClick={() => execCmd('justifyCenter')} title="Center" />
-                <ToolbarBtn icon={<AlignRight className="h-4 w-4" />} onClick={() => execCmd('justifyRight')} title="Align right" />
-                <ToolbarSep />
-                <ToolbarBtn icon={<Code className="h-4 w-4" />} onClick={() => execCmd('formatBlock', 'pre')} title="Code" />
-                <ToolbarBtn icon={<Type className="h-3.5 w-3.5" />} onClick={() => execCmd('removeFormat')} title="Clear formatting" />
+                ) : (
+                  <div className="flex items-center gap-2 flex-1">
+                    <span className="text-xs text-gray-500 font-medium">HTML Source Editor</span>
+                    {/* Variables in HTML mode */}
+                    <div className="relative group">
+                      <button className="p-1 rounded hover:bg-gray-200 text-gray-500 flex items-center gap-0.5 text-xs font-mono" title="Insert Variable">
+                        {'{{ }}'} <ChevronDown className="h-3 w-3" />
+                      </button>
+                      <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg py-1 w-44 hidden group-hover:block z-50">
+                        {['firstName', 'lastName', 'email', 'company', 'jobTitle', 'fullName'].map(v => (
+                          <button key={v} onClick={() => insertVariable(v)}
+                            className="w-full text-left px-3 py-1.5 text-xs hover:bg-blue-50 text-gray-700 font-mono">
+                            {`{{${v}}}`}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Developer mode toggle button */}
+                <button
+                  onClick={toggleEditorMode}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                    editorMode === 'html'
+                      ? 'bg-gray-800 text-white'
+                      : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-100'
+                  }`}
+                >
+                  <Code className="h-3.5 w-3.5" />
+                  Developer mode {'</>'}
+                  {editorMode === 'html' && (
+                    <button onClick={(e) => { e.stopPropagation(); toggleEditorMode(); }} className="ml-1 p-0.5 rounded hover:bg-gray-700">
+                      <X className="h-3 w-3" />
+                    </button>
+                  )}
+                </button>
               </div>
 
-              {/* Content editable area */}
-              <div
-                ref={editorRef}
-                contentEditable
-                onInput={handleEditorInput}
-                className="min-h-[300px] p-5 text-sm text-gray-900 outline-none [&:empty]:before:content-[attr(data-placeholder)] [&:empty]:before:text-gray-300"
-                data-placeholder="Compose your email..."
-                suppressContentEditableWarning
-              />
+              {/* Content area - Visual or HTML */}
+              {editorMode === 'visual' ? (
+                <div
+                  ref={editorRef}
+                  contentEditable
+                  onInput={handleEditorInput}
+                  className="min-h-[300px] p-5 text-sm text-gray-900 outline-none [&:empty]:before:content-[attr(data-placeholder)] [&:empty]:before:text-gray-300"
+                  data-placeholder="Compose your email..."
+                  suppressContentEditableWarning
+                />
+              ) : (
+                <textarea
+                  value={htmlSource}
+                  onChange={e => {
+                    setHtmlSource(e.target.value);
+                    updateActiveStep({ content: e.target.value });
+                  }}
+                  className="w-full min-h-[300px] p-5 text-sm font-mono bg-gray-900 text-gray-100 outline-none resize-y border-0"
+                  placeholder="<p>Enter your HTML email code here...</p>"
+                  spellCheck={false}
+                />
+              )}
             </div>
 
             {/* Add follow-up button */}
@@ -863,55 +916,33 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
             </div>
             
             <div className="space-y-3">
-              <select
-                value={aiType}
-                onChange={e => setAiType(e.target.value as any)}
-                className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white"
-              >
+              <select value={aiType} onChange={e => setAiType(e.target.value as any)}
+                className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white">
                 <option value="campaign">Generate email body</option>
                 <option value="subject">Suggest subject lines</option>
                 <option value="personalize">Personalize content</option>
                 <option value="template">Create full template</option>
               </select>
               
-              <textarea
-                value={aiPrompt}
-                onChange={e => setAiPrompt(e.target.value)}
+              <textarea value={aiPrompt} onChange={e => setAiPrompt(e.target.value)}
                 placeholder={aiType === 'subject' ? 'Describe your email topic...' : 'Describe what the email should say...'}
-                className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-2 resize-none h-20 outline-none focus:border-blue-300"
-              />
+                className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-2 resize-none h-20 outline-none focus:border-blue-300" />
               
               <button
                 onClick={async () => {
                   if (!aiPrompt.trim()) return;
-                  setAiGenerating(true);
-                  setAiError('');
-                  setAiResult(null);
+                  setAiGenerating(true); setAiError(''); setAiResult(null);
                   try {
                     const res = await fetch('/api/llm/generate', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      credentials: 'include',
-                      body: JSON.stringify({ 
-                        prompt: aiPrompt, 
-                        type: aiType,
-                        context: { 
-                          subject: activeStep?.subject,
-                          recipients: selectedContacts.length,
-                        }
-                      }),
+                      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+                      body: JSON.stringify({ prompt: aiPrompt, type: aiType, context: { subject: activeStep?.subject, recipients: selectedContacts.length } }),
                     });
                     if (res.ok) {
                       const data = await res.json();
                       setAiResult({ content: data.content, model: data.model, provider: data.provider });
-                    } else {
-                      setAiError('Generation failed. Check Advanced Settings.');
-                    }
-                  } catch {
-                    setAiError('Could not reach server');
-                  } finally {
-                    setAiGenerating(false);
-                  }
+                    } else { setAiError('Generation failed. Check Advanced Settings.'); }
+                  } catch { setAiError('Could not reach server'); }
+                  finally { setAiGenerating(false); }
                 }}
                 disabled={aiGenerating || !aiPrompt.trim()}
                 className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-gradient-to-r from-yellow-500 to-orange-500 text-white rounded-lg hover:from-yellow-600 hover:to-orange-600 disabled:opacity-50 transition-all"
@@ -920,52 +951,41 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                 {aiGenerating ? 'Generating...' : 'Generate'}
               </button>
 
-              {aiError && (
-                <div className="text-xs text-red-600 bg-red-50 rounded-lg p-2">{aiError}</div>
-              )}
+              {aiError && <div className="text-xs text-red-600 bg-red-50 rounded-lg p-2">{aiError}</div>}
 
               {aiResult && (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <span className="text-[10px] text-gray-400">
-                      {aiResult.provider === 'azure-openai' ? 'Azure OpenAI' : 'Demo'}
-                    </span>
+                    <span className="text-[10px] text-gray-400">{aiResult.provider === 'azure-openai' ? 'Azure OpenAI' : 'Demo'}</span>
                   </div>
                   <div className="text-xs text-gray-700 bg-gray-50 rounded-lg p-2.5 max-h-32 overflow-y-auto whitespace-pre-wrap border border-gray-100">
                     {aiResult.content}
                   </div>
                   <div className="flex gap-1.5">
                     {aiType === 'subject' ? (
-                      <button
-                        onClick={() => {
-                          const lines = aiResult.content.split('\n').filter(l => l.trim());
-                          const firstLine = lines[0]?.replace(/^\d+[\.\)]\s*/, '').replace(/^["']|["']$/g, '').trim();
-                          if (firstLine) updateActiveStep({ subject: firstLine });
-                        }}
-                        className="flex-1 text-[11px] px-2 py-1 bg-blue-50 text-blue-700 rounded-md hover:bg-blue-100 font-medium"
-                      >
+                      <button onClick={() => {
+                        const lines = aiResult.content.split('\n').filter(l => l.trim());
+                        const firstLine = lines[0]?.replace(/^\d+[\.\)]\s*/, '').replace(/^["']|["']$/g, '').trim();
+                        if (firstLine) updateActiveStep({ subject: firstLine });
+                      }} className="flex-1 text-[11px] px-2 py-1 bg-blue-50 text-blue-700 rounded-md hover:bg-blue-100 font-medium">
                         Use first suggestion
                       </button>
                     ) : (
                       <>
-                        <button
-                          onClick={() => {
-                            updateActiveStep({ content: aiResult.content });
-                            if (editorRef.current) editorRef.current.innerHTML = aiResult.content;
-                          }}
-                          className="flex-1 text-[11px] px-2 py-1 bg-blue-50 text-blue-700 rounded-md hover:bg-blue-100 font-medium"
-                        >
+                        <button onClick={() => {
+                          updateActiveStep({ content: aiResult.content });
+                          if (editorRef.current) editorRef.current.innerHTML = aiResult.content;
+                          setHtmlSource(aiResult.content);
+                        }} className="flex-1 text-[11px] px-2 py-1 bg-blue-50 text-blue-700 rounded-md hover:bg-blue-100 font-medium">
                           Replace content
                         </button>
-                        <button
-                          onClick={() => {
-                            const curr = activeStep?.content || '';
-                            const updated = curr + '\n' + aiResult.content;
-                            updateActiveStep({ content: updated });
-                            if (editorRef.current) editorRef.current.innerHTML = updated;
-                          }}
-                          className="flex-1 text-[11px] px-2 py-1 bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200 font-medium"
-                        >
+                        <button onClick={() => {
+                          const curr = activeStep?.content || '';
+                          const updated = curr + '\n' + aiResult.content;
+                          updateActiveStep({ content: updated });
+                          if (editorRef.current) editorRef.current.innerHTML = updated;
+                          setHtmlSource(updated);
+                        }} className="flex-1 text-[11px] px-2 py-1 bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200 font-medium">
                           Append
                         </button>
                       </>
@@ -974,15 +994,9 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                 </div>
               )}
 
-              {/* Quick prompts */}
               <div className="space-y-1">
                 <p className="text-[10px] text-gray-400 font-medium uppercase tracking-wider">Quick prompts</p>
-                {[
-                  'Cold outreach for SaaS product',
-                  'Follow-up after demo',
-                  'Re-engagement for inactive users',
-                  'Event invitation email',
-                ].map(p => (
+                {['Cold outreach for SaaS product', 'Follow-up after demo', 'Re-engagement for inactive users', 'Event invitation email'].map(p => (
                   <button key={p} onClick={() => setAiPrompt(p)}
                     className="w-full text-left text-[11px] text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded px-2 py-1 transition-colors">
                     {p}
@@ -1017,21 +1031,17 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                           <X className="h-3 w-3" />
                         </button>
                       )}
-                      <button onClick={(e) => e.stopPropagation()}
-                        className="p-0.5 rounded hover:bg-gray-200 text-gray-300 hover:text-gray-500 opacity-0 group-hover/step:opacity-100 transition-opacity">
-                        <MoreVertical className="h-3 w-3" />
-                      </button>
                     </div>
                   </div>
-                  <div className="text-[11px] text-gray-400 flex items-center gap-2">
+                  <div className="text-[11px] text-gray-400 flex items-center gap-1.5">
                     {i === 0 ? (
                       'Will be sent immediately'
                     ) : (
                       <>
-                        <Zap className="h-3 w-3" />
-                        {conditionLabels[step.condition]}
-                        <Clock className="h-3 w-3 ml-1" />
-                        {step.delayValue} {step.delayUnit}
+                        <Zap className="h-3 w-3 text-blue-500" />
+                        <span>{conditionLabels[step.condition]}</span>
+                        <Clock className="h-3 w-3 ml-0.5 text-gray-400" />
+                        <span>{step.delayValue} {step.delayUnit}</span>
                       </>
                     )}
                   </div>
@@ -1042,13 +1052,69 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
         )}
       </div>
 
-      {/* ==================== DIALOGS ==================== */}
+      {/* ==================== EMAIL PREVIEW DIALOG ==================== */}
+      <Dialog open={showPreview} onOpenChange={setShowPreview}>
+        <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <div className="bg-blue-50 p-2 rounded-lg">
+                <Monitor className="h-4 w-4 text-blue-600" />
+              </div>
+              Email Preview
+            </DialogTitle>
+            <DialogDescription>This is how your email will look to recipients. Variables are replaced with sample data.</DialogDescription>
+          </DialogHeader>
+          {previewLoading ? (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="h-6 w-6 animate-spin text-blue-500" />
+            </div>
+          ) : previewData ? (
+            <div className="space-y-4">
+              {/* Email header */}
+              <div className="bg-gray-50 rounded-xl p-4 border border-gray-100 space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-400 w-14">From:</span>
+                  <span className="text-sm text-gray-700 font-medium">{selectedAccount?.displayName || selectedAccount?.email || 'Sender'} &lt;{selectedAccount?.email || 'sender@example.com'}&gt;</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-400 w-14">To:</span>
+                  <span className="text-sm text-gray-700">{previewData.contact?.email || 'john@example.com'}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-400 w-14">Subject:</span>
+                  <span className="text-sm text-gray-900 font-semibold">{previewData.subject}</span>
+                </div>
+              </div>
+              {/* Email body */}
+              <div className="border border-gray-200 rounded-xl bg-white overflow-hidden">
+                <div className="p-6">
+                  <div
+                    dangerouslySetInnerHTML={{ __html: previewData.content }}
+                    className="prose prose-sm max-w-none text-gray-800 [&_a]:text-blue-600 [&_img]:max-w-full"
+                  />
+                </div>
+              </div>
+              {/* Preview info */}
+              <div className="flex items-center gap-2 text-xs text-gray-400 bg-gray-50 rounded-lg p-3">
+                <Info className="h-3.5 w-3.5" />
+                <span>Sample contact used: {previewData.contact?.firstName} {previewData.contact?.lastName} ({previewData.contact?.email})</span>
+              </div>
+            </div>
+          ) : (
+            <div className="text-center py-8 text-gray-400">No preview data available</div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowPreview(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ==================== OTHER DIALOGS ==================== */}
 
       {/* SELECT RECIPIENTS DIALOG */}
       <Dialog open={showRecipients} onOpenChange={setShowRecipients}>
         <DialogContent className="max-w-2xl p-0 overflow-hidden">
           <div className="flex min-h-[420px]">
-            {/* Left tabs */}
             <div className="w-48 border-r border-gray-100 py-4 flex-shrink-0">
               <h3 className="px-4 text-base font-bold text-gray-900 mb-3">Select recipients</h3>
               {([
@@ -1059,163 +1125,78 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
               ]).map(tab => (
                 <button key={tab.key} onClick={() => setRecipientTab(tab.key)}
                   className={`w-full flex items-center gap-2.5 px-4 py-2.5 text-sm font-medium transition-colors ${
-                    recipientTab === tab.key
-                      ? 'bg-blue-600 text-white'
-                      : 'text-gray-600 hover:bg-gray-50'
+                    recipientTab === tab.key ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-50'
                   }`}>
                   {tab.icon} {tab.label}
                 </button>
               ))}
             </div>
-
-            {/* Right content */}
             <div className="flex-1 p-6 flex flex-col">
-              {/* Google Sheets */}
               {recipientTab === 'sheets' && (
                 <div className="space-y-4 flex-1 overflow-auto">
                   <div>
                     <Label className="text-sm text-gray-600 mb-1.5 block">Spreadsheet</Label>
                     <div className="relative">
-                      <Input 
-                        placeholder="Copy/paste spreadsheet URL" 
-                        value={sheetUrl} 
-                        onChange={e => {
-                          setSheetUrl(e.target.value);
-                          setSheetError('');
-                          setSheetValid(null);
-                          setAvailableSheets([]);
-                          setSheetContacts([]);
-                          setSheetPreview(null);
-                          setSheetName('');
-                        }}
-                        className={`pr-10 ${sheetValid === true ? 'border-green-400 focus-visible:ring-green-400' : sheetValid === false ? 'border-red-400 focus-visible:ring-red-400' : ''}`}
-                      />
+                      <Input placeholder="Copy/paste spreadsheet URL" value={sheetUrl}
+                        onChange={e => { setSheetUrl(e.target.value); setSheetError(''); setSheetValid(null); setAvailableSheets([]); setSheetContacts([]); setSheetPreview(null); setSheetName(''); }}
+                        className={`pr-10 ${sheetValid === true ? 'border-green-400' : sheetValid === false ? 'border-red-400' : ''}`} />
                       <div className="absolute right-3 top-1/2 -translate-y-1/2">
                         {sheetValidating && <Loader2 className="h-4 w-4 text-blue-500 animate-spin" />}
                         {sheetValid === true && <CheckCircle className="h-4 w-4 text-green-500" />}
                         {sheetValid === false && <AlertCircle className="h-4 w-4 text-red-400" />}
                       </div>
                     </div>
-                    {sheetValid === true && (
-                      <p className="text-xs text-green-600 mt-1 flex items-center gap-1">
-                        <CheckCircle className="h-3 w-3" /> Spreadsheet connected
-                      </p>
-                    )}
-                    {sheetError && (
-                      <p className="text-xs text-red-500 mt-1">{sheetError}</p>
-                    )}
-                    {!sheetUrl && (
-                      <p className="text-xs text-gray-400 mt-1.5">
-                        Paste the URL of a Google Sheets spreadsheet. It must be shared with "Anyone with the link".
-                      </p>
-                    )}
+                    {sheetValid === true && <p className="text-xs text-green-600 mt-1 flex items-center gap-1"><CheckCircle className="h-3 w-3" /> Spreadsheet connected</p>}
+                    {sheetError && <p className="text-xs text-red-500 mt-1">{sheetError}</p>}
+                    {!sheetUrl && <p className="text-xs text-gray-400 mt-1.5">Paste the URL of a Google Sheets spreadsheet.</p>}
                   </div>
-
                   <div>
                     <Label className="text-sm text-gray-600 mb-1.5 block">Sheet</Label>
-                    <select 
-                      className={`w-full h-10 border rounded-md px-3 text-sm ${
-                        availableSheets.length === 0 
-                          ? 'border-gray-200 bg-gray-50 text-gray-400 cursor-not-allowed' 
-                          : 'border-gray-200 bg-white text-gray-700 cursor-pointer'
-                      }`}
-                      value={sheetName} 
-                      onChange={e => { 
-                        setSheetName(e.target.value); 
-                        setSheetError('');
-                        if (e.target.value) fetchSheetData(e.target.value); 
-                      }}
-                      disabled={availableSheets.length === 0}
-                    >
+                    <select className={`w-full h-10 border rounded-md px-3 text-sm ${availableSheets.length === 0 ? 'border-gray-200 bg-gray-50 text-gray-400 cursor-not-allowed' : 'border-gray-200 bg-white'}`}
+                      value={sheetName} onChange={e => { setSheetName(e.target.value); setSheetError(''); if (e.target.value) fetchSheetData(e.target.value); }}
+                      disabled={availableSheets.length === 0}>
                       <option value="">Select a sheet</option>
-                      {availableSheets.map(s => (
-                        <option key={s.id} value={s.name}>{s.name}</option>
-                      ))}
+                      {availableSheets.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
                     </select>
                   </div>
-
-                  {/* Loading state */}
-                  {sheetLoading && (
-                    <div className="flex items-center justify-center py-6">
-                      <Loader2 className="h-5 w-5 text-blue-500 animate-spin mr-2" />
-                      <span className="text-sm text-gray-500">Loading contacts from sheet...</span>
-                    </div>
-                  )}
-
-                  {/* Preview of loaded contacts */}
+                  {sheetLoading && <div className="flex items-center justify-center py-6"><Loader2 className="h-5 w-5 text-blue-500 animate-spin mr-2" /><span className="text-sm text-gray-500">Loading contacts...</span></div>}
                   {sheetPreview && !sheetLoading && (
                     <div className="space-y-3">
-                      <div className="flex items-center gap-2">
-                        <Badge className="bg-green-50 text-green-700 border-green-200">
-                          {sheetPreview.validContacts} contacts found
-                        </Badge>
-                        <span className="text-xs text-gray-400">
-                          ({sheetPreview.totalRows} total rows)
-                        </span>
-                      </div>
-
-                      {/* Data table preview */}
+                      <Badge className="bg-green-50 text-green-700 border-green-200">{sheetPreview.validContacts} contacts found</Badge>
                       {sheetContacts.length > 0 && (
                         <div className="border border-gray-200 rounded-lg overflow-hidden">
                           <div className="max-h-48 overflow-auto">
                             <table className="w-full text-xs">
-                              <thead className="bg-gray-50 sticky top-0">
-                                <tr>
-                                  <th className="px-3 py-2 text-left text-gray-500 font-semibold">Email</th>
-                                  <th className="px-3 py-2 text-left text-gray-500 font-semibold">First Name</th>
-                                  <th className="px-3 py-2 text-left text-gray-500 font-semibold">Last Name</th>
-                                  {sheetContacts.some(c => c.company) && (
-                                    <th className="px-3 py-2 text-left text-gray-500 font-semibold">Company</th>
-                                  )}
-                                </tr>
-                              </thead>
+                              <thead className="bg-gray-50 sticky top-0"><tr>
+                                <th className="px-3 py-2 text-left text-gray-500 font-semibold">Email</th>
+                                <th className="px-3 py-2 text-left text-gray-500 font-semibold">Name</th>
+                              </tr></thead>
                               <tbody className="divide-y divide-gray-100">
-                                {sheetContacts.slice(0, 10).map((c, i) => (
+                                {sheetContacts.slice(0, 8).map((c, i) => (
                                   <tr key={i} className="hover:bg-blue-50/30">
                                     <td className="px-3 py-1.5 text-gray-700 font-medium">{c.email}</td>
-                                    <td className="px-3 py-1.5 text-gray-600">{c.firstName || '—'}</td>
-                                    <td className="px-3 py-1.5 text-gray-600">{c.lastName || '—'}</td>
-                                    {sheetContacts.some(c => c.company) && (
-                                      <td className="px-3 py-1.5 text-gray-600">{c.company || '—'}</td>
-                                    )}
+                                    <td className="px-3 py-1.5 text-gray-600">{c.firstName || ''} {c.lastName || ''}</td>
                                   </tr>
                                 ))}
                               </tbody>
                             </table>
                           </div>
-                          {sheetContacts.length > 10 && (
-                            <div className="px-3 py-1.5 bg-gray-50 text-xs text-gray-400 text-center border-t">
-                              ... and {sheetContacts.length - 10} more
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {sheetContacts.length === 0 && sheetPreview.totalRows > 0 && (
-                        <div className="bg-amber-50 rounded-lg p-3 text-sm text-amber-700">
-                          <AlertCircle className="h-4 w-4 inline mr-1.5" />
-                          No email addresses found. Make sure your sheet has a column with "email" in the header.
+                          {sheetContacts.length > 8 && <div className="px-3 py-1.5 bg-gray-50 text-xs text-gray-400 text-center border-t">... and {sheetContacts.length - 8} more</div>}
                         </div>
                       )}
                     </div>
                   )}
                 </div>
               )}
-
-              {/* Import CSV */}
               {recipientTab === 'csv' && (
                 <div className="flex-1 flex items-center justify-center">
                   <div className="border-2 border-dashed border-blue-200 rounded-2xl p-10 text-center w-full bg-blue-50/30">
                     <Upload className="h-10 w-10 text-blue-400 mx-auto mb-3" />
-                    <p className="text-sm text-gray-500 mb-4">Drag a CSV file here or click the button below to upload your mailing list</p>
-                    <Button className="bg-blue-600 hover:bg-blue-700">
-                      <Upload className="h-4 w-4 mr-2" /> Import a CSV
-                    </Button>
+                    <p className="text-sm text-gray-500 mb-4">Drag a CSV file here or click the button below</p>
+                    <Button className="bg-blue-600 hover:bg-blue-700"><Upload className="h-4 w-4 mr-2" /> Import a CSV</Button>
                   </div>
                 </div>
               )}
-
-              {/* Contact list */}
               {recipientTab === 'contacts' && (
                 <div className="space-y-4 flex-1">
                   <div>
@@ -1226,96 +1207,62 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                         if (e.target.value === 'all') {
                           const validContacts = contacts.filter((c: any) => c.status !== 'unsubscribed');
                           setSelectedContacts(validContacts.map((c: any) => c.id));
-                        } else {
-                          setSelectedContacts([]);
-                        }
+                        } else { setSelectedContacts([]); }
                       }}>
                       <option value="">Select a list</option>
                       <option value="all">All contacts ({contacts.length})</option>
                     </select>
                   </div>
                   {selectedContacts.length > 0 && (
-                    <div className="bg-blue-50 rounded-lg p-3 text-sm text-blue-700 flex items-center gap-2">
-                      <CheckCircle className="h-4 w-4 flex-shrink-0" />
-                      <span><strong>{selectedContacts.length}</strong> contact{selectedContacts.length !== 1 ? 's' : ''} selected</span>
-                    </div>
-                  )}
-                  {/* Show selected contact details */}
-                  {selectedContacts.length > 0 && (
-                    <div className="space-y-1.5 max-h-48 overflow-y-auto">
-                      {contacts.filter((c: any) => selectedContacts.includes(c.id)).map((c: any) => (
-                        <div key={c.id} className="flex items-center gap-3 px-3 py-2 bg-white border border-gray-100 rounded-lg">
-                          <div className="w-7 h-7 rounded-full bg-gradient-to-br from-blue-500 to-indigo-500 flex items-center justify-center text-white text-[10px] font-semibold flex-shrink-0">
-                            {(c.firstName?.[0] || c.email?.[0] || '?').toUpperCase()}
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="text-sm font-medium text-gray-900 truncate">
-                              {c.firstName || c.lastName ? `${c.firstName || ''} ${c.lastName || ''}`.trim() : c.email}
+                    <>
+                      <div className="bg-blue-50 rounded-lg p-3 text-sm text-blue-700 flex items-center gap-2">
+                        <CheckCircle className="h-4 w-4 flex-shrink-0" />
+                        <span><strong>{selectedContacts.length}</strong> contact{selectedContacts.length !== 1 ? 's' : ''} selected</span>
+                      </div>
+                      <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                        {contacts.filter((c: any) => selectedContacts.includes(c.id)).slice(0, 10).map((c: any) => (
+                          <div key={c.id} className="flex items-center gap-3 px-3 py-2 bg-white border border-gray-100 rounded-lg">
+                            <div className="w-7 h-7 rounded-full bg-gradient-to-br from-blue-500 to-indigo-500 flex items-center justify-center text-white text-[10px] font-semibold flex-shrink-0">
+                              {(c.firstName?.[0] || c.email?.[0] || '?').toUpperCase()}
                             </div>
-                            {(c.firstName || c.lastName) && (
-                              <div className="text-xs text-gray-400 truncate">{c.email}</div>
-                            )}
+                            <div className="min-w-0 flex-1">
+                              <div className="text-sm font-medium text-gray-900 truncate">
+                                {c.firstName || c.lastName ? `${c.firstName || ''} ${c.lastName || ''}`.trim() : c.email}
+                              </div>
+                              {(c.firstName || c.lastName) && <div className="text-xs text-gray-400 truncate">{c.email}</div>}
+                            </div>
+                            <button onClick={() => setSelectedContacts(prev => prev.filter(id => id !== c.id))}
+                              className="p-0.5 rounded hover:bg-red-50 text-gray-300 hover:text-red-500 flex-shrink-0">
+                              <X className="h-3 w-3" />
+                            </button>
                           </div>
-                          <button onClick={() => setSelectedContacts(prev => prev.filter(id => id !== c.id))}
-                            className="p-0.5 rounded hover:bg-red-50 text-gray-300 hover:text-red-500 flex-shrink-0">
-                            <X className="h-3 w-3" />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
+                        ))}
+                      </div>
+                    </>
                   )}
                 </div>
               )}
-
-              {/* Copy/paste */}
               {recipientTab === 'paste' && (
                 <div className="flex-1 flex flex-col">
-                  <Textarea
-                    placeholder="Enter one email address per line"
-                    value={pasteEmails}
-                    onChange={e => setPasteEmails(e.target.value)}
-                    className="flex-1 min-h-[280px] resize-none"
-                  />
+                  <Textarea placeholder="Enter one email address per line" value={pasteEmails} onChange={e => setPasteEmails(e.target.value)} className="flex-1 min-h-[280px] resize-none" />
                 </div>
               )}
-
-              {/* Footer */}
               <div className="flex justify-end gap-2 mt-4 pt-4 border-t border-gray-100">
                 <Button variant="outline" onClick={() => setShowRecipients(false)}>Close</Button>
-                <Button 
-                  className="bg-blue-600 hover:bg-blue-700" 
-                  disabled={
-                    (recipientTab === 'sheets' && sheetContacts.length === 0) ||
-                    (recipientTab === 'contacts' && selectedContacts.length === 0) ||
-                    (recipientTab === 'paste' && !pasteEmails.trim())
-                  }
+                <Button className="bg-blue-600 hover:bg-blue-700"
+                  disabled={(recipientTab === 'sheets' && sheetContacts.length === 0) || (recipientTab === 'contacts' && selectedContacts.length === 0) || (recipientTab === 'paste' && !pasteEmails.trim())}
                   onClick={async () => {
-                    if (recipientTab === 'sheets' && sheetContacts.length > 0) {
-                      // Import contacts from Google Sheets
-                      await importSheetContacts();
-                      return; // importSheetContacts closes the dialog on success
-                    }
+                    if (recipientTab === 'sheets' && sheetContacts.length > 0) { await importSheetContacts(); return; }
                     if (recipientTab === 'paste' && pasteEmails.trim()) {
                       const emails = pasteEmails.split('\n').map(e => e.trim()).filter(e => e.includes('@'));
-                      // Find matching contacts or create temp ones
                       const matched = contacts.filter((c: any) => emails.includes(c.email));
-                      if (matched.length > 0) {
-                        setSelectedContacts(matched.map((c: any) => c.id));
-                      } else {
-                        // Create temporary contact entries from pasted emails
-                        setSelectedContacts(emails.map((_, i) => `paste-${i}`));
-                      }
+                      if (matched.length > 0) { setSelectedContacts(matched.map((c: any) => c.id)); }
+                      else { setSelectedContacts(emails.map((_, i) => `paste-${i}`)); }
                     }
-                    // For contacts tab — selection already done via dropdown onChange
-                    // Clear error on successful selection
-                    if (selectedContacts.length > 0 || (recipientTab === 'paste' && pasteEmails.trim())) {
-                      setError('');
-                    }
+                    if (selectedContacts.length > 0 || (recipientTab === 'paste' && pasteEmails.trim())) { setError(''); }
                     setShowRecipients(false);
                   }}>
-                  {recipientTab === 'sheets' && sheetContacts.length > 0 
-                    ? `Import ${sheetContacts.length} contacts` 
-                    : 'Next'}
+                  {recipientTab === 'sheets' && sheetContacts.length > 0 ? `Import ${sheetContacts.length} contacts` : 'Next'}
                 </Button>
               </div>
             </div>
@@ -1328,71 +1275,43 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>Autopilot</DialogTitle>
-            <DialogDescription>
-              Improve your deliverability with these sending options{' '}
-              <a href="#" className="text-blue-600 hover:underline">(why it's important)</a>.
-            </DialogDescription>
+            <DialogDescription>Improve your deliverability with these sending options.</DialogDescription>
           </DialogHeader>
-
           <div className="flex gap-8 mt-2">
-            {/* Left: Schedule */}
             <div className="flex-1">
-              <div className="flex items-center justify-between mb-3">
-                <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Send only on</div>
-                <div className="text-xs text-gray-400">Turn off</div>
-              </div>
+              <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Send only on</div>
               <div className="space-y-2">
                 {['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'].map(day => {
                   const dayConfig = autopilot.days[day];
                   return (
                     <div key={day} className={`flex items-center gap-3 ${!dayConfig.enabled ? 'opacity-50' : ''}`}>
-                      <input type="checkbox"
-                        checked={dayConfig.enabled}
-                        onChange={e => setAutopilot(prev => ({
-                          ...prev,
-                          days: { ...prev.days, [day]: { ...prev.days[day], enabled: e.target.checked } }
-                        }))}
-                        className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                      />
+                      <input type="checkbox" checked={dayConfig.enabled}
+                        onChange={e => setAutopilot(prev => ({ ...prev, days: { ...prev.days, [day]: { ...prev.days[day], enabled: e.target.checked } } }))}
+                        className="h-4 w-4 rounded border-gray-300 text-blue-600" />
                       <span className="text-sm text-gray-700 w-24">{day}</span>
                       <input type="time" value={dayConfig.startTime}
-                        onChange={e => setAutopilot(prev => ({
-                          ...prev,
-                          days: { ...prev.days, [day]: { ...prev.days[day], startTime: e.target.value } }
-                        }))}
+                        onChange={e => setAutopilot(prev => ({ ...prev, days: { ...prev.days, [day]: { ...prev.days[day], startTime: e.target.value } } }))}
                         disabled={!dayConfig.enabled}
-                        className="text-xs border border-gray-200 rounded px-2 py-1 w-20 disabled:bg-gray-50 disabled:text-gray-400" />
+                        className="text-xs border border-gray-200 rounded px-2 py-1 w-20 disabled:bg-gray-50" />
                       <span className="text-xs text-gray-400">to</span>
                       <input type="time" value={dayConfig.endTime}
-                        onChange={e => setAutopilot(prev => ({
-                          ...prev,
-                          days: { ...prev.days, [day]: { ...prev.days[day], endTime: e.target.value } }
-                        }))}
+                        onChange={e => setAutopilot(prev => ({ ...prev, days: { ...prev.days, [day]: { ...prev.days[day], endTime: e.target.value } } }))}
                         disabled={!dayConfig.enabled}
-                        className="text-xs border border-gray-200 rounded px-2 py-1 w-20 disabled:bg-gray-50 disabled:text-gray-400" />
+                        className="text-xs border border-gray-200 rounded px-2 py-1 w-20 disabled:bg-gray-50" />
                     </div>
                   );
                 })}
               </div>
-              <div className="flex items-center gap-1.5 mt-3 text-[11px] text-gray-400">
-                <span>📍</span> Based on your timezone
-              </div>
             </div>
-
-            {/* Right: Rate */}
             <div className="w-56">
               <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Sending rate</div>
-
               <label className="flex items-center gap-2 mb-3">
-                <input type="checkbox" checked className="h-4 w-4 rounded border-gray-300 text-blue-600" readOnly />
                 <span className="text-sm text-gray-700">Max emails per day:</span>
               </label>
               <Input type="number" value={autopilot.maxPerDay}
                 onChange={e => setAutopilot(prev => ({ ...prev, maxPerDay: parseInt(e.target.value) || 100 }))}
                 className="mb-3 h-9" />
-
               <label className="flex items-center gap-2 mb-3">
-                <input type="checkbox" checked className="h-4 w-4 rounded border-gray-300 text-blue-600" readOnly />
                 <span className="text-sm text-gray-700">Delay between emails:</span>
               </label>
               <div className="flex gap-2 mb-5">
@@ -1406,27 +1325,10 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                   <option value="minutes">minutes</option>
                 </select>
               </div>
-
               <div className="border-t border-gray-100 pt-4">
-                <div className="text-xs text-gray-400 mb-1">Sending will start on</div>
-                <div className="text-sm font-semibold text-gray-900 mb-3">
-                  {(() => {
-                    const now = new Date();
-                    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-                    // Find next enabled day
-                    for (let i = 0; i < 7; i++) {
-                      const check = new Date(now.getTime() + (i + 1) * 86400000);
-                      const dayName = dayNames[check.getDay()];
-                      if (autopilot.days[dayName]?.enabled) {
-                        return `${check.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' })}, ${autopilot.days[dayName].startTime.replace(':', ':')} AM`;
-                      }
-                    }
-                    return 'No active days selected';
-                  })()}
-                </div>
                 <div className="text-xs text-gray-400 mb-1">Summary</div>
                 <div className="text-sm text-gray-600">
-                  With the current settings, if you send {recipientCount || 100} emails, it will take about{' '}
+                  If you send {recipientCount || 100} emails, it will take about{' '}
                   <span className="font-semibold underline decoration-dotted">
                     {(() => {
                       const { dailyCapacity } = getAutopilotSummary();
@@ -1434,20 +1336,16 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                       const totalMinutes = count * (autopilot.delayUnit === 'minutes' ? autopilot.delayBetween : autopilot.delayBetween / 60);
                       if (totalMinutes < 60) return `${Math.ceil(totalMinutes)} minutes`;
                       if (totalMinutes < 1440) return `${Math.ceil(totalMinutes / 60)} hours`;
-                      return `${Math.ceil(count / (dailyCapacity || 100))} ${Math.ceil(count / (dailyCapacity || 100)) === 1 ? 'day' : 'days'}`;
+                      return `${Math.ceil(count / (dailyCapacity || 100))} days`;
                     })()}
                   </span>.
                 </div>
               </div>
             </div>
           </div>
-
           <DialogFooter className="mt-4">
             <Button variant="outline" onClick={() => setShowAutopilot(false)}>Cancel</Button>
-            <Button className="bg-blue-600 hover:bg-blue-700" onClick={() => {
-              setAutopilot(prev => ({ ...prev, enabled: true }));
-              setShowAutopilot(false);
-            }}>Apply</Button>
+            <Button className="bg-blue-600 hover:bg-blue-700" onClick={() => { setAutopilot(prev => ({ ...prev, enabled: true })); setShowAutopilot(false); }}>Apply</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1456,8 +1354,7 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
       <Dialog open={showSchedule} onOpenChange={setShowSchedule}>
         <DialogContent className="max-w-xs p-0">
           <CalendarPicker
-            selected={schedule.date}
-            time={schedule.time}
+            selected={schedule.date} time={schedule.time}
             onSelect={(date) => setSchedule(prev => ({ ...prev, date }))}
             onTimeChange={(time) => setSchedule(prev => ({ ...prev, time }))}
             onApply={() => { setSchedule(prev => ({ ...prev, enabled: true })); setShowSchedule(false); }}
@@ -1469,9 +1366,7 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
       {/* INSERT TEMPLATE DIALOG */}
       <Dialog open={showTemplates} onOpenChange={setShowTemplates}>
         <DialogContent className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Insert a template</DialogTitle>
-          </DialogHeader>
+          <DialogHeader><DialogTitle>Insert a template</DialogTitle></DialogHeader>
           <div className="flex gap-4 border-b border-gray-100 mb-3">
             <button onClick={() => setTemplateTab('recent')}
               className={`pb-2 text-sm font-medium border-b-2 transition-colors ${templateTab === 'recent' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-400 hover:text-gray-600'}`}>
@@ -1485,14 +1380,12 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
           <div className="space-y-0.5 max-h-80 overflow-y-auto">
             {templates.length === 0 ? (
               <div className="py-8 text-center text-gray-400 text-sm">No templates yet. Create one in the Templates section.</div>
-            ) : (
-              templates.map((t: any) => (
-                <button key={t.id} onClick={() => insertTemplate(t)}
-                  className="w-full text-left px-3 py-3 text-sm text-gray-700 hover:bg-blue-50 rounded-lg transition-colors truncate">
-                  {t.name}
-                </button>
-              ))
-            )}
+            ) : templates.map((t: any) => (
+              <button key={t.id} onClick={() => insertTemplate(t)}
+                className="w-full text-left px-3 py-3 text-sm text-gray-700 hover:bg-blue-50 rounded-lg transition-colors truncate">
+                {t.name}
+              </button>
+            ))}
           </div>
         </DialogContent>
       </Dialog>
@@ -1517,89 +1410,53 @@ function ToolbarSep() {
 
 // ==================== CALENDAR PICKER ====================
 function CalendarPicker({ selected, time, onSelect, onTimeChange, onApply, onCancel }: {
-  selected: Date | null;
-  time: string;
-  onSelect: (d: Date) => void;
-  onTimeChange: (t: string) => void;
-  onApply: () => void;
-  onCancel: () => void;
+  selected: Date | null; time: string;
+  onSelect: (d: Date) => void; onTimeChange: (t: string) => void;
+  onApply: () => void; onCancel: () => void;
 }) {
   const today = new Date();
   const [viewMonth, setViewMonth] = useState(today.getMonth());
   const [viewYear, setViewYear] = useState(today.getFullYear());
-
   const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
   const firstDayOfMonth = new Date(viewYear, viewMonth, 1).getDay();
   const monthName = new Date(viewYear, viewMonth).toLocaleString('default', { month: 'long' });
-
-  const prevMonth = () => {
-    if (viewMonth === 0) { setViewMonth(11); setViewYear(viewYear - 1); }
-    else setViewMonth(viewMonth - 1);
-  };
-  const nextMonth = () => {
-    if (viewMonth === 11) { setViewMonth(0); setViewYear(viewYear + 1); }
-    else setViewMonth(viewMonth + 1);
-  };
-
-  const isSelected = (day: number) => {
-    if (!selected) return false;
-    return selected.getDate() === day && selected.getMonth() === viewMonth && selected.getFullYear() === viewYear;
-  };
-  const isToday = (day: number) => {
-    return today.getDate() === day && today.getMonth() === viewMonth && today.getFullYear() === viewYear;
-  };
-
+  const prevMonth = () => { if (viewMonth === 0) { setViewMonth(11); setViewYear(viewYear - 1); } else setViewMonth(viewMonth - 1); };
+  const nextMonth = () => { if (viewMonth === 11) { setViewMonth(0); setViewYear(viewYear + 1); } else setViewMonth(viewMonth + 1); };
+  const isSelected = (day: number) => selected ? selected.getDate() === day && selected.getMonth() === viewMonth && selected.getFullYear() === viewYear : false;
+  const isToday = (day: number) => today.getDate() === day && today.getMonth() === viewMonth && today.getFullYear() === viewYear;
   const cells: (number | null)[] = [];
   for (let i = 0; i < firstDayOfMonth; i++) cells.push(null);
   for (let d = 1; d <= daysInMonth; d++) cells.push(d);
 
   return (
     <div className="p-4">
-      {/* Month nav */}
       <div className="flex items-center justify-between mb-3">
         <button onClick={prevMonth} className="p-1 rounded hover:bg-gray-100"><ChevronLeft className="h-4 w-4" /></button>
         <span className="text-sm font-bold text-gray-900">{monthName} {viewYear}</span>
         <button onClick={nextMonth} className="p-1 rounded hover:bg-gray-100"><ChevronRight className="h-4 w-4" /></button>
       </div>
-
-      {/* Day headers */}
       <div className="grid grid-cols-7 gap-0 mb-1">
         {['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'].map(d => (
           <div key={d} className="text-[10px] text-gray-400 font-medium text-center py-1">{d}</div>
         ))}
       </div>
-
-      {/* Day cells */}
       <div className="grid grid-cols-7 gap-0">
         {cells.map((day, i) => (
           <button key={i} disabled={!day}
             onClick={() => day && onSelect(new Date(viewYear, viewMonth, day))}
             className={`h-8 w-8 text-xs rounded-full flex items-center justify-center mx-auto transition-colors ${
-              !day ? '' :
-              isSelected(day) ? 'bg-blue-600 text-white font-bold' :
-              isToday(day) ? 'bg-blue-100 text-blue-700 font-semibold' :
-              'text-gray-700 hover:bg-gray-100'
-            }`}>
-            {day || ''}
-          </button>
+              !day ? '' : isSelected(day) ? 'bg-blue-600 text-white font-bold' : isToday(day) ? 'bg-blue-100 text-blue-700 font-semibold' : 'text-gray-700 hover:bg-gray-100'
+            }`}>{day || ''}</button>
         ))}
       </div>
-
-      {/* Selected info + time */}
       <div className="mt-4 pt-3 border-t border-gray-100">
         <div className="flex items-center justify-between mb-3">
           <div>
-            <div className="text-sm font-semibold text-gray-900">
-              {selected ? selected.toLocaleDateString('en-US', { weekday: 'long' }) : 'Select a date'}
-            </div>
-            <div className="text-xs text-gray-400">
-              {selected ? selected.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}
-            </div>
+            <div className="text-sm font-semibold text-gray-900">{selected ? selected.toLocaleDateString('en-US', { weekday: 'long' }) : 'Select a date'}</div>
+            <div className="text-xs text-gray-400">{selected ? selected.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '--'}</div>
           </div>
-          <input type="time" value={time} onChange={e => onTimeChange(e.target.value)}
-            className="text-sm border border-gray-200 rounded-lg px-3 py-1.5 w-24" />
+          <input type="time" value={time} onChange={e => onTimeChange(e.target.value)} className="text-sm border border-gray-200 rounded-lg px-3 py-1.5 w-24" />
         </div>
-
         <Button onClick={onApply} className="w-full bg-blue-600 hover:bg-blue-700 mb-2" disabled={!selected}>Apply</Button>
         <Button variant="outline" onClick={onCancel} className="w-full">Cancel</Button>
       </div>
