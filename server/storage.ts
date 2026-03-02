@@ -20,6 +20,13 @@ function now() { return new Date().toISOString(); }
 // JSON helpers: store arrays/objects as JSON text in SQLite
 function toJson(v: any): string | null { return v != null ? JSON.stringify(v) : null; }
 function fromJson(v: any): any { if (v == null) return null; try { return JSON.parse(v); } catch { return v; } }
+// Convert Date to ISO string for SQLite binding
+function toSqlDate(v: any): string | null {
+  if (v == null) return null;
+  if (v instanceof Date) return v.toISOString();
+  if (typeof v === 'string') return v;
+  return String(v);
+}
 
 // Hydrate a row: parse JSON columns back to objects
 function hydrateContact(r: any) {
@@ -665,7 +672,7 @@ export class DatabaseStorage {
     const m = { ...existing, ...data };
     db.prepare(`UPDATE campaigns SET name=?, description=?, status=?, totalRecipients=?, sentCount=?, openedCount=?, clickedCount=?, repliedCount=?, bouncedCount=?, unsubscribedCount=?, subject=?, content=?, emailAccountId=?, templateId=?, contactIds=?, segmentId=?, scheduledAt=?, updatedAt=? WHERE id=?`).run(
       m.name, m.description, m.status, m.totalRecipients, m.sentCount, m.openedCount, m.clickedCount, m.repliedCount, m.bouncedCount, m.unsubscribedCount,
-      m.subject, m.content, m.emailAccountId || null, m.templateId || null, toJson(m.contactIds), m.segmentId || null, m.scheduledAt || null, now(), id
+      m.subject, m.content, m.emailAccountId || null, m.templateId || null, toJson(m.contactIds), m.segmentId || null, toSqlDate(m.scheduledAt), now(), id
     );
     return this.getCampaign(id);
   }
@@ -701,7 +708,7 @@ export class DatabaseStorage {
     db.prepare('INSERT INTO messages (id, campaignId, contactId, subject, content, status, trackingId, emailAccountId, stepNumber, sentAt, openedAt, clickedAt, repliedAt, errorMessage, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
       id, message.campaignId, message.contactId || null, message.subject || '', message.content || '', message.status || 'sending',
       message.trackingId || null, message.emailAccountId || null, message.stepNumber || 0,
-      message.sentAt || null, message.openedAt || null, message.clickedAt || null, message.repliedAt || null, message.errorMessage || null, now()
+      toSqlDate(message.sentAt), toSqlDate(message.openedAt), toSqlDate(message.clickedAt), toSqlDate(message.repliedAt), message.errorMessage || null, now()
     );
     return this.getCampaignMessage(id);
   }
@@ -710,7 +717,7 @@ export class DatabaseStorage {
     if (!existing) throw new Error('Message not found');
     const m = { ...existing as any, ...data };
     db.prepare('UPDATE messages SET status=?, sentAt=?, openedAt=?, clickedAt=?, repliedAt=?, errorMessage=? WHERE id=?').run(
-      m.status, m.sentAt, m.openedAt, m.clickedAt, m.repliedAt, m.errorMessage, id
+      m.status, toSqlDate(m.sentAt), toSqlDate(m.openedAt), toSqlDate(m.clickedAt), toSqlDate(m.repliedAt), m.errorMessage || null, id
     );
     return this.getCampaignMessage(id);
   }

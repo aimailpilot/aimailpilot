@@ -152,115 +152,122 @@ export class CampaignEngine {
 
       const contact = contacts[i];
 
-      // Personalize
-      const personalData: PersonalizationData = {
-        firstName: contact.firstName || '',
-        lastName: contact.lastName || '',
-        email: contact.email,
-        company: contact.company || '',
-        jobTitle: contact.jobTitle || '',
-        fullName: `${contact.firstName || ''} ${contact.lastName || ''}`.trim(),
-      };
+      try {
+        // Personalize
+        const personalData: PersonalizationData = {
+          firstName: contact.firstName || '',
+          lastName: contact.lastName || '',
+          email: contact.email,
+          company: contact.company || '',
+          jobTitle: contact.jobTitle || '',
+          fullName: `${contact.firstName || ''} ${contact.lastName || ''}`.trim(),
+        };
 
-      const personalizedSubject = this.personalizeContent(subject, personalData);
-      const personalizedContent = this.personalizeContent(content, personalData);
+        const personalizedSubject = this.personalizeContent(subject, personalData);
+        const personalizedContent = this.personalizeContent(content, personalData);
 
-      // Generate tracking ID
-      const trackingId = `${campaignId}_${contact.id}_${Date.now()}`;
+        // Generate tracking ID
+        const trackingId = `${campaignId}_${contact.id}_${Date.now()}`;
 
-      // Add unsubscribe link if campaign has it enabled
-      let contentWithUnsub = personalizedContent;
-      const campaign = await storage.getCampaign(campaignId);
-      if (campaign?.includeUnsubscribe) {
-        const unsubUrl = `${baseUrl}/api/track/unsubscribe/${trackingId}`;
-        contentWithUnsub += `<p style="text-align:center;margin-top:30px;font-size:11px;color:#999;"><a href="${unsubUrl}" style="color:#999;text-decoration:underline;">Unsubscribe</a></p>`;
-      }
-
-      // Add open tracking pixel (with absolute URL)
-      const trackedContent = this.addTrackingPixel(contentWithUnsub, trackingId, baseUrl);
-
-      // Add click tracking to links (with absolute URL)
-      const clickTrackedContent = this.addClickTracking(trackedContent, trackingId, baseUrl);
-
-      // Generate a unique Message-ID for reply tracking
-      const messageId = `<${trackingId}@${smtpConfig.fromEmail.split('@')[1] || 'mailflow.app'}>`;
-
-      // Create message record with step number
-      const messageRecord = await storage.createCampaignMessage({
-        campaignId,
-        contactId: contact.id,
-        subject: personalizedSubject,
-        content: clickTrackedContent,
-        status: 'sending',
-        trackingId,
-        emailAccountId: emailAccount.id,
-        stepNumber,
-        messageId,
-      });
-
-      // Send email with custom Message-ID header for reply tracking
-      const result: SendResult = await smtpEmailService.sendEmail(emailAccount.id, smtpConfig, {
-        to: contact.email,
-        subject: personalizedSubject,
-        html: clickTrackedContent,
-        trackingId,
-        headers: {
-          'Message-ID': messageId,
-          'X-Mailflow-Campaign': campaignId,
-          'X-Mailflow-Contact': contact.id,
-          'X-Mailflow-Tracking': trackingId,
-          'X-Mailflow-Step': String(stepNumber),
-        },
-      });
-
-      if (result.success) {
-        await storage.updateCampaignMessage(messageRecord.id, {
-          status: 'sent',
-          sentAt: new Date(),
-          providerMessageId: result.messageId,
-        });
-        
-        // Update campaign stats
-        const updatedCampaign = await storage.getCampaign(campaignId);
-        if (updatedCampaign) {
-          await storage.updateCampaign(campaignId, {
-            sentCount: (updatedCampaign.sentCount || 0) + 1,
-          });
+        // Add unsubscribe link if campaign has it enabled
+        let contentWithUnsub = personalizedContent;
+        const campaign = await storage.getCampaign(campaignId);
+        if (campaign?.includeUnsubscribe) {
+          const unsubUrl = `${baseUrl}/api/track/unsubscribe/${trackingId}`;
+          contentWithUnsub += `<p style="text-align:center;margin-top:30px;font-size:11px;color:#999;"><a href="${unsubUrl}" style="color:#999;text-decoration:underline;">Unsubscribe</a></p>`;
         }
 
-        // Create 'sent' tracking event
-        await storage.createTrackingEvent({
-          type: 'sent',
+        // Add open tracking pixel (with absolute URL)
+        const trackedContent = this.addTrackingPixel(contentWithUnsub, trackingId, baseUrl);
+
+        // Add click tracking to links (with absolute URL)
+        const clickTrackedContent = this.addClickTracking(trackedContent, trackingId, baseUrl);
+
+        // Generate a unique Message-ID for reply tracking
+        const messageId = `<${trackingId}@${(smtpConfig.fromEmail || 'noreply@mailflow.app').split('@')[1] || 'mailflow.app'}>`;
+
+        // Create message record with step number
+        const messageRecord = await storage.createCampaignMessage({
           campaignId,
-          messageId: messageRecord.id,
           contactId: contact.id,
+          subject: personalizedSubject,
+          content: clickTrackedContent,
+          status: 'sending',
           trackingId,
+          emailAccountId: emailAccount.id,
           stepNumber,
+          messageId,
         });
-      } else {
-        await storage.updateCampaignMessage(messageRecord.id, {
-          status: 'failed',
-          errorMessage: result.error,
+
+        // Send email with custom Message-ID header for reply tracking
+        const result: SendResult = await smtpEmailService.sendEmail(emailAccount.id, smtpConfig, {
+          to: contact.email,
+          subject: personalizedSubject,
+          html: clickTrackedContent,
+          trackingId,
+          headers: {
+            'Message-ID': messageId,
+            'X-Mailflow-Campaign': campaignId,
+            'X-Mailflow-Contact': contact.id,
+            'X-Mailflow-Tracking': trackingId,
+            'X-Mailflow-Step': String(stepNumber),
+          },
         });
-        
-        // Update bounce count
-        const updatedCampaign = await storage.getCampaign(campaignId);
-        if (updatedCampaign) {
-          await storage.updateCampaign(campaignId, {
-            bouncedCount: (updatedCampaign.bouncedCount || 0) + 1,
+
+        const nowIso = new Date().toISOString();
+
+        if (result.success) {
+          await storage.updateCampaignMessage(messageRecord.id, {
+            status: 'sent',
+            sentAt: nowIso,
+            providerMessageId: result.messageId,
+          });
+          
+          // Update campaign stats
+          const updatedCampaign = await storage.getCampaign(campaignId);
+          if (updatedCampaign) {
+            await storage.updateCampaign(campaignId, {
+              sentCount: (updatedCampaign.sentCount || 0) + 1,
+            });
+          }
+
+          // Create 'sent' tracking event
+          await storage.createTrackingEvent({
+            type: 'sent',
+            campaignId,
+            messageId: messageRecord.id,
+            contactId: contact.id,
+            trackingId,
+            stepNumber,
+          });
+        } else {
+          await storage.updateCampaignMessage(messageRecord.id, {
+            status: 'failed',
+            errorMessage: result.error,
+          });
+          
+          // Update bounce count
+          const updatedCampaign = await storage.getCampaign(campaignId);
+          if (updatedCampaign) {
+            await storage.updateCampaign(campaignId, {
+              bouncedCount: (updatedCampaign.bouncedCount || 0) + 1,
+            });
+          }
+
+          // Create 'bounce' tracking event
+          await storage.createTrackingEvent({
+            type: 'bounce',
+            campaignId,
+            messageId: messageRecord.id,
+            contactId: contact.id,
+            trackingId,
+            stepNumber,
+            metadata: { error: result.error },
           });
         }
-
-        // Create 'bounce' tracking event
-        await storage.createTrackingEvent({
-          type: 'bounce',
-          campaignId,
-          messageId: messageRecord.id,
-          contactId: contact.id,
-          trackingId,
-          stepNumber,
-          metadata: { error: result.error },
-        });
+      } catch (emailError) {
+        // Log the error but continue to next email — don't crash the entire campaign loop
+        console.error(`[CampaignEngine] Error sending email ${i + 1}/${contacts.length} to ${contact.email}:`, emailError);
       }
 
       // Update progress
@@ -374,7 +381,7 @@ export class CampaignEngine {
 
     storage.updateCampaign(campaignId, { 
       status: 'scheduled',
-      scheduledAt: startTime,
+      scheduledAt: startTime.toISOString(),
     });
 
     setTimeout(() => {

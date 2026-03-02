@@ -563,7 +563,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       if (message) {
         if (!message.repliedAt) {
-          await storage.updateCampaignMessage(message.id, { repliedAt: new Date() });
+          await storage.updateCampaignMessage(message.id, { repliedAt: new Date().toISOString() });
           
           const campaign = await storage.getCampaign(message.campaignId);
           if (campaign) {
@@ -911,7 +911,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         // Only increment campaign count on first open
         if (!message.openedAt) {
-          await storage.updateCampaignMessage(message.id, { openedAt: new Date() });
+          await storage.updateCampaignMessage(message.id, { openedAt: new Date().toISOString() });
           
           const campaign = await storage.getCampaign(message.campaignId);
           if (campaign) {
@@ -945,7 +945,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       if (message) {
         if (!message.clickedAt) {
-          await storage.updateCampaignMessage(message.id, { clickedAt: new Date() });
+          await storage.updateCampaignMessage(message.id, { clickedAt: new Date().toISOString() });
           
           const campaign = await storage.getCampaign(message.campaignId);
           if (campaign) {
