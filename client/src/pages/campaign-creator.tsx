@@ -1575,9 +1575,45 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                     if (recipientTab === 'sheets' && sheetContacts.length > 0) { await importSheetContacts(); return; }
                     if (recipientTab === 'paste' && pasteEmails.trim()) {
                       const emails = pasteEmails.split('\n').map(e => e.trim()).filter(e => e.includes('@'));
+                      // First try to match existing contacts
                       const matched = contacts.filter((c: any) => emails.includes(c.email));
-                      if (matched.length > 0) { setSelectedContacts(matched.map((c: any) => c.id)); }
-                      else { setSelectedContacts(emails.map((_, i) => `paste-${i}`)); }
+                      const matchedEmails = new Set(matched.map((c: any) => c.email));
+                      const unmatchedEmails = emails.filter(e => !matchedEmails.has(e));
+
+                      // Create contacts for unmatched emails via bulk import
+                      let newIds: string[] = [];
+                      if (unmatchedEmails.length > 0) {
+                        try {
+                          const importRes = await fetch('/api/contacts/import', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            credentials: 'include',
+                            body: JSON.stringify({
+                              contacts: unmatchedEmails.map(email => ({ email })),
+                              source: 'paste',
+                            }),
+                          });
+                          if (importRes.ok) {
+                            // Re-fetch contacts to get the new IDs
+                            const refreshRes = await fetch('/api/contacts?limit=10000', { credentials: 'include' });
+                            if (refreshRes.ok) {
+                              const refreshData = await refreshRes.json();
+                              const allContacts = refreshData.contacts || refreshData;
+                              const newMatched = allContacts.filter((c: any) => unmatchedEmails.includes(c.email));
+                              newIds = newMatched.map((c: any) => c.id);
+                            }
+                          }
+                        } catch (e) {
+                          console.error('Failed to import pasted contacts:', e);
+                        }
+                      }
+
+                      const allIds = [...matched.map((c: any) => c.id), ...newIds];
+                      if (allIds.length > 0) {
+                        setSelectedContacts(allIds);
+                      } else {
+                        setError('No valid contacts could be created from pasted emails');
+                      }
                     }
                     if (selectedContacts.length > 0 || (recipientTab === 'paste' && pasteEmails.trim())) { setError(''); }
                     setShowRecipients(false);

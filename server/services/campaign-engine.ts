@@ -238,6 +238,11 @@ export class CampaignEngine {
           const c = await storage.getContact(cid);
           if (c) contacts.push(c);
         }
+        // If contactIds were invalid (e.g. 'paste-0' placeholders), fall back to all org contacts
+        if (contacts.length === 0) {
+          console.warn(`[CampaignEngine] contactIds ${JSON.stringify(campaign.contactIds)} resolved to 0 contacts, falling back to all org contacts`);
+          contacts = await storage.getContacts(campaign.organizationId, 10000, 0);
+        }
       } else {
         contacts = await storage.getContacts(campaign.organizationId, 10000, 0);
       }
