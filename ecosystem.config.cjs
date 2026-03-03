@@ -5,7 +5,7 @@ module.exports = {
       script: 'npx',
       args: 'tsx server/index.ts',
       env: {
-        NODE_ENV: 'development',
+        NODE_ENV: 'production',
         PORT: 3000
       },
       watch: false,
