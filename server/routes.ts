@@ -2005,29 +2005,66 @@ Which account should I use and why? If I need to split across accounts, provide 
   app.get('/api/track/open/:trackingId', async (req, res) => {
     try {
       const { trackingId } = req.params;
+      const userAgent = req.headers['user-agent'] || '';
+      
+      // ========== Filter out email proxy pre-fetches (false opens) ==========
+      // Gmail, Outlook, Yahoo, Apple etc. pre-fetch tracking pixels on delivery
+      // These are NOT real user opens - they happen before the recipient reads the email
+      const proxyPatterns = [
+        /GoogleImageProxy/i,           // Gmail image proxy
+        /via ggpht\.com/i,             // Gmail proxy variant
+        /Google-SMTP-STS/i,            // Google SMTP
+        /Microsoft Office/i,           // Outlook desktop
+        /Outlook-iOS/i,                // Outlook mobile
+        /ms-office/i,                  // Microsoft Office
+        /Windows-RSS-Platform/i,       // Windows RSS
+        /YahooMailProxy/i,             // Yahoo mail proxy
+        /YahooSeeker/i,                // Yahoo
+        /Chrome\/42\.0\.2311.*Edge\/12/i, // Known bot/scanner UA signature
+        /^Mozilla\/4\.0\s*$/,          // Generic bot UA
+        /^$/,                          // Empty user agent
+      ];
+      
+      const isProxy = proxyPatterns.some(p => p.test(userAgent));
+      
       const message = await storage.getCampaignMessageByTracking(trackingId);
       
       if (message) {
-        // Always record tracking event (even repeat opens)
-        await storage.createTrackingEvent({
-          type: 'open',
-          campaignId: message.campaignId,
-          messageId: message.id,
-          contactId: message.contactId,
-          trackingId,
-          userAgent: req.headers['user-agent'],
-          ip: req.ip,
-        });
+        if (isProxy) {
+          // Log proxy pre-fetch but DON'T count as real open
+          // Store as 'prefetch' event type for analytics awareness
+          await storage.createTrackingEvent({
+            type: 'prefetch',
+            campaignId: message.campaignId,
+            messageId: message.id,
+            contactId: message.contactId,
+            trackingId,
+            userAgent,
+            ip: req.ip,
+            metadata: JSON.stringify({ filtered: true, reason: 'email_proxy_prefetch' }),
+          });
+        } else {
+          // Real user open - record tracking event
+          await storage.createTrackingEvent({
+            type: 'open',
+            campaignId: message.campaignId,
+            messageId: message.id,
+            contactId: message.contactId,
+            trackingId,
+            userAgent,
+            ip: req.ip,
+          });
 
-        // Only increment campaign count on first open
-        if (!message.openedAt) {
-          await storage.updateCampaignMessage(message.id, { openedAt: new Date().toISOString() });
-          
-          const campaign = await storage.getCampaign(message.campaignId);
-          if (campaign) {
-            await storage.updateCampaign(message.campaignId, {
-              openedCount: (campaign.openedCount || 0) + 1,
-            });
+          // Only increment campaign count on first real open
+          if (!message.openedAt) {
+            await storage.updateCampaignMessage(message.id, { openedAt: new Date().toISOString() });
+            
+            const campaign = await storage.getCampaign(message.campaignId);
+            if (campaign) {
+              await storage.updateCampaign(message.campaignId, {
+                openedCount: (campaign.openedCount || 0) + 1,
+              });
+            }
           }
         }
       }

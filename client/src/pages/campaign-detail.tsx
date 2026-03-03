@@ -51,6 +51,9 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
   const [showAllEmails, setShowAllEmails] = useState(true);
   const [showTracking, setShowTracking] = useState(true);
 
+  // Reply tracking status
+  const [replyTrackingStatus, setReplyTrackingStatus] = useState<any>(null);
+
   const fetchDetail = async () => {
     setLoading(true);
     try {
@@ -66,7 +69,14 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
     }
   };
 
-  useEffect(() => { fetchDetail(); }, [campaignId]);
+  const fetchReplyStatus = async () => {
+    try {
+      const res = await fetch('/api/reply-tracking/status', { credentials: 'include' });
+      if (res.ok) setReplyTrackingStatus(await res.json());
+    } catch (e) {}
+  };
+
+  useEffect(() => { fetchDetail(); fetchReplyStatus(); }, [campaignId]);
 
   // Auto-refresh every 10s for active campaigns
   useEffect(() => {
@@ -506,6 +516,51 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
             </div>
           ))}
         </div>
+
+        {/* Reply Tracking Status Banner */}
+        {(campaign.status === 'active' || campaign.status === 'completed') && (
+          <div className="mt-5 p-4 rounded-xl border border-blue-100 bg-blue-50/50">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-lg bg-blue-100 flex items-center justify-center">
+                  <Reply className="h-4 w-4 text-blue-600" />
+                </div>
+                <div>
+                  <div className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+                    Reply Tracking
+                    {replyTrackingStatus?.isActive ? (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-600 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> Active
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold text-gray-500 bg-gray-100 border border-gray-200 px-1.5 py-0.5 rounded-full">
+                        Inactive
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-xs text-gray-500 mt-0.5">
+                    {replyTrackingStatus?.isActive 
+                      ? 'Checking for replies every 5 minutes via Gmail/Outlook API' 
+                      : 'Connect Gmail or Outlook in Email Accounts to enable reply detection'}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {(analytics?.replied || campaign.repliedCount || 0) > 0 && (
+                  <div className="text-right">
+                    <div className="text-lg font-bold text-amber-600">{analytics?.replied || campaign.repliedCount || 0}</div>
+                    <div className="text-[10px] text-gray-400">replies detected</div>
+                  </div>
+                )}
+              </div>
+            </div>
+            {/* Note about open tracking accuracy */}
+            <div className="mt-3 pt-3 border-t border-blue-100 text-[11px] text-gray-500 flex items-start gap-2">
+              <Info className="h-3 w-3 text-blue-400 mt-0.5 flex-shrink-0" />
+              <span>Open tracking filters out email proxy pre-fetches (Gmail, Outlook, Yahoo) to show only real opens. Reply detection requires OAuth-connected email accounts.</span>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ===================== STEP ANALYTICS TABLE ===================== */}

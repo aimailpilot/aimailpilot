@@ -851,22 +851,22 @@ export class DatabaseStorage {
     return { id, ...event, createdAt: now() };
   }
   async getTrackingEvents(campaignId: string) {
-    return db.prepare('SELECT * FROM tracking_events WHERE campaignId = ? ORDER BY createdAt DESC').all(campaignId).map(hydrateEvent);
+    return db.prepare("SELECT * FROM tracking_events WHERE campaignId = ? AND type != 'prefetch' ORDER BY createdAt DESC").all(campaignId).map(hydrateEvent);
   }
   async getTrackingEventsByMessage(messageId: string) {
-    return db.prepare('SELECT * FROM tracking_events WHERE messageId = ? ORDER BY createdAt ASC').all(messageId).map(hydrateEvent);
+    return db.prepare("SELECT * FROM tracking_events WHERE messageId = ? AND type != 'prefetch' ORDER BY createdAt ASC").all(messageId).map(hydrateEvent);
   }
   async getAllTrackingEvents(organizationId: string, limit = 50) {
     return db.prepare(`SELECT te.* FROM tracking_events te
       INNER JOIN campaigns c ON te.campaignId = c.id
-      WHERE c.organizationId = ? ORDER BY te.createdAt DESC LIMIT ?`).all(organizationId, limit).map(hydrateEvent);
+      WHERE c.organizationId = ? AND te.type != 'prefetch' ORDER BY te.createdAt DESC LIMIT ?`).all(organizationId, limit).map(hydrateEvent);
   }
 
   // ========== Enriched Campaign Messages ==========
   async getCampaignMessagesEnriched(campaignId: string, limit = 200, offset = 0) {
     const messages = db.prepare('SELECT * FROM messages WHERE campaignId = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(campaignId, limit, offset);
     return messages.map((m: any) => {
-      const events = db.prepare('SELECT * FROM tracking_events WHERE messageId = ? ORDER BY createdAt ASC').all(m.id).map(hydrateEvent);
+      const events = db.prepare("SELECT * FROM tracking_events WHERE messageId = ? AND type != 'prefetch' ORDER BY createdAt ASC").all(m.id).map(hydrateEvent);
       const contact = m.contactId ? hydrateContact(db.prepare('SELECT * FROM contacts WHERE id = ?').get(m.contactId)) : null;
       return {
         ...m,
