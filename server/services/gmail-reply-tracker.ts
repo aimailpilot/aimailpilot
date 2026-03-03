@@ -157,6 +157,15 @@ export class GmailReplyTracker {
 
       result.checked = listData.messages.length;
 
+      // Pre-load unreplied campaign messages for thread-based matching
+      const unrepliedMessages = await storage.getUnrepliedCampaignMessages(orgId);
+      const threadIdToMessage = new Map<string, any>();
+      for (const um of unrepliedMessages) {
+        if (um.providerMessageId) {
+          threadIdToMessage.set(um.providerMessageId, um);
+        }
+      }
+
       // Get all sent campaign messages that haven't been replied to yet
       // We'll use a batch approach - get message details and check headers
       for (const msgRef of listData.messages) {
@@ -175,16 +184,36 @@ export class GmailReplyTracker {
           const subject = getHeader('Subject');
           const date = getHeader('Date');
 
+          // Skip bounce/delivery notifications - these are not real replies
+          const fromLower = from.toLowerCase();
+          if (fromLower.includes('mailer-daemon') || 
+              fromLower.includes('postmaster') ||
+              fromLower.includes('mail delivery') ||
+              subject.toLowerCase().includes('delivery status notification') ||
+              subject.toLowerCase().includes('undeliverable') ||
+              subject.toLowerCase().includes('mail delivery failed')) {
+            continue;
+          }
+
           // Check if this is a reply to one of our campaign messages
-          // Our Message-IDs look like: <trackingId@domain.com>
+          // Method 1: Match via In-Reply-To / References headers (Message-ID matching)
           const allRefs = `${inReplyTo} ${references}`;
-          
-          // Extract tracking IDs from references
           const trackingIds = this.extractTrackingIds(allRefs);
+
+          // Method 2: Match via Gmail thread ID (if this message's threadId matches a sent campaign message)
+          let threadMatchedMessage: any = null;
+          if (trackingIds.length === 0 && msgRef.threadId) {
+            threadMatchedMessage = threadIdToMessage.get(msgRef.threadId);
+            if (threadMatchedMessage && !threadMatchedMessage.repliedAt) {
+              // Thread-based match found — treat it like a tracking ID match
+              trackingIds.push(threadMatchedMessage.trackingId);
+              console.log(`[GmailReplyTracker] Thread-based reply match: threadId=${msgRef.threadId} -> trackingId=${threadMatchedMessage.trackingId}`);
+            }
+          }
 
           for (const trackingId of trackingIds) {
             // Look up the campaign message by tracking ID
-            const campaignMessage = await storage.getCampaignMessageByTracking(trackingId);
+            const campaignMessage = threadMatchedMessage || await storage.getCampaignMessageByTracking(trackingId);
             if (!campaignMessage) continue;
             if (campaignMessage.repliedAt) continue; // Already tracked
 
@@ -304,13 +333,14 @@ export class GmailReplyTracker {
 
   /**
    * Extract Mailflow tracking IDs from In-Reply-To and References headers
-   * Our Message-IDs look like: <uuid@domain.com>
+   * Our Message-IDs look like: <campaignId_contactId_timestamp@domain.com>
+   * e.g. <394bf3f5-2086-41fa-bbad-3f66fde2f292_956a6436-89e0-42d6-b654-2484fea8c874_1772551404099@aegis.edu.in>
    */
   private extractTrackingIds(headerValue: string): string[] {
     if (!headerValue) return [];
     
-    // Match UUIDs or our tracking ID pattern from Message-ID references
-    const messageIdRegex = /<([a-f0-9-]{36,})@[^>]+>/gi;
+    // Match our tracking ID pattern: uuid_uuid_timestamp (contains hex, hyphens, underscores, digits)
+    const messageIdRegex = /<([a-f0-9][a-f0-9_-]{35,})@[^>]+>/gi;
     const ids: string[] = [];
     let match;
 
@@ -359,7 +389,7 @@ export class GmailReplyTracker {
     this.isChecking = true;
 
     try {
-      const result = await this.checkForReplies(orgId, 120); // Check last 2 hours
+      const result = await this.checkForReplies(orgId, 1440); // Check last 24 hours
       if (result.newReplies > 0) {
         console.log(`[GmailReplyTracker] Auto-check found ${result.newReplies} new replies`);
       }

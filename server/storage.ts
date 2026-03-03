@@ -904,6 +904,20 @@ export class DatabaseStorage {
     `).all(orgId, cutoff);
   }
 
+  // Get unreplied campaign messages for thread-based reply detection
+  async getUnrepliedCampaignMessages(orgId: string) {
+    return db.prepare(`
+      SELECT m.* FROM messages m
+      INNER JOIN campaigns c ON m.campaignId = c.id
+      WHERE c.organizationId = ?
+      AND m.status = 'sent'
+      AND m.repliedAt IS NULL
+      AND m.providerMessageId IS NOT NULL
+      ORDER BY m.sentAt DESC
+      LIMIT 200
+    `).all(orgId);
+  }
+
   // ========== Unsubscribes ==========
   async addUnsubscribe(data: any) {
     const id = genId();

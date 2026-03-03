@@ -1260,25 +1260,37 @@ Which account should I use and why? If I need to split across accounts, provide 
             followupSequences.push({ ...seq, steps });
             // Enhance step analytics with follow-up info (Mailmeteor-style description)
             for (const step of steps) {
-              const sa = stepAnalytics.find((s: any) => s.stepNumber === (step as any).stepNumber);
-              if (sa) {
-                const triggerLabels: Record<string, string> = {
-                  no_reply: 'If no reply', no_open: 'If no open', no_click: 'If no click',
-                  opened: 'If opened', clicked: 'If clicked', replied: 'If replied',
-                  always: 'Always',
+              let sa = stepAnalytics.find((s: any) => s.stepNumber === (step as any).stepNumber);
+              // If no step analytics entry exists for this follow-up step, create one
+              if (!sa) {
+                sa = {
+                  stepNumber: (step as any).stepNumber,
+                  label: `Step ${(step as any).stepNumber + 1}`,
+                  description: null,
+                  sent: 0, opened: 0, clicked: 0, replied: 0, bounced: 0, unsubscribed: 0,
+                  openRate: '0', clickRate: '0', replyRate: '0',
+                  isPending: true,
                 };
-                const trigger = triggerLabels[(step as any).trigger] || (step as any).trigger;
-                const days = (step as any).delayDays || 0;
-                const hours = (step as any).delayHours || 0;
-                const delayParts = [];
-                if (days > 0) delayParts.push(`${days} day${days > 1 ? 's' : ''}`);
-                if (hours > 0) delayParts.push(`${hours} hour${hours > 1 ? 's' : ''}`);
-                const delayStr = delayParts.length > 0 ? delayParts.join(' ') : 'immediate';
-                sa.description = `${trigger} – ${delayStr}`;
+                stepAnalytics.push(sa);
               }
+              const triggerLabels: Record<string, string> = {
+                no_reply: 'If no reply', no_open: 'If no open', no_click: 'If no click',
+                opened: 'If opened', clicked: 'If clicked', replied: 'If replied',
+                always: 'Always',
+              };
+              const trigger = triggerLabels[(step as any).trigger] || (step as any).trigger;
+              const days = (step as any).delayDays || 0;
+              const hours = (step as any).delayHours || 0;
+              const delayParts = [];
+              if (days > 0) delayParts.push(`${days} day${days > 1 ? 's' : ''}`);
+              if (hours > 0) delayParts.push(`${hours} hour${hours > 1 ? 's' : ''}`);
+              const delayStr = delayParts.length > 0 ? delayParts.join(' ') : 'immediate';
+              sa.description = `${trigger} \u2013 ${delayStr}`;
             }
           }
         }
+        // Sort step analytics by stepNumber
+        stepAnalytics.sort((a: any, b: any) => a.stepNumber - b.stepNumber);
       } catch (e) { /* ignore */ }
 
       // Get email account info

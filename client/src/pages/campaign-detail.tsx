@@ -328,27 +328,37 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
     return matchesSearch;
   });
 
-  // Tracking rows
-  const contactEventMap = new Map<string, { contact: any; email: string; events: TrackingEvent[]; lastActivity: string }>();
+  // Tracking rows - show ALL contacts with their engagement status (Mailmeteor-style)
+  const contactEventMap = new Map<string, { contact: any; email: string; events: TrackingEvent[]; lastActivity: string; message: CampaignMessage }>();
   for (const msg of messages) {
     if (!msg.contact) continue;
     const key = msg.contact.email;
     if (!contactEventMap.has(key)) {
-      contactEventMap.set(key, { contact: msg.contact, email: msg.subject || '', events: [], lastActivity: msg.sentAt || msg.createdAt });
+      contactEventMap.set(key, { contact: msg.contact, email: msg.subject || '', events: [], lastActivity: msg.sentAt || msg.createdAt, message: msg });
     }
     const entry = contactEventMap.get(key)!;
     if (msg.events) entry.events.push(...msg.events);
     const lastTime = msg.sentAt || msg.createdAt;
     if (lastTime > entry.lastActivity) entry.lastActivity = lastTime;
     if (msg.events?.length) {
-      const latestEventTime = msg.events.reduce((max, e) => e.createdAt > max ? e.createdAt : max, msg.events[0].createdAt);
+      const latestEventTime = msg.events.reduce((max: string, e: TrackingEvent) => e.createdAt > max ? e.createdAt : max, msg.events[0].createdAt);
       if (latestEventTime > entry.lastActivity) entry.lastActivity = latestEventTime;
     }
   }
   const trackingRows = Array.from(contactEventMap.values())
-    .filter(row => row.events.length > 0)
-    .sort((a, b) => new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime())
-    .slice(0, 20);
+    .sort((a, b) => {
+      // Sort by engagement level: replied > clicked > opened > sent
+      const getEngagement = (r: typeof a) => {
+        if (r.message.repliedAt || r.message.replyCount) return 4;
+        if (r.events.some(e => e.type === 'click')) return 3;
+        if (r.message.openedAt || r.message.openCount) return 2;
+        return 1;
+      };
+      const diff = getEngagement(b) - getEngagement(a);
+      if (diff !== 0) return diff;
+      return new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime();
+    })
+    .slice(0, 30);
 
   const isActive = campaign.status === 'active';
   const isPaused = campaign.status === 'paused';
@@ -588,25 +598,34 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
               </thead>
               <tbody>
                 {stepAnalytics.map((step: StepAnalytics, i: number) => (
-                  <tr key={i} className="border-b last:border-b-0 border-gray-50 hover:bg-gray-50/60 transition-colors">
+                  <tr key={i} className={`border-b last:border-b-0 border-gray-50 hover:bg-gray-50/60 transition-colors ${(step as any).isPending ? 'opacity-60' : ''}`}>
                     <td className="px-5 py-4">
                       <div className="flex items-center gap-3">
-                        <div className="w-7 h-7 rounded-lg bg-blue-50 border border-blue-100 flex items-center justify-center flex-shrink-0">
-                          <Hash className="h-3.5 w-3.5 text-blue-500" />
+                        <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 ${(step as any).isPending ? 'bg-amber-50 border border-amber-200' : 'bg-blue-50 border border-blue-100'}`}>
+                          {(step as any).isPending ? (
+                            <Clock className="h-3.5 w-3.5 text-amber-500" />
+                          ) : (
+                            <Hash className="h-3.5 w-3.5 text-blue-500" />
+                          )}
                         </div>
                         <div>
-                          <div className="text-sm font-semibold text-gray-900">{step.label}</div>
+                          <div className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+                            {step.label}
+                            {(step as any).isPending && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-medium">Scheduled</span>
+                            )}
+                          </div>
                           <div className="text-xs text-gray-400 mt-0.5">
                             {step.stepNumber === 0 ? (
                               'Sent at campaign creation'
                             ) : step.description ? (
                               <span className="flex items-center gap-1">
-                                <span className="text-gray-300">↓</span>
-                                {step.description.split('–')[0]?.trim()}
-                                {step.description.includes('–') && (
+                                <span className="text-gray-300">{'\u2193'}</span>
+                                {step.description.split('\u2013')[0]?.trim()}
+                                {step.description.includes('\u2013') && (
                                   <span className="text-blue-500 font-medium flex items-center gap-0.5">
                                     <Timer className="h-3 w-3" />
-                                    {step.description.split('–')[1]?.trim()}
+                                    {step.description.split('\u2013')[1]?.trim()}
                                   </span>
                                 )}
                               </span>
@@ -618,23 +637,23 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
                       </div>
                     </td>
                     <td className="text-center px-3 py-4">
-                      <span className="text-lg font-bold text-gray-900 tabular-nums">{step.sent}</span>
+                      <span className="text-lg font-bold text-gray-900 tabular-nums">{(step as any).isPending ? '-' : step.sent}</span>
                     </td>
                     <td className="text-center px-3 py-4">
-                      <span className="text-lg font-bold text-gray-900 tabular-nums">{step.opened}</span>
-                      <span className="text-[11px] text-gray-400 ml-1">{step.openRate}%</span>
+                      <span className="text-lg font-bold text-gray-900 tabular-nums">{(step as any).isPending ? '-' : step.opened}</span>
+                      {!(step as any).isPending && <span className="text-[11px] text-gray-400 ml-1">{step.openRate}%</span>}
                     </td>
                     <td className="text-center px-3 py-4">
-                      <span className="text-lg font-bold text-gray-900 tabular-nums">{step.clicked}</span>
-                      <span className="text-[11px] text-gray-400 ml-1">{step.clickRate}%</span>
+                      <span className="text-lg font-bold text-gray-900 tabular-nums">{(step as any).isPending ? '-' : step.clicked}</span>
+                      {!(step as any).isPending && <span className="text-[11px] text-gray-400 ml-1">{step.clickRate}%</span>}
                     </td>
                     <td className="text-center px-3 py-4">
-                      <span className="text-lg font-bold text-gray-900 tabular-nums">{step.replied}</span>
-                      <span className="text-[11px] text-gray-400 ml-1">{step.replyRate}%</span>
+                      <span className="text-lg font-bold text-gray-900 tabular-nums">{(step as any).isPending ? '-' : step.replied}</span>
+                      {!(step as any).isPending && <span className="text-[11px] text-gray-400 ml-1">{step.replyRate}%</span>}
                     </td>
                     <td className="text-center px-3 py-4">
-                      <span className="text-lg font-bold text-gray-900 tabular-nums">{step.unsubscribed}</span>
-                      <span className="text-[11px] text-gray-400 ml-1">0%</span>
+                      <span className="text-lg font-bold text-gray-900 tabular-nums">{(step as any).isPending ? '-' : step.unsubscribed}</span>
+                      {!(step as any).isPending && <span className="text-[11px] text-gray-400 ml-1">0%</span>}
                     </td>
                   </tr>
                 ))}
@@ -734,16 +753,28 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
               <thead>
                 <tr className="border-b border-gray-100 bg-gray-50/80">
                   <th className="text-left px-5 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">Recipient</th>
-                  <th className="text-left px-4 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">Subject</th>
+                  <th className="text-center px-4 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">Status</th>
                   <th className="text-left px-4 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">Events</th>
                   <th className="text-right px-5 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">Last activity</th>
                 </tr>
               </thead>
               <tbody>
                 {trackingRows.map((row, i) => {
-                  const opens = row.events.filter(e => e.type === 'open').length;
-                  const clicks = row.events.filter(e => e.type === 'click').length;
-                  const replies = row.events.filter(e => e.type === 'reply').length;
+                  const opens = row.message.openCount || (row.message.openedAt ? 1 : 0) || row.events.filter(e => e.type === 'open').length;
+                  const clicks = row.message.clickCount || (row.message.clickedAt ? 1 : 0) || row.events.filter(e => e.type === 'click').length;
+                  const replies = row.message.replyCount || (row.message.repliedAt ? 1 : 0) || row.events.filter(e => e.type === 'reply').length;
+                  const isSent = row.message.status === 'sent';
+                  const isFailed = row.message.status === 'failed' || row.message.status === 'bounced';
+                  // Determine highest engagement level for status badge
+                  const statusLabel = replies > 0 ? 'Replied' : clicks > 0 ? 'Clicked' : opens > 0 ? 'Opened' : isFailed ? 'Bounced' : isSent ? 'Delivered' : 'Sending';
+                  const statusColor: Record<string, string> = {
+                    Replied: 'bg-purple-100 text-purple-700 border-purple-200',
+                    Clicked: 'bg-blue-100 text-blue-700 border-blue-200',
+                    Opened: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+                    Delivered: 'bg-gray-100 text-gray-600 border-gray-200',
+                    Bounced: 'bg-red-100 text-red-700 border-red-200',
+                    Sending: 'bg-yellow-100 text-yellow-700 border-yellow-200',
+                  };
                   return (
                     <tr key={i} className="border-b border-gray-50 last:border-b-0 hover:bg-blue-50/30 transition-colors">
                       <td className="px-5 py-3.5">
@@ -761,14 +792,18 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
                           </div>
                         </div>
                       </td>
-                      <td className="px-4 py-3.5">
-                        <span className="text-sm text-gray-600 truncate block max-w-[200px]">{row.email || campaign.subject || '-'}</span>
+                      <td className="px-4 py-3.5 text-center">
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border ${statusColor[statusLabel] || statusColor.Delivered}`}>
+                          {statusLabel}
+                        </span>
                       </td>
                       <td className="px-4 py-3.5">
                         <div className="flex items-center gap-1.5 flex-wrap">
+                          {isSent && <EventBadge type="sent" count={1} />}
                           {opens > 0 && <EventBadge type="open" count={opens} />}
                           {clicks > 0 && <EventBadge type="click" count={clicks} />}
                           {replies > 0 && <EventBadge type="reply" count={replies} />}
+                          {isFailed && <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-50 text-red-600 border border-red-100"><AlertTriangle className="h-2.5 w-2.5" /> Bounced</span>}
                         </div>
                       </td>
                       <td className="px-5 py-3.5 text-right">
@@ -1098,8 +1133,9 @@ function DetailRow({ icon, label, value, valueColor, sub }: {
   );
 }
 
-function EventBadge({ type, count }: { type: 'open' | 'click' | 'reply'; count: number }) {
+function EventBadge({ type, count }: { type: 'open' | 'click' | 'reply' | 'sent'; count: number }) {
   const configs = {
+    sent: { bg: 'bg-gray-50 border-gray-200 text-gray-500', icon: <Send className="h-3 w-3" />, label: 'Sent' },
     open: { bg: 'bg-emerald-50 border-emerald-100 text-emerald-700', icon: <MailOpen className="h-3 w-3" />, label: `${count} open${count > 1 ? 's' : ''}` },
     click: { bg: 'bg-purple-50 border-purple-100 text-purple-700', icon: <MousePointer className="h-3 w-3" />, label: `${count} click${count > 1 ? 's' : ''}` },
     reply: { bg: 'bg-amber-50 border-amber-100 text-amber-700', icon: <MessageSquare className="h-3 w-3" />, label: `${count} repl${count > 1 ? 'ies' : 'y'}` },
