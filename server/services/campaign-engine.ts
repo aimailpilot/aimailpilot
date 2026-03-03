@@ -1,6 +1,150 @@
 import { storage } from '../storage';
 import { smtpEmailService, type SmtpConfig, type SendResult } from './smtp-email-service';
 
+/**
+ * Send email via Gmail API using OAuth access token.
+ * Returns SendResult compatible with SMTP service.
+ */
+async function sendViaGmailAPI(
+  accessToken: string,
+  opts: { from: string; to: string; subject: string; html: string; headers?: Record<string, string> }
+): Promise<SendResult> {
+  try {
+    let raw = '';
+    raw += `From: ${opts.from}\r\n`;
+    raw += `To: ${opts.to}\r\n`;
+    raw += `Subject: ${opts.subject}\r\n`;
+    raw += `MIME-Version: 1.0\r\n`;
+    raw += `Content-Type: text/html; charset="UTF-8"\r\n`;
+    if (opts.headers) {
+      for (const [k, v] of Object.entries(opts.headers)) {
+        raw += `${k}: ${v}\r\n`;
+      }
+    }
+    raw += `\r\n`;
+    raw += opts.html;
+
+    const base64 = Buffer.from(raw).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+    const resp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ raw: base64 }),
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      return { success: false, error: `Gmail API error (${resp.status}): ${errText}` };
+    }
+
+    const data = await resp.json() as any;
+    return { success: true, messageId: data.id };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Send email via Microsoft Graph API using OAuth access token.
+ */
+async function sendViaMicrosoftGraph(
+  accessToken: string,
+  opts: { from: string; to: string; subject: string; html: string; headers?: Record<string, string> }
+): Promise<SendResult> {
+  try {
+    const message = {
+      subject: opts.subject,
+      body: { contentType: 'HTML', content: opts.html },
+      toRecipients: [{ emailAddress: { address: opts.to } }],
+      from: { emailAddress: { address: opts.from } },
+      internetMessageHeaders: opts.headers
+        ? Object.entries(opts.headers).map(([name, value]) => ({ name, value }))
+        : undefined,
+    };
+
+    const resp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, saveToSentItems: true }),
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      return { success: false, error: `Graph API error (${resp.status}): ${errText}` };
+    }
+
+    return { success: true, messageId: `graph-${Date.now()}` };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Refresh a Gmail access token if expired.
+ */
+async function refreshGmailToken(orgId: string): Promise<string | null> {
+  const settings = await storage.getApiSettings(orgId);
+  const expiry = parseInt(settings.gmail_token_expiry || '0');
+  if (settings.gmail_access_token && Date.now() < expiry - 300000) {
+    return settings.gmail_access_token;
+  }
+  if (!settings.gmail_refresh_token) return null;
+  const clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET;
+  if (!clientId || !clientSecret) return settings.gmail_access_token || null;
+
+  try {
+    const { OAuth2Client } = await import('google-auth-library');
+    const oauth2 = new OAuth2Client(clientId, clientSecret);
+    oauth2.setCredentials({ refresh_token: settings.gmail_refresh_token });
+    const { credentials } = await oauth2.refreshAccessToken();
+    if (credentials.access_token) {
+      await storage.setApiSetting(orgId, 'gmail_access_token', credentials.access_token);
+      if (credentials.expiry_date) await storage.setApiSetting(orgId, 'gmail_token_expiry', String(credentials.expiry_date));
+      return credentials.access_token;
+    }
+  } catch (e) { console.error('[CampaignEngine] Gmail token refresh failed:', e); }
+  return settings.gmail_access_token || null;
+}
+
+/**
+ * Refresh a Microsoft access token if expired.
+ */
+async function refreshMicrosoftToken(orgId: string): Promise<string | null> {
+  const settings = await storage.getApiSettings(orgId);
+  const expiry = parseInt(settings.microsoft_token_expiry || '0');
+  if (settings.microsoft_access_token && Date.now() < expiry - 300000) {
+    return settings.microsoft_access_token;
+  }
+  if (!settings.microsoft_refresh_token) return null;
+  const clientId = settings.microsoft_oauth_client_id || process.env.MICROSOFT_CLIENT_ID;
+  const clientSecret = settings.microsoft_oauth_client_secret || process.env.MICROSOFT_CLIENT_SECRET;
+  if (!clientId || !clientSecret) return settings.microsoft_access_token || null;
+
+  try {
+    const body = new URLSearchParams({
+      client_id: clientId, client_secret: clientSecret,
+      refresh_token: settings.microsoft_refresh_token,
+      grant_type: 'refresh_token',
+      scope: 'openid profile email offline_access User.Read Mail.Read Mail.Send',
+    });
+    const resp = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString(),
+    });
+    if (resp.ok) {
+      const tokens = await resp.json() as any;
+      if (tokens.access_token) {
+        await storage.setApiSetting(orgId, 'microsoft_access_token', tokens.access_token);
+        if (tokens.refresh_token) await storage.setApiSetting(orgId, 'microsoft_refresh_token', tokens.refresh_token);
+        const exp = Date.now() + (tokens.expires_in || 3600) * 1000;
+        await storage.setApiSetting(orgId, 'microsoft_token_expiry', String(exp));
+        return tokens.access_token;
+      }
+    }
+  } catch (e) { console.error('[CampaignEngine] Microsoft token refresh failed:', e); }
+  return settings.microsoft_access_token || null;
+}
+
 interface CampaignSendOptions {
   campaignId: string;
   delayBetweenEmails?: number; // ms between each email (throttling)
@@ -237,20 +381,76 @@ export class CampaignEngine {
           messageId,
         });
 
-        // Send email with custom Message-ID header for reply tracking
-        const result: SendResult = await smtpEmailService.sendEmail(emailAccount.id, smtpConfig, {
-          to: contact.email,
-          subject: personalizedSubject,
-          html: clickTrackedContent,
-          trackingId,
-          headers: {
-            'Message-ID': messageId,
-            'X-Mailflow-Campaign': campaignId,
-            'X-Mailflow-Contact': contact.id,
-            'X-Mailflow-Tracking': trackingId,
-            'X-Mailflow-Step': String(stepNumber),
-          },
-        });
+        // Send email — try API methods first (Gmail API / Microsoft Graph), fall back to SMTP
+        const emailHeaders: Record<string, string> = {
+          'Message-ID': messageId,
+          'X-Mailflow-Campaign': campaignId,
+          'X-Mailflow-Contact': contact.id,
+          'X-Mailflow-Tracking': trackingId,
+          'X-Mailflow-Step': String(stepNumber),
+        };
+
+        let result: SendResult;
+        const provider = emailAccount.provider || smtpConfig?.provider || '';
+        const fromEmail = smtpConfig?.fromEmail || emailAccount.email || '';
+        const orgId = emailAccount.organizationId || '550e8400-e29b-41d4-a716-446655440001';
+
+        if (provider === 'gmail' || provider === 'google') {
+          // Try Gmail API first
+          const accessToken = await refreshGmailToken(orgId);
+          if (accessToken) {
+            console.log(`[CampaignEngine] Sending via Gmail API to ${contact.email}`);
+            result = await sendViaGmailAPI(accessToken, {
+              from: smtpConfig?.fromName ? `${smtpConfig.fromName} <${fromEmail}>` : fromEmail,
+              to: contact.email,
+              subject: personalizedSubject,
+              html: clickTrackedContent,
+              headers: emailHeaders,
+            });
+            // If Gmail API fails with auth error, fall back to SMTP
+            if (!result.success && result.error?.includes('401')) {
+              console.log(`[CampaignEngine] Gmail API auth failed, falling back to SMTP for ${contact.email}`);
+              result = await smtpEmailService.sendEmail(emailAccount.id, smtpConfig, {
+                to: contact.email, subject: personalizedSubject, html: clickTrackedContent, trackingId, headers: emailHeaders,
+              });
+            }
+          } else {
+            // No OAuth token, use SMTP
+            result = await smtpEmailService.sendEmail(emailAccount.id, smtpConfig, {
+              to: contact.email, subject: personalizedSubject, html: clickTrackedContent, trackingId, headers: emailHeaders,
+            });
+          }
+        } else if (provider === 'outlook' || provider === 'microsoft') {
+          // Try Microsoft Graph API first
+          const accessToken = await refreshMicrosoftToken(orgId);
+          if (accessToken) {
+            console.log(`[CampaignEngine] Sending via Microsoft Graph to ${contact.email}`);
+            result = await sendViaMicrosoftGraph(accessToken, {
+              from: fromEmail,
+              to: contact.email,
+              subject: personalizedSubject,
+              html: clickTrackedContent,
+              headers: emailHeaders,
+            });
+            // If Graph fails with auth error, fall back to SMTP
+            if (!result.success && (result.error?.includes('401') || result.error?.includes('403'))) {
+              console.log(`[CampaignEngine] Graph API auth failed, falling back to SMTP for ${contact.email}`);
+              result = await smtpEmailService.sendEmail(emailAccount.id, smtpConfig, {
+                to: contact.email, subject: personalizedSubject, html: clickTrackedContent, trackingId, headers: emailHeaders,
+              });
+            }
+          } else {
+            // No OAuth token, use SMTP
+            result = await smtpEmailService.sendEmail(emailAccount.id, smtpConfig, {
+              to: contact.email, subject: personalizedSubject, html: clickTrackedContent, trackingId, headers: emailHeaders,
+            });
+          }
+        } else {
+          // Other providers — SMTP only
+          result = await smtpEmailService.sendEmail(emailAccount.id, smtpConfig, {
+            to: contact.email, subject: personalizedSubject, html: clickTrackedContent, trackingId, headers: emailHeaders,
+          });
+        }
 
         const nowIso = new Date().toISOString();
 
