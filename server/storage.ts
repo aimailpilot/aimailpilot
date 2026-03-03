@@ -126,12 +126,33 @@ db.exec(`
     lastName TEXT,
     company TEXT,
     jobTitle TEXT,
+    phone TEXT,
+    mobilePhone TEXT,
+    linkedinUrl TEXT,
+    seniority TEXT,
+    department TEXT,
+    city TEXT,
+    state TEXT,
+    country TEXT,
+    website TEXT,
+    industry TEXT,
+    employeeCount TEXT,
+    annualRevenue TEXT,
+    companyLinkedinUrl TEXT,
+    companyCity TEXT,
+    companyState TEXT,
+    companyCountry TEXT,
+    companyAddress TEXT,
+    companyPhone TEXT,
+    emailStatus TEXT,
+    lastActivityDate TEXT,
     status TEXT DEFAULT 'cold',
     score INTEGER DEFAULT 0,
     tags TEXT DEFAULT '[]',
     customFields TEXT DEFAULT '{}',
     source TEXT DEFAULT 'manual',
     listId TEXT,
+    assignedTo TEXT,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
@@ -303,7 +324,60 @@ db.exec(`
     UNIQUE(organizationId, settingKey)
   );
   CREATE INDEX IF NOT EXISTS idx_api_settings_org ON api_settings(organizationId, settingKey);
+
+  -- Unified Inbox table for aggregating replies across all email accounts
+  CREATE TABLE IF NOT EXISTS unified_inbox (
+    id TEXT PRIMARY KEY,
+    organizationId TEXT NOT NULL,
+    emailAccountId TEXT,
+    campaignId TEXT,
+    messageId TEXT,
+    contactId TEXT,
+    gmailMessageId TEXT,
+    gmailThreadId TEXT,
+    outlookMessageId TEXT,
+    outlookConversationId TEXT,
+    fromEmail TEXT NOT NULL,
+    fromName TEXT,
+    toEmail TEXT,
+    subject TEXT,
+    snippet TEXT,
+    body TEXT,
+    bodyHtml TEXT,
+    status TEXT DEFAULT 'unread',
+    provider TEXT,
+    aiDraft TEXT,
+    repliedAt TEXT,
+    receivedAt TEXT NOT NULL,
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_inbox_org ON unified_inbox(organizationId, status);
+  CREATE INDEX IF NOT EXISTS idx_inbox_account ON unified_inbox(emailAccountId);
+  CREATE INDEX IF NOT EXISTS idx_inbox_campaign ON unified_inbox(campaignId);
+  CREATE INDEX IF NOT EXISTS idx_inbox_contact ON unified_inbox(contactId);
+  CREATE INDEX IF NOT EXISTS idx_inbox_received ON unified_inbox(receivedAt);
+  CREATE INDEX IF NOT EXISTS idx_inbox_gmail ON unified_inbox(gmailMessageId);
+  CREATE INDEX IF NOT EXISTS idx_inbox_outlook ON unified_inbox(outlookMessageId);
 `);
+
+// ========== MIGRATIONS for existing databases ==========
+// Add new Apollo.io contact columns if they don't exist
+const contactMigrationCols = [
+  'phone', 'mobilePhone', 'linkedinUrl', 'seniority', 'department',
+  'city', 'state', 'country', 'website', 'industry',
+  'employeeCount', 'annualRevenue', 'companyLinkedinUrl',
+  'companyCity', 'companyState', 'companyCountry', 'companyAddress',
+  'companyPhone', 'emailStatus', 'lastActivityDate', 'assignedTo'
+];
+for (const col of contactMigrationCols) {
+  try { db.exec(`ALTER TABLE contacts ADD COLUMN ${col} TEXT`); } catch (e) { /* column already exists */ }
+}
+
+// Create indexes on migrated columns (after migration ensures columns exist)
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_assigned ON contacts(assignedTo)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_industry ON contacts(industry)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_city ON contacts(city)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_seniority ON contacts(seniority)`); } catch (e) {}
 
 // ========== SEED DATA (only on first run) ==========
 const ORG_ID = '550e8400-e29b-41d4-a716-446655440001';
@@ -552,15 +626,29 @@ export class DatabaseStorage {
   }
   async createContact(contact: any) {
     const id = genId(); const ts2 = now();
-    db.prepare('INSERT INTO contacts (id, organizationId, email, firstName, lastName, company, jobTitle, status, score, tags, customFields, source, listId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+    db.prepare(`INSERT INTO contacts (id, organizationId, email, firstName, lastName, company, jobTitle,
+      phone, mobilePhone, linkedinUrl, seniority, department, city, state, country, website, industry,
+      employeeCount, annualRevenue, companyLinkedinUrl, companyCity, companyState, companyCountry, companyAddress,
+      companyPhone, emailStatus, lastActivityDate, status, score, tags, customFields, source, listId, assignedTo, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       id, contact.organizationId, contact.email, contact.firstName || '', contact.lastName || '', contact.company || '', contact.jobTitle || '',
-      contact.status || 'cold', contact.score || 0, toJson(contact.tags || []), toJson(contact.customFields || {}), contact.source || 'manual', contact.listId || null, ts2, ts2
+      contact.phone || '', contact.mobilePhone || '', contact.linkedinUrl || '', contact.seniority || '', contact.department || '',
+      contact.city || '', contact.state || '', contact.country || '', contact.website || '', contact.industry || '',
+      contact.employeeCount || '', contact.annualRevenue || '', contact.companyLinkedinUrl || '',
+      contact.companyCity || '', contact.companyState || '', contact.companyCountry || '', contact.companyAddress || '',
+      contact.companyPhone || '', contact.emailStatus || '', contact.lastActivityDate || '',
+      contact.status || 'cold', contact.score || 0, toJson(contact.tags || []), toJson(contact.customFields || {}),
+      contact.source || 'manual', contact.listId || null, contact.assignedTo || null, ts2, ts2
     );
     return this.getContact(id);
   }
   async createContactsBulk(contacts: any[], listId?: string) {
     const results: any[] = [];
-    const insertStmt = db.prepare('INSERT INTO contacts (id, organizationId, email, firstName, lastName, company, jobTitle, status, score, tags, customFields, source, listId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    const insertStmt = db.prepare(`INSERT INTO contacts (id, organizationId, email, firstName, lastName, company, jobTitle,
+      phone, mobilePhone, linkedinUrl, seniority, department, city, state, country, website, industry,
+      employeeCount, annualRevenue, companyLinkedinUrl, companyCity, companyState, companyCountry, companyAddress,
+      companyPhone, emailStatus, lastActivityDate, status, score, tags, customFields, source, listId, assignedTo, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     const findStmt = db.prepare('SELECT * FROM contacts WHERE organizationId = ? AND email = ?');
     const updateListStmt = db.prepare('UPDATE contacts SET listId = ?, updatedAt = ? WHERE id = ?');
 
@@ -577,8 +665,13 @@ export class DatabaseStorage {
         const id = genId(); const ts2 = now();
         insertStmt.run(
           id, contact.organizationId, contact.email, contact.firstName || '', contact.lastName || '', contact.company || '', contact.jobTitle || '',
-          contact.status || 'cold', contact.score || 0, toJson(contact.tags || []), toJson(contact.customFields || {}), contact.source || 'import',
-          listId || contact.listId || null, ts2, ts2
+          contact.phone || '', contact.mobilePhone || '', contact.linkedinUrl || '', contact.seniority || '', contact.department || '',
+          contact.city || '', contact.state || '', contact.country || '', contact.website || '', contact.industry || '',
+          contact.employeeCount || '', contact.annualRevenue || '', contact.companyLinkedinUrl || '',
+          contact.companyCity || '', contact.companyState || '', contact.companyCountry || '', contact.companyAddress || '',
+          contact.companyPhone || '', contact.emailStatus || '', contact.lastActivityDate || '',
+          contact.status || 'cold', contact.score || 0, toJson(contact.tags || []), toJson(contact.customFields || {}),
+          contact.source || 'import', listId || contact.listId || null, contact.assignedTo || null, ts2, ts2
         );
         results.push({ id, ...contact, listId: listId || contact.listId || null, tags: contact.tags || [], customFields: contact.customFields || {} });
       }
@@ -590,8 +683,20 @@ export class DatabaseStorage {
     const existing = await this.getContact(id);
     if (!existing) throw new Error('Contact not found');
     const m = { ...existing, ...data };
-    db.prepare('UPDATE contacts SET firstName=?, lastName=?, company=?, jobTitle=?, status=?, score=?, tags=?, customFields=?, source=?, listId=?, updatedAt=? WHERE id=?').run(
-      m.firstName, m.lastName, m.company, m.jobTitle, m.status, m.score, toJson(m.tags), toJson(m.customFields), m.source, m.listId || null, now(), id
+    db.prepare(`UPDATE contacts SET firstName=?, lastName=?, company=?, jobTitle=?,
+      phone=?, mobilePhone=?, linkedinUrl=?, seniority=?, department=?,
+      city=?, state=?, country=?, website=?, industry=?,
+      employeeCount=?, annualRevenue=?, companyLinkedinUrl=?,
+      companyCity=?, companyState=?, companyCountry=?, companyAddress=?,
+      companyPhone=?, emailStatus=?, lastActivityDate=?,
+      status=?, score=?, tags=?, customFields=?, source=?, listId=?, assignedTo=?, updatedAt=? WHERE id=?`).run(
+      m.firstName, m.lastName, m.company, m.jobTitle,
+      m.phone || '', m.mobilePhone || '', m.linkedinUrl || '', m.seniority || '', m.department || '',
+      m.city || '', m.state || '', m.country || '', m.website || '', m.industry || '',
+      m.employeeCount || '', m.annualRevenue || '', m.companyLinkedinUrl || '',
+      m.companyCity || '', m.companyState || '', m.companyCountry || '', m.companyAddress || '',
+      m.companyPhone || '', m.emailStatus || '', m.lastActivityDate || '',
+      m.status, m.score, toJson(m.tags), toJson(m.customFields), m.source, m.listId || null, m.assignedTo || null, now(), id
     );
     return this.getContact(id);
   }
@@ -606,9 +711,12 @@ export class DatabaseStorage {
     const q = `%${query.toLowerCase()}%`;
     let sql = `SELECT * FROM contacts WHERE organizationId = ? AND (
       LOWER(firstName) LIKE ? OR LOWER(lastName) LIKE ? OR LOWER(email) LIKE ? OR
-      LOWER(company) LIKE ? OR LOWER(jobTitle) LIKE ? OR LOWER(tags) LIKE ? OR LOWER(customFields) LIKE ?
+      LOWER(company) LIKE ? OR LOWER(jobTitle) LIKE ? OR LOWER(tags) LIKE ? OR LOWER(customFields) LIKE ? OR
+      LOWER(phone) LIKE ? OR LOWER(mobilePhone) LIKE ? OR LOWER(linkedinUrl) LIKE ? OR
+      LOWER(city) LIKE ? OR LOWER(state) LIKE ? OR LOWER(country) LIKE ? OR LOWER(industry) LIKE ? OR
+      LOWER(seniority) LIKE ? OR LOWER(department) LIKE ? OR LOWER(website) LIKE ?
     )`;
-    const params: any[] = [organizationId, q, q, q, q, q, q, q];
+    const params: any[] = [organizationId, q, q, q, q, q, q, q, q, q, q, q, q, q, q, q, q, q];
     if (filters?.listId) { sql += ' AND listId = ?'; params.push(filters.listId); }
     sql += ' ORDER BY createdAt DESC LIMIT 100';
     return db.prepare(sql).all(...params).map(hydrateContact);
@@ -1014,6 +1122,71 @@ export class DatabaseStorage {
 
   async deleteApiSetting(organizationId: string, key: string): Promise<void> {
     db.prepare('DELETE FROM api_settings WHERE organizationId = ? AND settingKey = ?').run(organizationId, key);
+  }
+
+  // ========== Unified Inbox ==========
+  async getInboxMessages(organizationId: string, filters?: { status?: string; emailAccountId?: string; campaignId?: string }, limit = 50, offset = 0) {
+    let sql = 'SELECT * FROM unified_inbox WHERE organizationId = ?';
+    const params: any[] = [organizationId];
+    if (filters?.status && filters.status !== 'all') { sql += ' AND status = ?'; params.push(filters.status); }
+    if (filters?.emailAccountId) { sql += ' AND emailAccountId = ?'; params.push(filters.emailAccountId); }
+    if (filters?.campaignId) { sql += ' AND campaignId = ?'; params.push(filters.campaignId); }
+    sql += ' ORDER BY receivedAt DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+    return db.prepare(sql).all(...params);
+  }
+
+  async getInboxMessageCount(organizationId: string, filters?: { status?: string }) {
+    let sql = 'SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ?';
+    const params: any[] = [organizationId];
+    if (filters?.status && filters.status !== 'all') { sql += ' AND status = ?'; params.push(filters.status); }
+    return (db.prepare(sql).get(...params) as any).c;
+  }
+
+  async getInboxMessage(id: string) {
+    return db.prepare('SELECT * FROM unified_inbox WHERE id = ?').get(id);
+  }
+
+  async getInboxMessageByGmailId(gmailMessageId: string) {
+    return db.prepare('SELECT * FROM unified_inbox WHERE gmailMessageId = ?').get(gmailMessageId);
+  }
+
+  async getInboxMessageByOutlookId(outlookMessageId: string) {
+    return db.prepare('SELECT * FROM unified_inbox WHERE outlookMessageId = ?').get(outlookMessageId);
+  }
+
+  async createInboxMessage(msg: any) {
+    const id = genId(); const ts2 = now();
+    db.prepare(`INSERT INTO unified_inbox (id, organizationId, emailAccountId, campaignId, messageId, contactId,
+      gmailMessageId, gmailThreadId, outlookMessageId, outlookConversationId,
+      fromEmail, fromName, toEmail, subject, snippet, body, bodyHtml,
+      status, provider, aiDraft, repliedAt, receivedAt, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      id, msg.organizationId, msg.emailAccountId || null, msg.campaignId || null, msg.messageId || null, msg.contactId || null,
+      msg.gmailMessageId || null, msg.gmailThreadId || null, msg.outlookMessageId || null, msg.outlookConversationId || null,
+      msg.fromEmail, msg.fromName || '', msg.toEmail || '', msg.subject || '', msg.snippet || '', msg.body || '', msg.bodyHtml || '',
+      msg.status || 'unread', msg.provider || '', msg.aiDraft || null, msg.repliedAt || null, msg.receivedAt || ts2, ts2
+    );
+    return this.getInboxMessage(id);
+  }
+
+  async updateInboxMessage(id: string, data: any) {
+    const existing = await this.getInboxMessage(id);
+    if (!existing) throw new Error('Inbox message not found');
+    const m = { ...existing, ...data } as any;
+    db.prepare('UPDATE unified_inbox SET status=?, aiDraft=?, repliedAt=? WHERE id=?').run(
+      m.status, m.aiDraft || null, m.repliedAt || null, id
+    );
+    return this.getInboxMessage(id);
+  }
+
+  async deleteInboxMessage(id: string) {
+    db.prepare('DELETE FROM unified_inbox WHERE id = ?').run(id);
+    return true;
+  }
+
+  async getInboxUnreadCount(organizationId: string) {
+    return (db.prepare('SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND status = ?').get(organizationId, 'unread') as any).c;
   }
 }
 

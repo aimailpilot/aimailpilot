@@ -182,6 +182,23 @@ export class CampaignEngine {
           company: contact.company || '',
           jobTitle: contact.jobTitle || '',
           fullName: `${contact.firstName || ''} ${contact.lastName || ''}`.trim(),
+          phone: contact.phone || '',
+          mobilePhone: contact.mobilePhone || '',
+          linkedinUrl: contact.linkedinUrl || '',
+          seniority: contact.seniority || '',
+          department: contact.department || '',
+          city: contact.city || '',
+          state: contact.state || '',
+          country: contact.country || '',
+          website: contact.website || '',
+          industry: contact.industry || '',
+          employeeCount: contact.employeeCount || '',
+          annualRevenue: contact.annualRevenue || '',
+          companyCity: contact.companyCity || '',
+          companyState: contact.companyState || '',
+          companyCountry: contact.companyCountry || '',
+          // Spread any customFields so {{customKey}} also works
+          ...(contact.customFields || {}),
         };
 
         const personalizedSubject = this.personalizeContent(subject, personalData);

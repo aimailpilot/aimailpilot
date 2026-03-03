@@ -230,6 +230,51 @@ export class GmailReplyTracker {
               },
             });
 
+            // Also store in unified_inbox for the Unified Inbox feature
+            const existingInbox = await storage.getInboxMessageByGmailId(msg.id);
+            if (!existingInbox) {
+              // Fetch full message body for unified inbox
+              let body = msg.snippet || '';
+              let bodyHtml = '';
+              try {
+                const fullMsg: GmailMessage = await this.gmailFetch(accessToken, `messages/${msg.id}?format=full`);
+                const parts = fullMsg.payload?.parts || [];
+                for (const part of parts) {
+                  if (part.mimeType === 'text/html' && part.body?.data) {
+                    bodyHtml = Buffer.from(part.body.data, 'base64url').toString('utf-8');
+                  } else if (part.mimeType === 'text/plain' && part.body?.data) {
+                    body = Buffer.from(part.body.data, 'base64url').toString('utf-8');
+                  }
+                }
+                // Single-part message
+                if (!bodyHtml && !body && fullMsg.payload?.body?.data) {
+                  body = Buffer.from(fullMsg.payload.body.data, 'base64url').toString('utf-8');
+                }
+              } catch (e) { /* fallback to snippet */ }
+
+              const settings = await storage.getApiSettings(orgId);
+              await storage.createInboxMessage({
+                organizationId: orgId,
+                emailAccountId: null,
+                campaignId: campaignMessage.campaignId,
+                messageId: campaignMessage.id,
+                contactId: campaignMessage.contactId,
+                gmailMessageId: msg.id,
+                gmailThreadId: msg.threadId,
+                fromEmail: from,
+                fromName: from.replace(/<.*>/, '').trim(),
+                toEmail: settings.gmail_email || '',
+                subject,
+                snippet: msg.snippet || '',
+                body,
+                bodyHtml,
+                status: 'unread',
+                provider: 'gmail',
+                receivedAt: date ? new Date(date).toISOString() : new Date().toISOString(),
+              });
+              console.log(`[GmailReplyTracker] Stored reply in unified inbox from ${from}`);
+            }
+
             result.newReplies++;
             result.replies.push({
               from,

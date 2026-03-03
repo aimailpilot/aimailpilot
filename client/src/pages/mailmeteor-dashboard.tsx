@@ -32,8 +32,9 @@ import FollowupSequenceBuilder from "./followup-builder";
 import CampaignDetailPage from "./campaign-detail";
 import AdvancedSettings from "./advanced-settings";
 import AccountSettings from "./account-settings";
+import UnifiedInbox from "./unified-inbox";
 
-type ViewType = 'campaigns' | 'templates' | 'contacts' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings';
+type ViewType = 'campaigns' | 'templates' | 'contacts' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings';
 
 // Live Tracking Feed component - fetches real tracking events
 function LiveTrackingFeed({ dashStats }: { dashStats: any }) {
@@ -204,6 +205,23 @@ export default function MailMeteorDashboard() {
     retry: false,
   });
 
+  // Fetch inbox unread count for sidebar badge
+  const [inboxUnread, setInboxUnread] = useState(0);
+  useEffect(() => {
+    const fetchUnread = async () => {
+      try {
+        const resp = await fetch('/api/inbox/unread-count', { credentials: 'include' });
+        if (resp.ok) {
+          const data = await resp.json();
+          setInboxUnread(data.unread || 0);
+        }
+      } catch {}
+    };
+    fetchUnread();
+    const interval = setInterval(fetchUnread, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
   const handleLogout = async () => {
     try {
       localStorage.clear();
@@ -258,6 +276,7 @@ export default function MailMeteorDashboard() {
 
   const sidebarMainItems = [
     { key: 'campaigns' as ViewType, label: 'Campaigns', icon: Send, count: campaigns?.length },
+    { key: 'inbox' as ViewType, label: 'Inbox', icon: Inbox, count: inboxUnread },
     { key: 'templates' as ViewType, label: 'Templates', icon: FileText },
     { key: 'contacts' as ViewType, label: 'Contacts', icon: Users },
   ];
@@ -281,7 +300,7 @@ export default function MailMeteorDashboard() {
   const getViewTitle = () => {
     if (viewMode === 'campaign') return 'New Campaign';
     const titles: Record<ViewType, string> = {
-      campaigns: 'Campaigns', templates: 'Templates', contacts: 'Contacts',
+      campaigns: 'Campaigns', inbox: 'Unified Inbox', templates: 'Templates', contacts: 'Contacts',
       setup: 'Email Accounts', analytics: 'Analytics', followups: 'Automations',
       verification: 'Email Verification', tracking: 'Live Activity Feed',
       account: 'Account', billing: 'Billing', insights: 'Insights', tools: 'Tools',
@@ -294,6 +313,7 @@ export default function MailMeteorDashboard() {
   const getViewDescription = () => {
     const descs: Record<ViewType, string> = {
       campaigns: 'Create and manage your email campaigns',
+      inbox: 'All replies from Gmail and Outlook in one place',
       templates: 'Build reusable email templates',
       contacts: 'Manage your contacts and segments',
       setup: 'Connect your email accounts',
@@ -764,6 +784,9 @@ export default function MailMeteorDashboard() {
 
           {/* Templates */}
           {viewMode === 'dashboard' && currentView === 'templates' && <TemplateManager />}
+
+          {/* Unified Inbox */}
+          {viewMode === 'dashboard' && currentView === 'inbox' && <UnifiedInbox />}
 
           {/* Contacts */}
           {viewMode === 'dashboard' && currentView === 'contacts' && <ContactsManager />}

@@ -13,7 +13,8 @@ import {
   Mail, Building, Briefcase, CheckCircle, Loader2, XCircle, Filter, UserPlus,
   MoreHorizontal, Star, TrendingUp, ArrowUpDown, FileSpreadsheet, List, FolderOpen, X, Eye, Tag,
   AlertTriangle, Ban, Link2, Sheet, Pencil, ExternalLink, ShieldX, ListX, LayoutList,
-  Copy, ArrowRight, ChevronDown, Info, Sparkles, RefreshCw
+  Copy, ArrowRight, ChevronDown, Info, Sparkles, RefreshCw,
+  Phone, Globe, MapPin, Linkedin, DollarSign, Hash, Calendar, Factory
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -32,6 +33,27 @@ interface Contact {
   listId?: string;
   customFields?: Record<string, any>;
   createdAt: string;
+  // Apollo.io enriched fields
+  phone?: string;
+  mobilePhone?: string;
+  linkedinUrl?: string;
+  seniority?: string;
+  department?: string;
+  city?: string;
+  state?: string;
+  country?: string;
+  website?: string;
+  industry?: string;
+  employeeCount?: string;
+  annualRevenue?: string;
+  companyLinkedinUrl?: string;
+  companyCity?: string;
+  companyState?: string;
+  companyCountry?: string;
+  companyAddress?: string;
+  companyPhone?: string;
+  emailStatus?: string;
+  lastActivityDate?: string;
 }
 
 interface ContactList {
@@ -911,6 +933,11 @@ export default function ContactsManager() {
                   { label: 'Status', value: detailContact.status, icon: CheckCircle },
                   { label: 'Score', value: detailContact.score, icon: Star },
                   { label: 'Source', value: detailContact.source || 'manual', icon: Download },
+                  { label: 'Phone', value: detailContact.phone, icon: Phone },
+                  { label: 'Mobile', value: detailContact.mobilePhone, icon: Phone },
+                  { label: 'Seniority', value: detailContact.seniority, icon: TrendingUp },
+                  { label: 'Department', value: detailContact.department, icon: Users },
+                  { label: 'Email Status', value: detailContact.emailStatus, icon: Mail },
                 ].filter(f => f.value).map((field, i) => (
                   <div key={i} className="flex items-start gap-2 p-2.5 bg-gray-50 rounded-lg">
                     <field.icon className="h-3.5 w-3.5 text-gray-400 mt-0.5" />
@@ -921,6 +948,73 @@ export default function ContactsManager() {
                   </div>
                 ))}
               </div>
+
+              {/* LinkedIn & Website */}
+              {(detailContact.linkedinUrl || detailContact.website) && (
+                <div>
+                  <div className="text-[10px] text-gray-400 uppercase font-semibold tracking-wide mb-2 flex items-center gap-1"><Globe className="h-3 w-3" /> Links</div>
+                  <div className="space-y-1.5">
+                    {detailContact.linkedinUrl && (
+                      <a href={detailContact.linkedinUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 p-2 bg-blue-50 rounded-lg text-sm text-blue-700 hover:bg-blue-100 transition">
+                        <Linkedin className="h-4 w-4" /> {detailContact.linkedinUrl.replace(/^https?:\/\/(www\.)?linkedin\.com\/in\//, '').replace(/\/$/, '') || 'LinkedIn Profile'}
+                      </a>
+                    )}
+                    {detailContact.website && (
+                      <a href={detailContact.website.startsWith('http') ? detailContact.website : `https://${detailContact.website}`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 p-2 bg-gray-50 rounded-lg text-sm text-gray-700 hover:bg-gray-100 transition">
+                        <Globe className="h-4 w-4" /> {detailContact.website}
+                      </a>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Location */}
+              {(detailContact.city || detailContact.state || detailContact.country) && (
+                <div>
+                  <div className="text-[10px] text-gray-400 uppercase font-semibold tracking-wide mb-2 flex items-center gap-1"><MapPin className="h-3 w-3" /> Location</div>
+                  <div className="p-2.5 bg-gray-50 rounded-lg text-sm text-gray-700">
+                    {[detailContact.city, detailContact.state, detailContact.country].filter(Boolean).join(', ')}
+                  </div>
+                </div>
+              )}
+
+              {/* Company Info */}
+              {(detailContact.industry || detailContact.employeeCount || detailContact.annualRevenue || detailContact.companyCity || detailContact.companyPhone || detailContact.companyLinkedinUrl) && (
+                <div>
+                  <div className="text-[10px] text-gray-400 uppercase font-semibold tracking-wide mb-2 flex items-center gap-1"><Factory className="h-3 w-3" /> Company Details</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { label: 'Industry', value: detailContact.industry },
+                      { label: 'Employees', value: detailContact.employeeCount },
+                      { label: 'Revenue', value: detailContact.annualRevenue },
+                      { label: 'HQ Location', value: [detailContact.companyCity, detailContact.companyState, detailContact.companyCountry].filter(Boolean).join(', ') },
+                      { label: 'Address', value: detailContact.companyAddress },
+                      { label: 'Company Phone', value: detailContact.companyPhone },
+                    ].filter(f => f.value).map((f, i) => (
+                      <div key={i} className="p-2 bg-gray-50 rounded text-xs">
+                        <div className="text-gray-400 uppercase font-semibold tracking-wide text-[10px]">{f.label}</div>
+                        <div className="text-gray-700 mt-0.5">{f.value}</div>
+                      </div>
+                    ))}
+                  </div>
+                  {detailContact.companyLinkedinUrl && (
+                    <a href={detailContact.companyLinkedinUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 p-2 mt-2 bg-blue-50 rounded-lg text-xs text-blue-700 hover:bg-blue-100 transition">
+                      <Linkedin className="h-3.5 w-3.5" /> Company LinkedIn
+                    </a>
+                  )}
+                </div>
+              )}
+
+              {/* Last Activity */}
+              {detailContact.lastActivityDate && (
+                <div className="flex items-center gap-2 p-2.5 bg-amber-50 rounded-lg">
+                  <Calendar className="h-3.5 w-3.5 text-amber-500" />
+                  <div>
+                    <div className="text-[10px] text-gray-400 uppercase font-semibold tracking-wide">Last Activity</div>
+                    <div className="text-sm text-gray-700">{detailContact.lastActivityDate}</div>
+                  </div>
+                </div>
+              )}
 
               {detailContact.tags && detailContact.tags.length > 0 && (
                 <div>

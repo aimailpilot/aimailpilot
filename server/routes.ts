@@ -7,10 +7,27 @@ import MemoryStore from "memorystore";
 import { smtpEmailService, SMTP_PRESETS, type SmtpConfig } from "./services/smtp-email-service";
 import { campaignEngine } from "./services/campaign-engine";
 import { gmailReplyTracker } from "./services/gmail-reply-tracker";
+import { outlookReplyTracker } from "./services/outlook-reply-tracker";
 import { OAuth2Client } from 'google-auth-library';
 
 // In-memory user store for simplified authentication
 const loggedInUsers = new Set<string>();
+
+// Helper to create raw email for Gmail API send
+function createRawEmail(opts: { from: string; to: string; subject: string; body: string; inReplyTo?: string; threadId?: string }): string {
+  const boundary = `boundary_${Date.now()}`;
+  let raw = '';
+  raw += `From: ${opts.from}\r\n`;
+  raw += `To: ${opts.to}\r\n`;
+  raw += `Subject: ${opts.subject}\r\n`;
+  raw += `MIME-Version: 1.0\r\n`;
+  raw += `Content-Type: text/html; charset="UTF-8"\r\n`;
+  if (opts.inReplyTo) raw += `In-Reply-To: ${opts.inReplyTo}\r\n`;
+  raw += `\r\n`;
+  raw += opts.body;
+  // Base64url encode
+  return Buffer.from(raw).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
 
 // ========== Google OAuth 2.0 Helper ==========
 // Credentials can come from environment variables or api_settings (database)
@@ -1758,23 +1775,88 @@ Which account should I use and why? If I need to split across accounts, provide 
         targetListId = contactListRecord?.id || null;
       }
 
+      // Apollo.io field mapping - recognize common CSV header variations
+      const apolloFieldMap: Record<string, string> = {
+        'email': 'email', 'e-mail': 'email', 'email address': 'email', 'work email': 'email',
+        'first name': 'firstName', 'first': 'firstName', 'firstname': 'firstName', 'first_name': 'firstName',
+        'last name': 'lastName', 'last': 'lastName', 'lastname': 'lastName', 'last_name': 'lastName', 'surname': 'lastName',
+        'name': '_fullName', 'full name': '_fullName', 'fullname': '_fullName',
+        'company': 'company', 'company name': 'company', 'organization': 'company', 'account name': 'company',
+        'title': 'jobTitle', 'job title': 'jobTitle', 'jobtitle': 'jobTitle', 'job_title': 'jobTitle', 'position': 'jobTitle', 'designation': 'jobTitle',
+        'phone': 'phone', 'phone number': 'phone', 'work phone': 'phone', 'direct phone': 'phone', 'work direct phone': 'phone', 'corporate phone': 'phone',
+        'mobile': 'mobilePhone', 'mobile phone': 'mobilePhone', 'cell': 'mobilePhone', 'cell phone': 'mobilePhone', 'home phone': 'mobilePhone', 'other phone': 'mobilePhone',
+        'linkedin': 'linkedinUrl', 'linkedin url': 'linkedinUrl', 'linkedin profile': 'linkedinUrl', 'person linkedin url': 'linkedinUrl',
+        'company linkedin url': 'companyLinkedinUrl', 'company linkedin': 'companyLinkedinUrl',
+        'seniority': 'seniority', 'level': 'seniority', 'management level': 'seniority',
+        'department': 'department', 'departments': 'department', 'function': 'department',
+        'city': 'city', 'person city': 'city',
+        'state': 'state', 'person state': 'state', 'region': 'state',
+        'country': 'country', 'person country': 'country',
+        'website': 'website', 'company website': 'website', 'url': 'website', 'domain': 'website',
+        'industry': 'industry', 'company industry': 'industry',
+        'employees': 'employeeCount', '# employees': 'employeeCount', 'employee count': 'employeeCount', 'company size': 'employeeCount', 'number of employees': 'employeeCount', 'headcount': 'employeeCount',
+        'annual revenue': 'annualRevenue', 'revenue': 'annualRevenue', 'company revenue': 'annualRevenue',
+        'company city': 'companyCity', 'hq city': 'companyCity',
+        'company state': 'companyState', 'hq state': 'companyState',
+        'company country': 'companyCountry', 'hq country': 'companyCountry',
+        'company address': 'companyAddress', 'hq address': 'companyAddress', 'address': 'companyAddress',
+        'company phone': 'companyPhone',
+        'email status': 'emailStatus', 'email confidence': 'emailStatus',
+        'last activity date': 'lastActivityDate', 'last contacted': 'lastActivityDate',
+        'lead status': 'status', 'status': 'status', 'stage': 'status',
+        'lead score': 'score', 'score': 'score',
+        'tags': 'tags', 'labels': 'tags',
+        'source': '_source', 'lead source': '_source',
+      };
+
       const contactsToCreate = contactList.map((c: any) => {
-        // Separate known fields from custom fields
-        const { email, firstName, first_name, lastName, last_name, company, jobTitle, job_title, status, tags, source: cSource, ...extraFields } = c;
+        const contact: Record<string, any> = {};
+        const customFields: Record<string, any> = {};
+
+        for (const [csvHeader, value] of Object.entries(c)) {
+          if (!value || String(value).trim() === '') continue;
+          const trimmedValue = String(value).trim();
+          const lowerHeader = String(csvHeader).toLowerCase().trim();
+          const mappedField = apolloFieldMap[lowerHeader];
+
+          if (mappedField === '_fullName') {
+            if (!contact.firstName) {
+              const parts = trimmedValue.split(/\s+/);
+              contact.firstName = parts[0] || '';
+              contact.lastName = parts.slice(1).join(' ') || '';
+            }
+          } else if (mappedField === 'tags') {
+            contact.tags = trimmedValue.split(/[,;|]/).map((t: string) => t.trim()).filter(Boolean);
+          } else if (mappedField === 'score') {
+            contact.score = parseInt(trimmedValue) || 0;
+          } else if (mappedField === '_source') {
+            contact.source = trimmedValue;
+          } else if (mappedField) {
+            if (!contact[mappedField]) contact[mappedField] = trimmedValue;
+          } else {
+            customFields[csvHeader] = trimmedValue;
+          }
+        }
+
         return {
           organizationId: req.user.organizationId,
-          email: email || '',
-          firstName: firstName || first_name || '',
-          lastName: lastName || last_name || '',
-          company: company || '',
-          jobTitle: jobTitle || job_title || '',
-          status: status || 'cold',
-          tags: tags || [],
-          source: cSource || source || 'import',
+          email: contact.email || '', firstName: contact.firstName || '', lastName: contact.lastName || '',
+          company: contact.company || '', jobTitle: contact.jobTitle || '',
+          phone: contact.phone || '', mobilePhone: contact.mobilePhone || '',
+          linkedinUrl: contact.linkedinUrl || '', seniority: contact.seniority || '', department: contact.department || '',
+          city: contact.city || '', state: contact.state || '', country: contact.country || '',
+          website: contact.website || '', industry: contact.industry || '',
+          employeeCount: contact.employeeCount || '', annualRevenue: contact.annualRevenue || '',
+          companyLinkedinUrl: contact.companyLinkedinUrl || '',
+          companyCity: contact.companyCity || '', companyState: contact.companyState || '', companyCountry: contact.companyCountry || '',
+          companyAddress: contact.companyAddress || '', companyPhone: contact.companyPhone || '',
+          emailStatus: contact.emailStatus || '', lastActivityDate: contact.lastActivityDate || '',
+          status: contact.status || 'cold', score: contact.score || 0,
+          tags: contact.tags || [], source: contact.source || source || 'import',
           listId: targetListId,
-          customFields: extraFields || {},
+          customFields: Object.keys(customFields).length > 0 ? customFields : {},
         };
-      });
+      }).filter((c: any) => c.email && c.email.includes('@'));
 
       const results = await storage.createContactsBulk(contactsToCreate, targetListId);
       const imported = results.filter((r: any) => !r._skipped).length;
@@ -2869,6 +2951,242 @@ Which account should I use and why? If I need to split across accounts, provide 
     });
   });
 
+  // ========== UNIFIED INBOX ==========
+
+  // List inbox messages with filters
+  app.get('/api/inbox', requireAuth, async (req: any, res) => {
+    try {
+      const { status, emailAccountId, campaignId, limit, offset } = req.query;
+      const messages = await storage.getInboxMessages(
+        req.user.organizationId,
+        { status, emailAccountId, campaignId },
+        parseInt(limit as string) || 50,
+        parseInt(offset as string) || 0
+      );
+      const total = await storage.getInboxMessageCount(req.user.organizationId, { status });
+      const unread = await storage.getInboxUnreadCount(req.user.organizationId);
+
+      // Enrich messages with contact info
+      const enriched = await Promise.all(messages.map(async (m: any) => {
+        let contact = null;
+        if (m.contactId) {
+          contact = await storage.getContact(m.contactId);
+        }
+        // Try to find contact by email if not linked
+        if (!contact && m.fromEmail) {
+          contact = await storage.getContactByEmail(m.fromEmail, req.user.organizationId);
+        }
+        return {
+          ...m,
+          contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company, jobTitle: contact.jobTitle } : null,
+        };
+      }));
+
+      res.json({ messages: enriched, total, unread });
+    } catch (error) {
+      console.error('Inbox list error:', error);
+      res.status(500).json({ message: 'Failed to fetch inbox messages' });
+    }
+  });
+
+  // Mark multiple messages read
+  app.post('/api/inbox/bulk-read', requireAuth, async (req: any, res) => {
+    try {
+      const { ids } = req.body;
+      if (!Array.isArray(ids)) return res.status(400).json({ message: 'ids array required' });
+      for (const id of ids) {
+        await storage.updateInboxMessage(id, { status: 'read' });
+      }
+      res.json({ success: true, updated: ids.length });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to bulk update' });
+    }
+  });
+
+  // Get unread count — MUST be before /:id routes
+  app.get('/api/inbox/unread-count', requireAuth, async (req: any, res) => {
+    try {
+      const count = await storage.getInboxUnreadCount(req.user.organizationId);
+      res.json({ unread: count });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to get unread count' });
+    }
+  });
+
+  // Trigger manual inbox sync — MUST be before /:id routes
+  app.post('/api/inbox/sync', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const lookbackMinutes = parseInt(req.body.lookbackMinutes) || 120;
+      const results: any = { gmail: null, outlook: null };
+
+      const settings = await storage.getApiSettings(orgId);
+
+      if (settings.gmail_access_token || settings.gmail_refresh_token) {
+        results.gmail = await gmailReplyTracker.checkForReplies(orgId, lookbackMinutes);
+      }
+      if (settings.microsoft_access_token || settings.microsoft_refresh_token) {
+        results.outlook = await outlookReplyTracker.checkForReplies(orgId, lookbackMinutes);
+      }
+
+      const totalNew = (results.gmail?.newReplies || 0) + (results.outlook?.newReplies || 0);
+      res.json({ success: true, totalNew, results });
+    } catch (error) {
+      console.error('Inbox sync error:', error);
+      res.status(500).json({ message: 'Failed to sync inbox' });
+    }
+  });
+
+  // Get inbox sync status — MUST be before /:id routes
+  app.get('/api/inbox/sync-status', requireAuth, async (req: any, res) => {
+    try {
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      const gmailStatus = gmailReplyTracker.getStatus();
+      const outlookStatus = outlookReplyTracker.getStatus();
+
+      res.json({
+        gmail: {
+          connected: !!(settings.gmail_access_token || settings.gmail_refresh_token),
+          email: settings.gmail_email || null,
+          ...gmailStatus,
+        },
+        outlook: {
+          connected: !!(settings.microsoft_access_token || settings.microsoft_refresh_token),
+          email: settings.microsoft_user_email || null,
+          ...outlookStatus,
+        },
+      });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to get sync status' });
+    }
+  });
+
+  // Get single inbox message
+  app.get('/api/inbox/:id', requireAuth, async (req: any, res) => {
+    try {
+      const msg = await storage.getInboxMessage(req.params.id);
+      if (!msg) return res.status(404).json({ message: 'Message not found' });
+
+      // Enrich with contact
+      let contact = null;
+      if ((msg as any).contactId) contact = await storage.getContact((msg as any).contactId);
+      if (!contact && (msg as any).fromEmail) contact = await storage.getContactByEmail((msg as any).fromEmail, req.user.organizationId);
+
+      // Enrich with campaign info
+      let campaign = null;
+      if ((msg as any).campaignId) campaign = await storage.getCampaign((msg as any).campaignId);
+
+      res.json({
+        ...msg,
+        contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company, jobTitle: contact.jobTitle } : null,
+        campaign: campaign ? { id: campaign.id, name: campaign.name } : null,
+      });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch message' });
+    }
+  });
+
+  // Mark message as read / archived / replied
+  app.patch('/api/inbox/:id', requireAuth, async (req: any, res) => {
+    try {
+      const updated = await storage.updateInboxMessage(req.params.id, req.body);
+      res.json(updated);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to update message' });
+    }
+  });
+
+  // Archive message
+  app.post('/api/inbox/:id/archive', requireAuth, async (req: any, res) => {
+    try {
+      const updated = await storage.updateInboxMessage(req.params.id, { status: 'archived' });
+      res.json(updated);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to archive message' });
+    }
+  });
+
+  // Delete message from inbox
+  app.delete('/api/inbox/:id', requireAuth, async (req: any, res) => {
+    try {
+      await storage.deleteInboxMessage(req.params.id);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to delete message' });
+    }
+  });
+
+  // Reply to message via Gmail API
+  app.post('/api/inbox/:id/reply', requireAuth, async (req: any, res) => {
+    try {
+      const msg: any = await storage.getInboxMessage(req.params.id);
+      if (!msg) return res.status(404).json({ message: 'Message not found' });
+
+      const { body: replyBody } = req.body;
+      if (!replyBody) return res.status(400).json({ message: 'Reply body is required' });
+
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      const provider = msg.provider;
+
+      if (provider === 'gmail') {
+        // Send reply via Gmail API
+        const accessToken = settings.gmail_access_token;
+        if (!accessToken) return res.status(400).json({ message: 'Gmail not connected. Please re-authenticate.' });
+
+        const senderEmail = settings.gmail_email || msg.toEmail;
+        const rawMessage = createRawEmail({
+          from: senderEmail,
+          to: msg.fromEmail,
+          subject: msg.subject?.startsWith('Re:') ? msg.subject : `Re: ${msg.subject}`,
+          body: replyBody,
+          inReplyTo: msg.gmailMessageId ? `<${msg.gmailMessageId}>` : undefined,
+          threadId: msg.gmailThreadId,
+        });
+
+        const sendResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ raw: rawMessage, threadId: msg.gmailThreadId }),
+        });
+
+        if (!sendResp.ok) {
+          const errText = await sendResp.text();
+          return res.status(500).json({ message: `Gmail send failed: ${errText}` });
+        }
+
+        await storage.updateInboxMessage(msg.id, { status: 'replied', repliedAt: new Date().toISOString() });
+        res.json({ success: true, provider: 'gmail' });
+
+      } else if (provider === 'outlook') {
+        // Send reply via Microsoft Graph
+        const accessToken = settings.microsoft_access_token;
+        if (!accessToken) return res.status(400).json({ message: 'Outlook not connected. Please re-authenticate.' });
+
+        // Create a reply
+        const replyResp = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${msg.outlookMessageId}/reply`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ comment: replyBody }),
+        });
+
+        if (!replyResp.ok) {
+          const errText = await replyResp.text();
+          return res.status(500).json({ message: `Outlook send failed: ${errText}` });
+        }
+
+        await storage.updateInboxMessage(msg.id, { status: 'replied', repliedAt: new Date().toISOString() });
+        res.json({ success: true, provider: 'outlook' });
+
+      } else {
+        // No provider match — can't send reply without Gmail or Outlook connected
+        res.status(400).json({ message: 'Could not determine reply provider. Connect Gmail or Outlook first.' });
+      }
+    } catch (error) {
+      console.error('Reply error:', error);
+      res.status(500).json({ message: 'Failed to send reply' });
+    }
+  });
+
   // ========== SMTP PRESETS ==========
   app.get('/api/smtp-presets', (req, res) => {
     res.json(Object.entries(SMTP_PRESETS).map(([key, config]) => ({
@@ -2886,6 +3204,10 @@ Which account should I use and why? If I need to split across accounts, provide 
     if (orgSettings.gmail_access_token || orgSettings.gmail_refresh_token) {
       console.log('[ReplyTracker] Gmail tokens found, starting auto-check...');
       gmailReplyTracker.startAutoCheck('550e8400-e29b-41d4-a716-446655440001', 5);
+    }
+    if (orgSettings.microsoft_access_token || orgSettings.microsoft_refresh_token) {
+      console.log('[ReplyTracker] Outlook tokens found, starting auto-check...');
+      outlookReplyTracker.startAutoCheck('550e8400-e29b-41d4-a716-446655440001', 5);
     }
   } catch (e) {
     console.error('[ReplyTracker] Failed to start auto-check on startup:', e);
