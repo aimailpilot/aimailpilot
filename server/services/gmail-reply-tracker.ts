@@ -363,10 +363,101 @@ export class GmailReplyTracker {
       if (result.newReplies > 0) {
         console.log(`[GmailReplyTracker] Auto-check found ${result.newReplies} new replies`);
       }
+      // Also check for opens via Gmail API (sent messages thread activity)
+      await this.checkForOpensViaApi(orgId);
     } catch (error) {
       console.error('[GmailReplyTracker] Auto-check error:', error);
     } finally {
       this.isChecking = false;
+    }
+  }
+
+  /**
+   * Check for email opens via Gmail API
+   * Gmail doesn't provide read receipts, but we can detect opens by:
+   * 1. Querying sent messages that match our campaign Message-IDs
+   * 2. Checking if the thread has any interaction (label changes, replies)
+   * 3. For sent messages in threads - if the thread has INBOX label removed from
+   *    the sent message, it means the recipient's mail server processed it
+   * 
+   * This supplements pixel tracking since Gmail's image proxy caches pixels.
+   */
+  private async checkForOpensViaApi(orgId: string): Promise<void> {
+    try {
+      const accessToken = await this.getValidAccessToken(orgId);
+      if (!accessToken) return;
+
+      // Find recent campaign messages (last 24h) that haven't been marked as opened
+      const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const unopenedMessages = await storage.getUnopenedCampaignMessages(orgId, cutoff);
+      
+      if (unopenedMessages.length === 0) return;
+
+      // For each unopened message, check the Gmail thread for read activity
+      let opensDetected = 0;
+      for (const msg of unopenedMessages) {
+        try {
+          if (!msg.providerMessageId) continue;
+
+          // Get the thread for our sent message
+          // Gmail providerMessageId is the Gmail message ID
+          const gmailMsg = await this.gmailFetch(
+            accessToken,
+            `messages/${msg.providerMessageId}?format=metadata&metadataHeaders=From&metadataHeaders=To`
+          );
+
+          if (!gmailMsg || !gmailMsg.threadId) continue;
+
+          // Check the thread - if it has multiple messages, recipient replied (handled by checkForReplies)
+          // But we can also check if the sent message labels changed - Gmail removes UNREAD for read threads
+          const thread = await this.gmailFetch(
+            accessToken,
+            `threads/${gmailMsg.threadId}?format=metadata`
+          );
+
+          if (!thread || !thread.messages) continue;
+
+          // A thread with >1 message means someone replied - that counts as an open
+          // Also check if any message in the thread was read (UNREAD label removed from thread)
+          const hasReply = thread.messages.length > 1;
+          const threadLabels = thread.messages.flatMap((m: any) => m.labelIds || []);
+          const hasUnread = threadLabels.includes('UNREAD');
+          
+          // If thread has a reply OR the thread is no longer unread, count as opened
+          if (hasReply || !hasUnread) {
+            // Mark as opened
+            await storage.updateCampaignMessage(msg.id, { openedAt: new Date().toISOString() });
+            
+            const campaign = await storage.getCampaign(msg.campaignId);
+            if (campaign) {
+              await storage.updateCampaign(msg.campaignId, {
+                openedCount: (campaign.openedCount || 0) + 1,
+              });
+            }
+
+            // Create tracking event
+            await storage.createTrackingEvent({
+              type: 'open',
+              campaignId: msg.campaignId,
+              messageId: msg.id,
+              contactId: msg.contactId,
+              trackingId: msg.trackingId,
+              metadata: JSON.stringify({ detectedVia: 'gmail-api-thread', threadId: gmailMsg.threadId, reason: hasReply ? 'thread_reply' : 'thread_read' }),
+            });
+
+            opensDetected++;
+          }
+        } catch (e) {
+          // Skip individual message errors silently
+        }
+      }
+
+      if (opensDetected > 0) {
+        console.log(`[GmailReplyTracker] Detected ${opensDetected} opens via Gmail API thread analysis`);
+      }
+    } catch (error) {
+      // Don't let open detection errors affect reply checking
+      console.error('[GmailReplyTracker] Open detection error:', error instanceof Error ? error.message : error);
     }
   }
 

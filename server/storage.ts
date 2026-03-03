@@ -379,6 +379,10 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_industry ON contacts(indu
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_city ON contacts(city)`); } catch (e) {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_seniority ON contacts(seniority)`); } catch (e) {}
 
+// ========== Messages table migrations ==========
+try { db.exec(`ALTER TABLE messages ADD COLUMN providerMessageId TEXT`); } catch (e) { /* already exists */ }
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_provider_id ON messages(providerMessageId)`); } catch (e) {}
+
 // ========== SEED DATA (only on first run) ==========
 const ORG_ID = '550e8400-e29b-41d4-a716-446655440001';
 
@@ -835,8 +839,8 @@ export class DatabaseStorage {
     const existing = await this.getCampaignMessage(id);
     if (!existing) throw new Error('Message not found');
     const m = { ...existing as any, ...data };
-    db.prepare('UPDATE messages SET status=?, sentAt=?, openedAt=?, clickedAt=?, repliedAt=?, errorMessage=? WHERE id=?').run(
-      m.status, toSqlDate(m.sentAt), toSqlDate(m.openedAt), toSqlDate(m.clickedAt), toSqlDate(m.repliedAt), m.errorMessage || null, id
+    db.prepare('UPDATE messages SET status=?, sentAt=?, openedAt=?, clickedAt=?, repliedAt=?, errorMessage=?, providerMessageId=? WHERE id=?').run(
+      m.status, toSqlDate(m.sentAt), toSqlDate(m.openedAt), toSqlDate(m.clickedAt), toSqlDate(m.repliedAt), m.errorMessage || null, m.providerMessageId || null, id
     );
     return this.getCampaignMessage(id);
   }
@@ -883,6 +887,21 @@ export class DatabaseStorage {
   }
   async getCampaignMessagesTotalCount(campaignId: string) {
     return (db.prepare('SELECT COUNT(*) as c FROM messages WHERE campaignId = ?').get(campaignId) as any).c;
+  }
+
+  // Get unopened campaign messages for Gmail API open detection
+  async getUnopenedCampaignMessages(orgId: string, cutoff: string) {
+    return db.prepare(`
+      SELECT m.* FROM messages m
+      INNER JOIN campaigns c ON m.campaignId = c.id
+      WHERE c.organizationId = ?
+      AND m.status = 'sent'
+      AND m.openedAt IS NULL
+      AND m.sentAt >= ?
+      AND m.providerMessageId IS NOT NULL
+      ORDER BY m.sentAt DESC
+      LIMIT 100
+    `).all(orgId, cutoff);
   }
 
   // ========== Unsubscribes ==========

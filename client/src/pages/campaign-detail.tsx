@@ -528,7 +528,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
                 <div>
                   <div className="text-sm font-semibold text-gray-900 flex items-center gap-2">
                     Reply Tracking
-                    {replyTrackingStatus?.isActive ? (
+                    {replyTrackingStatus?.active ? (
                       <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-600 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full">
                         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> Active
                       </span>
@@ -539,7 +539,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
                     )}
                   </div>
                   <div className="text-xs text-gray-500 mt-0.5">
-                    {replyTrackingStatus?.isActive 
+                    {replyTrackingStatus?.active 
                       ? 'Checking for replies every 5 minutes via Gmail/Outlook API' 
                       : 'Connect Gmail or Outlook in Email Accounts to enable reply detection'}
                   </div>
