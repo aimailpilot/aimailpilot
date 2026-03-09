@@ -404,11 +404,12 @@ export class GmailReplyTracker {
 
   /**
    * Check for email opens via Gmail API
-   * Gmail doesn't provide read receipts, but we can detect opens by:
-   * 1. Querying sent messages that match our campaign Message-IDs
-   * 2. Checking if the thread has any interaction (label changes, replies)
-   * 3. For sent messages in threads - if the thread has INBOX label removed from
-   *    the sent message, it means the recipient's mail server processed it
+   * Gmail doesn't provide direct read receipts. We can only reliably detect opens when:
+   * 1. The thread has a reply from someone other than us (if they replied, they opened it)
+   * 2. A prefetch event arrives >90 seconds after send (heuristic from pixel tracking)
+   * 
+   * NOTE: Checking UNREAD labels is unreliable because sent-only threads never have
+   * UNREAD labels from the sender's perspective, causing false positives.
    * 
    * This supplements pixel tracking since Gmail's image proxy caches pixels.
    */
@@ -423,59 +424,54 @@ export class GmailReplyTracker {
       
       if (unopenedMessages.length === 0) return;
 
-      // For each unopened message, check the Gmail thread for read activity
+      // For each unopened message, check the Gmail thread for reply activity
       let opensDetected = 0;
       for (const msg of unopenedMessages) {
         try {
           if (!msg.providerMessageId) continue;
 
           // Get the thread for our sent message
-          // Gmail providerMessageId is the Gmail message ID
-          const gmailMsg = await this.gmailFetch(
-            accessToken,
-            `messages/${msg.providerMessageId}?format=metadata&metadataHeaders=From&metadataHeaders=To`
-          );
-
-          if (!gmailMsg || !gmailMsg.threadId) continue;
-
-          // Check the thread - if it has multiple messages, recipient replied (handled by checkForReplies)
-          // But we can also check if the sent message labels changed - Gmail removes UNREAD for read threads
           const thread = await this.gmailFetch(
             accessToken,
-            `threads/${gmailMsg.threadId}?format=metadata`
+            `threads/${msg.providerMessageId}?format=metadata&metadataHeaders=From`
           );
 
           if (!thread || !thread.messages) continue;
 
+          // Only count as opened if there's a reply from someone other than the sender
           // A thread with >1 message means someone replied - that counts as an open
-          // Also check if any message in the thread was read (UNREAD label removed from thread)
-          const hasReply = thread.messages.length > 1;
-          const threadLabels = thread.messages.flatMap((m: any) => m.labelIds || []);
-          const hasUnread = threadLabels.includes('UNREAD');
-          
-          // If thread has a reply OR the thread is no longer unread, count as opened
-          if (hasReply || !hasUnread) {
-            // Mark as opened
-            await storage.updateCampaignMessage(msg.id, { openedAt: new Date().toISOString() });
-            
-            const campaign = await storage.getCampaign(msg.campaignId);
-            if (campaign) {
-              await storage.updateCampaign(msg.campaignId, {
-                openedCount: (campaign.openedCount || 0) + 1,
-              });
-            }
-
-            // Create tracking event
-            await storage.createTrackingEvent({
-              type: 'open',
-              campaignId: msg.campaignId,
-              messageId: msg.id,
-              contactId: msg.contactId,
-              trackingId: msg.trackingId,
-              metadata: JSON.stringify({ detectedVia: 'gmail-api-thread', threadId: gmailMsg.threadId, reason: hasReply ? 'thread_reply' : 'thread_read' }),
+          if (thread.messages.length > 1) {
+            // Verify at least one message is NOT from us (not just our own followup)
+            const settings = await storage.getApiSettings(orgId);
+            const ourEmail = (settings.gmail_email || '').toLowerCase();
+            const hasExternalReply = thread.messages.some((m: any) => {
+              const from = (m.payload?.headers || []).find((h: any) => h.name.toLowerCase() === 'from')?.value || '';
+              return !from.toLowerCase().includes(ourEmail);
             });
 
-            opensDetected++;
+            if (hasExternalReply) {
+              // Mark as opened
+              await storage.updateCampaignMessage(msg.id, { openedAt: new Date().toISOString() });
+              
+              const campaign = await storage.getCampaign(msg.campaignId);
+              if (campaign) {
+                await storage.updateCampaign(msg.campaignId, {
+                  openedCount: (campaign.openedCount || 0) + 1,
+                });
+              }
+
+              // Create tracking event
+              await storage.createTrackingEvent({
+                type: 'open',
+                campaignId: msg.campaignId,
+                messageId: msg.id,
+                contactId: msg.contactId,
+                trackingId: msg.trackingId,
+                metadata: JSON.stringify({ detectedVia: 'gmail-api-thread', threadId: msg.providerMessageId, reason: 'thread_reply' }),
+              });
+
+              opensDetected++;
+            }
           }
         } catch (e) {
           // Skip individual message errors silently

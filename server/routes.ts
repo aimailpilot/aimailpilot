@@ -1281,9 +1281,11 @@ Which account should I use and why? If I need to split across accounts, provide 
               const trigger = triggerLabels[(step as any).trigger] || (step as any).trigger;
               const days = (step as any).delayDays || 0;
               const hours = (step as any).delayHours || 0;
+              const minutes = (step as any).delayMinutes || 0;
               const delayParts = [];
               if (days > 0) delayParts.push(`${days} day${days > 1 ? 's' : ''}`);
               if (hours > 0) delayParts.push(`${hours} hour${hours > 1 ? 's' : ''}`);
+              if (minutes > 0) delayParts.push(`${minutes} minute${minutes > 1 ? 's' : ''}`);
               const delayStr = delayParts.length > 0 ? delayParts.join(' ') : 'immediate';
               sa.description = `${trigger} \u2013 ${delayStr}`;
             }
@@ -2279,20 +2281,17 @@ Which account should I use and why? If I need to split across accounts, provide 
     try {
       const { campaignId, trigger, subject, content, delayValue, delayUnit, stepOrder, name } = req.body;
 
-      // Convert delayValue + delayUnit to delayDays + delayHours
+      // Convert delayValue + delayUnit to delayDays + delayHours + delayMinutes
       let delayDays = 0;
       let delayHours = 0;
+      let delayMinutes = 0;
       const val = parseInt(delayValue) || 0;
       switch (delayUnit) {
-        case 'minutes': delayHours = 0; delayDays = 0; break; // minutes stored as fractional hours
+        case 'minutes': delayMinutes = val; break;
         case 'hours': delayHours = val; break;
         case 'days': delayDays = val; break;
         case 'weeks': delayDays = val * 7; break;
         default: delayDays = val; break;
-      }
-      // For minutes, convert to hours (round up to at least 1 hour for practical sending)
-      if (delayUnit === 'minutes' && val > 0) {
-        delayHours = Math.max(1, Math.ceil(val / 60));
       }
 
       // Map condition names from campaign creator to followup engine triggers
@@ -2312,7 +2311,7 @@ Which account should I use and why? If I need to split across accounts, provide 
       const sequence = await storage.createFollowupSequence({
         organizationId: req.user.organizationId,
         name: seqName,
-        description: `Auto-created follow-up: ${mappedTrigger} after ${delayDays}d ${delayHours}h`,
+        description: `Auto-created follow-up: ${mappedTrigger} after ${delayDays}d ${delayHours}h ${delayMinutes}m`,
         createdBy: req.user.id,
       });
 
@@ -2323,6 +2322,7 @@ Which account should I use and why? If I need to split across accounts, provide 
         trigger: mappedTrigger,
         delayDays,
         delayHours,
+        delayMinutes,
         subject: subject || '',
         content: content || '',
       });
@@ -2333,7 +2333,7 @@ Which account should I use and why? If I need to split across accounts, provide 
           campaignId,
           sequenceId: (sequence as any).id,
         });
-        console.log(`[Followup] Created sequence "${seqName}" for campaign ${campaignId}: ${mappedTrigger} after ${delayDays}d ${delayHours}h`);
+        console.log(`[Followup] Created sequence "${seqName}" for campaign ${campaignId}: ${mappedTrigger} after ${delayDays}d ${delayHours}h ${delayMinutes}m`);
       }
 
       res.status(201).json({
@@ -2343,6 +2343,7 @@ Which account should I use and why? If I need to split across accounts, provide 
         trigger: mappedTrigger,
         delayDays,
         delayHours,
+        delayMinutes,
       });
     } catch (error) {
       console.error('[Followup] Error creating sequence:', error);

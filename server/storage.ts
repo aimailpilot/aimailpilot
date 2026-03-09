@@ -383,6 +383,9 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_seniority ON contacts(sen
 try { db.exec(`ALTER TABLE messages ADD COLUMN providerMessageId TEXT`); } catch (e) { /* already exists */ }
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_provider_id ON messages(providerMessageId)`); } catch (e) {}
 
+// ========== Followup steps migrations ==========
+try { db.exec(`ALTER TABLE followup_steps ADD COLUMN delayMinutes INTEGER DEFAULT 0`); } catch (e) { /* already exists */ }
+
 // ========== SEED DATA (only on first run) ==========
 const ORG_ID = '550e8400-e29b-41d4-a716-446655440001';
 
@@ -978,8 +981,8 @@ export class DatabaseStorage {
   async getFollowupStep(id: string) { return db.prepare('SELECT * FROM followup_steps WHERE id = ?').get(id) || null; }
   async createFollowupStep(step: any) {
     const id = genId();
-    db.prepare('INSERT INTO followup_steps (id, sequenceId, stepNumber, trigger, delayDays, delayHours, subject, content, isActive, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)').run(
-      id, step.sequenceId, step.stepNumber || 0, step.trigger || 'no_reply', step.delayDays || 0, step.delayHours || 0, step.subject || '', step.content || '', now()
+    db.prepare('INSERT INTO followup_steps (id, sequenceId, stepNumber, trigger, delayDays, delayHours, delayMinutes, subject, content, isActive, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)').run(
+      id, step.sequenceId, step.stepNumber || 0, step.trigger || 'no_reply', step.delayDays || 0, step.delayHours || 0, step.delayMinutes || 0, step.subject || '', step.content || '', now()
     );
     return this.getFollowupStep(id);
   }
@@ -987,8 +990,8 @@ export class DatabaseStorage {
     const existing = await this.getFollowupStep(id);
     if (!existing) throw new Error('Step not found');
     const m = { ...existing as any, ...data };
-    db.prepare('UPDATE followup_steps SET stepNumber=?, trigger=?, delayDays=?, delayHours=?, subject=?, content=?, isActive=? WHERE id=?').run(
-      m.stepNumber, m.trigger, m.delayDays, m.delayHours, m.subject, m.content, m.isActive ? 1 : 0, id
+    db.prepare('UPDATE followup_steps SET stepNumber=?, trigger=?, delayDays=?, delayHours=?, delayMinutes=?, subject=?, content=?, isActive=? WHERE id=?').run(
+      m.stepNumber, m.trigger, m.delayDays, m.delayHours, m.delayMinutes || 0, m.subject, m.content, m.isActive ? 1 : 0, id
     );
     return this.getFollowupStep(id);
   }
