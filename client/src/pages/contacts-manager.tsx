@@ -52,6 +52,8 @@ interface Contact {
   companyCountry?: string;
   companyAddress?: string;
   companyPhone?: string;
+  secondaryEmail?: string;
+  homePhone?: string;
   emailStatus?: string;
   lastActivityDate?: string;
 }
@@ -346,6 +348,8 @@ export default function ContactsManager() {
           else if ((lower === 'company country' || lower === 'hq country') && !mapping.companyCountry) { mapping.companyCountry = h; extraMapped = true; }
           else if ((lower === 'company phone') && !mapping.companyPhone) { mapping.companyPhone = h; extraMapped = true; }
           else if ((lower === 'company address' || lower === 'hq address' || lower === 'address') && !mapping.companyAddress) { mapping.companyAddress = h; extraMapped = true; }
+          else if ((lower === 'secondary email' || lower === 'alternate email' || lower === 'other email' || lower === 'personal email') && !mapping.secondaryEmail) { mapping.secondaryEmail = h; extraMapped = true; }
+          else if ((lower === 'home phone' || lower === 'personal phone') && !mapping.homePhone) { mapping.homePhone = h; extraMapped = true; }
         });
         setCsvMapping(mapping);
         if (extraMapped) setShowAllFields(true);
@@ -1002,6 +1006,8 @@ export default function ContactsManager() {
                   { label: 'Source', value: detailContact.source || 'manual', icon: Download },
                   { label: 'Phone', value: detailContact.phone, icon: Phone },
                   { label: 'Mobile', value: detailContact.mobilePhone, icon: Phone },
+                  { label: 'Home Phone', value: detailContact.homePhone, icon: Phone },
+                  { label: 'Secondary Email', value: detailContact.secondaryEmail, icon: Mail },
                   { label: 'Seniority', value: detailContact.seniority, icon: TrendingUp },
                   { label: 'Department', value: detailContact.department, icon: Users },
                   { label: 'Email Status', value: detailContact.emailStatus, icon: Mail },
@@ -1568,6 +1574,8 @@ export default function ContactsManager() {
         fields: [
           { key: 'phone', label: 'Phone', icon: Phone },
           { key: 'mobilePhone', label: 'Mobile Phone', icon: Phone },
+          { key: 'homePhone', label: 'Home Phone', icon: Phone },
+          { key: 'secondaryEmail', label: 'Secondary Email', icon: Mail },
           { key: 'linkedinUrl', label: 'LinkedIn URL', icon: Linkedin },
           { key: 'seniority', label: 'Seniority', icon: TrendingUp },
           { key: 'department', label: 'Department', icon: Users },
@@ -1740,6 +1748,92 @@ export default function ContactsManager() {
             })}
           </div>
         )}
+
+        {/* Unmapped Columns - show CSV columns not mapped to any field */}
+        {(() => {
+          const allFieldKeys = fieldSections.flatMap(s => s.fields.map(f => f.key));
+          const mappedHeaders = new Set(Object.values(mapping).filter(Boolean));
+          const unmappedHeaders = headers.filter(h => h && h.trim() && !mappedHeaders.has(h));
+          // Available fields that haven't been assigned yet
+          const usedFields = new Set(Object.entries(mapping).filter(([_, v]) => v && v.trim()).map(([k]) => k));
+          const availableFields = allFieldKeys.filter(k => !usedFields.has(k));
+
+          if (unmappedHeaders.length === 0) return null;
+
+          return (
+            <div>
+              <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2 flex items-center gap-2">
+                <AlertTriangle className="h-3 w-3 text-amber-500" />
+                Unmapped Columns
+                <span className="text-[9px] px-1.5 py-0.5 bg-amber-100 text-amber-600 rounded-full font-semibold">
+                  {unmappedHeaders.length} remaining
+                </span>
+              </h4>
+              <p className="text-[10px] text-gray-400 mb-2">
+                These columns are not mapped to any contact field. Assign them to a field or they will be saved as custom data.
+              </p>
+              <div className="bg-amber-50/50 border border-amber-100 rounded-lg p-3 space-y-2">
+                {unmappedHeaders.map((header) => {
+                  // Check if this header has been assigned via reverse mapping
+                  const assignedField = Object.entries(mapping).find(([_, v]) => v === header)?.[0];
+                  return (
+                    <div key={header} className="flex items-center gap-3">
+                      <div className="w-40 shrink-0 flex items-center gap-1.5">
+                        <span className="text-[10px] px-2 py-1 bg-white text-gray-600 rounded font-mono ring-1 ring-gray-200 truncate max-w-[140px]" title={header}>
+                          {header}
+                        </span>
+                      </div>
+                      <ArrowRight className="h-3 w-3 text-gray-300 shrink-0" />
+                      <Select
+                        value={assignedField || '__custom__'}
+                        onValueChange={(v) => {
+                          if (v === '__custom__') {
+                            // Remove any existing mapping for this header
+                            setMapping((prev: any) => {
+                              const next = { ...prev };
+                              for (const key of Object.keys(next)) {
+                                if (next[key] === header) delete next[key];
+                              }
+                              return next;
+                            });
+                          } else {
+                            // Set the mapping: field -> header
+                            setMapping((prev: any) => {
+                              const next = { ...prev };
+                              // Remove any previous mapping for this header
+                              for (const key of Object.keys(next)) {
+                                if (next[key] === header) delete next[key];
+                              }
+                              next[v] = header;
+                              return next;
+                            });
+                          }
+                        }}
+                      >
+                        <SelectTrigger className="h-8 text-sm bg-white">
+                          <SelectValue placeholder="Save as custom field" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__custom__">
+                            <span className="text-gray-400">Save as custom field</span>
+                          </SelectItem>
+                          {availableFields.map(f => {
+                            const fieldDef = fieldSections.flatMap(s => s.fields).find(fd => fd.key === f);
+                            return (
+                              <SelectItem key={f} value={f}>
+                                {fieldDef?.label || f}
+                              </SelectItem>
+                            );
+                          })}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Data Preview */}
         {data.length > 0 && (

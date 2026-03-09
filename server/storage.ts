@@ -31,7 +31,7 @@ function toSqlDate(v: any): string | null {
 // Hydrate a row: parse JSON columns back to objects
 function hydrateContact(r: any) {
   if (!r) return null;
-  return { ...r, tags: fromJson(r.tags) || [], customFields: fromJson(r.customFields) || {} };
+  return { ...r, tags: fromJson(r.tags) || [], customFields: fromJson(r.customFields) || {}, emailRatingDetails: fromJson(r.emailRatingDetails) || {} };
 }
 function hydrateCampaign(r: any) {
   if (!r) return null;
@@ -144,6 +144,8 @@ db.exec(`
     companyCountry TEXT,
     companyAddress TEXT,
     companyPhone TEXT,
+    secondaryEmail TEXT,
+    homePhone TEXT,
     emailStatus TEXT,
     lastActivityDate TEXT,
     status TEXT DEFAULT 'cold',
@@ -367,17 +369,24 @@ const contactMigrationCols = [
   'city', 'state', 'country', 'website', 'industry',
   'employeeCount', 'annualRevenue', 'companyLinkedinUrl',
   'companyCity', 'companyState', 'companyCountry', 'companyAddress',
-  'companyPhone', 'emailStatus', 'lastActivityDate', 'assignedTo'
+  'companyPhone', 'secondaryEmail', 'homePhone', 'emailStatus', 'lastActivityDate', 'assignedTo'
 ];
 for (const col of contactMigrationCols) {
   try { db.exec(`ALTER TABLE contacts ADD COLUMN ${col} TEXT`); } catch (e) { /* column already exists */ }
 }
+
+// Email rating columns
+try { db.exec(`ALTER TABLE contacts ADD COLUMN emailRating INTEGER DEFAULT 0`); } catch (e) { /* already exists */ }
+try { db.exec(`ALTER TABLE contacts ADD COLUMN emailRatingGrade TEXT DEFAULT ''`); } catch (e) { /* already exists */ }
+try { db.exec(`ALTER TABLE contacts ADD COLUMN emailRatingDetails TEXT DEFAULT '{}'`); } catch (e) { /* already exists */ }
+try { db.exec(`ALTER TABLE contacts ADD COLUMN emailRatingUpdatedAt TEXT`); } catch (e) { /* already exists */ }
 
 // Create indexes on migrated columns (after migration ensures columns exist)
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_assigned ON contacts(assignedTo)`); } catch (e) {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_industry ON contacts(industry)`); } catch (e) {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_city ON contacts(city)`); } catch (e) {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_seniority ON contacts(seniority)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_email_rating ON contacts(emailRating)`); } catch (e) {}
 
 // ========== Messages table migrations ==========
 try { db.exec(`ALTER TABLE messages ADD COLUMN providerMessageId TEXT`); } catch (e) { /* already exists */ }
@@ -636,14 +645,14 @@ export class DatabaseStorage {
     db.prepare(`INSERT INTO contacts (id, organizationId, email, firstName, lastName, company, jobTitle,
       phone, mobilePhone, linkedinUrl, seniority, department, city, state, country, website, industry,
       employeeCount, annualRevenue, companyLinkedinUrl, companyCity, companyState, companyCountry, companyAddress,
-      companyPhone, emailStatus, lastActivityDate, status, score, tags, customFields, source, listId, assignedTo, createdAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      companyPhone, secondaryEmail, homePhone, emailStatus, lastActivityDate, status, score, tags, customFields, source, listId, assignedTo, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       id, contact.organizationId, contact.email, contact.firstName || '', contact.lastName || '', contact.company || '', contact.jobTitle || '',
       contact.phone || '', contact.mobilePhone || '', contact.linkedinUrl || '', contact.seniority || '', contact.department || '',
       contact.city || '', contact.state || '', contact.country || '', contact.website || '', contact.industry || '',
       contact.employeeCount || '', contact.annualRevenue || '', contact.companyLinkedinUrl || '',
       contact.companyCity || '', contact.companyState || '', contact.companyCountry || '', contact.companyAddress || '',
-      contact.companyPhone || '', contact.emailStatus || '', contact.lastActivityDate || '',
+      contact.companyPhone || '', contact.secondaryEmail || '', contact.homePhone || '', contact.emailStatus || '', contact.lastActivityDate || '',
       contact.status || 'cold', contact.score || 0, toJson(contact.tags || []), toJson(contact.customFields || {}),
       contact.source || 'manual', contact.listId || null, contact.assignedTo || null, ts2, ts2
     );
@@ -654,8 +663,8 @@ export class DatabaseStorage {
     const insertStmt = db.prepare(`INSERT INTO contacts (id, organizationId, email, firstName, lastName, company, jobTitle,
       phone, mobilePhone, linkedinUrl, seniority, department, city, state, country, website, industry,
       employeeCount, annualRevenue, companyLinkedinUrl, companyCity, companyState, companyCountry, companyAddress,
-      companyPhone, emailStatus, lastActivityDate, status, score, tags, customFields, source, listId, assignedTo, createdAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      companyPhone, secondaryEmail, homePhone, emailStatus, lastActivityDate, status, score, tags, customFields, source, listId, assignedTo, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     const findStmt = db.prepare('SELECT * FROM contacts WHERE organizationId = ? AND email = ?');
     const updateListStmt = db.prepare('UPDATE contacts SET listId = ?, updatedAt = ? WHERE id = ?');
 
@@ -676,7 +685,7 @@ export class DatabaseStorage {
           contact.city || '', contact.state || '', contact.country || '', contact.website || '', contact.industry || '',
           contact.employeeCount || '', contact.annualRevenue || '', contact.companyLinkedinUrl || '',
           contact.companyCity || '', contact.companyState || '', contact.companyCountry || '', contact.companyAddress || '',
-          contact.companyPhone || '', contact.emailStatus || '', contact.lastActivityDate || '',
+          contact.companyPhone || '', contact.secondaryEmail || '', contact.homePhone || '', contact.emailStatus || '', contact.lastActivityDate || '',
           contact.status || 'cold', contact.score || 0, toJson(contact.tags || []), toJson(contact.customFields || {}),
           contact.source || 'import', listId || contact.listId || null, contact.assignedTo || null, ts2, ts2
         );
@@ -695,17 +704,53 @@ export class DatabaseStorage {
       city=?, state=?, country=?, website=?, industry=?,
       employeeCount=?, annualRevenue=?, companyLinkedinUrl=?,
       companyCity=?, companyState=?, companyCountry=?, companyAddress=?,
-      companyPhone=?, emailStatus=?, lastActivityDate=?,
+      companyPhone=?, secondaryEmail=?, homePhone=?, emailStatus=?, lastActivityDate=?,
       status=?, score=?, tags=?, customFields=?, source=?, listId=?, assignedTo=?, updatedAt=? WHERE id=?`).run(
       m.firstName, m.lastName, m.company, m.jobTitle,
       m.phone || '', m.mobilePhone || '', m.linkedinUrl || '', m.seniority || '', m.department || '',
       m.city || '', m.state || '', m.country || '', m.website || '', m.industry || '',
       m.employeeCount || '', m.annualRevenue || '', m.companyLinkedinUrl || '',
       m.companyCity || '', m.companyState || '', m.companyCountry || '', m.companyAddress || '',
-      m.companyPhone || '', m.emailStatus || '', m.lastActivityDate || '',
+      m.companyPhone || '', m.secondaryEmail || '', m.homePhone || '', m.emailStatus || '', m.lastActivityDate || '',
       m.status, m.score, toJson(m.tags), toJson(m.customFields), m.source, m.listId || null, m.assignedTo || null, now(), id
     );
     return this.getContact(id);
+  }
+  async updateContactEmailRating(id: string, rating: number, grade: string, details: any) {
+    db.prepare('UPDATE contacts SET emailRating=?, emailRatingGrade=?, emailRatingDetails=?, emailRatingUpdatedAt=? WHERE id=?').run(
+      rating, grade, toJson(details), now(), id
+    );
+  }
+  async getContactEngagementStats(contactId: string) {
+    const stats = db.prepare(`
+      SELECT 
+        COUNT(*) as totalSent,
+        SUM(CASE WHEN openedAt IS NOT NULL THEN 1 ELSE 0 END) as totalOpened,
+        SUM(CASE WHEN clickedAt IS NOT NULL THEN 1 ELSE 0 END) as totalClicked,
+        SUM(CASE WHEN repliedAt IS NOT NULL THEN 1 ELSE 0 END) as totalReplied,
+        MAX(sentAt) as lastSentAt,
+        MAX(openedAt) as lastOpenedAt,
+        MAX(clickedAt) as lastClickedAt,
+        MAX(repliedAt) as lastRepliedAt
+      FROM messages WHERE contactId = ?
+    `).get(contactId) as any;
+    return stats || { totalSent: 0, totalOpened: 0, totalClicked: 0, totalReplied: 0 };
+  }
+  async getContactReplyContent(contactId: string) {
+    // Get reply content from unified inbox
+    const replies = db.prepare(`
+      SELECT body, snippet, subject, fromEmail, receivedAt 
+      FROM unified_inbox 
+      WHERE contactId = ? AND (status = 'replied' OR repliedAt IS NOT NULL) AND body IS NOT NULL
+      ORDER BY receivedAt DESC LIMIT 5
+    `).all(contactId) as any[];
+    // Also check tracking events for reply metadata
+    const replyEvents = db.prepare(`
+      SELECT metadata, createdAt FROM tracking_events 
+      WHERE contactId = ? AND type = 'reply'
+      ORDER BY createdAt DESC LIMIT 5
+    `).all(contactId) as any[];
+    return { replies, replyEvents: replyEvents.map(hydrateEvent) };
   }
   async deleteContact(id: string) { db.prepare('DELETE FROM contacts WHERE id = ?').run(id); return true; }
   async deleteContacts(ids: string[]) {

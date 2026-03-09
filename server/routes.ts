@@ -8,6 +8,7 @@ import { smtpEmailService, SMTP_PRESETS, type SmtpConfig } from "./services/smtp
 import { campaignEngine } from "./services/campaign-engine";
 import { gmailReplyTracker } from "./services/gmail-reply-tracker";
 import { outlookReplyTracker } from "./services/outlook-reply-tracker";
+import { calculateContactRating, batchRecalculateRatings } from "./services/email-rating-engine";
 import { OAuth2Client } from 'google-auth-library';
 
 // In-memory user store for simplified authentication
@@ -1800,7 +1801,7 @@ Which account should I use and why? If I need to split across accounts, provide 
         'company': 'company', 'company name': 'company', 'organization': 'company', 'account name': 'company',
         'title': 'jobTitle', 'job title': 'jobTitle', 'jobtitle': 'jobTitle', 'job_title': 'jobTitle', 'position': 'jobTitle', 'designation': 'jobTitle',
         'phone': 'phone', 'phone number': 'phone', 'work phone': 'phone', 'direct phone': 'phone', 'work direct phone': 'phone', 'corporate phone': 'phone',
-        'mobile': 'mobilePhone', 'mobile phone': 'mobilePhone', 'cell': 'mobilePhone', 'cell phone': 'mobilePhone', 'home phone': 'mobilePhone', 'other phone': 'mobilePhone',
+        'mobile': 'mobilePhone', 'mobile phone': 'mobilePhone', 'cell': 'mobilePhone', 'cell phone': 'mobilePhone', 'other phone': 'mobilePhone',
         'linkedin': 'linkedinUrl', 'linkedin url': 'linkedinUrl', 'linkedin profile': 'linkedinUrl', 'person linkedin url': 'linkedinUrl',
         'company linkedin url': 'companyLinkedinUrl', 'company linkedin': 'companyLinkedinUrl',
         'seniority': 'seniority', 'level': 'seniority', 'management level': 'seniority',
@@ -1822,6 +1823,8 @@ Which account should I use and why? If I need to split across accounts, provide 
         'lead status': 'status', 'status': 'status', 'stage': 'status',
         'lead score': 'score', 'score': 'score',
         'tags': 'tags', 'labels': 'tags',
+        'secondary email': 'secondaryEmail', 'secondary_email': 'secondaryEmail', 'alternate email': 'secondaryEmail', 'other email': 'secondaryEmail', 'personal email': 'secondaryEmail',
+        'home phone': 'homePhone', 'home_phone': 'homePhone', 'personal phone': 'homePhone',
         'source': '_source', 'lead source': '_source',
       };
 
@@ -1889,6 +1892,7 @@ Which account should I use and why? If I need to split across accounts, provide 
           companyLinkedinUrl: contact.companyLinkedinUrl || '',
           companyCity: contact.companyCity || '', companyState: contact.companyState || '', companyCountry: contact.companyCountry || '',
           companyAddress: contact.companyAddress || '', companyPhone: contact.companyPhone || '',
+          secondaryEmail: contact.secondaryEmail || '', homePhone: contact.homePhone || '',
           emailStatus: contact.emailStatus || '', lastActivityDate: contact.lastActivityDate || '',
           status: contact.status || 'cold', score: contact.score || 0,
           tags: contact.tags || [], source: contact.source || source || 'import',
@@ -1969,6 +1973,8 @@ Which account should I use and why? If I need to split across accounts, provide 
         { field: 'companyCountry', description: 'Company HQ country' },
         { field: 'companyAddress', description: 'Company address / HQ address' },
         { field: 'companyPhone', description: 'Company phone number' },
+        { field: 'secondaryEmail', description: 'Secondary / alternate / personal email address' },
+        { field: 'homePhone', description: 'Home phone / personal phone number' },
         { field: 'emailStatus', description: 'Email verification status / confidence' },
         { field: 'lastActivityDate', description: 'Last activity / last contacted date' },
         { field: 'tags', description: 'Tags / labels' },
