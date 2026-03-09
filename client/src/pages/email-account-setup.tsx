@@ -52,6 +52,7 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Map<string, { success: boolean; error?: string; timestamp?: string }>>(new Map());
   const [showPassword, setShowPassword] = useState(false);
+  const [gmailUseSmtp, setGmailUseSmtp] = useState(false); // false = OAuth, true = SMTP manual
 
   const [formProvider, setFormProvider] = useState('gmail');
   const [formEmail, setFormEmail] = useState('');
@@ -75,6 +76,33 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
     fetchAccounts();
     fetchPresets();
     fetchGmailOAuthStatus();
+  }, []);
+
+  // Handle redirect from Gmail OAuth connect flow
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const connectedEmail = params.get('gmail_connected');
+    const error = params.get('error');
+    if (connectedEmail) {
+      setGmailConnectSuccess(`Gmail account ${connectedEmail} connected successfully via OAuth!`);
+      fetchAccounts();
+      fetchGmailOAuthStatus();
+      // Clean the URL
+      window.history.replaceState({}, '', window.location.pathname);
+      setTimeout(() => setGmailConnectSuccess(''), 8000);
+    }
+    if (error) {
+      const errorMessages: Record<string, string> = {
+        'oauth_not_configured': 'Google OAuth is not configured. Set up Client ID and Secret in Advanced Settings.',
+        'gmail_connect_failed': 'Failed to start Gmail connection. Please try again.',
+        'gmail_connect_denied': 'Gmail connection was cancelled.',
+        'gmail_userinfo_failed': 'Could not retrieve Gmail account info. Please try again.',
+        'gmail_connect_callback_failed': 'Gmail connection failed during callback. Please try again.',
+      };
+      setGmailConnectError(errorMessages[error] || `Connection error: ${error}`);
+      window.history.replaceState({}, '', window.location.pathname);
+      setTimeout(() => setGmailConnectError(''), 10000);
+    }
   }, []);
 
   const fetchAccounts = async () => {
@@ -282,6 +310,7 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
     setFormReplyTo('');
     setFormError('');
     setShowPassword(false);
+    setGmailUseSmtp(false);
   };
 
   const getProviderConfig = (provider: string) => {
@@ -348,6 +377,20 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
           </CardContent>
         </Card>
       </div>
+
+      {/* Global success/error messages (from OAuth redirect) */}
+      {gmailConnectSuccess && !showAddDialog && (
+        <Alert className="border-emerald-200 bg-emerald-50">
+          <CheckCircle className="h-4 w-4 text-emerald-600" />
+          <AlertDescription className="text-sm text-emerald-700">{gmailConnectSuccess}</AlertDescription>
+        </Alert>
+      )}
+      {gmailConnectError && !showAddDialog && (
+        <Alert variant="destructive" className="py-3">
+          <XCircle className="h-4 w-4" />
+          <AlertDescription className="text-sm">{gmailConnectError}</AlertDescription>
+        </Alert>
+      )}
 
       {/* Quick Gmail Connect (Mailmeteor-style) */}
       {gmailOAuthStatus.available && !accounts.find(a => a.email === gmailOAuthStatus.email && a.provider === 'gmail') && (
@@ -678,15 +721,55 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
 
             {/* Provider-specific alerts */}
             {formProvider === 'gmail' && (
-              <Alert className="border-amber-200 bg-amber-50/50">
-                <AlertCircle className="h-4 w-4 text-amber-600" />
-                <AlertDescription className="text-sm text-amber-800">
-                  <strong>Gmail requires an App Password</strong> (not your regular password). You must have 2-Step Verification enabled.{' '}
-                  <a href="https://myaccount.google.com/apppasswords" target="_blank" className="underline font-medium inline-flex items-center gap-0.5">
-                    Generate one here <ExternalLink className="h-3 w-3" />
-                  </a>
-                </AlertDescription>
-              </Alert>
+              <div className="space-y-3">
+                {/* Gmail OAuth - Primary Option */}
+                <div className={`border-2 rounded-xl p-4 transition-all ${!gmailUseSmtp ? 'border-emerald-300 bg-emerald-50/50' : 'border-gray-200 bg-white'}`}>
+                  <div className="flex items-center gap-3">
+                    <div className="bg-white p-2 rounded-lg shadow-sm border border-emerald-100 flex-shrink-0">
+                      <svg className="h-6 w-6" viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
+                    </div>
+                    <div className="flex-1">
+                      <h4 className="text-sm font-semibold text-gray-900">Connect with Google</h4>
+                      <p className="text-xs text-gray-500">Sign in with Google to connect your Gmail. No app password needed.</p>
+                    </div>
+                    <Button
+                      size="sm"
+                      className="bg-gradient-to-r from-emerald-600 to-green-600 hover:from-emerald-700 hover:to-green-700 flex-shrink-0"
+                      onClick={() => {
+                        // Redirect to Gmail OAuth connect flow
+                        window.location.href = '/api/auth/gmail-connect';
+                      }}
+                    >
+                      <Zap className="h-3.5 w-3.5 mr-1.5" /> Connect Gmail
+                    </Button>
+                  </div>
+                  <div className="flex items-center gap-2 mt-2.5">
+                    <Badge variant="outline" className="text-[10px] bg-emerald-50 text-emerald-700 border-emerald-200">
+                      <Shield className="h-3 w-3 mr-0.5" /> OAuth 2.0
+                    </Badge>
+                    <Badge variant="outline" className="text-[10px] bg-emerald-50 text-emerald-700 border-emerald-200">
+                      <Zap className="h-3 w-3 mr-0.5" /> 2,000 emails/day
+                    </Badge>
+                    <Badge variant="outline" className="text-[10px] bg-emerald-50 text-emerald-700 border-emerald-200">
+                      No password required
+                    </Badge>
+                  </div>
+                </div>
+
+                {/* Divider with SMTP fallback toggle */}
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 h-px bg-gray-200" />
+                  <button
+                    type="button"
+                    onClick={() => setGmailUseSmtp(!gmailUseSmtp)}
+                    className="text-[11px] text-gray-400 hover:text-gray-600 font-medium flex items-center gap-1"
+                  >
+                    {gmailUseSmtp ? 'Hide' : 'Or use'} SMTP with App Password
+                    <ChevronRight className={`h-3 w-3 transition-transform ${gmailUseSmtp ? 'rotate-90' : ''}`} />
+                  </button>
+                  <div className="flex-1 h-px bg-gray-200" />
+                </div>
+              </div>
             )}
             {(formProvider === 'outlook' || formProvider === 'office365') && (
               <Alert className="border-blue-200 bg-blue-50/50">
@@ -707,7 +790,9 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
               </Alert>
             )}
 
-            {/* Email & Display Name */}
+            {/* Email & Display Name + SMTP (hidden for Gmail OAuth mode) */}
+            {(formProvider !== 'gmail' || gmailUseSmtp) && (
+            <>
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Email Address *</Label>
@@ -799,6 +884,20 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
                 className="mt-1.5"
               />
             </div>
+
+            {formProvider === 'gmail' && gmailUseSmtp && (
+              <Alert className="border-amber-200 bg-amber-50/50">
+                <AlertCircle className="h-4 w-4 text-amber-600" />
+                <AlertDescription className="text-sm text-amber-800">
+                  <strong>Gmail requires an App Password</strong> (not your regular password). You must have 2-Step Verification enabled.{' '}
+                  <a href="https://myaccount.google.com/apppasswords" target="_blank" className="underline font-medium inline-flex items-center gap-0.5">
+                    Generate one here <ExternalLink className="h-3 w-3" />
+                  </a>
+                </AlertDescription>
+              </Alert>
+            )}
+            </>
+            )}
 
             {formError && (
               <Alert variant="destructive" className="py-3">

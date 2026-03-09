@@ -329,6 +329,139 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // ===== ADD GMAIL ACCOUNT VIA OAUTH (separate from login) =====
+  // Initiates Google OAuth specifically to add a new Gmail sender account
+  app.get('/api/auth/gmail-connect', requireAuth, async (req: any, res) => {
+    try {
+      const baseUrl = getBaseUrlFromRequest(req);
+      const redirectUri = `${baseUrl}/api/auth/gmail-connect/callback`;
+      const orgId = req.user.organizationId;
+
+      let clientId = process.env.GOOGLE_CLIENT_ID || '';
+      let clientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
+      try {
+        const settings = await storage.getApiSettings(orgId);
+        if (settings.google_oauth_client_id) clientId = settings.google_oauth_client_id;
+        if (settings.google_oauth_client_secret) clientSecret = settings.google_oauth_client_secret;
+      } catch (e) { /* use env vars */ }
+
+      if (!clientId || !clientSecret) {
+        return res.redirect('/setup?error=oauth_not_configured');
+      }
+
+      const oauth2Client = createOAuth2Client({ clientId, clientSecret, redirectUri });
+      // Use login_hint if provided (for connecting specific account)
+      const loginHint = req.query.email as string || '';
+      const authUrl = oauth2Client.generateAuthUrl({
+        access_type: 'offline',
+        prompt: 'consent',
+        scope: [
+          'https://www.googleapis.com/auth/gmail.send',
+          'https://www.googleapis.com/auth/gmail.readonly',
+          'https://www.googleapis.com/auth/userinfo.email',
+          'https://www.googleapis.com/auth/userinfo.profile',
+        ],
+        state: JSON.stringify({ redirectUri, purpose: 'add_sender', orgId }),
+        ...(loginHint ? { login_hint: loginHint } : {}),
+      });
+
+      console.log('[Auth] Gmail connect redirect, hint:', loginHint || 'none');
+      res.redirect(authUrl);
+    } catch (error) {
+      console.error('[Auth] Gmail connect init error:', error);
+      res.redirect('/setup?error=gmail_connect_failed');
+    }
+  });
+
+  // Callback for adding Gmail sender account
+  app.get('/api/auth/gmail-connect/callback', async (req: any, res) => {
+    try {
+      const { code, state, error: oauthError } = req.query;
+      if (oauthError || !code) {
+        return res.redirect('/setup?error=gmail_connect_denied');
+      }
+
+      let redirectUri = `${getBaseUrlFromRequest(req)}/api/auth/gmail-connect/callback`;
+      let orgId = '550e8400-e29b-41d4-a716-446655440001';
+      try {
+        if (state) {
+          const parsed = JSON.parse(state as string);
+          if (parsed.redirectUri) redirectUri = parsed.redirectUri;
+          if (parsed.orgId) orgId = parsed.orgId;
+        }
+      } catch (e) { /* use defaults */ }
+
+      let clientId = process.env.GOOGLE_CLIENT_ID || '';
+      let clientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
+      try {
+        const settings = await storage.getApiSettings(orgId);
+        if (settings.google_oauth_client_id) clientId = settings.google_oauth_client_id;
+        if (settings.google_oauth_client_secret) clientSecret = settings.google_oauth_client_secret;
+      } catch (e) { /* use env vars */ }
+
+      const oauth2Client = createOAuth2Client({ clientId, clientSecret, redirectUri });
+      const { tokens } = await oauth2Client.getToken(code as string);
+      oauth2Client.setCredentials(tokens);
+
+      // Get the email of the authorized account
+      const userInfoResp = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+        headers: { Authorization: `Bearer ${tokens.access_token}` },
+      });
+      if (!userInfoResp.ok) {
+        return res.redirect('/setup?error=gmail_userinfo_failed');
+      }
+      const googleUser = await userInfoResp.json() as any;
+      const gmailEmail = googleUser.email;
+      const displayName = googleUser.name || gmailEmail.split('@')[0];
+
+      // Store tokens for this specific email
+      await storage.setApiSetting(orgId, `gmail_sender_${gmailEmail}_access_token`, tokens.access_token!);
+      if (tokens.refresh_token) {
+        await storage.setApiSetting(orgId, `gmail_sender_${gmailEmail}_refresh_token`, tokens.refresh_token);
+      }
+      if (tokens.expiry_date) {
+        await storage.setApiSetting(orgId, `gmail_sender_${gmailEmail}_token_expiry`, String(tokens.expiry_date));
+      }
+
+      // Also update the primary gmail tokens if this is the primary account
+      const primaryEmail = (await storage.getApiSettings(orgId)).gmail_user_email;
+      if (gmailEmail === primaryEmail || !primaryEmail) {
+        await storage.setApiSetting(orgId, 'gmail_access_token', tokens.access_token!);
+        if (tokens.refresh_token) await storage.setApiSetting(orgId, 'gmail_refresh_token', tokens.refresh_token);
+        if (tokens.expiry_date) await storage.setApiSetting(orgId, 'gmail_token_expiry', String(tokens.expiry_date));
+        if (!primaryEmail) await storage.setApiSetting(orgId, 'gmail_user_email', gmailEmail);
+      }
+
+      // Check if account already exists
+      const existing = (await storage.getEmailAccounts(orgId)).find((a: any) => a.email === gmailEmail);
+      if (!existing) {
+        // Create email account
+        await storage.createEmailAccount({
+          organizationId: orgId,
+          provider: 'gmail',
+          email: gmailEmail,
+          displayName,
+          smtpConfig: {
+            host: 'smtp.gmail.com', port: 587, secure: false,
+            auth: { user: gmailEmail, pass: 'OAUTH_TOKEN' },
+            fromName: displayName, fromEmail: gmailEmail, replyTo: '',
+            provider: 'gmail',
+          },
+          dailyLimit: 2000,
+          isActive: true,
+        });
+        console.log(`[Auth] New Gmail sender added via OAuth: ${gmailEmail}`);
+      } else {
+        console.log(`[Auth] Gmail sender already exists: ${gmailEmail}, tokens updated`);
+      }
+
+      res.redirect('/setup?gmail_connected=' + encodeURIComponent(gmailEmail));
+    } catch (error) {
+      console.error('[Auth] Gmail connect callback error:', error);
+      res.redirect('/setup?error=gmail_connect_callback_failed');
+    }
+  });
+
   // ===== REAL MICROSOFT / OUTLOOK OAUTH 2.0 =====
   // Step 1: Redirect user to Microsoft's consent screen
   app.get('/api/auth/microsoft', async (req: any, res) => {
