@@ -1825,6 +1825,16 @@ Which account should I use and why? If I need to split across accounts, provide 
         'source': '_source', 'lead source': '_source',
       };
 
+      // List of known direct contact field names (sent by enhanced column mapper)
+      const directContactFields = new Set([
+        'email', 'firstName', 'lastName', 'company', 'jobTitle',
+        'phone', 'mobilePhone', 'linkedinUrl', 'seniority', 'department',
+        'city', 'state', 'country', 'website', 'industry',
+        'employeeCount', 'annualRevenue', 'companyLinkedinUrl',
+        'companyCity', 'companyState', 'companyCountry', 'companyAddress', 'companyPhone',
+        'emailStatus', 'lastActivityDate', 'tags', 'status', 'score',
+      ]);
+
       const contactsToCreate = contactList.map((c: any) => {
         const contact: Record<string, any> = {};
         const customFields: Record<string, any> = {};
@@ -1832,6 +1842,19 @@ Which account should I use and why? If I need to split across accounts, provide 
         for (const [csvHeader, value] of Object.entries(c)) {
           if (!value || String(value).trim() === '') continue;
           const trimmedValue = String(value).trim();
+
+          // Check if key is already a direct contact field name (from enhanced mapper)
+          if (directContactFields.has(csvHeader)) {
+            if (csvHeader === 'tags') {
+              contact.tags = trimmedValue.split(/[,;|]/).map((t: string) => t.trim()).filter(Boolean);
+            } else if (csvHeader === 'score') {
+              contact.score = parseInt(trimmedValue) || 0;
+            } else {
+              if (!contact[csvHeader]) contact[csvHeader] = trimmedValue;
+            }
+            continue;
+          }
+
           const lowerHeader = String(csvHeader).toLowerCase().trim();
           const mappedField = apolloFieldMap[lowerHeader];
 
@@ -1898,6 +1921,128 @@ Which account should I use and why? If I need to split across accounts, provide 
     } catch (error) {
       console.error('Import error:', error);
       res.status(500).json({ message: 'Failed to import contacts' });
+    }
+  });
+
+  // AI-powered column mapping using Azure OpenAI
+  app.post('/api/contacts/ai-map-columns', async (req: any, res) => {
+    try {
+      const { csvHeaders, sampleRows } = req.body;
+      if (!Array.isArray(csvHeaders) || csvHeaders.length === 0) {
+        return res.status(400).json({ message: 'csvHeaders array is required' });
+      }
+
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      const endpoint = settings.azure_openai_endpoint;
+      const apiKey = settings.azure_openai_api_key;
+      const deploymentName = settings.azure_openai_deployment;
+      const apiVersion = settings.azure_openai_api_version || '2024-08-01-preview';
+
+      if (!endpoint || !apiKey || !deploymentName) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Azure OpenAI is not configured. Go to Advanced Settings to set up Azure OpenAI.' 
+        });
+      }
+
+      const contactFields = [
+        { field: 'email', description: 'Email address' },
+        { field: 'firstName', description: 'First name / given name' },
+        { field: 'lastName', description: 'Last name / surname / family name' },
+        { field: 'company', description: 'Company name / organization' },
+        { field: 'jobTitle', description: 'Job title / position / role / designation' },
+        { field: 'phone', description: 'Work phone / direct phone number' },
+        { field: 'mobilePhone', description: 'Mobile / cell phone number' },
+        { field: 'linkedinUrl', description: 'Personal LinkedIn profile URL' },
+        { field: 'seniority', description: 'Seniority level (e.g., VP, Director, Manager)' },
+        { field: 'department', description: 'Department or function' },
+        { field: 'city', description: 'Person city' },
+        { field: 'state', description: 'Person state / region / province' },
+        { field: 'country', description: 'Person country' },
+        { field: 'website', description: 'Website / domain URL' },
+        { field: 'industry', description: 'Company industry / sector' },
+        { field: 'employeeCount', description: 'Number of employees / company size / headcount' },
+        { field: 'annualRevenue', description: 'Annual revenue / company revenue' },
+        { field: 'companyLinkedinUrl', description: 'Company LinkedIn URL' },
+        { field: 'companyCity', description: 'Company HQ city' },
+        { field: 'companyState', description: 'Company HQ state' },
+        { field: 'companyCountry', description: 'Company HQ country' },
+        { field: 'companyAddress', description: 'Company address / HQ address' },
+        { field: 'companyPhone', description: 'Company phone number' },
+        { field: 'emailStatus', description: 'Email verification status / confidence' },
+        { field: 'lastActivityDate', description: 'Last activity / last contacted date' },
+        { field: 'tags', description: 'Tags / labels' },
+        { field: 'status', description: 'Lead status / stage (hot, warm, cold)' },
+        { field: 'score', description: 'Lead score / contact score' },
+      ];
+
+      const sampleDataStr = sampleRows && sampleRows.length > 0
+        ? `\n\nSample data (first ${sampleRows.length} rows):\n${sampleRows.map((row: Record<string, string>, i: number) => 
+            `Row ${i+1}: ${csvHeaders.map(h => `${h}="${row[h] || ''}"`).join(', ')}`
+          ).join('\n')}`
+        : '';
+
+      const prompt = `You are a data mapping assistant. Given CSV column headers and available contact fields, suggest the best mapping.
+
+CSV Headers: ${JSON.stringify(csvHeaders)}${sampleDataStr}
+
+Available contact fields:
+${contactFields.map(f => `- "${f.field}": ${f.description}`).join('\n')}
+
+Return ONLY a valid JSON object mapping contact field names to CSV header names. Only include mappings where you are confident the CSV header corresponds to the contact field. If a CSV header does not clearly match any field, do not include it. The keys should be contact field names and values should be exact CSV header names from the list above.
+
+Example response:
+{"email": "Email Address", "firstName": "First Name", "company": "Organization"}`;
+
+      const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${deploymentName}/chat/completions?api-version=${apiVersion}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'api-key': apiKey,
+        },
+        body: JSON.stringify({
+          messages: [
+            { role: 'system', content: 'You are a precise data mapping assistant. Respond only with a valid JSON object.' },
+            { role: 'user', content: prompt }
+          ],
+          temperature: 0.1,
+          max_tokens: 500,
+        }),
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error('[AI Map] Azure OpenAI error:', errText);
+        return res.json({ success: false, message: `Azure OpenAI error: ${response.status}` });
+      }
+
+      const data = await response.json() as any;
+      const content = data.choices?.[0]?.message?.content || '';
+      
+      // Parse the JSON from the response
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        return res.json({ success: false, message: 'AI could not generate a mapping', raw: content });
+      }
+
+      const mapping = JSON.parse(jsonMatch[0]);
+      
+      // Validate that all values are actual CSV headers and all keys are valid fields
+      const validFields = new Set(contactFields.map(f => f.field));
+      const headerSet = new Set(csvHeaders);
+      const cleanMapping: Record<string, string> = {};
+      for (const [field, header] of Object.entries(mapping)) {
+        if (validFields.has(field) && headerSet.has(header as string)) {
+          cleanMapping[field] = header as string;
+        }
+      }
+
+      res.json({ success: true, mapping: cleanMapping });
+    } catch (error) {
+      console.error('[AI Map] Error:', error);
+      const errMsg = error instanceof Error ? error.message : 'Unknown error';
+      res.json({ success: false, message: `AI mapping failed: ${errMsg}` });
     }
   });
 

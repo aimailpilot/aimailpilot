@@ -109,6 +109,9 @@ export default function ContactsManager() {
   const [importListName, setImportListName] = useState('');
   const [importFileName, setImportFileName] = useState('');
   const [importToExistingList, setImportToExistingList] = useState<string>('');
+  const [aiMappingLoading, setAiMappingLoading] = useState(false);
+  const [aiMappingError, setAiMappingError] = useState('');
+  const [showAllFields, setShowAllFields] = useState(false);
 
   // Create list dialog state
   const [showCreateListDialog, setShowCreateListDialog] = useState(false);
@@ -312,16 +315,40 @@ export default function ContactsManager() {
         setCsvData(rows);
 
         const mapping: Record<string, string> = {};
+        let extraMapped = false;
         headers.forEach(h => {
           const lower = h.toLowerCase().trim();
+          // Key fields
           if (lower.includes('email') || lower === 'e-mail') mapping.email = h;
           else if ((lower.includes('first') && lower.includes('name')) || lower === 'first') mapping.firstName = h;
           else if ((lower.includes('last') && lower.includes('name')) || lower === 'last' || lower === 'surname') mapping.lastName = h;
           else if (lower === 'name' || lower === 'full name' || lower === 'fullname') mapping.firstName = h;
           else if (lower.includes('company') || lower.includes('organization') || lower === 'org') mapping.company = h;
           else if (lower.includes('title') || lower.includes('position') || lower === 'role' || lower.includes('designation')) mapping.jobTitle = h;
+          // Extended fields
+          else if ((lower === 'phone' || lower === 'phone number' || lower === 'work phone' || lower === 'direct phone' || lower === 'work direct phone') && !mapping.phone) { mapping.phone = h; extraMapped = true; }
+          else if ((lower === 'mobile' || lower === 'mobile phone' || lower === 'cell' || lower === 'cell phone') && !mapping.mobilePhone) { mapping.mobilePhone = h; extraMapped = true; }
+          else if ((lower.includes('linkedin') && !lower.includes('company')) && !mapping.linkedinUrl) { mapping.linkedinUrl = h; extraMapped = true; }
+          else if ((lower.includes('company') && lower.includes('linkedin')) && !mapping.companyLinkedinUrl) { mapping.companyLinkedinUrl = h; extraMapped = true; }
+          else if ((lower === 'seniority' || lower === 'level' || lower === 'management level') && !mapping.seniority) { mapping.seniority = h; extraMapped = true; }
+          else if ((lower === 'department' || lower === 'departments' || lower === 'function') && !mapping.department) { mapping.department = h; extraMapped = true; }
+          else if ((lower === 'city' || lower === 'person city') && !mapping.city) { mapping.city = h; extraMapped = true; }
+          else if ((lower === 'state' || lower === 'person state' || lower === 'region') && !mapping.state) { mapping.state = h; extraMapped = true; }
+          else if ((lower === 'country' || lower === 'person country') && !mapping.country) { mapping.country = h; extraMapped = true; }
+          else if ((lower === 'website' || lower === 'domain' || lower === 'company website') && !mapping.website) { mapping.website = h; extraMapped = true; }
+          else if ((lower === 'industry' || lower === 'company industry') && !mapping.industry) { mapping.industry = h; extraMapped = true; }
+          else if ((lower.includes('employee') || lower === 'headcount' || lower === 'company size' || lower === '# employees') && !mapping.employeeCount) { mapping.employeeCount = h; extraMapped = true; }
+          else if ((lower.includes('revenue')) && !mapping.annualRevenue) { mapping.annualRevenue = h; extraMapped = true; }
+          else if ((lower === 'tags' || lower === 'labels') && !mapping.tags) { mapping.tags = h; extraMapped = true; }
+          else if ((lower === 'email status' || lower === 'email confidence') && !mapping.emailStatus) { mapping.emailStatus = h; extraMapped = true; }
+          else if ((lower === 'company city' || lower === 'hq city') && !mapping.companyCity) { mapping.companyCity = h; extraMapped = true; }
+          else if ((lower === 'company state' || lower === 'hq state') && !mapping.companyState) { mapping.companyState = h; extraMapped = true; }
+          else if ((lower === 'company country' || lower === 'hq country') && !mapping.companyCountry) { mapping.companyCountry = h; extraMapped = true; }
+          else if ((lower === 'company phone') && !mapping.companyPhone) { mapping.companyPhone = h; extraMapped = true; }
+          else if ((lower === 'company address' || lower === 'hq address' || lower === 'address') && !mapping.companyAddress) { mapping.companyAddress = h; extraMapped = true; }
         });
         setCsvMapping(mapping);
+        if (extraMapped) setShowAllFields(true);
         console.log('[CSV] Auto-mapped:', mapping);
       } catch (err) {
         console.error('[CSV] Parse error:', err);
@@ -357,11 +384,13 @@ export default function ContactsManager() {
 
     const contacts = csvData.map(row => {
       const contact: Record<string, any> = {};
-      if (csvMapping.email) contact.email = (row[csvMapping.email] || '').trim();
-      if (csvMapping.firstName) contact.firstName = (row[csvMapping.firstName] || '').trim();
-      if (csvMapping.lastName) contact.lastName = (row[csvMapping.lastName] || '').trim();
-      if (csvMapping.company) contact.company = (row[csvMapping.company] || '').trim();
-      if (csvMapping.jobTitle) contact.jobTitle = (row[csvMapping.jobTitle] || '').trim();
+      // Apply all field mappings (not just key fields)
+      for (const [field, csvHeader] of Object.entries(csvMapping)) {
+        if (csvHeader && csvHeader.trim() && row[csvHeader]) {
+          contact[field] = (row[csvHeader] || '').trim();
+        }
+      }
+      // Pass unmapped columns through with original header names
       const mappedColumns = new Set(Object.values(csvMapping).filter(Boolean));
       csvHeaders.forEach(header => {
         if (!mappedColumns.has(header) && row[header]) contact[header] = row[header].trim();
@@ -392,6 +421,41 @@ export default function ContactsManager() {
       }
     } catch (e) { setImportResult({ success: false, message: 'Import failed' }); }
     setImportLoading(false);
+  };
+
+  // ========== AI COLUMN MAPPING ==========
+  const handleAiMapColumns = async (
+    headers: string[], 
+    data: any[], 
+    setMapping: (fn: any) => void
+  ) => {
+    setAiMappingLoading(true);
+    setAiMappingError('');
+    try {
+      const sampleRows = data.slice(0, 3).map(row => {
+        const sample: Record<string, string> = {};
+        headers.forEach(h => { sample[h] = row[h] || ''; });
+        return sample;
+      });
+
+      const res = await fetch('/api/contacts/ai-map-columns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ csvHeaders: headers, sampleRows }),
+      });
+
+      const result = await res.json();
+      if (result.success && result.mapping) {
+        setMapping((prev: any) => ({ ...prev, ...result.mapping }));
+        setShowAllFields(true); // Auto-expand to show all mapped fields
+      } else {
+        setAiMappingError(result.message || 'AI mapping failed');
+      }
+    } catch (e) {
+      setAiMappingError('Failed to connect to AI service');
+    }
+    setAiMappingLoading(false);
   };
 
   // ========== CREATE LIST ==========
@@ -522,11 +586,13 @@ export default function ContactsManager() {
     setGsImportLoading(true); setGsImportResult(null);
     const contacts = gsData.map(row => {
       const contact: Record<string, any> = {};
-      if (gsMapping.email) contact.email = (row[gsMapping.email] || '').trim();
-      if (gsMapping.firstName) contact.firstName = (row[gsMapping.firstName] || '').trim();
-      if (gsMapping.lastName) contact.lastName = (row[gsMapping.lastName] || '').trim();
-      if (gsMapping.company) contact.company = (row[gsMapping.company] || '').trim();
-      if (gsMapping.jobTitle) contact.jobTitle = (row[gsMapping.jobTitle] || '').trim();
+      // Apply all field mappings (not just key fields)
+      for (const [field, csvHeader] of Object.entries(gsMapping)) {
+        if (csvHeader && csvHeader.trim() && row[csvHeader]) {
+          contact[field] = (row[csvHeader] || '').trim();
+        }
+      }
+      // Pass unmapped columns through with original header names
       const mappedCols = new Set(Object.values(gsMapping).filter(Boolean));
       gsHeaders.forEach(h => { if (!mappedCols.has(h) && row[h]) contact[h] = row[h].trim(); });
       return contact;
@@ -651,12 +717,13 @@ export default function ContactsManager() {
                   <Plus className="h-4 w-4 mr-2 text-green-500" /> Create List
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => { setShowImportDialog(true); setCsvData([]); setCsvHeaders([]); setCsvMapping({}); setImportResult(null); setImportListName(''); setImportFileName(''); setImportToExistingList(''); if (fileInputRef.current) fileInputRef.current.value = ''; }}>
+                <DropdownMenuItem onClick={() => { setShowImportDialog(true); setCsvData([]); setCsvHeaders([]); setCsvMapping({}); setImportResult(null); setImportListName(''); setImportFileName(''); setImportToExistingList(''); setAiMappingError(''); setShowAllFields(false); if (fileInputRef.current) fileInputRef.current.value = ''; }}>
                   <Upload className="h-4 w-4 mr-2 text-violet-500" /> Import CSV
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => {
                   setGsUrl(''); setGsSheets([]); setGsSelectedSheet(null); setGsData([]); setGsHeaders([]);
                   setGsMapping({}); setGsListName(''); setGsSheetTitle(''); setGsError(''); setGsImportResult(null); setGsToExistingList('');
+                  setAiMappingError(''); setShowAllFields(false);
                   setShowGoogleSheetsDialog(true);
                 }}>
                   <FileSpreadsheet className="h-4 w-4 mr-2 text-green-600" /> Import Google Sheets
@@ -1484,8 +1551,70 @@ export default function ContactsManager() {
     setMapping: (fn: any) => void,
     type: 'csv' | 'sheets'
   ) {
+    // Define all available contact fields organized in sections
+    const fieldSections = [
+      {
+        label: 'Key Fields',
+        fields: [
+          { key: 'email', label: 'Email', icon: Mail, required: true },
+          { key: 'firstName', label: 'First Name', icon: Users },
+          { key: 'lastName', label: 'Last Name', icon: Users },
+          { key: 'company', label: 'Company', icon: Building },
+          { key: 'jobTitle', label: 'Job Title', icon: Briefcase },
+        ],
+      },
+      {
+        label: 'Contact Details',
+        fields: [
+          { key: 'phone', label: 'Phone', icon: Phone },
+          { key: 'mobilePhone', label: 'Mobile Phone', icon: Phone },
+          { key: 'linkedinUrl', label: 'LinkedIn URL', icon: Linkedin },
+          { key: 'seniority', label: 'Seniority', icon: TrendingUp },
+          { key: 'department', label: 'Department', icon: Users },
+          { key: 'emailStatus', label: 'Email Status', icon: Mail },
+          { key: 'lastActivityDate', label: 'Last Activity', icon: Calendar },
+        ],
+      },
+      {
+        label: 'Location',
+        fields: [
+          { key: 'city', label: 'City', icon: MapPin },
+          { key: 'state', label: 'State', icon: MapPin },
+          { key: 'country', label: 'Country', icon: Globe },
+          { key: 'website', label: 'Website', icon: Globe },
+        ],
+      },
+      {
+        label: 'Company Info',
+        fields: [
+          { key: 'industry', label: 'Industry', icon: Factory },
+          { key: 'employeeCount', label: 'Employee Count', icon: Hash },
+          { key: 'annualRevenue', label: 'Annual Revenue', icon: DollarSign },
+          { key: 'companyLinkedinUrl', label: 'Company LinkedIn', icon: Linkedin },
+          { key: 'companyCity', label: 'Company City', icon: MapPin },
+          { key: 'companyState', label: 'Company State', icon: MapPin },
+          { key: 'companyCountry', label: 'Company Country', icon: Globe },
+          { key: 'companyAddress', label: 'Company Address', icon: MapPin },
+          { key: 'companyPhone', label: 'Company Phone', icon: Phone },
+        ],
+      },
+      {
+        label: 'Other',
+        fields: [
+          { key: 'tags', label: 'Tags', icon: Tag },
+          { key: 'status', label: 'Lead Status', icon: Star },
+          { key: 'score', label: 'Lead Score', icon: Hash },
+        ],
+      },
+    ];
+
+    const allMappedCount = Object.values(mapping).filter(v => v && v.trim()).length;
+    const keyFields = fieldSections[0].fields;
+    const extraSections = fieldSections.slice(1);
+
     return (
       <div className="space-y-3">
+        {/* Detected Columns */}
         <div>
           <div className="flex items-center justify-between mb-2">
             <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Detected Columns ({headers.length})</h4>
@@ -1503,19 +1632,54 @@ export default function ContactsManager() {
               );
             })}
           </div>
-          <p className="text-[10px] text-gray-400 mt-1">Green = mapped to standard field. All columns are saved.</p>
+          <p className="text-[10px] text-gray-400 mt-1">
+            Green = mapped to contact field ({allMappedCount}/{headers.length} mapped). Unmapped columns are saved as custom fields.
+          </p>
         </div>
 
+        {/* AI Auto-Map + Toggle */}
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 text-xs border-violet-200 text-violet-700 hover:bg-violet-50"
+            disabled={aiMappingLoading}
+            onClick={() => handleAiMapColumns(headers, data, setMapping)}
+          >
+            {aiMappingLoading ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />
+            ) : (
+              <Sparkles className="h-3.5 w-3.5 mr-1.5" />
+            )}
+            {aiMappingLoading ? 'AI Mapping...' : 'AI Auto-Map'}
+          </Button>
+          <Tooltip>
+            <TooltipTrigger>
+              <Info className="h-3.5 w-3.5 text-gray-400" />
+            </TooltipTrigger>
+            <TooltipContent className="max-w-xs">
+              <p className="text-xs">Uses Azure OpenAI (configured in Advanced Settings) to intelligently map your CSV columns to contact fields based on header names and sample data.</p>
+            </TooltipContent>
+          </Tooltip>
+          {aiMappingError && (
+            <span className="text-[10px] text-red-500 flex items-center gap-1">
+              <AlertTriangle className="h-3 w-3" /> {aiMappingError}
+            </span>
+          )}
+        </div>
+
+        {/* Key Fields Section */}
         <div>
           <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Map Key Columns</h4>
           <div className="bg-gray-50 rounded-lg p-3 space-y-2.5">
-            {['email', 'firstName', 'lastName', 'company', 'jobTitle'].map((field) => (
-              <div key={field} className="flex items-center gap-3">
-                <Label className="w-24 text-xs font-semibold text-gray-500 uppercase tracking-wide">
-                  {field === 'firstName' ? 'First Name' : field === 'lastName' ? 'Last Name' : field === 'jobTitle' ? 'Job Title' : field}
-                  {field === 'email' && <span className="text-red-500 ml-0.5">*</span>}
+            {keyFields.map((field) => (
+              <div key={field.key} className="flex items-center gap-3">
+                <Label className="w-28 text-xs font-semibold text-gray-500 uppercase tracking-wide flex items-center gap-1.5">
+                  <field.icon className="h-3 w-3 text-gray-400" />
+                  {field.label}
+                  {field.required && <span className="text-red-500">*</span>}
                 </Label>
-                <Select value={mapping[field] || '__skip__'} onValueChange={(v) => setMapping((prev: any) => ({ ...prev, [field]: v === '__skip__' ? '' : v }))}>
+                <Select value={mapping[field.key] || '__skip__'} onValueChange={(v) => setMapping((prev: any) => ({ ...prev, [field.key]: v === '__skip__' ? '' : v }))}>
                   <SelectTrigger className="h-8 text-sm bg-white"><SelectValue placeholder="Select column" /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="__skip__">-- Skip --</SelectItem>
@@ -1527,6 +1691,57 @@ export default function ContactsManager() {
           </div>
         </div>
 
+        {/* Expand/Collapse All Fields */}
+        <button
+          onClick={() => setShowAllFields(!showAllFields)}
+          className="flex items-center gap-2 text-xs font-medium text-blue-600 hover:text-blue-800 transition-colors w-full justify-center py-2 border border-dashed border-blue-200 rounded-lg hover:bg-blue-50/50"
+        >
+          <ChevronDown className={`h-3.5 w-3.5 transition-transform ${showAllFields ? 'rotate-180' : ''}`} />
+          {showAllFields ? 'Hide additional fields' : `Map all columns (${extraSections.reduce((sum, s) => sum + s.fields.length, 0)} more fields)`}
+          <ChevronDown className={`h-3.5 w-3.5 transition-transform ${showAllFields ? 'rotate-180' : ''}`} />
+        </button>
+
+        {/* Additional Field Sections (collapsible) */}
+        {showAllFields && (
+          <div className="space-y-3">
+            {extraSections.map((section) => {
+              const mappedInSection = section.fields.filter(f => mapping[f.key] && mapping[f.key].trim()).length;
+              return (
+                <div key={section.label}>
+                  <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2 flex items-center gap-2">
+                    {section.label}
+                    {mappedInSection > 0 && (
+                      <span className="text-[9px] px-1.5 py-0.5 bg-emerald-100 text-emerald-600 rounded-full font-semibold">
+                        {mappedInSection} mapped
+                      </span>
+                    )}
+                  </h4>
+                  <div className="bg-gray-50 rounded-lg p-3 space-y-2.5">
+                    {section.fields.map((field) => (
+                      <div key={field.key} className="flex items-center gap-3">
+                        <Label className="w-28 text-xs font-semibold text-gray-500 uppercase tracking-wide flex items-center gap-1.5 shrink-0">
+                          <field.icon className="h-3 w-3 text-gray-400" />
+                          {field.label}
+                        </Label>
+                        <Select value={mapping[field.key] || '__skip__'} onValueChange={(v) => setMapping((prev: any) => ({ ...prev, [field.key]: v === '__skip__' ? '' : v }))}>
+                          <SelectTrigger className={`h-8 text-sm bg-white ${mapping[field.key] ? 'ring-1 ring-emerald-200' : ''}`}>
+                            <SelectValue placeholder="Select column" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="__skip__">-- Skip --</SelectItem>
+                            {headers.filter(h => h && h.trim()).map(h => <SelectItem key={h} value={h}>{h}</SelectItem>)}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Data Preview */}
         {data.length > 0 && (
           <div className="border rounded-lg p-3 bg-white">
             <div className="text-[10px] font-semibold uppercase text-gray-400 mb-2">Preview (first 3 rows)</div>
