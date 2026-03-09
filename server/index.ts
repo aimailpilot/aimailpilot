@@ -1,6 +1,7 @@
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
+import { startFollowupEngine } from "./services/followup-engine";
 
 const app = express();
 app.use(express.json());
@@ -59,5 +60,7 @@ app.use((req, res, next) => {
     reusePort: true,
   }, () => {
     log(`MailFlow serving on port ${port}`);
+    // Start the follow-up engine after server is ready
+    startFollowupEngine();
   });
 })();

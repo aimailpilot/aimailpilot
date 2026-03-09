@@ -868,6 +868,11 @@ export class DatabaseStorage {
       INNER JOIN campaigns c ON te.campaignId = c.id
       WHERE c.organizationId = ? AND te.type != 'prefetch' ORDER BY te.createdAt DESC LIMIT ?`).all(organizationId, limit).map(hydrateEvent);
   }
+  
+  async getRecentTrackingEvents(messageId: string, type: string, withinSeconds: number) {
+    const cutoff = new Date(Date.now() - withinSeconds * 1000).toISOString();
+    return db.prepare("SELECT * FROM tracking_events WHERE messageId = ? AND type = ? AND createdAt > ? ORDER BY createdAt DESC").all(messageId, type, cutoff) as any[];
+  }
 
   // ========== Enriched Campaign Messages ==========
   async getCampaignMessagesEnriched(campaignId: string, limit = 200, offset = 0) {
@@ -879,7 +884,14 @@ export class DatabaseStorage {
         ...m,
         contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company } : null,
         events,
-        openCount: events.filter((e: any) => e.type === 'open').length,
+        openCount: events.filter((e: any) => {
+          if (e.type !== 'open') return false;
+          // Filter out duplicate opens (metadata contains { duplicate: true })
+          if (e.metadata && typeof e.metadata === 'string') {
+            try { const meta = JSON.parse(e.metadata); if (meta.duplicate) return false; } catch {}
+          } else if (e.metadata && e.metadata.duplicate) return false;
+          return true;
+        }).length,
         clickCount: events.filter((e: any) => e.type === 'click').length,
         replyCount: events.filter((e: any) => e.type === 'reply').length,
         firstOpenedAt: events.find((e: any) => e.type === 'open')?.createdAt || null,
@@ -1016,8 +1028,9 @@ export class DatabaseStorage {
   }
   async createFollowupExecution(execution: any) {
     const id = genId();
+    const scheduledAt = execution.scheduledAt instanceof Date ? execution.scheduledAt.toISOString() : (execution.scheduledAt || null);
     db.prepare('INSERT INTO followup_executions (id, campaignMessageId, stepId, contactId, campaignId, status, scheduledAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
-      id, execution.campaignMessageId || null, execution.stepId || null, execution.contactId || null, execution.campaignId || null, execution.status || 'pending', execution.scheduledAt || null, now()
+      id, execution.campaignMessageId || null, execution.stepId || null, execution.contactId || null, execution.campaignId || null, execution.status || 'pending', scheduledAt, now()
     );
     return this.getFollowupExecutionById(id);
   }
@@ -1025,7 +1038,9 @@ export class DatabaseStorage {
     const existing = await this.getFollowupExecutionById(id);
     if (!existing) throw new Error('Execution not found');
     const m = { ...existing as any, ...data };
-    db.prepare('UPDATE followup_executions SET status=?, executedAt=? WHERE id=?').run(m.status, m.executedAt || null, id);
+    const executedAt = m.executedAt instanceof Date ? m.executedAt.toISOString() : (m.executedAt || null);
+    const sentAt = m.sentAt instanceof Date ? m.sentAt.toISOString() : (m.sentAt || null);
+    db.prepare('UPDATE followup_executions SET status=?, executedAt=? WHERE id=?').run(m.status, executedAt || sentAt || null, id);
     return this.getFollowupExecutionById(id);
   }
   async cancelPendingFollowupsForContact(contactId: string, campaignId?: string) {

@@ -268,12 +268,13 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
     );
   }
 
-  const { campaign, analytics, messages, totalMessages, recentEvents, stepAnalytics, emailAccount, activityTimeline } = detail;
+  const { campaign, analytics, messages, totalMessages, recentEvents, stepAnalytics, emailAccount, activityTimeline, hasActiveFollowups } = detail;
 
   // ========== COMPUTED VALUES ==========
   const getStatusConfig = (status: string) => {
     const configs: Record<string, { bg: string; text: string; label: string; dot: string }> = {
       active: { bg: 'bg-emerald-50', text: 'text-emerald-700', label: 'Active', dot: 'bg-emerald-500' },
+      following_up: { bg: 'bg-blue-50', text: 'text-blue-700', label: 'Following Up', dot: 'bg-blue-500' },
       completed: { bg: 'bg-slate-100', text: 'text-slate-600', label: 'Ended', dot: 'bg-slate-400' },
       ended: { bg: 'bg-slate-100', text: 'text-slate-600', label: 'Ended', dot: 'bg-slate-400' },
       draft: { bg: 'bg-gray-100', text: 'text-gray-600', label: 'Draft', dot: 'bg-gray-400' },
@@ -284,7 +285,9 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
     return configs[status] || configs.draft;
   };
 
-  const statusConfig = getStatusConfig(campaign.status);
+  // Show "Following Up" for completed campaigns that have active follow-up sequences
+  const effectiveStatus = (campaign.status === 'completed' && hasActiveFollowups) ? 'following_up' : campaign.status;
+  const statusConfig = getStatusConfig(effectiveStatus);
 
   const formatDateTime = (dateStr: string) => {
     if (!dateStr) return '-';
@@ -362,7 +365,8 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
 
   const isActive = campaign.status === 'active';
   const isPaused = campaign.status === 'paused';
-  const isEnded = campaign.status === 'completed' || campaign.status === 'archived';
+  const isFollowingUp = campaign.status === 'completed' && hasActiveFollowups;
+  const isEnded = (campaign.status === 'completed' || campaign.status === 'archived') && !isFollowingUp;
 
   // Progress
   const totalSent = analytics?.totalSent || campaign.sentCount || 0;
@@ -430,6 +434,15 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
                   <span className="text-gray-300">·</span>
                   <span className="text-xs text-gray-400">
                     Ended <span className="text-gray-500 font-medium">{formatDateTime(endedDate)}</span>
+                  </span>
+                </>
+              )}
+              {isFollowingUp && (
+                <>
+                  <span className="text-gray-300">·</span>
+                  <span className="text-xs text-blue-500 font-medium">
+                    <Timer className="h-3 w-3 inline mr-1" />
+                    Follow-up sequence active
                   </span>
                 </>
               )}

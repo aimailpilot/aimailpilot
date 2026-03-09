@@ -1328,6 +1328,7 @@ Which account should I use and why? If I need to split across accounts, provide 
         recentEvents: trackingEvents.slice(0, 50),
         stepAnalytics,
         followupSequences,
+        hasActiveFollowups: followupSequences.length > 0 && followupSequences.some((s: any) => s.steps && s.steps.length > 0),
         emailAccount,
         activityTimeline,
         trackingBaseUrl: campaignEngine.getBaseUrl(),
@@ -2071,26 +2072,45 @@ Which account should I use and why? If I need to split across accounts, provide 
             metadata: JSON.stringify({ filtered: true, reason: isBot ? 'bot' : 'gmail_prefetch', secondsSinceSent: Math.round(secondsSinceSent) }),
           });
         } else {
-          // Real open (either normal browser or Gmail proxy after delay)
-          await storage.createTrackingEvent({
-            type: 'open',
-            campaignId: message.campaignId,
-            messageId: message.id,
-            contactId: message.contactId,
-            trackingId,
-            userAgent,
-            ip: req.ip,
-          });
+          // Check for rapid-fire duplicate opens (same message, same UA within 30 seconds)
+          // Gmail image proxy often hits the tracking pixel multiple times in quick succession
+          const recentEvents = await storage.getRecentTrackingEvents(message.id, 'open', 30);
+          const isDuplicate = recentEvents.length > 0;
+          
+          if (isDuplicate) {
+            // Still log the event but mark as duplicate — don't increment counts
+            await storage.createTrackingEvent({
+              type: 'open',
+              campaignId: message.campaignId,
+              messageId: message.id,
+              contactId: message.contactId,
+              trackingId,
+              userAgent,
+              ip: req.ip,
+              metadata: JSON.stringify({ duplicate: true, secondsSinceLast: Math.round((Date.now() - new Date(recentEvents[0].createdAt).getTime()) / 1000) }),
+            });
+          } else {
+            // Real unique open (either normal browser or Gmail proxy after delay)
+            await storage.createTrackingEvent({
+              type: 'open',
+              campaignId: message.campaignId,
+              messageId: message.id,
+              contactId: message.contactId,
+              trackingId,
+              userAgent,
+              ip: req.ip,
+            });
 
-          // Only increment campaign count on first real open
-          if (!message.openedAt) {
-            await storage.updateCampaignMessage(message.id, { openedAt: new Date().toISOString() });
-            
-            const campaign = await storage.getCampaign(message.campaignId);
-            if (campaign) {
-              await storage.updateCampaign(message.campaignId, {
-                openedCount: (campaign.openedCount || 0) + 1,
-              });
+            // Only increment campaign count on first real open
+            if (!message.openedAt) {
+              await storage.updateCampaignMessage(message.id, { openedAt: new Date().toISOString() });
+              
+              const campaign = await storage.getCampaign(message.campaignId);
+              if (campaign) {
+                await storage.updateCampaign(message.campaignId, {
+                  openedCount: (campaign.openedCount || 0) + 1,
+                });
+              }
             }
           }
         }

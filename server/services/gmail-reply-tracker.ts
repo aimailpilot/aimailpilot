@@ -292,7 +292,7 @@ export class GmailReplyTracker {
                 gmailThreadId: msg.threadId,
                 fromEmail: from,
                 fromName: from.replace(/<.*>/, '').trim(),
-                toEmail: settings.gmail_email || '',
+                toEmail: settings.gmail_user_email || '',
                 subject,
                 snippet: msg.snippet || '',
                 body,
@@ -443,7 +443,7 @@ export class GmailReplyTracker {
           if (thread.messages.length > 1) {
             // Verify at least one message is NOT from us (not just our own followup)
             const settings = await storage.getApiSettings(orgId);
-            const ourEmail = (settings.gmail_email || '').toLowerCase();
+            const ourEmail = (settings.gmail_user_email || '').toLowerCase();
             const hasExternalReply = thread.messages.some((m: any) => {
               const from = (m.payload?.headers || []).find((h: any) => h.name.toLowerCase() === 'from')?.value || '';
               return !from.toLowerCase().includes(ourEmail);

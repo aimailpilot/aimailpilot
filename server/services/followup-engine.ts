@@ -1,10 +1,10 @@
 import { storage } from "../storage";
-import { LLMService } from "./llm";
 import { smtpEmailService } from "./smtp-email-service";
 
 // Simple email interface since we need to integrate with existing email providers
 interface EmailMessage {
   to: string;
+  from?: string;
   subject: string;
   html: string;
   text?: string;
@@ -16,10 +16,101 @@ interface EmailResult {
   error?: string;
 }
 
+/**
+ * Send email via Gmail API using OAuth access token.
+ */
+async function sendViaGmailAPI(
+  accessToken: string,
+  opts: { from: string; to: string; subject: string; html: string; headers?: Record<string, string> }
+): Promise<EmailResult> {
+  try {
+    let raw = '';
+    raw += `From: ${opts.from}\r\n`;
+    raw += `To: ${opts.to}\r\n`;
+    raw += `Subject: ${opts.subject}\r\n`;
+    raw += `MIME-Version: 1.0\r\n`;
+    raw += `Content-Type: text/html; charset="UTF-8"\r\n`;
+    if (opts.headers) {
+      for (const [k, v] of Object.entries(opts.headers)) {
+        raw += `${k}: ${v}\r\n`;
+      }
+    }
+    raw += `\r\n`;
+    raw += opts.html;
+
+    const base64 = Buffer.from(raw).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+    const resp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ raw: base64 }),
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      return { success: false, error: `Gmail API error (${resp.status}): ${errText}` };
+    }
+
+    const data = await resp.json() as any;
+    return { success: true, messageId: data.id };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 class EmailService {
-  async sendEmail(emailAccountId: string, message: EmailMessage): Promise<EmailResult> {
+  async sendEmail(emailAccountId: string, message: EmailMessage, orgId?: string): Promise<EmailResult> {
     try {
-      // Try real SMTP sending via the email account
+      // Try Gmail API first if we have OAuth tokens
+      if (orgId) {
+        const settings = await storage.getApiSettings(orgId);
+        let accessToken = settings.gmail_access_token;
+        const refreshToken = settings.gmail_refresh_token;
+        const tokenExpiry = settings.gmail_token_expiry;
+        const clientId = settings.google_oauth_client_id;
+        const clientSecret = settings.google_oauth_client_secret;
+
+        // Refresh token if expired
+        if (accessToken && tokenExpiry && Date.now() > parseInt(tokenExpiry) - 300000) {
+          if (refreshToken && clientId && clientSecret) {
+            try {
+              const resp = await fetch('https://oauth2.googleapis.com/token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({
+                  grant_type: 'refresh_token',
+                  refresh_token: refreshToken,
+                  client_id: clientId,
+                  client_secret: clientSecret,
+                }),
+              });
+              if (resp.ok) {
+                const data = await resp.json() as any;
+                accessToken = data.access_token;
+                await storage.setApiSetting(orgId, 'gmail_access_token', accessToken);
+                await storage.setApiSetting(orgId, 'gmail_token_expiry', String(Date.now() + (data.expires_in || 3600) * 1000));
+              }
+            } catch (e) {
+              console.error('[Followup] Token refresh failed:', e);
+            }
+          }
+        }
+
+        if (accessToken) {
+          const fromEmail = settings.gmail_user_email || message.from || '';
+          console.log(`[Followup] Sending follow-up via Gmail API to ${message.to}`);
+          const result = await sendViaGmailAPI(accessToken, {
+            from: fromEmail,
+            to: message.to,
+            subject: message.subject,
+            html: message.html,
+          });
+          if (result.success) return result;
+          console.log(`[Followup] Gmail API failed, trying SMTP: ${result.error}`);
+        }
+      }
+
+      // Try SMTP as fallback
       const account = await storage.getEmailAccount(emailAccountId);
       if (account?.smtpConfig) {
         console.log(`[Followup] Sending email via SMTP account ${emailAccountId} to ${message.to}`);
@@ -36,8 +127,8 @@ class EmailService {
         };
       }
 
-      // Fallback: log and simulate if no SMTP config
-      console.log(`[Followup] No SMTP config for account ${emailAccountId}, simulating send to ${message.to}`);
+      // Fallback: log and simulate if no sending method available
+      console.log(`[Followup] No email sending method for account ${emailAccountId}, simulating send to ${message.to}`);
       return {
         success: true,
         messageId: `followup_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
@@ -59,11 +150,9 @@ export interface FollowupTriggerData {
 }
 
 export class FollowupEngine {
-  private llmService: LLMService;
   private emailService: EmailService;
 
   constructor() {
-    this.llmService = new LLMService();
     this.emailService = new EmailService();
   }
 
@@ -122,11 +211,15 @@ export class FollowupEngine {
     const now = new Date();
     const sentAt = new Date(message.sentAt);
     
-    // Calculate delay in milliseconds - support days, hours
+    // Calculate delay in milliseconds - support days, hours, minutes
     const delayDays = parseInt(step.delayDays) || 0;
     const delayHours = parseInt(step.delayHours) || 0;
-    const delayMs = (delayDays * 24 * 60 * 60 * 1000) + (delayHours * 60 * 60 * 1000);
+    const delayMinutes = parseInt(step.delayMinutes) || 0;
+    const delayMs = (delayDays * 24 * 60 * 60 * 1000) + (delayHours * 60 * 60 * 1000) + (delayMinutes * 60 * 1000);
     const triggerTime = new Date(sentAt.getTime() + delayMs);
+
+    // Debug logging
+    console.log(`[Followup] Evaluating step ${step.stepNumber} for msg ${message.id}: trigger=${step.trigger}, delay=${delayDays}d ${delayHours}h ${delayMinutes}m, sentAt=${sentAt.toISOString()}, triggerTime=${triggerTime.toISOString()}, now=${now.toISOString()}, timeReached=${now >= triggerTime}`);
 
     // Check if enough time has passed
     if (now < triggerTime) {
@@ -205,47 +298,21 @@ export class FollowupEngine {
         }
       }
 
-      // Use AI to personalize if LLM config is available
-      if (campaign.llmConfigId && campaign.organizationId) {
-        try {
-          const personalizedContent = await this.llmService.generatePersonalizedEmail(
-            campaign.organizationId,
-            contact,
-            content,
-            {
-              isFollowup: true,
-              originalMessage: message,
-              step: step,
-              trigger: step.trigger
-            }
-          );
-          content = personalizedContent;
-        } catch (error) {
-          console.error("Failed to personalize follow-up content:", error);
-          // Continue with original content
-        }
-      }
-
       // Create follow-up execution record
       const execution = await storage.createFollowupExecution({
         campaignMessageId: message.id,
         stepId: step.id,
         contactId: contact.id,
-        status: "scheduled",
+        campaignId: campaign.id,
+        status: "pending",
         scheduledAt: new Date(),
-        subject: subject || '',
-        content: content || '',
-        triggerData: {
-          trigger: step.trigger,
-          originalMessageId: message.id,
-          timestamp: new Date().toISOString()
-        }
       });
 
       console.log(`Scheduled follow-up for contact ${contact.email}, step ${step.stepNumber}`);
       
-      // If the follow-up should be sent immediately, send it now
-      if (step.delayDays === 0 && step.delayHours === 0) {
+      // If the follow-up should be sent immediately (no delay configured), send it now
+      const hasDelay = (parseInt(step.delayDays) || 0) > 0 || (parseInt(step.delayHours) || 0) > 0 || (parseInt(step.delayMinutes) || 0) > 0;
+      if (!hasDelay) {
         await this.executeFollowup(execution.id);
       }
       
@@ -301,8 +368,11 @@ export class FollowupEngine {
         return;
       }
 
-      // Send the follow-up email
-      if (!campaign.emailAccountId || !contact.email || !execution.subject || !execution.content) {
+      // Send the follow-up email — use subject from step if execution.subject is empty
+      const subject = execution.subject || step.subject || campaign.subject || 'Follow-up';
+      const content = execution.content || step.content || '';
+      
+      if (!campaign.emailAccountId || !contact.email || !content) {
         await storage.updateFollowupExecution(executionId, {
           status: "failed",
           errorMessage: "Missing required email data"
@@ -310,12 +380,26 @@ export class FollowupEngine {
         return;
       }
 
+      // Replace template variables in content
+      let personalizedContent = content
+        .replace(/\{\{firstName\}\}/g, contact.firstName || '')
+        .replace(/\{\{lastName\}\}/g, contact.lastName || '')
+        .replace(/\{\{email\}\}/g, contact.email || '')
+        .replace(/\{\{company\}\}/g, contact.company || '')
+        .replace(/\{\{jobTitle\}\}/g, contact.jobTitle || '')
+        .replace(/\{\{topic\}\}/g, campaign.subject || campaign.name || '');
+      
+      let personalizedSubject = subject
+        .replace(/\{\{firstName\}\}/g, contact.firstName || '')
+        .replace(/\{\{lastName\}\}/g, contact.lastName || '')
+        .replace(/\{\{company\}\}/g, contact.company || '');
+
       const emailResult = await this.emailService.sendEmail(campaign.emailAccountId, {
         to: contact.email,
-        subject: execution.subject,
-        html: execution.content,
-        text: execution.content.replace(/<[^>]*>/g, ""), // Strip HTML for text version
-      });
+        subject: personalizedSubject,
+        html: personalizedContent,
+        text: personalizedContent.replace(/<[^>]*>/g, ""), // Strip HTML for text version
+      }, campaign.organizationId);
 
       if (emailResult.success) {
         await storage.updateFollowupExecution(executionId, {
@@ -323,25 +407,43 @@ export class FollowupEngine {
           sentAt: new Date()
         });
         
-        // Create a new campaign message record for tracking
+        // Create a new campaign message record for tracking with correct stepNumber
+        const trackingId = `${campaign.id}_${contact.id}_${Date.now()}`;
         await storage.createCampaignMessage({
           campaignId: campaign.id,
           contactId: contact.id,
-          subject: execution.subject || '',
-          content: execution.content || '',
+          subject: personalizedSubject,
+          content: personalizedContent,
           status: "sent",
           sentAt: new Date(),
-          trackingId: emailResult.messageId
+          stepNumber: step.stepNumber || 1,
+          trackingId: trackingId,
+          providerMessageId: emailResult.messageId,
+          emailAccountId: campaign.emailAccountId,
         });
         
-        console.log(`Follow-up sent successfully to ${contact.email}`);
+        // Update campaign sent count
+        await storage.updateCampaign(campaign.id, {
+          sentCount: (campaign.sentCount || 0) + 1,
+        });
+        
+        // Create sent tracking event
+        await storage.createTrackingEvent({
+          type: 'sent',
+          campaignId: campaign.id,
+          messageId: trackingId,
+          contactId: contact.id,
+          trackingId: trackingId,
+        });
+        
+        console.log(`[Followup] Follow-up step ${step.stepNumber} sent successfully to ${contact.email} for campaign ${campaign.name}`);
       } else {
         await storage.updateFollowupExecution(executionId, {
           status: "failed",
           errorMessage: emailResult.error || "Unknown email sending error"
         });
         
-        console.error(`Failed to send follow-up to ${contact.email}:`, emailResult.error);
+        console.error(`[Followup] Failed to send follow-up to ${contact.email}:`, emailResult.error);
       }
       
     } catch (error) {
@@ -404,7 +506,24 @@ export class FollowupEngine {
 // Create singleton instance
 export const followupEngine = new FollowupEngine();
 
-// Auto-process follow-ups every 5 minutes
-setInterval(() => {
+// Auto-process follow-ups every 60 seconds (to handle minute-level delays)
+let followupInterval: NodeJS.Timeout | null = null;
+
+export function startFollowupEngine() {
+  if (followupInterval) return;
+  console.log('[Followup] Starting follow-up engine (checking every 60s)...');
+  // Run immediately on start
   followupEngine.processFollowupTriggers().catch(console.error);
-}, 5 * 60 * 1000);
+  // Then run every 60 seconds
+  followupInterval = setInterval(() => {
+    followupEngine.processFollowupTriggers().catch(console.error);
+  }, 60 * 1000);
+}
+
+export function stopFollowupEngine() {
+  if (followupInterval) {
+    clearInterval(followupInterval);
+    followupInterval = null;
+    console.log('[Followup] Follow-up engine stopped');
+  }
+}
