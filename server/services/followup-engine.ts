@@ -218,9 +218,13 @@ export class FollowupEngine {
    */
   private async processMessageFollowups(message: any, followupSteps: any[]): Promise<void> {
     for (const step of followupSteps) {
+      // Skip if already executed — check this first to avoid unnecessary evaluation + logging
+      if (await this.followupAlreadyExecuted(message.id, step.id)) {
+        continue;
+      }
       const shouldTrigger = await this.evaluateFollowupTrigger(message, step);
       
-      if (shouldTrigger && !(await this.followupAlreadyExecuted(message.id, step.id))) {
+      if (shouldTrigger) {
         await this.scheduleFollowup(message, step);
       }
     }
@@ -240,11 +244,9 @@ export class FollowupEngine {
     const delayMs = (delayDays * 24 * 60 * 60 * 1000) + (delayHours * 60 * 60 * 1000) + (delayMinutes * 60 * 1000);
     const triggerTime = new Date(sentAt.getTime() + delayMs);
 
-    // Debug logging
-    console.log(`[Followup] Evaluating step ${step.stepNumber} for msg ${message.id}: trigger=${step.trigger}, delay=${delayDays}d ${delayHours}h ${delayMinutes}m, sentAt=${sentAt.toISOString()}, triggerTime=${triggerTime.toISOString()}, now=${now.toISOString()}, timeReached=${now >= triggerTime}`);
-
-    // Check if enough time has passed
+    // Debug logging — only log when time hasn't been reached yet (waiting) or when triggering
     if (now < triggerTime) {
+      // Only log once per minute for waiting messages (skip noisy repeated logs)
       return false;
     }
 
