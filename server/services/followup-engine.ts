@@ -8,6 +8,10 @@ interface EmailMessage {
   subject: string;
   html: string;
   text?: string;
+  // Threading support: reply in same thread as original email
+  threadId?: string;       // Gmail thread ID to reply in
+  inReplyTo?: string;      // Message-ID of the original email
+  references?: string;     // References header for threading
 }
 
 interface EmailResult {
@@ -21,7 +25,7 @@ interface EmailResult {
  */
 async function sendViaGmailAPI(
   accessToken: string,
-  opts: { from: string; to: string; subject: string; html: string; headers?: Record<string, string> }
+  opts: { from: string; to: string; subject: string; html: string; headers?: Record<string, string>; threadId?: string }
 ): Promise<EmailResult> {
   try {
     let raw = '';
@@ -40,10 +44,16 @@ async function sendViaGmailAPI(
 
     const base64 = Buffer.from(raw).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
+    // Include threadId if provided — this tells Gmail to place the reply in the same thread
+    const payload: any = { raw: base64 };
+    if (opts.threadId) {
+      payload.threadId = opts.threadId;
+    }
+
     const resp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
       method: 'POST',
       headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ raw: base64 }),
+      body: JSON.stringify(payload),
     });
 
     if (!resp.ok) {
@@ -98,12 +108,20 @@ class EmailService {
 
         if (accessToken) {
           const fromEmail = settings.gmail_user_email || message.from || '';
-          console.log(`[Followup] Sending follow-up via Gmail API to ${message.to}`);
+          console.log(`[Followup] Sending follow-up via Gmail API to ${message.to}${message.threadId ? ' (thread: ' + message.threadId + ')' : ''}`);
+          
+          // Build threading headers for in-reply-to
+          const headers: Record<string, string> = {};
+          if (message.inReplyTo) headers['In-Reply-To'] = message.inReplyTo;
+          if (message.references) headers['References'] = message.references;
+          
           const result = await sendViaGmailAPI(accessToken, {
             from: fromEmail,
             to: message.to,
             subject: message.subject,
             html: message.html,
+            headers: Object.keys(headers).length > 0 ? headers : undefined,
+            threadId: message.threadId,
           });
           if (result.success) return result;
           console.log(`[Followup] Gmail API failed, trying SMTP: ${result.error}`);
@@ -186,7 +204,11 @@ export class FollowupEngine {
     const campaignMessages = await storage.getCampaignMessages(campaignId);
     const followupSteps = await storage.getFollowupSteps(sequenceId);
     
-    for (const message of campaignMessages) {
+    // Only evaluate original (step 0) messages for follow-up triggers
+    // Step 1+ messages are follow-ups themselves and should not trigger more follow-ups
+    const originalMessages = campaignMessages.filter((m: any) => (m.stepNumber || 0) === 0);
+    
+    for (const message of originalMessages) {
       await this.processMessageFollowups(message, followupSteps);
     }
   }
@@ -305,7 +327,7 @@ export class FollowupEngine {
         contactId: contact.id,
         campaignId: campaign.id,
         status: "pending",
-        scheduledAt: new Date(),
+        scheduledAt: new Date().toISOString(),
       });
 
       console.log(`Scheduled follow-up for contact ${contact.email}, step ${step.stepNumber}`);
@@ -368,8 +390,34 @@ export class FollowupEngine {
         return;
       }
 
-      // Send the follow-up email — use subject from step if execution.subject is empty
-      const subject = execution.subject || step.subject || campaign.subject || 'Follow-up';
+      // ========== Threading: send follow-up as reply in the same email thread ==========
+      // Find the ORIGINAL (step 0) message for this contact in this campaign.
+      // execution.campaignMessageId should point to step 0, but in edge cases it
+      // might point to a step-1 message, so always look up the step-0 message.
+      let originalMessage: any = campaignMessage;
+      if ((campaignMessage as any).stepNumber !== 0 && (campaignMessage as any).stepNumber !== undefined) {
+        const allMsgs = await storage.getCampaignMessages(campaign.id, 1000, 0);
+        const step0Msg = allMsgs.find((m: any) => m.contactId === contact.id && (m.stepNumber || 0) === 0);
+        if (step0Msg) {
+          originalMessage = step0Msg;
+          console.log(`[Followup] Found step-0 original message ${step0Msg.id} with providerMessageId=${step0Msg.providerMessageId}`);
+        }
+      }
+      
+      // Determine subject: if step has no subject or same subject, use "Re: <original>"
+      const stepSubject = (execution.subject || step.subject || '').trim();
+      const originalSubject = (originalMessage.subject || campaign.subject || '').trim();
+      let followupSubject: string;
+      
+      if (!stepSubject || stepSubject === originalSubject) {
+        // No custom subject or same subject → thread as reply
+        const cleanSubject = originalSubject.replace(/^(Re:\s*)+/i, '').trim();
+        followupSubject = cleanSubject ? `Re: ${cleanSubject}` : 'Follow-up';
+      } else {
+        // Different subject specified → use it (will create new thread)
+        followupSubject = stepSubject;
+      }
+      
       const content = execution.content || step.content || '';
       
       if (!campaign.emailAccountId || !contact.email || !content) {
@@ -389,22 +437,91 @@ export class FollowupEngine {
         .replace(/\{\{jobTitle\}\}/g, contact.jobTitle || '')
         .replace(/\{\{topic\}\}/g, campaign.subject || campaign.name || '');
       
-      let personalizedSubject = subject
+      let personalizedSubject = followupSubject
         .replace(/\{\{firstName\}\}/g, contact.firstName || '')
         .replace(/\{\{lastName\}\}/g, contact.lastName || '')
         .replace(/\{\{company\}\}/g, contact.company || '');
+
+      // Build threading headers
+      // Fetch the real threadId and Message-ID from Gmail for the original email
+      let gmailThreadId: string | undefined;
+      let originalMessageId = '';
+      
+      if (originalMessage.providerMessageId && campaign.organizationId) {
+        try {
+          const settings = await storage.getApiSettings(campaign.organizationId);
+          let accessToken = settings.gmail_access_token;
+          const refreshToken = settings.gmail_refresh_token;
+          const tokenExpiry = settings.gmail_token_expiry;
+          const clientId = settings.google_oauth_client_id;
+          const clientSecret = settings.google_oauth_client_secret;
+          
+          // Refresh token if needed
+          if (accessToken && tokenExpiry && Date.now() > parseInt(tokenExpiry) - 300000) {
+            if (refreshToken && clientId && clientSecret) {
+              try {
+                const refreshResp = await fetch('https://oauth2.googleapis.com/token', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                  body: new URLSearchParams({
+                    grant_type: 'refresh_token',
+                    refresh_token: refreshToken,
+                    client_id: clientId,
+                    client_secret: clientSecret,
+                  }),
+                });
+                if (refreshResp.ok) {
+                  const data = await refreshResp.json() as any;
+                  accessToken = data.access_token;
+                  await storage.setApiSetting(campaign.organizationId, 'gmail_access_token', accessToken);
+                  await storage.setApiSetting(campaign.organizationId, 'gmail_token_expiry', String(Date.now() + (data.expires_in || 3600) * 1000));
+                }
+              } catch (e) {
+                console.error('[Followup] Token refresh for threading failed:', e);
+              }
+            }
+          }
+          
+          if (accessToken) {
+            const msgResp = await fetch(
+              `https://gmail.googleapis.com/gmail/v1/users/me/messages/${originalMessage.providerMessageId}?format=metadata&metadataHeaders=Message-ID`,
+              { headers: { Authorization: `Bearer ${accessToken}` } }
+            );
+            if (msgResp.ok) {
+              const msgData = await msgResp.json() as any;
+              // Get the real Gmail threadId
+              gmailThreadId = msgData.threadId;
+              // Get the real Message-ID header
+              const msgIdHeader = (msgData.payload?.headers || []).find(
+                (h: any) => h.name.toLowerCase() === 'message-id'
+              );
+              if (msgIdHeader) {
+                originalMessageId = msgIdHeader.value;
+              }
+            }
+          }
+        } catch (e) {
+          console.log(`[Followup] Could not fetch original Message-ID, will rely on threadId for threading`);
+        }
+      }
+
+      console.log(`[Followup] Threading: subject="${personalizedSubject}", threadId=${gmailThreadId || 'none'}, inReplyTo=${originalMessageId || 'none'}`);
 
       const emailResult = await this.emailService.sendEmail(campaign.emailAccountId, {
         to: contact.email,
         subject: personalizedSubject,
         html: personalizedContent,
-        text: personalizedContent.replace(/<[^>]*>/g, ""), // Strip HTML for text version
+        text: personalizedContent.replace(/<[^>]*>/g, ""),
+        // Threading info — places follow-up in same Gmail thread as original email
+        threadId: gmailThreadId,
+        inReplyTo: originalMessageId || undefined,
+        references: originalMessageId || undefined,
       }, campaign.organizationId);
 
       if (emailResult.success) {
         await storage.updateFollowupExecution(executionId, {
           status: "sent",
-          sentAt: new Date()
+          sentAt: new Date().toISOString()
         });
         
         // Create a new campaign message record for tracking with correct stepNumber
@@ -415,7 +532,7 @@ export class FollowupEngine {
           subject: personalizedSubject,
           content: personalizedContent,
           status: "sent",
-          sentAt: new Date(),
+          sentAt: new Date().toISOString(),
           stepNumber: step.stepNumber || 1,
           trackingId: trackingId,
           providerMessageId: emailResult.messageId,

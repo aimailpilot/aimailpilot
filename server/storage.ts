@@ -831,10 +831,10 @@ export class DatabaseStorage {
   async getCampaignMessageByTracking(trackingId: string) { return db.prepare('SELECT * FROM messages WHERE trackingId = ?').get(trackingId) || null; }
   async createCampaignMessage(message: any) {
     const id = genId();
-    db.prepare('INSERT INTO messages (id, campaignId, contactId, subject, content, status, trackingId, emailAccountId, stepNumber, sentAt, openedAt, clickedAt, repliedAt, errorMessage, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+    db.prepare('INSERT INTO messages (id, campaignId, contactId, subject, content, status, trackingId, emailAccountId, stepNumber, sentAt, openedAt, clickedAt, repliedAt, errorMessage, providerMessageId, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
       id, message.campaignId, message.contactId || null, message.subject || '', message.content || '', message.status || 'sending',
       message.trackingId || null, message.emailAccountId || null, message.stepNumber || 0,
-      toSqlDate(message.sentAt), toSqlDate(message.openedAt), toSqlDate(message.clickedAt), toSqlDate(message.repliedAt), message.errorMessage || null, now()
+      toSqlDate(message.sentAt), toSqlDate(message.openedAt), toSqlDate(message.clickedAt), toSqlDate(message.repliedAt), message.errorMessage || null, message.providerMessageId || null, now()
     );
     return this.getCampaignMessage(id);
   }
@@ -1028,9 +1028,15 @@ export class DatabaseStorage {
   }
   async createFollowupExecution(execution: any) {
     const id = genId();
-    const scheduledAt = execution.scheduledAt instanceof Date ? execution.scheduledAt.toISOString() : (execution.scheduledAt || null);
+    // Ensure all values are SQLite-safe (strings, numbers, or null)
+    const toStr = (v: any): string | null => {
+      if (v == null) return null;
+      if (v instanceof Date) return v.toISOString();
+      if (typeof v === 'object') return JSON.stringify(v);
+      return String(v);
+    };
     db.prepare('INSERT INTO followup_executions (id, campaignMessageId, stepId, contactId, campaignId, status, scheduledAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
-      id, execution.campaignMessageId || null, execution.stepId || null, execution.contactId || null, execution.campaignId || null, execution.status || 'pending', scheduledAt, now()
+      id, toStr(execution.campaignMessageId), toStr(execution.stepId), toStr(execution.contactId), toStr(execution.campaignId), toStr(execution.status) || 'pending', toStr(execution.scheduledAt), now()
     );
     return this.getFollowupExecutionById(id);
   }
@@ -1038,9 +1044,13 @@ export class DatabaseStorage {
     const existing = await this.getFollowupExecutionById(id);
     if (!existing) throw new Error('Execution not found');
     const m = { ...existing as any, ...data };
-    const executedAt = m.executedAt instanceof Date ? m.executedAt.toISOString() : (m.executedAt || null);
-    const sentAt = m.sentAt instanceof Date ? m.sentAt.toISOString() : (m.sentAt || null);
-    db.prepare('UPDATE followup_executions SET status=?, executedAt=? WHERE id=?').run(m.status, executedAt || sentAt || null, id);
+    const toDateStr = (v: any): string | null => {
+      if (v == null) return null;
+      if (v instanceof Date) return v.toISOString();
+      return String(v);
+    };
+    const executedAt = toDateStr(m.executedAt) || toDateStr(m.sentAt) || null;
+    db.prepare('UPDATE followup_executions SET status=?, executedAt=? WHERE id=?').run(String(m.status), executedAt, id);
     return this.getFollowupExecutionById(id);
   }
   async cancelPendingFollowupsForContact(contactId: string, campaignId?: string) {
