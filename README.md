@@ -9,6 +9,7 @@
 ## Features
 
 ### Completed
+- **SuperAdmin Console** - Platform-wide management: user/org administration, impersonation, stats dashboard, role-based access control
 - **Multitenancy & Team Management** - Full multi-organization support with team invitations, roles, and org switching
 - **Google OAuth 2.0 Sign-In** - Real Google authentication for user login (configurable from Advanced Settings)
 - **Microsoft OAuth 2.0 Sign-In** - Outlook/Microsoft account authentication
@@ -58,6 +59,42 @@
 ### Database Tables
 - `org_members` - Many-to-many mapping of users to organizations with roles
 - `org_invitations` - Pending, accepted, or cancelled team invitations
+
+## SuperAdmin System
+
+### Overview
+The SuperAdmin is a platform-level role that sits above organization owners. SuperAdmins can manage all organizations, users, and platform settings.
+
+### How to Become SuperAdmin
+1. **First-time setup**: If no SuperAdmin exists, any authenticated user can claim the role by calling `POST /api/setup-superadmin`
+2. **Environment variable**: Set `SUPERADMIN_EMAILS=admin@example.com,admin2@example.com` to auto-promote users on startup
+3. **Existing SuperAdmin**: A SuperAdmin can grant/revoke SuperAdmin status to other users via the console
+
+### SuperAdmin Features
+| Feature | Description |
+|---------|------------|
+| **Platform Stats** | Total users, orgs, campaigns, emails sent, opens, clicks, replies |
+| **User Management** | List all users, search, enable/disable accounts, grant/revoke SuperAdmin |
+| **Organization Management** | List all orgs with stats, view details, delete organizations (cascade) |
+| **User Impersonation** | View the platform as any user (switch to their org context) |
+| **Top Organizations** | Ranked by email volume with member/contact/campaign counts |
+| **Weekly Activity** | New users, campaigns, and emails sent in the last 7 days |
+
+### SuperAdmin API Endpoints
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/superadmin-exists` | Check if any SuperAdmin exists |
+| POST | `/api/setup-superadmin` | First-time SuperAdmin setup (only works when none exist) |
+| GET | `/api/superadmin/stats` | Platform-wide statistics |
+| GET | `/api/superadmin/organizations` | List all organizations (with search, pagination) |
+| GET | `/api/superadmin/organizations/:id` | Get org details with members and stats |
+| DELETE | `/api/superadmin/organizations/:id` | Delete org and all related data |
+| GET | `/api/superadmin/users` | List all users (with search, pagination) |
+| PUT | `/api/superadmin/users/:id/toggle-active` | Enable/disable user |
+| PUT | `/api/superadmin/users/:id/superadmin` | Grant/revoke SuperAdmin |
+| POST | `/api/superadmin/impersonate/:userId` | Impersonate a user |
+| POST | `/api/superadmin/stop-impersonation` | Stop impersonating |
+| POST | `/api/superadmin/promote-by-email` | Promote user by email |
 
 ## URLs
 - **Production**: https://aimailpilot.com (when deployed)
