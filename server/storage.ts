@@ -83,6 +83,7 @@ db.exec(`
     role TEXT DEFAULT 'admin',
     organizationId TEXT NOT NULL,
     isActive INTEGER DEFAULT 1,
+    isSuperAdmin INTEGER DEFAULT 0,
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL
   );
@@ -447,6 +448,20 @@ try {
 // ========== Messages table migrations ==========
 try { db.exec(`ALTER TABLE messages ADD COLUMN providerMessageId TEXT`); } catch (e) { /* already exists */ }
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_provider_id ON messages(providerMessageId)`); } catch (e) {}
+
+// ========== SuperAdmin migration ==========
+try { db.exec(`ALTER TABLE users ADD COLUMN isSuperAdmin INTEGER DEFAULT 0`); } catch (e) { /* already exists */ }
+// Auto-promote superadmin from environment variable (comma-separated emails)
+try {
+  const superAdminEmails = (process.env.SUPERADMIN_EMAILS || '').split(',').map(e => e.trim().toLowerCase()).filter(Boolean);
+  if (superAdminEmails.length > 0) {
+    const promote = db.prepare('UPDATE users SET isSuperAdmin = 1 WHERE LOWER(email) = ?');
+    for (const email of superAdminEmails) {
+      promote.run(email);
+    }
+    console.log(`[SuperAdmin] Checked ${superAdminEmails.length} email(s) for superadmin promotion`);
+  }
+} catch (e) { /* ignore */ }
 
 // ========== Critical indexes for high-volume (10-20K emails/day) ==========
 // Messages: needed for follow-up engine (getCampaignMessages filter by contactId+stepNumber)
@@ -1610,6 +1625,173 @@ export class DatabaseStorage {
 
   async getAllOrganizationIds(): Promise<string[]> {
     return (db.prepare('SELECT id FROM organizations').all() as any[]).map(r => r.id);
+  }
+
+  // ========== SuperAdmin Methods ==========
+  
+  async isSuperAdmin(userId: string): Promise<boolean> {
+    const user = db.prepare('SELECT isSuperAdmin FROM users WHERE id = ?').get(userId) as any;
+    return user?.isSuperAdmin === 1;
+  }
+
+  async setSuperAdmin(userId: string, isSuperAdmin: boolean): Promise<void> {
+    db.prepare('UPDATE users SET isSuperAdmin = ?, updatedAt = ? WHERE id = ?').run(isSuperAdmin ? 1 : 0, now(), userId);
+  }
+
+  async setSuperAdminByEmail(email: string, isSuperAdmin: boolean): Promise<any> {
+    db.prepare('UPDATE users SET isSuperAdmin = ?, updatedAt = ? WHERE LOWER(email) = LOWER(?)').run(isSuperAdmin ? 1 : 0, now(), email);
+    return db.prepare('SELECT * FROM users WHERE LOWER(email) = LOWER(?)').get(email) || null;
+  }
+
+  async getAllUsers(limit = 100, offset = 0, search?: string): Promise<any[]> {
+    if (search) {
+      return db.prepare(`
+        SELECT u.*, 
+          (SELECT COUNT(*) FROM org_members om WHERE om.userId = u.id) as orgCount,
+          (SELECT GROUP_CONCAT(o.name, ', ') FROM org_members om2 JOIN organizations o ON o.id = om2.organizationId WHERE om2.userId = u.id) as orgNames
+        FROM users u 
+        WHERE u.email LIKE ? OR u.firstName LIKE ? OR u.lastName LIKE ?
+        ORDER BY u.createdAt DESC LIMIT ? OFFSET ?
+      `).all(`%${search}%`, `%${search}%`, `%${search}%`, limit, offset);
+    }
+    return db.prepare(`
+      SELECT u.*, 
+        (SELECT COUNT(*) FROM org_members om WHERE om.userId = u.id) as orgCount,
+        (SELECT GROUP_CONCAT(o.name, ', ') FROM org_members om2 JOIN organizations o ON o.id = om2.organizationId WHERE om2.userId = u.id) as orgNames
+      FROM users u 
+      ORDER BY u.createdAt DESC LIMIT ? OFFSET ?
+    `).all(limit, offset);
+  }
+
+  async getAllUsersCount(search?: string): Promise<number> {
+    if (search) {
+      return ((db.prepare('SELECT COUNT(*) as c FROM users WHERE email LIKE ? OR firstName LIKE ? OR lastName LIKE ?').get(`%${search}%`, `%${search}%`, `%${search}%`)) as any).c;
+    }
+    return ((db.prepare('SELECT COUNT(*) as c FROM users').get()) as any).c;
+  }
+
+  async getAllOrganizations(limit = 100, offset = 0, search?: string): Promise<any[]> {
+    if (search) {
+      return db.prepare(`
+        SELECT o.*,
+          (SELECT COUNT(*) FROM org_members om WHERE om.organizationId = o.id) as memberCount,
+          (SELECT COUNT(*) FROM campaigns c WHERE c.organizationId = o.id) as campaignCount,
+          (SELECT COUNT(*) FROM contacts ct WHERE ct.organizationId = o.id) as contactCount,
+          (SELECT COUNT(*) FROM email_accounts ea WHERE ea.organizationId = o.id) as emailAccountCount,
+          (SELECT SUM(CASE WHEN c2.status = 'active' THEN 1 ELSE 0 END) FROM campaigns c2 WHERE c2.organizationId = o.id) as activeCampaigns
+        FROM organizations o 
+        WHERE o.name LIKE ? OR o.domain LIKE ?
+        ORDER BY o.createdAt DESC LIMIT ? OFFSET ?
+      `).all(`%${search}%`, `%${search}%`, limit, offset);
+    }
+    return db.prepare(`
+      SELECT o.*,
+        (SELECT COUNT(*) FROM org_members om WHERE om.organizationId = o.id) as memberCount,
+        (SELECT COUNT(*) FROM campaigns c WHERE c.organizationId = o.id) as campaignCount,
+        (SELECT COUNT(*) FROM contacts ct WHERE ct.organizationId = o.id) as contactCount,
+        (SELECT COUNT(*) FROM email_accounts ea WHERE ea.organizationId = o.id) as emailAccountCount,
+        (SELECT SUM(CASE WHEN c2.status = 'active' THEN 1 ELSE 0 END) FROM campaigns c2 WHERE c2.organizationId = o.id) as activeCampaigns
+      FROM organizations o 
+      ORDER BY o.createdAt DESC LIMIT ? OFFSET ?
+    `).all(limit, offset);
+  }
+
+  async getAllOrganizationsCount(search?: string): Promise<number> {
+    if (search) {
+      return ((db.prepare('SELECT COUNT(*) as c FROM organizations WHERE name LIKE ? OR domain LIKE ?').get(`%${search}%`, `%${search}%`)) as any).c;
+    }
+    return ((db.prepare('SELECT COUNT(*) as c FROM organizations').get()) as any).c;
+  }
+
+  async getPlatformStats(): Promise<any> {
+    const totalUsers = ((db.prepare('SELECT COUNT(*) as c FROM users').get()) as any).c;
+    const activeUsers = ((db.prepare('SELECT COUNT(*) as c FROM users WHERE isActive = 1').get()) as any).c;
+    const totalOrgs = ((db.prepare('SELECT COUNT(*) as c FROM organizations').get()) as any).c;
+    const totalCampaigns = ((db.prepare('SELECT COUNT(*) as c FROM campaigns').get()) as any).c;
+    const activeCampaigns = ((db.prepare("SELECT COUNT(*) as c FROM campaigns WHERE status = 'active'").get()) as any).c;
+    const totalContacts = ((db.prepare('SELECT COUNT(*) as c FROM contacts').get()) as any).c;
+    const totalEmailAccounts = ((db.prepare('SELECT COUNT(*) as c FROM email_accounts').get()) as any).c;
+    const totalEmailsSent = ((db.prepare("SELECT COUNT(*) as c FROM messages WHERE status = 'sent'").get()) as any).c;
+    const totalOpens = ((db.prepare("SELECT COUNT(*) as c FROM tracking_events WHERE type = 'open'").get()) as any).c;
+    const totalClicks = ((db.prepare("SELECT COUNT(*) as c FROM tracking_events WHERE type = 'click'").get()) as any).c;
+    const totalReplies = ((db.prepare("SELECT COUNT(*) as c FROM tracking_events WHERE type = 'reply'").get()) as any).c;
+    const totalTemplates = ((db.prepare('SELECT COUNT(*) as c FROM templates').get()) as any).c;
+    const superAdmins = ((db.prepare('SELECT COUNT(*) as c FROM users WHERE isSuperAdmin = 1').get()) as any).c;
+    
+    // Recent activity (last 7 days)
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const recentUsers = ((db.prepare('SELECT COUNT(*) as c FROM users WHERE createdAt > ?').get(sevenDaysAgo)) as any).c;
+    const recentCampaigns = ((db.prepare('SELECT COUNT(*) as c FROM campaigns WHERE createdAt > ?').get(sevenDaysAgo)) as any).c;
+    const recentEmails = ((db.prepare("SELECT COUNT(*) as c FROM messages WHERE sentAt > ?").get(sevenDaysAgo)) as any).c;
+
+    // Top organizations by email volume
+    const topOrgs = db.prepare(`
+      SELECT o.id, o.name, o.domain,
+        (SELECT COUNT(*) FROM messages m JOIN campaigns c ON c.id = m.campaignId WHERE c.organizationId = o.id AND m.status = 'sent') as emailsSent,
+        (SELECT COUNT(*) FROM contacts ct WHERE ct.organizationId = o.id) as contacts,
+        (SELECT COUNT(*) FROM org_members om WHERE om.organizationId = o.id) as members
+      FROM organizations o
+      ORDER BY emailsSent DESC LIMIT 10
+    `).all();
+
+    return {
+      totalUsers, activeUsers, totalOrgs, totalCampaigns, activeCampaigns,
+      totalContacts, totalEmailAccounts, totalEmailsSent, totalOpens, totalClicks,
+      totalReplies, totalTemplates, superAdmins,
+      recentUsers, recentCampaigns, recentEmails,
+      topOrgs,
+    };
+  }
+
+  async deactivateUser(userId: string): Promise<void> {
+    db.prepare('UPDATE users SET isActive = 0, updatedAt = ? WHERE id = ?').run(now(), userId);
+  }
+
+  async activateUser(userId: string): Promise<void> {
+    db.prepare('UPDATE users SET isActive = 1, updatedAt = ? WHERE id = ?').run(now(), userId);
+  }
+
+  async deleteOrganizationCascade(orgId: string): Promise<void> {
+    const batch = db.transaction(() => {
+      db.prepare('DELETE FROM tracking_events WHERE campaignId IN (SELECT id FROM campaigns WHERE organizationId = ?)').run(orgId);
+      db.prepare('DELETE FROM messages WHERE campaignId IN (SELECT id FROM campaigns WHERE organizationId = ?)').run(orgId);
+      db.prepare('DELETE FROM followup_executions WHERE campaignId IN (SELECT id FROM campaigns WHERE organizationId = ?)').run(orgId);
+      db.prepare('DELETE FROM campaign_followups WHERE campaignId IN (SELECT id FROM campaigns WHERE organizationId = ?)').run(orgId);
+      db.prepare('DELETE FROM followup_steps WHERE sequenceId IN (SELECT id FROM followup_sequences WHERE organizationId = ?)').run(orgId);
+      db.prepare('DELETE FROM followup_sequences WHERE organizationId = ?').run(orgId);
+      db.prepare('DELETE FROM campaigns WHERE organizationId = ?').run(orgId);
+      db.prepare('DELETE FROM contacts WHERE organizationId = ?').run(orgId);
+      db.prepare('DELETE FROM contact_lists WHERE organizationId = ?').run(orgId);
+      db.prepare('DELETE FROM segments WHERE organizationId = ?').run(orgId);
+      db.prepare('DELETE FROM templates WHERE organizationId = ?').run(orgId);
+      db.prepare('DELETE FROM email_accounts WHERE organizationId = ?').run(orgId);
+      db.prepare('DELETE FROM llm_configs WHERE organizationId = ?').run(orgId);
+      db.prepare('DELETE FROM api_settings WHERE organizationId = ?').run(orgId);
+      db.prepare('DELETE FROM unified_inbox WHERE organizationId = ?').run(orgId);
+      db.prepare('DELETE FROM unsubscribes WHERE organizationId = ?').run(orgId);
+      db.prepare('DELETE FROM org_invitations WHERE organizationId = ?').run(orgId);
+      db.prepare('DELETE FROM org_members WHERE organizationId = ?').run(orgId);
+      db.prepare('DELETE FROM organizations WHERE id = ?').run(orgId);
+    });
+    batch();
+  }
+
+  async getOrgDetails(orgId: string): Promise<any> {
+    const org = db.prepare('SELECT * FROM organizations WHERE id = ?').get(orgId) as any;
+    if (!org) return null;
+    const members = db.prepare(`
+      SELECT u.id, u.email, u.firstName, u.lastName, u.isSuperAdmin, u.isActive, u.createdAt,
+        om.role, om.joinedAt
+      FROM org_members om 
+      JOIN users u ON u.id = om.userId
+      WHERE om.organizationId = ?
+      ORDER BY om.role = 'owner' DESC, om.joinedAt ASC
+    `).all(orgId);
+    const campaigns = ((db.prepare('SELECT COUNT(*) as c FROM campaigns WHERE organizationId = ?').get(orgId)) as any).c;
+    const contacts = ((db.prepare('SELECT COUNT(*) as c FROM contacts WHERE organizationId = ?').get(orgId)) as any).c;
+    const emailAccounts = ((db.prepare('SELECT COUNT(*) as c FROM email_accounts WHERE organizationId = ?').get(orgId)) as any).c;
+    const emailsSent = ((db.prepare("SELECT COUNT(*) as c FROM messages m JOIN campaigns c ON c.id = m.campaignId WHERE c.organizationId = ? AND m.status = 'sent'").get(orgId)) as any).c;
+    return { ...org, members, stats: { campaigns, contacts, emailAccounts, emailsSent } };
   }
 }
 

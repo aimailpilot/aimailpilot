@@ -109,7 +109,12 @@ const requireAuth = async (req: any, res: any, next: any) => {
       role: orgRole,
       email: sessionUser?.email || 'unknown',
       name: sessionUser?.name || 'Unknown',
+      isSuperAdmin: false,
     };
+    // Check superadmin status
+    try {
+      req.user.isSuperAdmin = await storage.isSuperAdmin(userId);
+    } catch (e) { /* ignore */ }
     // Auto-detect public URL for tracking links
     const host = req.headers['x-forwarded-host'] || req.headers['host'];
     if (host && !host.includes('localhost')) {
@@ -120,6 +125,14 @@ const requireAuth = async (req: any, res: any, next: any) => {
   } else {
     res.status(401).json({ error: 'Not authenticated' });
   }
+};
+
+// SuperAdmin middleware - must be used AFTER requireAuth
+const requireSuperAdmin = async (req: any, res: any, next: any) => {
+  if (!req.user?.isSuperAdmin) {
+    return res.status(403).json({ error: 'SuperAdmin access required' });
+  }
+  next();
 };
 
 export async function registerRoutes(app: Express): Promise<Server> {
@@ -4068,6 +4081,7 @@ Example response:
         organizationId: req.user.organizationId,
         organizationName: (currentOrg as any)?.name || 'Unknown',
         role: req.user.role,
+        isSuperAdmin: req.user.isSuperAdmin || false,
         organizations: orgs.map((o: any) => ({
           id: o.id,
           name: o.name,
@@ -4078,6 +4092,195 @@ Example response:
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch user profile' });
     }
+  });
+
+  // ========== SUPERADMIN ROUTES ==========
+  app.use('/api/superadmin', requireAuth, requireSuperAdmin);
+
+  // First-time superadmin setup: If no superadmin exists, the first user to call this becomes superadmin
+  // This is separate from the superadmin middleware so any authenticated user can bootstrap
+  app.post('/api/setup-superadmin', requireAuth, async (req: any, res) => {
+    try {
+      const stats = await storage.getPlatformStats();
+      if (stats.superAdmins > 0) {
+        return res.status(403).json({ message: 'SuperAdmin already exists. Contact an existing superadmin.' });
+      }
+      await storage.setSuperAdmin(req.user.id, true);
+      res.json({ success: true, message: 'You are now the platform SuperAdmin!' });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to setup superadmin' });
+    }
+  });
+
+  // Check if superadmin exists (public for setup UI)
+  app.get('/api/superadmin-exists', requireAuth, async (req: any, res) => {
+    try {
+      const stats = await storage.getPlatformStats();
+      res.json({ exists: stats.superAdmins > 0, isSuperAdmin: req.user.isSuperAdmin });
+    } catch (error) {
+      res.json({ exists: false, isSuperAdmin: false });
+    }
+  });
+
+  // Platform-wide statistics
+  app.get('/api/superadmin/stats', async (req: any, res) => {
+    try {
+      const stats = await storage.getPlatformStats();
+      res.json(stats);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch platform stats' });
+    }
+  });
+
+  // List all organizations
+  app.get('/api/superadmin/organizations', async (req: any, res) => {
+    try {
+      const limit = parseInt(req.query.limit) || 50;
+      const offset = parseInt(req.query.offset) || 0;
+      const search = req.query.search || '';
+      const orgs = await storage.getAllOrganizations(limit, offset, search);
+      const total = await storage.getAllOrganizationsCount(search);
+      res.json({ organizations: orgs, total, limit, offset });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch organizations' });
+    }
+  });
+
+  // Get organization details (with members, stats)
+  app.get('/api/superadmin/organizations/:id', async (req: any, res) => {
+    try {
+      const org = await storage.getOrgDetails(req.params.id);
+      if (!org) return res.status(404).json({ message: 'Organization not found' });
+      res.json(org);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch organization details' });
+    }
+  });
+
+  // Delete organization (cascade)
+  app.delete('/api/superadmin/organizations/:id', async (req: any, res) => {
+    try {
+      await storage.deleteOrganizationCascade(req.params.id);
+      res.json({ success: true, message: 'Organization and all related data deleted' });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to delete organization' });
+    }
+  });
+
+  // List all users
+  app.get('/api/superadmin/users', async (req: any, res) => {
+    try {
+      const limit = parseInt(req.query.limit) || 50;
+      const offset = parseInt(req.query.offset) || 0;
+      const search = req.query.search || '';
+      const users = await storage.getAllUsers(limit, offset, search);
+      const total = await storage.getAllUsersCount(search);
+      res.json({ users: users.map((u: any) => ({ ...u, isSuperAdmin: !!u.isSuperAdmin, isActive: !!u.isActive })), total, limit, offset });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch users' });
+    }
+  });
+
+  // Toggle user active/inactive
+  app.put('/api/superadmin/users/:id/toggle-active', async (req: any, res) => {
+    try {
+      const user = await storage.getUser(req.params.id) as any;
+      if (!user) return res.status(404).json({ message: 'User not found' });
+      if (user.isSuperAdmin && req.params.id !== req.user.id) {
+        return res.status(400).json({ message: 'Cannot deactivate another superadmin' });
+      }
+      if (user.isActive) {
+        await storage.deactivateUser(req.params.id);
+      } else {
+        await storage.activateUser(req.params.id);
+      }
+      const updated = await storage.getUser(req.params.id);
+      res.json(updated);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to toggle user status' });
+    }
+  });
+
+  // Grant/revoke superadmin
+  app.put('/api/superadmin/users/:id/superadmin', async (req: any, res) => {
+    try {
+      const { isSuperAdmin } = req.body;
+      if (req.params.id === req.user.id && !isSuperAdmin) {
+        return res.status(400).json({ message: 'Cannot remove your own superadmin access' });
+      }
+      await storage.setSuperAdmin(req.params.id, !!isSuperAdmin);
+      const updated = await storage.getUser(req.params.id);
+      res.json(updated);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to update superadmin status' });
+    }
+  });
+
+  // Impersonate user (switch to their default org)
+  app.post('/api/superadmin/impersonate/:userId', async (req: any, res) => {
+    try {
+      const targetUser = await storage.getUser(req.params.userId) as any;
+      if (!targetUser) return res.status(404).json({ message: 'User not found' });
+      
+      const defaultOrg = await storage.getUserDefaultOrganization(req.params.userId);
+      if (!defaultOrg) return res.status(400).json({ message: 'User has no organization' });
+      
+      // Store original superadmin identity for "return to admin" functionality
+      (req.session as any).originalUserId = req.user.id;
+      (req.session as any).originalUserName = req.user.name;
+      (req.session as any).isImpersonating = true;
+      
+      // Switch to the target user's context
+      (req.session as any).activeOrgId = defaultOrg.id;
+      
+      res.json({ 
+        success: true, 
+        user: { id: targetUser.id, email: targetUser.email, name: `${targetUser.firstName} ${targetUser.lastName}`.trim() },
+        organization: { id: defaultOrg.id, name: (defaultOrg as any).name },
+      });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to impersonate user' });
+    }
+  });
+
+  // Stop impersonation (return to superadmin)
+  app.post('/api/superadmin/stop-impersonation', async (req: any, res) => {
+    try {
+      const originalUserId = (req.session as any)?.originalUserId;
+      if (!originalUserId) return res.status(400).json({ message: 'Not currently impersonating' });
+      
+      const defaultOrg = await storage.getUserDefaultOrganization(originalUserId);
+      (req.session as any).activeOrgId = defaultOrg ? defaultOrg.id : null;
+      delete (req.session as any).originalUserId;
+      delete (req.session as any).originalUserName;
+      delete (req.session as any).isImpersonating;
+      
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to stop impersonation' });
+    }
+  });
+
+  // Promote a user to superadmin by email (useful for initial setup)
+  app.post('/api/superadmin/promote-by-email', async (req: any, res) => {
+    try {
+      const { email } = req.body;
+      if (!email) return res.status(400).json({ message: 'Email is required' });
+      const user = await storage.setSuperAdminByEmail(email, true);
+      if (!user) return res.status(404).json({ message: 'User not found' });
+      res.json({ success: true, user });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to promote user' });
+    }
+  });
+
+  // Get current superadmin's impersonation status
+  app.get('/api/superadmin/impersonation-status', async (req: any, res) => {
+    res.json({
+      isImpersonating: !!(req.session as any)?.isImpersonating,
+      originalUserId: (req.session as any)?.originalUserId || null,
+      originalUserName: (req.session as any)?.originalUserName || null,
+    });
   });
 
   // Start Gmail reply tracking auto-check for all organizations that have tokens

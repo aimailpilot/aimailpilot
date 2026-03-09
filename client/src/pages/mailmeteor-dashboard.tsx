@@ -12,7 +12,7 @@ import {
   Bell, Activity, Inbox, MoreHorizontal, Pause, Play, Trash2,
   ArrowUp, ArrowDown, Calendar, Sparkles, CreditCard, Lightbulb,
   Wrench, PieChart, Link2, Globe, RefreshCw, ExternalLink, XCircle,
-  AlertTriangle, Building2
+  AlertTriangle, Building2, Shield
 } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -34,8 +34,9 @@ import AdvancedSettings from "./advanced-settings";
 import AccountSettings from "./account-settings";
 import UnifiedInbox from "./unified-inbox";
 import TeamManagement from "./team-management";
+import SuperAdminDashboard from "./superadmin-dashboard";
 
-type ViewType = 'campaigns' | 'templates' | 'contacts' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings' | 'team';
+type ViewType = 'campaigns' | 'templates' | 'contacts' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings' | 'team' | 'superadmin';
 
 // Live Tracking Feed component - fetches real tracking events
 function LiveTrackingFeed({ dashStats }: { dashStats: any }) {
@@ -195,6 +196,7 @@ export default function MailMeteorDashboard() {
   const [location, setLocation] = useLocation();
   const [userOrgs, setUserOrgs] = useState<Array<{ id: string; name: string; role: string; isDefault: boolean }>>([]);
   const [currentOrgName, setCurrentOrgName] = useState('');
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   
   const { campaigns, isLoading } = useCampaigns();
 
@@ -211,6 +213,9 @@ export default function MailMeteorDashboard() {
         if (data?.organizations) {
           setUserOrgs(data.organizations);
           setCurrentOrgName(data.organizationName || '');
+        }
+        if (data?.isSuperAdmin) {
+          setIsSuperAdmin(true);
         }
       })
       .catch(() => {});
@@ -324,6 +329,7 @@ export default function MailMeteorDashboard() {
   ];
 
   const sidebarBottomItems = [
+    ...(isSuperAdmin ? [{ key: 'superadmin' as ViewType, label: 'SuperAdmin', icon: Shield }] : []),
     { key: 'team' as ViewType, label: 'Team', icon: Users },
     { key: 'account' as ViewType, label: 'Account', icon: Settings },
     { key: 'advanced-settings' as ViewType, label: 'Advanced', icon: Wrench },
@@ -340,6 +346,7 @@ export default function MailMeteorDashboard() {
       'campaign-detail': 'Campaign Detail',
       'advanced-settings': 'Advanced Settings',
       team: 'Team Management',
+      superadmin: 'SuperAdmin Console',
     };
     return titles[currentView] || 'Dashboard';
   };
@@ -362,6 +369,7 @@ export default function MailMeteorDashboard() {
       'campaign-detail': 'Campaign tracking details',
       'advanced-settings': 'Configure API integrations and advanced options',
       team: 'Manage your team members, roles, and invitations',
+      superadmin: 'Platform-wide management, monitoring, and user administration',
     };
     return descs[currentView] || '';
   };
@@ -576,13 +584,16 @@ export default function MailMeteorDashboard() {
           <div className="mt-4 pt-4 border-t border-white/10 space-y-0.5">
             {sidebarBottomItems.map((item) => {
               const isActive = currentView === item.key && viewMode === 'dashboard';
+              const isSuperAdminItem = item.key === 'superadmin';
               return sidebarCollapsed ? (
                 <Tooltip key={item.key}>
                   <TooltipTrigger asChild>
                     <button
                       onClick={() => { setCurrentView(item.key); setViewMode('dashboard'); }}
                       className={`w-full flex items-center justify-center p-2.5 rounded-lg transition-all duration-150 ${
-                        isActive ? 'bg-white/10 text-white' : 'text-gray-400 hover:bg-white/5 hover:text-gray-200'
+                        isSuperAdminItem
+                          ? isActive ? 'bg-gradient-to-r from-red-500/30 to-orange-500/30 text-orange-300' : 'text-orange-400 hover:bg-red-500/10 hover:text-orange-300'
+                          : isActive ? 'bg-white/10 text-white' : 'text-gray-400 hover:bg-white/5 hover:text-gray-200'
                       }`}
                     >
                       <item.icon className="h-[18px] w-[18px]" />
@@ -595,9 +606,13 @@ export default function MailMeteorDashboard() {
                   key={item.key}
                   onClick={() => { setCurrentView(item.key); setViewMode('dashboard'); }}
                   className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left transition-all duration-150 text-[13px] ${
-                    isActive
-                      ? 'bg-blue-600/90 text-white font-semibold'
-                      : 'text-gray-300 hover:bg-white/5 hover:text-white font-medium'
+                    isSuperAdminItem
+                      ? isActive
+                        ? 'bg-gradient-to-r from-red-600/90 to-orange-600/90 text-white font-semibold'
+                        : 'text-orange-300 hover:bg-red-500/10 hover:text-orange-200 font-medium'
+                      : isActive
+                        ? 'bg-blue-600/90 text-white font-semibold'
+                        : 'text-gray-300 hover:bg-white/5 hover:text-white font-medium'
                   }`}
                 >
                   <item.icon className={`h-[18px] w-[18px] flex-shrink-0`} />
@@ -925,6 +940,11 @@ export default function MailMeteorDashboard() {
           {/* Team Management */}
           {viewMode === 'dashboard' && currentView === 'team' && (
             <TeamManagement />
+          )}
+
+          {/* SuperAdmin Console */}
+          {viewMode === 'dashboard' && currentView === 'superadmin' && isSuperAdmin && (
+            <SuperAdminDashboard />
           )}
 
           {/* Advanced Settings */}
