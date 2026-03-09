@@ -14,7 +14,7 @@ import {
   AlignCenter, AlignRight, Type, Paperclip, Strikethrough, X,
   MoreVertical, ChevronDown, ChevronLeft, ChevronRight, Upload,
   Copy, Table, Trash2, ArrowLeft, Settings2, Rocket, Pencil,
-  SpellCheck, Palette, Brain, Wand2, Play, Monitor
+  SpellCheck, Palette, Brain, Wand2, Play, Monitor, BarChart3
 } from "lucide-react";
 
 // ==================== TYPES ====================
@@ -1546,8 +1546,17 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                               {(c.firstName?.[0] || c.email?.[0] || '?').toUpperCase()}
                             </div>
                             <div className="min-w-0 flex-1">
-                              <div className="text-sm font-medium text-gray-900 truncate">
+                              <div className="text-sm font-medium text-gray-900 truncate flex items-center gap-2">
                                 {c.firstName || c.lastName ? `${c.firstName || ''} ${c.lastName || ''}`.trim() : c.email}
+                                {c.emailRatingGrade && (
+                                  <span className={`inline-flex items-center text-[9px] font-bold px-1 py-0 rounded border ${
+                                    ['A+','A','B+'].includes(c.emailRatingGrade) ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
+                                    ['B','C+','C'].includes(c.emailRatingGrade) ? 'bg-yellow-50 text-yellow-700 border-yellow-200' :
+                                    'bg-gray-100 text-gray-500 border-gray-200'
+                                  }`}>
+                                    <BarChart3 className="h-2 w-2 mr-0.5" />{c.emailRatingGrade}
+                                  </span>
+                                )}
                               </div>
                               {(c.firstName || c.lastName) && <div className="text-xs text-gray-400 truncate">{c.email}</div>}
                             </div>

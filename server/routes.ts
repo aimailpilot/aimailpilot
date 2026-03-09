@@ -2081,6 +2081,51 @@ Example response:
     }
   });
 
+  // ========== EMAIL RATING ==========
+
+  // Calculate rating for a single contact
+  app.post('/api/contacts/:id/rating', async (req: any, res) => {
+    try {
+      const { useAI } = req.body || {};
+      const result = await calculateContactRating(req.params.id, {
+        useAI: useAI !== false,
+        organizationId: req.user.organizationId,
+      });
+      res.json(result);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      res.status(500).json({ message: `Failed to calculate rating: ${msg}` });
+    }
+  });
+
+  // Get engagement stats for a contact (without recalculating)
+  app.get('/api/contacts/:id/engagement', async (req: any, res) => {
+    try {
+      const stats = await storage.getContactEngagementStats(req.params.id);
+      const contact = await storage.getContact(req.params.id);
+      res.json({
+        ...stats,
+        emailRating: (contact as any)?.emailRating || 0,
+        emailRatingGrade: (contact as any)?.emailRatingGrade || '',
+        emailRatingDetails: (contact as any)?.emailRatingDetails || {},
+        emailRatingUpdatedAt: (contact as any)?.emailRatingUpdatedAt || null,
+      });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch engagement stats' });
+    }
+  });
+
+  // Batch recalculate ratings for all contacts
+  app.post('/api/contacts/batch-rating', async (req: any, res) => {
+    try {
+      const { useAI } = req.body || {};
+      const result = await batchRecalculateRatings(req.user.organizationId, { useAI });
+      res.json({ success: true, ...result });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to batch recalculate ratings' });
+    }
+  });
+
   // ========== CONTACT SEGMENTS ==========
 
   app.get('/api/segments', async (req: any, res) => {

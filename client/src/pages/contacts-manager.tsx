@@ -14,7 +14,8 @@ import {
   MoreHorizontal, Star, TrendingUp, ArrowUpDown, FileSpreadsheet, List, FolderOpen, X, Eye, Tag,
   AlertTriangle, Ban, Link2, Sheet, Pencil, ExternalLink, ShieldX, ListX, LayoutList,
   Copy, ArrowRight, ChevronDown, Info, Sparkles, RefreshCw,
-  Phone, Globe, MapPin, Linkedin, DollarSign, Hash, Calendar, Factory
+  Phone, Globe, MapPin, Linkedin, DollarSign, Hash, Calendar, Factory,
+  Zap, BarChart3, Flame
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -56,6 +57,11 @@ interface Contact {
   homePhone?: string;
   emailStatus?: string;
   lastActivityDate?: string;
+  // Email rating
+  emailRating?: number;
+  emailRatingGrade?: string;
+  emailRatingDetails?: any;
+  emailRatingUpdatedAt?: string;
 }
 
 interface ContactList {
@@ -85,6 +91,10 @@ export default function ContactsManager() {
   const [editContact, setEditContact] = useState<Contact | null>(null);
   const [importResult, setImportResult] = useState<any>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Email rating state
+  const [ratingLoading, setRatingLoading] = useState<string | null>(null); // contactId or 'batch'
+  const [batchRatingProgress, setBatchRatingProgress] = useState<{ processed: number; total: number } | null>(null);
 
   // Active tab
   const [activeTab, setActiveTab] = useState<TabType>('all');
@@ -653,6 +663,54 @@ export default function ContactsManager() {
     return colors[hash % colors.length];
   };
 
+  const getRatingBadge = (rating?: number, grade?: string) => {
+    if (!rating && rating !== 0) return null;
+    const gradeColors: Record<string, string> = {
+      'A+': 'bg-emerald-100 text-emerald-800 border-emerald-200',
+      'A': 'bg-emerald-50 text-emerald-700 border-emerald-200',
+      'B+': 'bg-green-50 text-green-700 border-green-200',
+      'B': 'bg-lime-50 text-lime-700 border-lime-200',
+      'C+': 'bg-yellow-50 text-yellow-700 border-yellow-200',
+      'C': 'bg-amber-50 text-amber-700 border-amber-200',
+      'D': 'bg-orange-50 text-orange-700 border-orange-200',
+      'E': 'bg-red-50 text-red-600 border-red-200',
+      'F': 'bg-gray-100 text-gray-500 border-gray-200',
+    };
+    const g = grade || 'F';
+    const cls = gradeColors[g] || gradeColors['F'];
+    return (
+      <Tooltip>
+        <TooltipTrigger>
+          <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-md border ${cls}`}>
+            {g} <span className="font-normal text-[9px] opacity-70">{rating}</span>
+          </span>
+        </TooltipTrigger>
+        <TooltipContent>
+          <p className="text-xs">Email Rating: {rating}/100 (Grade {g})</p>
+        </TooltipContent>
+      </Tooltip>
+    );
+  };
+
+  const calculateSingleRating = async (contactId: string, useAI: boolean = false) => {
+    setRatingLoading(contactId);
+    try {
+      const res = await fetch(`/api/contacts/${contactId}/rating`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ useAI }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        // Update local contact data
+        setContacts(prev => prev.map(c => c.id === contactId ? { ...c, emailRating: data.rating, emailRatingGrade: data.grade, emailRatingDetails: data.details } : c));
+        if (detailContact?.id === contactId) {
+          setDetailContact(prev => prev ? { ...prev, emailRating: data.rating, emailRatingGrade: data.grade, emailRatingDetails: data.details } : prev);
+        }
+      }
+    } catch (e) { console.error('Rating calculation failed:', e); }
+    setRatingLoading(null);
+  };
+
   const toggleSelect = (id: string) => { setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]); };
   const toggleSelectAll = () => { setSelectedIds(selectedIds.length === contacts.length ? [] : contacts.map(c => c.id)); };
 
@@ -731,6 +789,38 @@ export default function ContactsManager() {
                   setShowGoogleSheetsDialog(true);
                 }}>
                   <FileSpreadsheet className="h-4 w-4 mr-2 text-green-600" /> Import Google Sheets
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={async () => {
+                  if (ratingLoading) return;
+                  setRatingLoading('batch');
+                  setBatchRatingProgress({ processed: 0, total: contacts.length });
+                  try {
+                    const res = await fetch('/api/contacts/batch-rating', {
+                      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+                      body: JSON.stringify({ useAI: false }),
+                    });
+                    if (res.ok) { const data = await res.json(); setBatchRatingProgress({ processed: data.processed, total: data.processed + data.errors }); }
+                    fetchContacts();
+                  } catch (e) { console.error('Batch rating failed:', e); }
+                  setTimeout(() => { setRatingLoading(null); setBatchRatingProgress(null); }, 2000);
+                }}>
+                  <BarChart3 className="h-4 w-4 mr-2 text-orange-500" /> {ratingLoading === 'batch' ? 'Calculating...' : 'Calculate Ratings'}
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={async () => {
+                  if (ratingLoading) return;
+                  setRatingLoading('batch-ai');
+                  try {
+                    const res = await fetch('/api/contacts/batch-rating', {
+                      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+                      body: JSON.stringify({ useAI: true }),
+                    });
+                    if (res.ok) { const data = await res.json(); setBatchRatingProgress({ processed: data.processed, total: data.processed + data.errors }); }
+                    fetchContacts();
+                  } catch (e) { console.error('AI batch rating failed:', e); }
+                  setTimeout(() => { setRatingLoading(null); setBatchRatingProgress(null); }, 2000);
+                }}>
+                  <Sparkles className="h-4 w-4 mr-2 text-purple-500" /> {ratingLoading === 'batch-ai' ? 'AI Scoring...' : 'AI Rate (Azure OpenAI)'}
                 </DropdownMenuItem>
                 {selectedIds.length > 0 && (
                   <>
@@ -1020,6 +1110,75 @@ export default function ContactsManager() {
                     </div>
                   </div>
                 ))}
+              </div>
+
+              {/* Email Engagement Rating */}
+              <div className="border border-gray-100 rounded-xl p-3 bg-gradient-to-br from-gray-50/50 to-white">
+                <div className="flex items-center justify-between mb-2.5">
+                  <div className="text-[10px] text-gray-400 uppercase font-semibold tracking-wide flex items-center gap-1"><BarChart3 className="h-3 w-3" /> Email Rating</div>
+                  <div className="flex items-center gap-1.5">
+                    <Button variant="ghost" size="sm" className="h-6 text-[10px] px-2 text-gray-500 hover:text-blue-600"
+                      disabled={ratingLoading === detailContact.id}
+                      onClick={() => calculateSingleRating(detailContact.id, false)}>
+                      {ratingLoading === detailContact.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3 mr-1" />}
+                      Calculate
+                    </Button>
+                    <Button variant="ghost" size="sm" className="h-6 text-[10px] px-2 text-purple-500 hover:text-purple-700"
+                      disabled={ratingLoading === detailContact.id}
+                      onClick={() => calculateSingleRating(detailContact.id, true)}>
+                      <Sparkles className="h-3 w-3 mr-1" /> AI Rate
+                    </Button>
+                  </div>
+                </div>
+                {detailContact.emailRating || detailContact.emailRatingGrade ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-3">
+                      <div className="flex-shrink-0">
+                        {getRatingBadge(detailContact.emailRating, detailContact.emailRatingGrade)}
+                      </div>
+                      <div className="flex-1">
+                        <div className="w-full bg-gray-200 rounded-full h-2">
+                          <div className={`h-2 rounded-full transition-all ${
+                            (detailContact.emailRating || 0) >= 75 ? 'bg-emerald-500' :
+                            (detailContact.emailRating || 0) >= 50 ? 'bg-yellow-500' :
+                            (detailContact.emailRating || 0) >= 25 ? 'bg-orange-500' : 'bg-red-400'
+                          }`} style={{ width: `${detailContact.emailRating || 0}%` }} />
+                        </div>
+                      </div>
+                      <span className="text-xs font-semibold text-gray-600 min-w-[35px] text-right">{detailContact.emailRating}/100</span>
+                    </div>
+                    {detailContact.emailRatingDetails && (
+                      <div className="grid grid-cols-4 gap-1.5 mt-2">
+                        {[
+                          { label: 'Sent', val: detailContact.emailRatingDetails.totalSent, score: detailContact.emailRatingDetails.sentScore },
+                          { label: 'Opens', val: detailContact.emailRatingDetails.totalOpened, score: detailContact.emailRatingDetails.openScore },
+                          { label: 'Clicks', val: detailContact.emailRatingDetails.totalClicked, score: detailContact.emailRatingDetails.clickScore },
+                          { label: 'Replies', val: detailContact.emailRatingDetails.totalReplied, score: detailContact.emailRatingDetails.replyScore },
+                        ].map((m, i) => (
+                          <div key={i} className="text-center p-1.5 bg-white rounded-lg border border-gray-100">
+                            <div className="text-[10px] text-gray-400 uppercase">{m.label}</div>
+                            <div className="text-sm font-bold text-gray-800">{m.val ?? 0}</div>
+                            <div className="text-[9px] text-gray-400">+{m.score ?? 0}pts</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {detailContact.emailRatingDetails?.replyQualityLabel && detailContact.emailRatingDetails.replyQualityLabel !== 'N/A' && (
+                      <div className="flex items-center gap-2 mt-1 px-2 py-1.5 bg-purple-50 rounded-lg">
+                        <Sparkles className="h-3 w-3 text-purple-500" />
+                        <span className="text-[11px] text-purple-700">AI Reply Quality: <strong>{detailContact.emailRatingDetails.replyQualityLabel}</strong> (+{detailContact.emailRatingDetails.replyQualityScore}pts)</span>
+                      </div>
+                    )}
+                    {detailContact.emailRatingUpdatedAt && (
+                      <div className="text-[9px] text-gray-300 text-right mt-1">Last calculated: {fmtDate(detailContact.emailRatingUpdatedAt)}</div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-center py-3 text-xs text-gray-400">
+                    <BarChart3 className="h-5 w-5 mx-auto mb-1 text-gray-300" />
+                    No rating yet. Click Calculate to score this contact.
+                  </div>
+                )}
               </div>
 
               {/* LinkedIn & Website */}
@@ -1957,7 +2116,7 @@ export default function ContactsManager() {
             {/* Table Header */}
             <div className={`grid ${isSpecialTab
               ? 'grid-cols-[40px_1fr_160px_48px]'
-              : 'grid-cols-[40px_1fr_1fr_130px_100px_48px]'
+              : 'grid-cols-[40px_1fr_1fr_80px_130px_100px_48px]'
             } gap-3 px-4 py-2.5 border-b border-gray-100 bg-gray-50/60`}>
               <div className="flex items-center">
                 <input type="checkbox" checked={selectedIds.length === contacts.length && contacts.length > 0} onChange={toggleSelectAll} className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600" />
@@ -1966,6 +2125,7 @@ export default function ContactsManager() {
                 {isSpecialTab ? 'Email address' : 'Contact'}
               </div>
               {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Company</div>}
+              {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1"><BarChart3 className="h-2.5 w-2.5" /> Rating</div>}
               {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Tags</div>}
               <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1">
                 Created <ArrowUpDown className="h-2.5 w-2.5" />
@@ -1985,7 +2145,7 @@ export default function ContactsManager() {
                   onClick={() => openDetail(contact)}
                   className={`grid ${isSpecialTab
                     ? 'grid-cols-[40px_1fr_160px_48px]'
-                    : 'grid-cols-[40px_1fr_1fr_130px_100px_48px]'
+                    : 'grid-cols-[40px_1fr_1fr_80px_130px_100px_48px]'
                   } gap-3 px-4 py-3 border-b border-gray-50 items-center transition-all group cursor-pointer ${
                     isSelected ? 'bg-blue-50/50' : isFlagged ? 'bg-red-50/20' : 'hover:bg-gray-50/80'
                   }`}
@@ -2046,6 +2206,16 @@ export default function ContactsManager() {
                           {contact.jobTitle && <div className="text-xs text-gray-400 truncate ml-4.5">{contact.jobTitle}</div>}
                         </>
                       ) : <span className="text-xs text-gray-300">--</span>}
+                    </div>
+                  )}
+
+                  {/* Email Rating (not in special tabs) */}
+                  {!isSpecialTab && (
+                    <div className="flex items-center">
+                      {contact.emailRating || contact.emailRatingGrade
+                        ? getRatingBadge(contact.emailRating, contact.emailRatingGrade)
+                        : <span className="text-[10px] text-gray-300">--</span>
+                      }
                     </div>
                   )}
 
