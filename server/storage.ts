@@ -366,6 +366,39 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_inbox_received ON unified_inbox(receivedAt);
   CREATE INDEX IF NOT EXISTS idx_inbox_gmail ON unified_inbox(gmailMessageId);
   CREATE INDEX IF NOT EXISTS idx_inbox_outlook ON unified_inbox(outlookMessageId);
+
+  -- Organization Members (multitenancy: many-to-many user<->org)
+  CREATE TABLE IF NOT EXISTS org_members (
+    id TEXT PRIMARY KEY,
+    organizationId TEXT NOT NULL,
+    userId TEXT NOT NULL,
+    role TEXT DEFAULT 'member',
+    isDefault INTEGER DEFAULT 0,
+    joinedAt TEXT NOT NULL,
+    invitedBy TEXT,
+    createdAt TEXT NOT NULL,
+    UNIQUE(organizationId, userId)
+  );
+  CREATE INDEX IF NOT EXISTS idx_org_members_user ON org_members(userId);
+  CREATE INDEX IF NOT EXISTS idx_org_members_org ON org_members(organizationId);
+  CREATE INDEX IF NOT EXISTS idx_org_members_default ON org_members(userId, isDefault);
+
+  -- Organization Invitations
+  CREATE TABLE IF NOT EXISTS org_invitations (
+    id TEXT PRIMARY KEY,
+    organizationId TEXT NOT NULL,
+    email TEXT NOT NULL,
+    role TEXT DEFAULT 'member',
+    invitedBy TEXT,
+    token TEXT NOT NULL UNIQUE,
+    status TEXT DEFAULT 'pending',
+    expiresAt TEXT NOT NULL,
+    acceptedAt TEXT,
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_org_invitations_email ON org_invitations(email, status);
+  CREATE INDEX IF NOT EXISTS idx_org_invitations_org ON org_invitations(organizationId, status);
+  CREATE INDEX IF NOT EXISTS idx_org_invitations_token ON org_invitations(token);
 `);
 
 // ========== MIGRATIONS for existing databases ==========
@@ -393,6 +426,23 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_industry ON contacts(indu
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_city ON contacts(city)`); } catch (e) {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_seniority ON contacts(seniority)`); } catch (e) {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_email_rating ON contacts(emailRating)`); } catch (e) {}
+
+// ========== Multitenancy migration: ensure all users have org_member records ==========
+try {
+  const usersWithoutMembership = db.prepare(`
+    SELECT u.id, u.organizationId FROM users u 
+    LEFT JOIN org_members om ON om.userId = u.id AND om.organizationId = u.organizationId
+    WHERE om.id IS NULL AND u.organizationId IS NOT NULL
+  `).all() as any[];
+  if (usersWithoutMembership.length > 0) {
+    const insertMember = db.prepare('INSERT OR IGNORE INTO org_members (id, organizationId, userId, role, isDefault, joinedAt, createdAt) VALUES (?, ?, ?, ?, 1, ?, ?)');
+    const ts = now();
+    for (const u of usersWithoutMembership) {
+      insertMember.run(genId(), u.organizationId, u.id, 'admin', ts, ts);
+    }
+    console.log(`[Migration] Created ${usersWithoutMembership.length} org_member record(s) for existing users`);
+  }
+} catch (e) { /* ignore */ }
 
 // ========== Messages table migrations ==========
 try { db.exec(`ALTER TABLE messages ADD COLUMN providerMessageId TEXT`); } catch (e) { /* already exists */ }
@@ -446,6 +496,11 @@ function seedIfEmpty() {
   // User
   db.prepare('INSERT INTO users (id, email, firstName, lastName, role, organizationId, isActive, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)').run(
     'user-123', 'demo@mailflow.app', 'Demo', 'User', 'admin', ORG_ID, ts, ts
+  );
+
+  // Org Member (associate demo user with org)
+  db.prepare('INSERT INTO org_members (id, organizationId, userId, role, isDefault, joinedAt, createdAt) VALUES (?, ?, ?, ?, 1, ?, ?)').run(
+    genId(), ORG_ID, 'user-123', 'owner', ts, ts
   );
 
   // Contacts
@@ -1362,6 +1417,199 @@ export class DatabaseStorage {
 
   async getInboxUnreadCount(organizationId: string) {
     return (db.prepare('SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND status = ?').get(organizationId, 'unread') as any).c;
+  }
+
+  // ========== Organization Members (Multitenancy) ==========
+  
+  async getOrgMember(organizationId: string, userId: string) {
+    return db.prepare('SELECT * FROM org_members WHERE organizationId = ? AND userId = ?').get(organizationId, userId) || null;
+  }
+
+  async getOrgMembers(organizationId: string) {
+    return db.prepare(`
+      SELECT om.*, u.email, u.firstName, u.lastName, u.isActive as userActive
+      FROM org_members om
+      INNER JOIN users u ON om.userId = u.id
+      WHERE om.organizationId = ?
+      ORDER BY om.role = 'owner' DESC, om.joinedAt ASC
+    `).all(organizationId);
+  }
+
+  async getUserOrganizations(userId: string) {
+    return db.prepare(`
+      SELECT o.*, om.role as memberRole, om.isDefault, om.joinedAt
+      FROM organizations o
+      INNER JOIN org_members om ON om.organizationId = o.id
+      WHERE om.userId = ?
+      ORDER BY om.isDefault DESC, om.joinedAt ASC
+    `).all(userId);
+  }
+
+  async getUserDefaultOrganization(userId: string) {
+    // Get the default org, or fallback to the first org
+    const defaultOrg = db.prepare(`
+      SELECT o.*, om.role as memberRole, om.isDefault
+      FROM organizations o
+      INNER JOIN org_members om ON om.organizationId = o.id
+      WHERE om.userId = ? AND om.isDefault = 1
+      LIMIT 1
+    `).get(userId) as any;
+    if (defaultOrg) return defaultOrg;
+    
+    // Fallback: get the first org the user belongs to
+    return db.prepare(`
+      SELECT o.*, om.role as memberRole, om.isDefault
+      FROM organizations o
+      INNER JOIN org_members om ON om.organizationId = o.id
+      WHERE om.userId = ?
+      ORDER BY om.joinedAt ASC
+      LIMIT 1
+    `).get(userId) || null;
+  }
+
+  async addOrgMember(organizationId: string, userId: string, role: string = 'member', invitedBy?: string) {
+    const id = genId(); const ts = now();
+    // If user has no other orgs, make this the default
+    const existingOrgs = db.prepare('SELECT COUNT(*) as c FROM org_members WHERE userId = ?').get(userId) as any;
+    const isDefault = existingOrgs.c === 0 ? 1 : 0;
+    db.prepare('INSERT OR IGNORE INTO org_members (id, organizationId, userId, role, isDefault, joinedAt, invitedBy, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, organizationId, userId, role, isDefault, ts, invitedBy || null, ts
+    );
+    return this.getOrgMember(organizationId, userId);
+  }
+
+  async updateOrgMemberRole(organizationId: string, userId: string, role: string) {
+    db.prepare('UPDATE org_members SET role = ? WHERE organizationId = ? AND userId = ?').run(role, organizationId, userId);
+    return this.getOrgMember(organizationId, userId);
+  }
+
+  async removeOrgMember(organizationId: string, userId: string) {
+    db.prepare('DELETE FROM org_members WHERE organizationId = ? AND userId = ?').run(organizationId, userId);
+    // If this was the default org, set another one as default
+    const remaining = db.prepare('SELECT * FROM org_members WHERE userId = ? ORDER BY joinedAt ASC LIMIT 1').get(userId) as any;
+    if (remaining) {
+      db.prepare('UPDATE org_members SET isDefault = 1 WHERE id = ?').run(remaining.id);
+    }
+    return true;
+  }
+
+  async setDefaultOrganization(userId: string, organizationId: string) {
+    db.prepare('UPDATE org_members SET isDefault = 0 WHERE userId = ?').run(userId);
+    db.prepare('UPDATE org_members SET isDefault = 1 WHERE userId = ? AND organizationId = ?').run(userId, organizationId);
+    // Also update the user's organizationId for backward compatibility
+    db.prepare('UPDATE users SET organizationId = ?, updatedAt = ? WHERE id = ?').run(organizationId, now(), userId);
+    return true;
+  }
+
+  async getOrgMemberCount(organizationId: string) {
+    return (db.prepare('SELECT COUNT(*) as c FROM org_members WHERE organizationId = ?').get(organizationId) as any).c;
+  }
+
+  // ========== Organization Invitations ==========
+  
+  async createInvitation(organizationId: string, email: string, role: string, invitedBy: string) {
+    const id = genId(); const ts = now();
+    const token = crypto.randomUUID() + '-' + crypto.randomUUID();
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(); // 7 days
+    // Cancel any existing pending invitations for this email + org
+    db.prepare("UPDATE org_invitations SET status = 'cancelled' WHERE organizationId = ? AND email = ? AND status = 'pending'").run(organizationId, email);
+    db.prepare('INSERT INTO org_invitations (id, organizationId, email, role, invitedBy, token, status, expiresAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, organizationId, email, role, invitedBy, token, 'pending', expiresAt, ts
+    );
+    return { id, organizationId, email, role, invitedBy, token, status: 'pending', expiresAt, createdAt: ts };
+  }
+
+  async getInvitationByToken(token: string) {
+    return db.prepare('SELECT * FROM org_invitations WHERE token = ?').get(token) || null;
+  }
+
+  async getOrgInvitations(organizationId: string) {
+    return db.prepare("SELECT * FROM org_invitations WHERE organizationId = ? AND status = 'pending' ORDER BY createdAt DESC").all(organizationId);
+  }
+
+  async getPendingInvitationsForEmail(email: string) {
+    return db.prepare("SELECT oi.*, o.name as orgName FROM org_invitations oi INNER JOIN organizations o ON oi.organizationId = o.id WHERE oi.email = ? AND oi.status = 'pending' AND oi.expiresAt > ?").all(email, now());
+  }
+
+  async acceptInvitation(token: string, userId: string) {
+    const invitation = await this.getInvitationByToken(token) as any;
+    if (!invitation) throw new Error('Invitation not found');
+    if (invitation.status !== 'pending') throw new Error('Invitation already used');
+    if (new Date(invitation.expiresAt) < new Date()) throw new Error('Invitation expired');
+
+    db.prepare("UPDATE org_invitations SET status = 'accepted', acceptedAt = ? WHERE id = ?").run(now(), invitation.id);
+    await this.addOrgMember(invitation.organizationId, userId, invitation.role, invitation.invitedBy);
+    return invitation;
+  }
+
+  async cancelInvitation(id: string) {
+    db.prepare("UPDATE org_invitations SET status = 'cancelled' WHERE id = ?").run(id);
+    return true;
+  }
+
+  // ========== Enhanced Organization Methods ==========
+
+  async updateOrganization(id: string, data: any) {
+    const existing = await this.getOrganization(id);
+    if (!existing) throw new Error('Organization not found');
+    const m = { ...existing as any, ...data };
+    db.prepare('UPDATE organizations SET name=?, domain=?, settings=?, updatedAt=? WHERE id=?').run(
+      m.name, m.domain || '', toJson(m.settings || {}), now(), id
+    );
+    return this.getOrganization(id);
+  }
+
+  async deleteOrganization(id: string) {
+    // Delete all related data in a transaction
+    const batch = db.transaction(() => {
+      db.prepare('DELETE FROM org_invitations WHERE organizationId = ?').run(id);
+      db.prepare('DELETE FROM org_members WHERE organizationId = ?').run(id);
+      db.prepare('DELETE FROM api_settings WHERE organizationId = ?').run(id);
+      db.prepare('DELETE FROM unified_inbox WHERE organizationId = ?').run(id);
+      db.prepare('DELETE FROM followup_sequences WHERE organizationId = ?').run(id);
+      db.prepare('DELETE FROM integrations WHERE organizationId = ?').run(id);
+      db.prepare('DELETE FROM unsubscribes WHERE organizationId = ?').run(id);
+      db.prepare('DELETE FROM templates WHERE organizationId = ?').run(id);
+      db.prepare('DELETE FROM segments WHERE organizationId = ?').run(id);
+      db.prepare('DELETE FROM contact_lists WHERE organizationId = ?').run(id);
+      db.prepare('DELETE FROM contacts WHERE organizationId = ?').run(id);
+      // Delete campaign messages first, then campaigns
+      const campaigns = db.prepare('SELECT id FROM campaigns WHERE organizationId = ?').all(id) as any[];
+      for (const c of campaigns) {
+        db.prepare('DELETE FROM messages WHERE campaignId = ?').run(c.id);
+        db.prepare('DELETE FROM tracking_events WHERE campaignId = ?').run(c.id);
+        db.prepare('DELETE FROM campaign_followups WHERE campaignId = ?').run(c.id);
+        db.prepare('DELETE FROM followup_executions WHERE campaignId = ?').run(c.id);
+      }
+      db.prepare('DELETE FROM campaigns WHERE organizationId = ?').run(id);
+      db.prepare('DELETE FROM email_accounts WHERE organizationId = ?').run(id);
+      db.prepare('DELETE FROM organizations WHERE id = ?').run(id);
+    });
+    batch();
+    return true;
+  }
+
+  // Create org + owner membership in a single transaction
+  async createOrganizationWithOwner(orgData: any, userId: string) {
+    const orgId = genId(); const ts = now();
+    const batch = db.transaction(() => {
+      // Create org
+      db.prepare('INSERT INTO organizations (id, name, domain, settings, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)').run(
+        orgId, orgData.name, orgData.domain || '', toJson(orgData.settings || {}), ts, ts
+      );
+      // Add owner membership
+      db.prepare('INSERT INTO org_members (id, organizationId, userId, role, isDefault, joinedAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+        genId(), orgId, userId, 'owner', 0, ts, ts
+      );
+      // Update user's organizationId
+      db.prepare('UPDATE users SET organizationId = ?, updatedAt = ? WHERE id = ?').run(orgId, ts, userId);
+    });
+    batch();
+    return this.getOrganization(orgId);
+  }
+
+  async getAllOrganizationIds(): Promise<string[]> {
+    return (db.prepare('SELECT id FROM organizations').all() as any[]).map(r => r.id);
   }
 }
 

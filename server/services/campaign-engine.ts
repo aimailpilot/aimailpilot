@@ -427,7 +427,7 @@ export class CampaignEngine {
         let result: SendResult;
         const provider = emailAccount.provider || smtpConfig?.provider || '';
         const fromEmail = smtpConfig?.fromEmail || emailAccount.email || '';
-        const orgId = emailAccount.organizationId || '550e8400-e29b-41d4-a716-446655440001';
+        const orgId = emailAccount.organizationId || '';
 
         if (provider === 'gmail' || provider === 'google') {
           // Try Gmail API first

@@ -12,7 +12,7 @@ import {
   Bell, Activity, Inbox, MoreHorizontal, Pause, Play, Trash2,
   ArrowUp, ArrowDown, Calendar, Sparkles, CreditCard, Lightbulb,
   Wrench, PieChart, Link2, Globe, RefreshCw, ExternalLink, XCircle,
-  AlertTriangle
+  AlertTriangle, Building2
 } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -33,8 +33,9 @@ import CampaignDetailPage from "./campaign-detail";
 import AdvancedSettings from "./advanced-settings";
 import AccountSettings from "./account-settings";
 import UnifiedInbox from "./unified-inbox";
+import TeamManagement from "./team-management";
 
-type ViewType = 'campaigns' | 'templates' | 'contacts' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings';
+type ViewType = 'campaigns' | 'templates' | 'contacts' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings' | 'team';
 
 // Live Tracking Feed component - fetches real tracking events
 function LiveTrackingFeed({ dashStats }: { dashStats: any }) {
@@ -192,6 +193,8 @@ export default function MailMeteorDashboard() {
   const [toolsExpanded, setToolsExpanded] = useState(false);
   const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(null);
   const [location, setLocation] = useLocation();
+  const [userOrgs, setUserOrgs] = useState<Array<{ id: string; name: string; role: string; isDefault: boolean }>>([]);
+  const [currentOrgName, setCurrentOrgName] = useState('');
   
   const { campaigns, isLoading } = useCampaigns();
 
@@ -199,6 +202,35 @@ export default function MailMeteorDashboard() {
     queryKey: ['/api/auth/user'],
     retry: false,
   });
+
+  // Fetch user profile with org info
+  useEffect(() => {
+    fetch('/api/auth/user-profile', { credentials: 'include' })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data?.organizations) {
+          setUserOrgs(data.organizations);
+          setCurrentOrgName(data.organizationName || '');
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleSwitchOrg = async (orgId: string) => {
+    try {
+      const res = await fetch('/api/organizations/switch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ organizationId: orgId }),
+      });
+      if (res.ok) {
+        window.location.reload(); // Reload to refresh all data for new org
+      }
+    } catch (e) {
+      console.error('Failed to switch org:', e);
+    }
+  };
 
   const { data: dashStats } = useQuery({
     queryKey: ['/api/dashboard/stats'],
@@ -292,6 +324,7 @@ export default function MailMeteorDashboard() {
   ];
 
   const sidebarBottomItems = [
+    { key: 'team' as ViewType, label: 'Team', icon: Users },
     { key: 'account' as ViewType, label: 'Account', icon: Settings },
     { key: 'advanced-settings' as ViewType, label: 'Advanced', icon: Wrench },
     { key: 'billing' as ViewType, label: 'Billing', icon: CreditCard },
@@ -306,6 +339,7 @@ export default function MailMeteorDashboard() {
       account: 'Account', billing: 'Billing', insights: 'Insights', tools: 'Tools',
       'campaign-detail': 'Campaign Detail',
       'advanced-settings': 'Advanced Settings',
+      team: 'Team Management',
     };
     return titles[currentView] || 'Dashboard';
   };
@@ -327,6 +361,7 @@ export default function MailMeteorDashboard() {
       tools: 'Campaign tools',
       'campaign-detail': 'Campaign tracking details',
       'advanced-settings': 'Configure API integrations and advanced options',
+      team: 'Manage your team members, roles, and invitations',
     };
     return descs[currentView] || '';
   };
@@ -352,6 +387,39 @@ export default function MailMeteorDashboard() {
             {!sidebarCollapsed && <span className="text-base font-bold text-white truncate">MailFlow</span>}
           </div>
         </div>
+
+        {/* Organization Switcher */}
+        {!sidebarCollapsed && userOrgs.length > 0 && (
+          <div className="px-3 pb-2">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors text-left">
+                  <Building2 className="h-4 w-4 text-gray-400 flex-shrink-0" />
+                  <span className="text-sm text-gray-300 truncate flex-1">{currentOrgName || 'Select Org'}</span>
+                  <ChevronDown className="h-3 w-3 text-gray-500 flex-shrink-0" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-56">
+                {userOrgs.map(org => (
+                  <DropdownMenuItem 
+                    key={org.id}
+                    onClick={() => handleSwitchOrg(org.id)}
+                    className={org.isDefault ? 'bg-blue-50' : ''}
+                  >
+                    <Building2 className="h-4 w-4 mr-2" />
+                    <span className="truncate">{org.name}</span>
+                    {org.isDefault && <Badge className="ml-auto text-[10px] py-0 px-1.5 bg-blue-100 text-blue-700">Active</Badge>}
+                  </DropdownMenuItem>
+                ))}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={() => { setCurrentView('team'); setViewMode('dashboard'); }}>
+                  <Users className="h-4 w-4 mr-2" />
+                  Manage Teams
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        )}
 
         {/* Navigation */}
         <nav className="flex-1 px-2 pt-1 overflow-y-auto">
@@ -852,6 +920,11 @@ export default function MailMeteorDashboard() {
                 </Card>
               </div>
             </div>
+          )}
+
+          {/* Team Management */}
+          {viewMode === 'dashboard' && currentView === 'team' && (
+            <TeamManagement />
           )}
 
           {/* Advanced Settings */}

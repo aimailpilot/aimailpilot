@@ -58,15 +58,55 @@ function getBaseUrlFromRequest(req: any): string {
 }
 
 // Simple auth middleware
-const requireAuth = (req: any, res: any, next: any) => {
+const requireAuth = async (req: any, res: any, next: any) => {
   const userId = req.cookies?.user_id || req.session?.userId;
   if (userId && loggedInUsers.has(userId)) {
     // Get user data from session
     const sessionUser = (req.session as any)?.user;
+    
+    // Determine the active organization for this user
+    // Priority: 1) query param ?orgId, 2) session orgId, 3) user's default org from DB
+    let orgId = req.query?.orgId || (req.session as any)?.activeOrgId;
+    let orgRole = 'admin';
+    
+    if (!orgId) {
+      // Look up user's default organization from database
+      try {
+        const defaultOrg = await storage.getUserDefaultOrganization(userId);
+        if (defaultOrg) {
+          orgId = defaultOrg.id;
+          orgRole = defaultOrg.memberRole || 'admin';
+          // Cache in session for future requests
+          (req.session as any).activeOrgId = orgId;
+        }
+      } catch (e) {
+        // Fallback: try user's organizationId from DB
+        try {
+          const dbUser = await storage.getUser(userId);
+          if (dbUser) orgId = (dbUser as any).organizationId;
+        } catch (e2) { /* ignore */ }
+      }
+    } else {
+      // Verify user has access to the requested org
+      try {
+        const membership = await storage.getOrgMember(orgId, userId);
+        if (membership) {
+          orgRole = (membership as any).role;
+        } else {
+          // User doesn't have access to this org
+          return res.status(403).json({ error: 'Access denied to this organization' });
+        }
+      } catch (e) { /* fallback */ }
+    }
+    
+    if (!orgId) {
+      return res.status(400).json({ error: 'No organization found. Please create or join an organization.' });
+    }
+    
     req.user = { 
       id: userId, 
-      organizationId: '550e8400-e29b-41d4-a716-446655440001', 
-      role: 'admin',
+      organizationId: orgId, 
+      role: orgRole,
       email: sessionUser?.email || 'unknown',
       name: sessionUser?.name || 'Unknown',
     };
@@ -88,10 +128,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Load persisted tracking base URL from settings on startup
   try {
-    const orgSettings = await storage.getApiSettings('550e8400-e29b-41d4-a716-446655440001');
-    if (orgSettings.tracking_base_url) {
-      campaignEngine.setPublicBaseUrl(orgSettings.tracking_base_url);
-      console.log('[Tracking] Loaded base URL from settings:', orgSettings.tracking_base_url);
+    const orgIds = await storage.getAllOrganizationIds();
+    for (const orgId of orgIds) {
+      const orgSettings = await storage.getApiSettings(orgId);
+      if (orgSettings.tracking_base_url) {
+        campaignEngine.setPublicBaseUrl(orgSettings.tracking_base_url);
+        console.log('[Tracking] Loaded base URL from settings:', orgSettings.tracking_base_url);
+        break; // Use first found
+      }
     }
   } catch (e) { /* ignore on startup */ }
 
@@ -107,7 +151,54 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
     next();
   });
-  
+
+  // Helper: Get OAuth credentials from any org (for pre-auth flows)
+  // Searches all orgs for stored OAuth config, falls back to env vars
+  async function getStoredOAuthCredentials(provider: 'google' | 'microsoft') {
+    let clientId = '';
+    let clientSecret = '';
+    
+    try {
+      const orgIds = await storage.getAllOrganizationIds();
+      for (const orgId of orgIds) {
+        const settings = await storage.getApiSettings(orgId);
+        if (provider === 'google') {
+          if (settings.google_oauth_client_id) { clientId = settings.google_oauth_client_id; clientSecret = settings.google_oauth_client_secret || ''; break; }
+        } else {
+          if (settings.microsoft_oauth_client_id) { clientId = settings.microsoft_oauth_client_id; clientSecret = settings.microsoft_oauth_client_secret || ''; break; }
+        }
+      }
+    } catch (e) { /* ignore */ }
+    
+    if (provider === 'google') {
+      return { clientId: clientId || process.env.GOOGLE_CLIENT_ID || '', clientSecret: clientSecret || process.env.GOOGLE_CLIENT_SECRET || '' };
+    }
+    return { clientId: clientId || process.env.MICROSOFT_CLIENT_ID || '', clientSecret: clientSecret || process.env.MICROSOFT_CLIENT_SECRET || '' };
+  }
+
+  // Helper: Ensure user has an org (create one if needed, or accept pending invitations)
+  async function ensureUserOrganization(userId: string, email: string, name: string): Promise<string> {
+    // Check if user already has an org
+    const defaultOrg = await storage.getUserDefaultOrganization(userId);
+    if (defaultOrg) return defaultOrg.id;
+    
+    // Check for pending invitations
+    const pendingInvites = await storage.getPendingInvitationsForEmail(email);
+    if (pendingInvites.length > 0) {
+      // Auto-accept the first invitation
+      const invite = pendingInvites[0] as any;
+      await storage.acceptInvitation(invite.token, userId);
+      return invite.organizationId;
+    }
+    
+    // No org and no invitations - create a personal org
+    const orgName = name ? `${name}'s Organization` : `${email.split('@')[0]}'s Organization`;
+    const org = await storage.createOrganizationWithOwner({ name: orgName, domain: email.split('@')[1] || '' }, userId);
+    // Set as default
+    await storage.setDefaultOrganization(userId, (org as any).id);
+    return (org as any).id;
+  }
+
   const MemStore = MemoryStore(session);
   
   // Detect if running in production
@@ -152,15 +243,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const redirectUri = `${baseUrl}/api/auth/google/callback`;
 
       // Try to load credentials from api_settings first, then env vars
-      let clientId = process.env.GOOGLE_CLIENT_ID || '';
-      let clientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
-
-      try {
-        // Check api_settings for stored OAuth credentials (use a default org)
-        const settings = await storage.getApiSettings('550e8400-e29b-41d4-a716-446655440001');
-        if (settings.google_oauth_client_id) clientId = settings.google_oauth_client_id;
-        if (settings.google_oauth_client_secret) clientSecret = settings.google_oauth_client_secret;
-      } catch (e) { /* ignore - use env vars */ }
+      const { clientId, clientSecret } = await getStoredOAuthCredentials('google');
 
       if (!clientId || !clientSecret) {
         // No OAuth configured - fall back to demo login
@@ -221,14 +304,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       } catch (e) { /* use default */ }
 
       // Load credentials
-      let clientId = process.env.GOOGLE_CLIENT_ID || '';
-      let clientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
-
-      try {
-        const settings = await storage.getApiSettings('550e8400-e29b-41d4-a716-446655440001');
-        if (settings.google_oauth_client_id) clientId = settings.google_oauth_client_id;
-        if (settings.google_oauth_client_secret) clientSecret = settings.google_oauth_client_secret;
-      } catch (e) { /* use env vars */ }
+      const { clientId, clientSecret } = await getStoredOAuthCredentials('google');
 
       const oauth2Client = createOAuth2Client({ clientId, clientSecret, redirectUri });
 
@@ -256,15 +332,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.log('[Auth] Google OAuth success for:', email);
 
       // Upsert user in database
-      const defaultOrgId = '550e8400-e29b-41d4-a716-446655440001';
       let dbUser = await storage.getUserByEmail(email) as any;
       if (!dbUser) {
+        // Create user without org first (org will be assigned by ensureUserOrganization)
         dbUser = await storage.createUser({
           email,
           firstName,
           lastName,
           role: 'admin',
-          organizationId: defaultOrgId,
+          organizationId: 'pending', // temporary, will be set properly below
           isActive: true,
         });
         console.log('[Auth] Created new user:', dbUser.id, email);
@@ -275,6 +351,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       const userId = dbUser.id;
+      
+      // Ensure user has an organization (create one or accept invitations)
+      const userOrgId = await ensureUserOrganization(userId, email, name);
+      console.log('[Auth] User org resolved:', userOrgId);
+
       const userObj = {
         id: userId,
         email,
@@ -285,23 +366,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
         refresh_token: tokens.refresh_token || null,
       };
 
-      // Store Gmail tokens in api_settings for reply tracking service
-      const defaultOrgIdForTokens = '550e8400-e29b-41d4-a716-446655440001';
+      // Store Gmail tokens in the user's organization api_settings
       try {
         if (tokens.access_token) {
-          await storage.setApiSetting(defaultOrgIdForTokens, 'gmail_access_token', tokens.access_token);
+          await storage.setApiSetting(userOrgId, 'gmail_access_token', tokens.access_token);
         }
         if (tokens.refresh_token) {
-          await storage.setApiSetting(defaultOrgIdForTokens, 'gmail_refresh_token', tokens.refresh_token);
+          await storage.setApiSetting(userOrgId, 'gmail_refresh_token', tokens.refresh_token);
         }
         if (tokens.expiry_date) {
-          await storage.setApiSetting(defaultOrgIdForTokens, 'gmail_token_expiry', String(tokens.expiry_date));
+          await storage.setApiSetting(userOrgId, 'gmail_token_expiry', String(tokens.expiry_date));
         }
-        await storage.setApiSetting(defaultOrgIdForTokens, 'gmail_user_email', email);
+        await storage.setApiSetting(userOrgId, 'gmail_user_email', email);
         console.log('[Auth] Stored Gmail tokens for reply tracking');
 
         // Start automatic reply checking
-        gmailReplyTracker.startAutoCheck(defaultOrgIdForTokens, 5);
+        gmailReplyTracker.startAutoCheck(userOrgId, 5);
       } catch (tokenStoreError) {
         console.error('[Auth] Failed to store Gmail tokens:', tokenStoreError);
       }
@@ -382,7 +462,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       let redirectUri = `${getBaseUrlFromRequest(req)}/api/auth/gmail-connect/callback`;
-      let orgId = '550e8400-e29b-41d4-a716-446655440001';
+      let orgId = '';
       try {
         if (state) {
           const parsed = JSON.parse(state as string);
@@ -390,6 +470,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
           if (parsed.orgId) orgId = parsed.orgId;
         }
       } catch (e) { /* use defaults */ }
+      
+      // Fallback: get first org if orgId not in state
+      if (!orgId) {
+        const orgIds = await storage.getAllOrganizationIds();
+        orgId = orgIds[0] || '';
+      }
 
       let clientId = process.env.GOOGLE_CLIENT_ID || '';
       let clientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
@@ -470,14 +556,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const redirectUri = `${baseUrl}/api/auth/microsoft/callback`;
 
       // Load credentials from api_settings first, then env vars
-      let clientId = process.env.MICROSOFT_CLIENT_ID || '';
-      let clientSecret = process.env.MICROSOFT_CLIENT_SECRET || '';
-
-      try {
-        const settings = await storage.getApiSettings('550e8400-e29b-41d4-a716-446655440001');
-        if (settings.microsoft_oauth_client_id) clientId = settings.microsoft_oauth_client_id;
-        if (settings.microsoft_oauth_client_secret) clientSecret = settings.microsoft_oauth_client_secret;
-      } catch (e) { /* ignore - use env vars */ }
+      const { clientId, clientSecret } = await getStoredOAuthCredentials('microsoft');
 
       if (!clientId || !clientSecret) {
         // No OAuth configured - fall back to demo login
@@ -544,14 +623,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       } catch (e) { /* use default */ }
 
       // Load credentials
-      let clientId = process.env.MICROSOFT_CLIENT_ID || '';
-      let clientSecret = process.env.MICROSOFT_CLIENT_SECRET || '';
-
-      try {
-        const settings = await storage.getApiSettings('550e8400-e29b-41d4-a716-446655440001');
-        if (settings.microsoft_oauth_client_id) clientId = settings.microsoft_oauth_client_id;
-        if (settings.microsoft_oauth_client_secret) clientSecret = settings.microsoft_oauth_client_secret;
-      } catch (e) { /* use env vars */ }
+      const { clientId, clientSecret } = await getStoredOAuthCredentials('microsoft');
 
       // Exchange authorization code for tokens
       const tokenResponse = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
@@ -595,7 +667,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.log('[Auth] Microsoft OAuth success for:', email);
 
       // Upsert user in database
-      const defaultOrgId = '550e8400-e29b-41d4-a716-446655440001';
       let dbUser = await storage.getUserByEmail(email) as any;
       if (!dbUser) {
         dbUser = await storage.createUser({
@@ -603,7 +674,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           firstName,
           lastName,
           role: 'admin',
-          organizationId: defaultOrgId,
+          organizationId: 'pending', // temporary, will be set properly below
           isActive: true,
         });
         console.log('[Auth] Created new Microsoft user:', dbUser.id, email);
@@ -613,6 +684,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       const userId = dbUser.id;
+      
+      // Ensure user has an organization
+      const userOrgId = await ensureUserOrganization(userId, email, name);
+      console.log('[Auth] Microsoft user org resolved:', userOrgId);
+
       const userObj = {
         id: userId,
         email,
@@ -623,19 +699,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
         refresh_token: tokens.refresh_token || null,
       };
 
-      // Store Microsoft tokens in api_settings for future use (mail send, read, etc.)
+      // Store Microsoft tokens in the user's organization api_settings
       try {
         if (tokens.access_token) {
-          await storage.setApiSetting(defaultOrgId, 'microsoft_access_token', tokens.access_token);
+          await storage.setApiSetting(userOrgId, 'microsoft_access_token', tokens.access_token);
         }
         if (tokens.refresh_token) {
-          await storage.setApiSetting(defaultOrgId, 'microsoft_refresh_token', tokens.refresh_token);
+          await storage.setApiSetting(userOrgId, 'microsoft_refresh_token', tokens.refresh_token);
         }
         if (tokens.expires_in) {
           const expiryDate = Date.now() + (tokens.expires_in * 1000);
-          await storage.setApiSetting(defaultOrgId, 'microsoft_token_expiry', String(expiryDate));
+          await storage.setApiSetting(userOrgId, 'microsoft_token_expiry', String(expiryDate));
         }
-        await storage.setApiSetting(defaultOrgId, 'microsoft_user_email', email);
+        await storage.setApiSetting(userOrgId, 'microsoft_user_email', email);
         console.log('[Auth] Stored Microsoft tokens for mail integration');
       } catch (tokenStoreError) {
         console.error('[Auth] Failed to store Microsoft tokens:', tokenStoreError);
@@ -685,9 +761,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       // Also check if Microsoft tokens are stored (user logged in with Google but connected Outlook too)
       try {
-        const settings = await storage.getApiSettings('550e8400-e29b-41d4-a716-446655440001');
-        if (settings.microsoft_access_token && settings.microsoft_user_email) {
-          return res.json({ connected: true, email: settings.microsoft_user_email, demo: false });
+        // Try to find the user's org and check for MS tokens
+        const dbUser = await storage.getUserByEmail(user?.email || '') as any;
+        if (dbUser) {
+          const userOrg = await storage.getUserDefaultOrganization(dbUser.id);
+          if (userOrg) {
+            const settings = await storage.getApiSettings(userOrg.id);
+            if (settings.microsoft_access_token && settings.microsoft_user_email) {
+              return res.json({ connected: true, email: settings.microsoft_user_email, demo: false });
+            }
+          }
         }
       } catch (e) { /* ignore */ }
     }
@@ -726,9 +809,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       let googleClientId = process.env.GOOGLE_CLIENT_ID || '';
       let msClientId = process.env.MICROSOFT_CLIENT_ID || '';
       try {
-        const settings = await storage.getApiSettings('550e8400-e29b-41d4-a716-446655440001');
-        if (settings.google_oauth_client_id) googleClientId = settings.google_oauth_client_id;
-        if (settings.microsoft_oauth_client_id) msClientId = settings.microsoft_oauth_client_id;
+        const { clientId: gId } = await getStoredOAuthCredentials('google');
+        const { clientId: mId } = await getStoredOAuthCredentials('microsoft');
+        if (gId) googleClientId = gId;
+        if (mId) msClientId = mId;
       } catch (e) { /* ignore */ }
       res.json({
         googleOAuth: !!googleClientId,
@@ -3754,16 +3838,261 @@ Example response:
     })));
   });
 
-  // Start Gmail reply tracking auto-check if tokens are available
-  try {
-    const orgSettings = await storage.getApiSettings('550e8400-e29b-41d4-a716-446655440001');
-    if (orgSettings.gmail_access_token || orgSettings.gmail_refresh_token) {
-      console.log('[ReplyTracker] Gmail tokens found, starting auto-check...');
-      gmailReplyTracker.startAutoCheck('550e8400-e29b-41d4-a716-446655440001', 5);
+  // ========== ORGANIZATION & TEAM MANAGEMENT (Multitenancy) ==========
+  app.use('/api/organizations', requireAuth);
+  app.use('/api/team', requireAuth);
+  app.use('/api/invitations', requireAuth);
+
+  // Get current user's organizations
+  app.get('/api/organizations', async (req: any, res) => {
+    try {
+      const orgs = await storage.getUserOrganizations(req.user.id);
+      res.json(orgs);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch organizations' });
     }
-    if (orgSettings.microsoft_access_token || orgSettings.microsoft_refresh_token) {
-      console.log('[ReplyTracker] Outlook tokens found, starting auto-check...');
-      outlookReplyTracker.startAutoCheck('550e8400-e29b-41d4-a716-446655440001', 5);
+  });
+
+  // Get current organization details
+  app.get('/api/organizations/current', async (req: any, res) => {
+    try {
+      const org = await storage.getOrganization(req.user.organizationId);
+      if (!org) return res.status(404).json({ message: 'Organization not found' });
+      const memberCount = await storage.getOrgMemberCount(req.user.organizationId);
+      res.json({ ...org, memberCount, userRole: req.user.role });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch organization' });
+    }
+  });
+
+  // Create a new organization
+  app.post('/api/organizations', async (req: any, res) => {
+    try {
+      const { name, domain } = req.body;
+      if (!name) return res.status(400).json({ message: 'Organization name is required' });
+      
+      const org = await storage.createOrganizationWithOwner({ name, domain }, req.user.id);
+      res.status(201).json(org);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to create organization' });
+    }
+  });
+
+  // Update current organization
+  app.put('/api/organizations/current', async (req: any, res) => {
+    try {
+      if (req.user.role !== 'owner' && req.user.role !== 'admin') {
+        return res.status(403).json({ message: 'Only owners and admins can update organization settings' });
+      }
+      const { name, domain, settings } = req.body;
+      const org = await storage.updateOrganization(req.user.organizationId, { name, domain, settings });
+      res.json(org);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to update organization' });
+    }
+  });
+
+  // Switch active organization
+  app.post('/api/organizations/switch', async (req: any, res) => {
+    try {
+      const { organizationId } = req.body;
+      if (!organizationId) return res.status(400).json({ message: 'Organization ID required' });
+      
+      const membership = await storage.getOrgMember(organizationId, req.user.id);
+      if (!membership) return res.status(403).json({ message: 'You are not a member of this organization' });
+      
+      await storage.setDefaultOrganization(req.user.id, organizationId);
+      (req.session as any).activeOrgId = organizationId;
+      
+      const org = await storage.getOrganization(organizationId);
+      res.json({ success: true, organization: org });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to switch organization' });
+    }
+  });
+
+  // Get team members of current org
+  app.get('/api/team/members', async (req: any, res) => {
+    try {
+      const members = await storage.getOrgMembers(req.user.organizationId);
+      res.json(members);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch team members' });
+    }
+  });
+
+  // Update member role
+  app.put('/api/team/members/:userId/role', async (req: any, res) => {
+    try {
+      if (req.user.role !== 'owner' && req.user.role !== 'admin') {
+        return res.status(403).json({ message: 'Only owners and admins can change roles' });
+      }
+      const { role } = req.body;
+      if (!['owner', 'admin', 'member', 'viewer'].includes(role)) {
+        return res.status(400).json({ message: 'Invalid role' });
+      }
+      if (req.params.userId === req.user.id && req.user.role === 'owner') {
+        const members = await storage.getOrgMembers(req.user.organizationId) as any[];
+        const ownerCount = members.filter(m => m.role === 'owner').length;
+        if (ownerCount <= 1 && role !== 'owner') {
+          return res.status(400).json({ message: 'Cannot remove the last owner. Transfer ownership first.' });
+        }
+      }
+      const member = await storage.updateOrgMemberRole(req.user.organizationId, req.params.userId, role);
+      res.json(member);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to update member role' });
+    }
+  });
+
+  // Remove member from organization
+  app.delete('/api/team/members/:userId', async (req: any, res) => {
+    try {
+      if (req.user.role !== 'owner' && req.user.role !== 'admin') {
+        return res.status(403).json({ message: 'Only owners and admins can remove members' });
+      }
+      if (req.params.userId === req.user.id) {
+        const members = await storage.getOrgMembers(req.user.organizationId) as any[];
+        const ownerCount = members.filter(m => m.role === 'owner').length;
+        if (req.user.role === 'owner' && ownerCount <= 1) {
+          return res.status(400).json({ message: 'Cannot leave as the last owner. Transfer ownership first.' });
+        }
+      }
+      await storage.removeOrgMember(req.user.organizationId, req.params.userId);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to remove member' });
+    }
+  });
+
+  // Leave organization (self-remove)
+  app.post('/api/team/leave', async (req: any, res) => {
+    try {
+      const members = await storage.getOrgMembers(req.user.organizationId) as any[];
+      const ownerCount = members.filter(m => m.role === 'owner').length;
+      if (req.user.role === 'owner' && ownerCount <= 1) {
+        return res.status(400).json({ message: 'Cannot leave as the last owner. Transfer ownership or delete the organization.' });
+      }
+      await storage.removeOrgMember(req.user.organizationId, req.user.id);
+      (req.session as any).activeOrgId = null;
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to leave organization' });
+    }
+  });
+
+  // Create invitation
+  app.post('/api/invitations', async (req: any, res) => {
+    try {
+      if (req.user.role !== 'owner' && req.user.role !== 'admin') {
+        return res.status(403).json({ message: 'Only owners and admins can invite members' });
+      }
+      const { email, role } = req.body;
+      if (!email) return res.status(400).json({ message: 'Email is required' });
+      
+      const existingUser = await storage.getUserByEmail(email) as any;
+      if (existingUser) {
+        const existingMember = await storage.getOrgMember(req.user.organizationId, existingUser.id);
+        if (existingMember) {
+          return res.status(400).json({ message: 'This user is already a member of this organization' });
+        }
+      }
+      
+      const invitation = await storage.createInvitation(req.user.organizationId, email, role || 'member', req.user.id);
+      res.status(201).json(invitation);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to create invitation' });
+    }
+  });
+
+  // Get pending invitations for current org
+  app.get('/api/invitations', async (req: any, res) => {
+    try {
+      const invitations = await storage.getOrgInvitations(req.user.organizationId);
+      res.json(invitations);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch invitations' });
+    }
+  });
+
+  // Cancel invitation
+  app.delete('/api/invitations/:id', async (req: any, res) => {
+    try {
+      if (req.user.role !== 'owner' && req.user.role !== 'admin') {
+        return res.status(403).json({ message: 'Only owners and admins can cancel invitations' });
+      }
+      await storage.cancelInvitation(req.params.id);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to cancel invitation' });
+    }
+  });
+
+  // Accept invitation (can be used by logged-in users)
+  app.post('/api/invitations/accept', async (req: any, res) => {
+    try {
+      const { token } = req.body;
+      if (!token) return res.status(400).json({ message: 'Invitation token required' });
+      
+      const invitation = await storage.acceptInvitation(token, req.user.id);
+      await storage.setDefaultOrganization(req.user.id, (invitation as any).organizationId);
+      (req.session as any).activeOrgId = (invitation as any).organizationId;
+      
+      res.json({ success: true, organizationId: (invitation as any).organizationId });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Failed to accept invitation';
+      res.status(400).json({ message: msg });
+    }
+  });
+
+  // Get pending invitations for current user's email
+  app.get('/api/invitations/pending', async (req: any, res) => {
+    try {
+      const invitations = await storage.getPendingInvitationsForEmail(req.user.email);
+      res.json(invitations);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch pending invitations' });
+    }
+  });
+
+  // Enhanced /api/auth/user-profile with org information
+  app.get('/api/auth/user-profile', requireAuth, async (req: any, res) => {
+    try {
+      const orgs = await storage.getUserOrganizations(req.user.id);
+      const currentOrg = await storage.getOrganization(req.user.organizationId);
+      const sessionUser = (req.session as any)?.user || {};
+      
+      res.json({
+        ...sessionUser,
+        id: req.user.id,
+        organizationId: req.user.organizationId,
+        organizationName: (currentOrg as any)?.name || 'Unknown',
+        role: req.user.role,
+        organizations: orgs.map((o: any) => ({
+          id: o.id,
+          name: o.name,
+          role: o.memberRole,
+          isDefault: !!o.isDefault,
+        })),
+      });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch user profile' });
+    }
+  });
+
+  // Start Gmail reply tracking auto-check for all organizations that have tokens
+  try {
+    const allOrgIds = await storage.getAllOrganizationIds();
+    for (const orgId of allOrgIds) {
+      const orgSettings = await storage.getApiSettings(orgId);
+      if (orgSettings.gmail_access_token || orgSettings.gmail_refresh_token) {
+        console.log(`[ReplyTracker] Gmail tokens found for org ${orgId}, starting auto-check...`);
+        gmailReplyTracker.startAutoCheck(orgId, 5);
+      }
+      if (orgSettings.microsoft_access_token || orgSettings.microsoft_refresh_token) {
+        console.log(`[ReplyTracker] Outlook tokens found for org ${orgId}, starting auto-check...`);
+        outlookReplyTracker.startAutoCheck(orgId, 5);
+      }
     }
   } catch (e) {
     console.error('[ReplyTracker] Failed to start auto-check on startup:', e);

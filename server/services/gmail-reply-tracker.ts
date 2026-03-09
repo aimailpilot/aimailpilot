@@ -58,7 +58,8 @@ export class GmailReplyTracker {
   private async refreshAccessToken(
     refreshToken: string,
     clientId: string,
-    clientSecret: string
+    clientSecret: string,
+    orgId?: string
   ): Promise<string | null> {
     try {
       const oauth2Client = new OAuth2Client(clientId, clientSecret);
@@ -66,11 +67,12 @@ export class GmailReplyTracker {
       const { credentials } = await oauth2Client.refreshAccessToken();
       
       if (credentials.access_token) {
-        // Store the new access token
-        const orgId = '550e8400-e29b-41d4-a716-446655440001';
-        await storage.setApiSetting(orgId, 'gmail_access_token', credentials.access_token);
-        if (credentials.expiry_date) {
-          await storage.setApiSetting(orgId, 'gmail_token_expiry', String(credentials.expiry_date));
+        // Store the new access token in the org's settings
+        if (orgId) {
+          await storage.setApiSetting(orgId, 'gmail_access_token', credentials.access_token);
+          if (credentials.expiry_date) {
+            await storage.setApiSetting(orgId, 'gmail_token_expiry', String(credentials.expiry_date));
+          }
         }
         return credentials.access_token;
       }
@@ -102,7 +104,7 @@ export class GmailReplyTracker {
       if (Date.now() > expiryTime - 300000) {
         // Token is expired or about to expire, refresh it
         if (refreshToken && clientId && clientSecret) {
-          accessToken = await this.refreshAccessToken(refreshToken, clientId, clientSecret) || accessToken;
+          accessToken = await this.refreshAccessToken(refreshToken, clientId, clientSecret, orgId) || accessToken;
         }
       }
     }
