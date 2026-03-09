@@ -695,6 +695,145 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // ===== CONNECT GMAIL VIA OAUTH (Mailmeteor-style one-click) =====
+
+  // Check if Gmail OAuth is available for quick connect
+  app.get('/api/email-accounts/gmail-oauth-status', async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const settings = await storage.getApiSettings(orgId);
+      const gmailEmail = settings.gmail_user_email;
+      const hasToken = !!(settings.gmail_access_token || settings.gmail_refresh_token);
+      res.json({ 
+        available: !!(gmailEmail && hasToken),
+        email: gmailEmail || null,
+        hasToken,
+      });
+    } catch (e) {
+      res.json({ available: false, email: null, hasToken: false });
+    }
+  });
+
+  app.post('/api/email-accounts/connect-gmail', async (req: any, res) => {
+    try {
+      const { displayName, email: overrideEmail } = req.body;
+      const orgId = req.user.organizationId;
+
+      // Check if we have stored Gmail OAuth tokens
+      const settings = await storage.getApiSettings(orgId);
+      const gmailEmail = overrideEmail || settings.gmail_user_email;
+      const accessToken = settings.gmail_access_token;
+      const refreshToken = settings.gmail_refresh_token;
+
+      if (!gmailEmail) {
+        return res.status(400).json({ 
+          message: 'No Gmail account connected. Please sign in with Google first.',
+          code: 'NO_GMAIL_ACCOUNT'
+        });
+      }
+
+      if (!accessToken && !refreshToken) {
+        return res.status(400).json({ 
+          message: 'Gmail OAuth tokens not found. Please re-authenticate with Google.',
+          code: 'NO_OAUTH_TOKENS'
+        });
+      }
+
+      // Check if this Gmail is already connected as an email account
+      const existingAccounts = await storage.getEmailAccounts(orgId);
+      const alreadyExists = existingAccounts.find((a: any) => a.email === gmailEmail && a.provider === 'gmail');
+      if (alreadyExists) {
+        return res.status(400).json({ 
+          message: `Gmail account ${gmailEmail} is already connected.`,
+          code: 'ALREADY_EXISTS'
+        });
+      }
+
+      // Verify the token works by calling Gmail API
+      let tokenToUse = accessToken;
+      try {
+        const testResp = await fetch('https://www.googleapis.com/gmail/v1/users/me/profile', {
+          headers: { Authorization: `Bearer ${tokenToUse}` },
+        });
+        if (!testResp.ok) {
+          // Try refreshing the token
+          const clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID || '';
+          const clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET || '';
+          if (refreshToken && clientId && clientSecret) {
+            const refreshResp = await fetch('https://oauth2.googleapis.com/token', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: new URLSearchParams({
+                client_id: clientId,
+                client_secret: clientSecret,
+                refresh_token: refreshToken,
+                grant_type: 'refresh_token',
+              }),
+            });
+            if (refreshResp.ok) {
+              const refreshData = await refreshResp.json() as any;
+              tokenToUse = refreshData.access_token;
+              await storage.setApiSetting(orgId, 'gmail_access_token', tokenToUse);
+              if (refreshData.expiry_date) {
+                await storage.setApiSetting(orgId, 'gmail_token_expiry', String(refreshData.expiry_date));
+              }
+            } else {
+              return res.status(400).json({ 
+                message: 'Failed to refresh Gmail token. Please re-authenticate with Google.',
+                code: 'TOKEN_REFRESH_FAILED'
+              });
+            }
+          } else {
+            return res.status(400).json({ 
+              message: 'Gmail token expired and cannot be refreshed. Please re-authenticate.',
+              code: 'TOKEN_EXPIRED'
+            });
+          }
+        }
+      } catch (e) {
+        return res.status(400).json({ 
+          message: 'Could not verify Gmail connection. Please try again.',
+          code: 'VERIFICATION_FAILED'
+        });
+      }
+
+      // Create the email account with Gmail provider (no SMTP config needed for API sending)
+      const smtpConfig = {
+        host: 'smtp.gmail.com',
+        port: 587,
+        secure: false,
+        auth: { user: gmailEmail, pass: 'OAUTH_TOKEN' },
+        fromName: displayName || gmailEmail.split('@')[0],
+        fromEmail: gmailEmail,
+        replyTo: '',
+        provider: 'gmail' as const,
+      };
+
+      const account = await storage.createEmailAccount({
+        organizationId: orgId,
+        provider: 'gmail',
+        email: gmailEmail,
+        displayName: displayName || gmailEmail.split('@')[0],
+        smtpConfig,
+        dailyLimit: 2000,
+        isActive: true,
+      });
+
+      console.log(`[EmailAccounts] Gmail OAuth account connected: ${gmailEmail}`);
+
+      res.status(201).json({
+        ...account,
+        smtpConfig: undefined,
+        method: 'oauth',
+        message: `Gmail account ${gmailEmail} connected successfully via OAuth! No app password required.`,
+      });
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : 'Unknown error';
+      console.error('[EmailAccounts] Gmail OAuth connect error:', errMsg);
+      res.status(500).json({ message: `Failed to connect Gmail: ${errMsg}` });
+    }
+  });
+
   app.post('/api/email-accounts', async (req: any, res) => {
     try {
       const { provider, email, displayName, smtpHost, smtpPort, smtpSecure, smtpUser, smtpPass, replyTo } = req.body;
