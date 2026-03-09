@@ -33,7 +33,7 @@ function createRawEmail(opts: { from: string; to: string; subject: string; body:
 // ========== Google OAuth 2.0 Helper ==========
 // Credentials can come from environment variables or api_settings (database)
 // Priority: env vars > api_settings
-const PRODUCTION_DOMAIN = 'mailsbellaward.com';
+const PRODUCTION_DOMAIN = 'aimailpilot.com';
 
 function getGoogleOAuthConfig(overrides?: { clientId?: string; clientSecret?: string; redirectUri?: string }) {
   const clientId = overrides?.clientId || process.env.GOOGLE_CLIENT_ID || '';
@@ -123,7 +123,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       httpOnly: true, 
       maxAge: 24 * 60 * 60 * 1000, 
       sameSite: 'lax',
-      // In production, set domain for mailsbellaward.com
+      // In production, set domain for aimailpilot.com
       ...(isProduction && process.env.COOKIE_DOMAIN ? { domain: process.env.COOKIE_DOMAIN } : {}),
     },
     name: 'connect.sid'

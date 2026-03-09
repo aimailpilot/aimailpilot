@@ -129,7 +129,7 @@ export default function LandingPage({ onLogin }: LandingPageProps) {
                 <div className="flex-1 mx-4">
                   <div className="bg-white border border-gray-200 rounded-lg px-4 py-1.5 text-xs text-gray-400 max-w-sm mx-auto flex items-center gap-2">
                     <Lock className="h-3 w-3 text-emerald-500" />
-                    mailsbellaward.com/dashboard
+                    aimailpilot.com/dashboard
                   </div>
                 </div>
               </div>

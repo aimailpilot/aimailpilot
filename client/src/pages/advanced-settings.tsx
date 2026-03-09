@@ -346,7 +346,7 @@ export default function AdvancedSettings() {
                 </a></li>
                 <li>Create a new project or select existing one</li>
                 <li>Create <strong>OAuth 2.0 Client ID</strong> (Web Application)</li>
-                <li>Add <code className="bg-blue-100 px-1 rounded">https://mailsbellaward.com/api/auth/google/callback</code> as an Authorized Redirect URI</li>
+                <li>Add <code className="bg-blue-100 px-1 rounded">https://aimailpilot.com/api/auth/google/callback</code> as an Authorized Redirect URI</li>
                 <li>Also add your sandbox URL callback if testing locally</li>
                 <li>Copy the Client ID and Client Secret below</li>
               </ol>
@@ -401,10 +401,10 @@ export default function AdvancedSettings() {
             <div className="space-y-1">
               <div className="flex items-center gap-2">
                 <code className="text-xs bg-gray-100 px-2 py-1 rounded text-gray-800 flex-1">
-                  https://mailsbellaward.com/api/auth/google/callback
+                  https://aimailpilot.com/api/auth/google/callback
                 </code>
                 <button
-                  onClick={() => navigator.clipboard.writeText('https://mailsbellaward.com/api/auth/google/callback')}
+                  onClick={() => navigator.clipboard.writeText('https://aimailpilot.com/api/auth/google/callback')}
                   className="text-gray-400 hover:text-gray-600"
                   title="Copy"
                 >
@@ -533,10 +533,10 @@ export default function AdvancedSettings() {
             <div className="space-y-1">
               <div className="flex items-center gap-2">
                 <code className="text-xs bg-gray-100 px-2 py-1 rounded text-gray-800 flex-1">
-                  https://mailsbellaward.com/api/auth/microsoft/callback
+                  https://aimailpilot.com/api/auth/microsoft/callback
                 </code>
                 <button
-                  onClick={() => navigator.clipboard.writeText('https://mailsbellaward.com/api/auth/microsoft/callback')}
+                  onClick={() => navigator.clipboard.writeText('https://aimailpilot.com/api/auth/microsoft/callback')}
                   className="text-gray-400 hover:text-gray-600"
                   title="Copy"
                 >
