@@ -1,8 +1,8 @@
-# MailFlow - AI-Powered Email Campaign Platform
+# AImailPilot - AI-Powered Email Campaign Platform
 
 ## Project Overview
-- **Name**: MailFlow
-- **Production Domain**: `mailsbellaward.com`
+- **Name**: AImailPilot
+- **Production Domain**: `aimailpilot.com`
 - **Goal**: A Mailmeteor-like email campaign management platform with AI-powered personalization, campaign management, and intelligent outreach automation
 - **Tech Stack**: Express + React + TypeScript + Tailwind CSS + Vite + shadcn/ui + SQLite
 
@@ -32,7 +32,7 @@
 ### Architecture
 - **Frontend**: React 18 + Wouter routing + TanStack Query + shadcn/ui components
 - **Backend**: Express.js with session-based authentication + Google/Microsoft OAuth 2.0
-- **Database**: SQLite (better-sqlite3) with WAL mode - persistent data in `./data/mailflow.db`
+- **Database**: SQLite (better-sqlite3) with WAL mode - persistent data in `./data/aimailpilot.db`
 - **Auth**: Cookie-based sessions + real Google/Microsoft OAuth 2.0 (fallback to demo mode when not configured)
 - **Email**: Nodemailer SMTP with multiple provider presets
 - **Multitenancy**: Organization-based data isolation with role-based access control
@@ -60,7 +60,7 @@
 - `org_invitations` - Pending, accepted, or cancelled team invitations
 
 ## URLs
-- **Production**: https://mailsbellaward.com (when deployed)
+- **Production**: https://aimailpilot.com (when deployed)
 - **Sandbox**: https://3000-isw56zs1g5v3ymi7shlgn-cc2fbc16.sandbox.novita.ai
 
 ## API Endpoints
@@ -150,8 +150,8 @@
 
 ### Quick Start
 ```bash
-git clone <repo-url> /opt/mailflow
-cd /opt/mailflow
+git clone <repo-url> /opt/aimailpilot
+cd /opt/aimailpilot
 npm install
 npm run build
 
@@ -163,7 +163,7 @@ SESSION_SECRET=your-strong-random-secret-here
 EOF
 
 # Start with PM2
-pm2 start dist/index.js --name mailflow --env production
+pm2 start dist/index.js --name aimailpilot --env production
 pm2 save && pm2 startup
 ```
 
@@ -175,7 +175,7 @@ pm2 save && pm2 startup
 
 ## Deployment Status
 - **Platform**: Node.js Express server
-- **Database**: SQLite (./data/mailflow.db)
+- **Database**: SQLite (./data/aimailpilot.db)
 - **Status**: Active
 - **Port**: 3000
 - **Last Updated**: 2026-03-09
