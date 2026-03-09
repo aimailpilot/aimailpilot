@@ -206,7 +206,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   
   app.use(session({
     store: new MemStore({ checkPeriod: 86400000 }),
-    secret: process.env.SESSION_SECRET || 'mailflow-dev-secret-key',
+    secret: process.env.SESSION_SECRET || 'aimailpilot-dev-secret-key',
     resave: false,
     saveUninitialized: false,
     cookie: { 
@@ -225,7 +225,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Simple login (fallback/dev only)
   app.post('/api/auth/simple-login', (req, res) => {
     const userId = 'user-123';
-    const mockUser = { id: userId, email: 'demo@mailflow.app', name: 'Demo User', picture: '', provider: 'google', access_token: 'demo-token' };
+    const mockUser = { id: userId, email: 'demo@aimailpilot.com', name: 'Demo User', picture: '', provider: 'google', access_token: 'demo-token' };
     loggedInUsers.add(userId);
     res.cookie('user_id', userId, { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
     res.cookie('user_data', JSON.stringify(mockUser), { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
@@ -249,7 +249,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         // No OAuth configured - fall back to demo login
         console.warn('[Auth] Google OAuth not configured, falling back to demo login');
         const userId = 'google-demo-user';
-        const mockUser = { id: userId, email: 'demo@mailflow.app', name: 'Demo User', picture: '', provider: 'google', access_token: 'demo-token' };
+        const mockUser = { id: userId, email: 'demo@aimailpilot.com', name: 'Demo User', picture: '', provider: 'google', access_token: 'demo-token' };
         loggedInUsers.add(userId);
         res.cookie('user_id', userId, { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
         res.cookie('user_data', JSON.stringify(mockUser), { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
@@ -562,7 +562,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         // No OAuth configured - fall back to demo login
         console.warn('[Auth] Microsoft OAuth not configured, falling back to demo login');
         const userId = 'microsoft-demo-user';
-        const mockUser = { id: userId, email: 'demo@mailflow.app', name: 'Demo User', picture: '', provider: 'microsoft', access_token: 'demo-ms-token' };
+        const mockUser = { id: userId, email: 'demo@aimailpilot.com', name: 'Demo User', picture: '', provider: 'microsoft', access_token: 'demo-ms-token' };
         loggedInUsers.add(userId);
         res.cookie('user_id', userId, { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
         res.cookie('user_data', JSON.stringify(mockUser), { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
@@ -825,7 +825,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.get('/api/test', (req, res) => {
-    res.json({ message: 'MailFlow server is running!', timestamp: new Date().toISOString() });
+    res.json({ message: 'AImailPilot server is running!', timestamp: new Date().toISOString() });
   });
 
   // Apply auth middleware
@@ -1983,12 +1983,12 @@ Which account should I use and why? If I need to split across accounts, provide 
       const fullHtml = `
         <div style="font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto; padding: 20px;">
           <div style="background: linear-gradient(135deg, #2563eb, #7c3aed); padding: 24px; border-radius: 12px; text-align: center; color: white; margin-bottom: 24px;">
-            <h2 style="margin: 0 0 8px 0; font-size: 18px;">MailFlow - Campaign Test Email</h2>
+            <h2 style="margin: 0 0 8px 0; font-size: 18px;">AImailPilot - Campaign Test Email</h2>
             <p style="margin: 0; opacity: 0.9; font-size: 13px;">This is a preview of your complete email sequence (${emailSteps.length} step${emailSteps.length > 1 ? 's' : ''})</p>
           </div>
           ${combinedHtml}
           <div style="text-align: center; padding: 16px; color: #94a3b8; font-size: 11px; border-top: 1px solid #e2e8f0; margin-top: 16px;">
-            This is a test email sent from MailFlow. Variables have been replaced with sample data.
+            This is a test email sent from AImailPilot. Variables have been replaced with sample data.
           </div>
         </div>
       `;
@@ -2799,12 +2799,12 @@ Example response:
     const sessionUser = (req.session as any)?.user;
     
     res.json({
-      name: sessionUser?.name || req.user.name || 'MailFlow User',
-      email: sessionUser?.email || req.user.email || 'user@mailflow.app',
+      name: sessionUser?.name || req.user.name || 'AImailPilot User',
+      email: sessionUser?.email || req.user.email || 'user@aimailpilot.com',
       picture: sessionUser?.picture || '',
       provider: sessionUser?.provider || 'google',
       quota: { used: 0, total: totalQuota, resetsAt: 'Tomorrow at 12:00 AM' },
-      billing: { plan: 'MailFlow Pro', isEducation: false, members: 'Invite teammates to join' },
+      billing: { plan: 'AImailPilot Pro', isEducation: false, members: 'Invite teammates to join' },
       emailAccounts: accounts.length,
     });
   });
@@ -3197,7 +3197,7 @@ Example response:
 
       // Fallback: demo response
       res.json({
-        content: `Here's a professionally crafted email based on your request:\n\nSubject: Quick Follow-up\n\nHi {{firstName}},\n\nI hope this message finds you well. I wanted to reach out regarding ${prompt || 'our recent discussion'}.\n\nI'd love to schedule a quick call to discuss further. Would you have 15 minutes this week?\n\nBest regards,\nThe MailFlow Team`,
+        content: `Here's a professionally crafted email based on your request:\n\nSubject: Quick Follow-up\n\nHi {{firstName}},\n\nI hope this message finds you well. I wanted to reach out regarding ${prompt || 'our recent discussion'}.\n\nI'd love to schedule a quick call to discuss further. Would you have 15 minutes this week?\n\nBest regards,\nThe AImailPilot Team`,
         model: 'demo',
         tokens: 150,
         provider: 'demo',

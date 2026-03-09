@@ -3,7 +3,7 @@
  * Uses Gmail API to detect replies to campaign emails.
  * 
  * How it works:
- * 1. Campaign emails are sent with custom headers (X-Mailflow-Tracking, Message-ID)
+ * 1. Campaign emails are sent with custom headers (X-AImailPilot-Tracking, Message-ID)
  * 2. This service polls Gmail via REST API for messages that are replies (In-Reply-To header)
  * 3. Matches replies to campaign messages by searching for references to our Message-IDs
  * 4. Updates campaign stats and tracking events when replies are detected
@@ -368,7 +368,7 @@ export class GmailReplyTracker {
   }
 
   /**
-   * Extract Mailflow tracking IDs from In-Reply-To and References headers
+   * Extract AImailPilot tracking IDs from In-Reply-To and References headers
    * Our Message-IDs look like: <campaignId_contactId_timestamp@domain.com>
    * e.g. <394bf3f5-2086-41fa-bbad-3f66fde2f292_956a6436-89e0-42d6-b654-2484fea8c874_1772551404099@aegis.edu.in>
    */

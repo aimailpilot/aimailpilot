@@ -1,7 +1,7 @@
 module.exports = {
   apps: [
     {
-      name: 'mailflow',
+      name: 'aimailpilot',
       script: 'npx',
       args: 'tsx server/index.ts',
       env: {

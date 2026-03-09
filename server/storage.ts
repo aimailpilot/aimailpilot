@@ -1,5 +1,5 @@
-// Persistent SQLite storage for MailFlow
-// Data is stored in ./data/mailflow.db and survives server restarts
+// Persistent SQLite storage for AImailPilot
+// Data is stored in ./data/aimailpilot.db and survives server restarts
 import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -7,7 +7,7 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const DB_PATH = path.resolve(__dirname, '..', 'data', 'mailflow.db');
+const DB_PATH = path.resolve(__dirname, '..', 'data', 'aimailpilot.db');
 const db = new Database(DB_PATH);
 
 // Enable WAL mode for better concurrent read performance
@@ -490,12 +490,12 @@ function seedIfEmpty() {
 
   // Organization
   db.prepare('INSERT INTO organizations (id, name, domain, settings, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)').run(
-    ORG_ID, 'MailFlow Organization', 'mailflow.app', '{}', ts, ts
+    ORG_ID, 'AImailPilot Organization', 'aimailpilot.com', '{}', ts, ts
   );
 
   // User
   db.prepare('INSERT INTO users (id, email, firstName, lastName, role, organizationId, isActive, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)').run(
-    'user-123', 'demo@mailflow.app', 'Demo', 'User', 'admin', ORG_ID, ts, ts
+    'user-123', 'demo@aimailpilot.com', 'Demo', 'User', 'admin', ORG_ID, ts, ts
   );
 
   // Org Member (associate demo user with org)
@@ -550,10 +550,10 @@ function seedIfEmpty() {
     cold: 'camp-cold-outreach-005',
   };
   const insertCampaign = db.prepare('INSERT INTO campaigns (id, organizationId, name, description, status, totalRecipients, sentCount, openedCount, clickedCount, repliedCount, bouncedCount, unsubscribedCount, subject, content, contactIds, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
-  insertCampaign.run(CIDS.q4, ORG_ID, 'Q4 Product Launch', 'New feature announcement', 'completed', 1250, 1180, 720, 345, 89, 12, 5, 'Exciting news from MailFlow!', '<p>Hi {{firstName}},</p><p>We have exciting news!</p>', '[]', '2025-08-15T00:00:00.000Z', ts);
-  insertCampaign.run(CIDS.onboard, ORG_ID, 'Customer Onboarding Series', 'Welcome email sequence', 'completed', 450, 430, 312, 156, 42, 3, 2, 'Welcome to MailFlow!', '<p>Hi {{firstName}},</p><p>Welcome!</p>', '[]', '2025-08-20T00:00:00.000Z', ts);
+  insertCampaign.run(CIDS.q4, ORG_ID, 'Q4 Product Launch', 'New feature announcement', 'completed', 1250, 1180, 720, 345, 89, 12, 5, 'Exciting news from AImailPilot!', '<p>Hi {{firstName}},</p><p>We have exciting news!</p>', '[]', '2025-08-15T00:00:00.000Z', ts);
+  insertCampaign.run(CIDS.onboard, ORG_ID, 'Customer Onboarding Series', 'Welcome email sequence', 'completed', 450, 430, 312, 156, 42, 3, 2, 'Welcome to AImailPilot!', '<p>Hi {{firstName}},</p><p>Welcome!</p>', '[]', '2025-08-20T00:00:00.000Z', ts);
   insertCampaign.run(CIDS.reengage, ORG_ID, 'Re-engagement Campaign', 'Win back inactive users', 'scheduled', 890, 0, 0, 0, 0, 0, 0, '', '', '[]', '2025-09-01T00:00:00.000Z', ts);
-  insertCampaign.run(CIDS.newsletter, ORG_ID, 'Newsletter - August', 'Monthly newsletter', 'completed', 2400, 2380, 1450, 678, 120, 20, 15, 'MailFlow August Newsletter', '<p>Hi {{firstName}},</p><p>Monthly update.</p>', '[]', '2025-08-01T00:00:00.000Z', '2025-08-30T00:00:00.000Z');
+  insertCampaign.run(CIDS.newsletter, ORG_ID, 'Newsletter - August', 'Monthly newsletter', 'completed', 2400, 2380, 1450, 678, 120, 20, 15, 'AImailPilot August Newsletter', '<p>Hi {{firstName}},</p><p>Monthly update.</p>', '[]', '2025-08-01T00:00:00.000Z', '2025-08-30T00:00:00.000Z');
   insertCampaign.run(CIDS.cold, ORG_ID, 'Cold Outreach - Tech', 'Tech industry outreach', 'draft', 0, 0, 0, 0, 0, 0, 0, '', '', '[]', '2025-09-02T00:00:00.000Z', ts);
 
   // Seed messages + tracking events for Q4 Product Launch
@@ -579,7 +579,7 @@ function seedIfEmpty() {
       const clickTime = hasClick ? new Date(new Date(sentTime).getTime() + Math.random() * 7200000).toISOString() : null;
       const replyTime = hasReply ? new Date(new Date(sentTime).getTime() + Math.random() * dayMs).toISOString() : null;
 
-      insertMsg.run(msgId, CIDS.q4, contact.id, 'Exciting news from MailFlow!', `<p>Hi ${contact.firstName},</p><p>We have exciting news...</p>`, isBounced ? 'failed' : 'sent', trackingId, 0, isBounced ? null : sentTime, openTime, clickTime, replyTime, sentTime);
+      insertMsg.run(msgId, CIDS.q4, contact.id, 'Exciting news from AImailPilot!', `<p>Hi ${contact.firstName},</p><p>We have exciting news...</p>`, isBounced ? 'failed' : 'sent', trackingId, 0, isBounced ? null : sentTime, openTime, clickTime, replyTime, sentTime);
 
       insertEvt.run(`evt-sent-${msgId}`, 'sent', CIDS.q4, msgId, contact.id, trackingId, null, null, null, sentTime);
       if (hasOpen) {
@@ -588,7 +588,7 @@ function seedIfEmpty() {
           insertEvt.run(`evt-open2-${msgId}`, 'open', CIDS.q4, msgId, contact.id, trackingId, null, null, null, new Date(new Date(openTime!).getTime() + Math.random() * dayMs).toISOString());
         }
       }
-      if (hasClick) insertEvt.run(`evt-click-${msgId}`, 'click', CIDS.q4, msgId, contact.id, trackingId, 'https://mailflow.app/features', null, null, clickTime);
+      if (hasClick) insertEvt.run(`evt-click-${msgId}`, 'click', CIDS.q4, msgId, contact.id, trackingId, 'https://aimailpilot.com/features', null, null, clickTime);
       if (hasReply) insertEvt.run(`evt-reply-${msgId}`, 'reply', CIDS.q4, msgId, contact.id, trackingId, null, null, null, replyTime);
       if (isBounced) insertEvt.run(`evt-bounce-${msgId}`, 'bounce', CIDS.q4, msgId, contact.id, trackingId, null, null, toJson({ error: 'Mailbox not found' }), sentTime);
     });
@@ -606,10 +606,10 @@ function seedIfEmpty() {
       const clickTime = hasClick ? new Date(new Date(sentTime).getTime() + Math.random() * 14400000).toISOString() : null;
       const replyTime = hasReply ? new Date(new Date(sentTime).getTime() + Math.random() * dayMs).toISOString() : null;
 
-      insertMsg.run(msgId, CIDS.newsletter, contact.id, 'MailFlow August Newsletter', `<p>Hi ${contact.firstName},</p><p>Monthly update...</p>`, 'sent', trackingId, 0, sentTime, openTime, clickTime, replyTime, sentTime);
+      insertMsg.run(msgId, CIDS.newsletter, contact.id, 'AImailPilot August Newsletter', `<p>Hi ${contact.firstName},</p><p>Monthly update...</p>`, 'sent', trackingId, 0, sentTime, openTime, clickTime, replyTime, sentTime);
       insertEvt.run(`evt-sent-nl-${i}`, 'sent', CIDS.newsletter, msgId, contact.id, trackingId, null, null, null, sentTime);
       if (hasOpen) insertEvt.run(`evt-open-nl-${i}`, 'open', CIDS.newsletter, msgId, contact.id, trackingId, null, null, null, openTime);
-      if (hasClick) insertEvt.run(`evt-click-nl-${i}`, 'click', CIDS.newsletter, msgId, contact.id, trackingId, 'https://mailflow.app/blog/august-update', null, null, clickTime);
+      if (hasClick) insertEvt.run(`evt-click-nl-${i}`, 'click', CIDS.newsletter, msgId, contact.id, trackingId, 'https://aimailpilot.com/blog/august-update', null, null, clickTime);
       if (hasReply) insertEvt.run(`evt-reply-nl-${i}`, 'reply', CIDS.newsletter, msgId, contact.id, trackingId, null, null, null, replyTime);
     });
   });

@@ -918,7 +918,7 @@ export default function AdvancedSettings() {
           <CardTitle className="text-lg flex items-center gap-2">
             <RefreshCw className="h-5 w-5 text-gray-400" /> Integration Usage
           </CardTitle>
-          <CardDescription>Where your integrations are used across MailFlow</CardDescription>
+          <CardDescription>Where your integrations are used across AImailPilot</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

@@ -253,7 +253,7 @@ export class OutlookReplyTracker {
     }
   }
 
-  /** Extract Mailflow tracking IDs from message references */
+  /** Extract AImailPilot tracking IDs from message references */
   private extractTrackingIds(headerValue: string): string[] {
     if (!headerValue) return [];
     const regex = /<([a-f0-9-]{36,})@[^>]+>/gi;

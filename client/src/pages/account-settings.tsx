@@ -341,7 +341,7 @@ export default function AccountSettings() {
                   <div className="flex-1">
                     <Label>Name</Label>
                     <div className="flex items-center space-x-2">
-                      <span className="text-lg font-medium">{userInfo?.name || 'MailFlow User'}</span>
+                      <span className="text-lg font-medium">{userInfo?.name || 'AImailPilot User'}</span>
                       <Button variant="ghost" size="sm"><Edit className="h-4 w-4" /></Button>
                     </div>
                   </div>
@@ -353,7 +353,7 @@ export default function AccountSettings() {
                   </div>
                   <div className="flex-1">
                     <Label>Email</Label>
-                    <div className="text-lg font-medium">{userInfo?.email || 'user@mailflow.app'}</div>
+                    <div className="text-lg font-medium">{userInfo?.email || 'user@aimailpilot.com'}</div>
                   </div>
                 </div>
 
@@ -404,7 +404,7 @@ export default function AccountSettings() {
                   <div className="flex-1">
                     <Label>Plan</Label>
                     <div className="flex items-center space-x-2">
-                      <span className="text-lg font-medium">{userInfo?.billing?.plan || 'MailFlow Pro'}</span>
+                      <span className="text-lg font-medium">{userInfo?.billing?.plan || 'AImailPilot Pro'}</span>
                       <Badge className="bg-red-500 text-white">Upgrade to Pro</Badge>
                     </div>
                   </div>

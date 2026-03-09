@@ -53,7 +53,7 @@ export default function LandingPage({ onLogin }: LandingPageProps) {
             <div className="bg-gradient-to-br from-blue-600 to-indigo-600 p-2 rounded-xl shadow-lg shadow-blue-200">
               <Mail className="h-5 w-5 text-white" />
             </div>
-            <span className="text-xl font-bold bg-gradient-to-r from-gray-900 to-gray-600 bg-clip-text text-transparent">MailFlow</span>
+            <span className="text-xl font-bold bg-gradient-to-r from-gray-900 to-gray-600 bg-clip-text text-transparent">AImailPilot</span>
           </div>
           <div className="flex items-center gap-3">
             <Button variant="ghost" className="text-gray-600 font-medium" onClick={handleGoogleLogin}>
@@ -142,7 +142,7 @@ export default function LandingPage({ onLogin }: LandingPageProps) {
                       <div className="bg-gradient-to-br from-blue-600 to-indigo-600 p-1.5 rounded-lg">
                         <Mail className="h-3.5 w-3.5 text-white" />
                       </div>
-                      <span className="text-sm font-bold text-gray-900">MailFlow</span>
+                      <span className="text-sm font-bold text-gray-900">AImailPilot</span>
                     </div>
                     <div className="space-y-1">
                       {[
@@ -287,7 +287,7 @@ export default function LandingPage({ onLogin }: LandingPageProps) {
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {[
-              { quote: "MailFlow completely changed how we do outreach. Our open rates jumped from 15% to 62% in the first week.", name: "Sarah K.", role: "Head of Sales, TechCorp", avatar: "SK" },
+              { quote: "AImailPilot completely changed how we do outreach. Our open rates jumped from 15% to 62% in the first week.", name: "Sarah K.", role: "Head of Sales, TechCorp", avatar: "SK" },
               { quote: "The automated follow-ups are a game changer. I set it once and it keeps working while I focus on closing deals.", name: "Mike R.", role: "Founder, StartupIO", avatar: "MR" },
               { quote: "Best email tool for Gmail hands down. The personalization and tracking features are exactly what we needed.", name: "Lisa T.", role: "Marketing Director, Agency Co", avatar: "LT" },
             ].map((testimonial, i) => (
@@ -347,7 +347,7 @@ export default function LandingPage({ onLogin }: LandingPageProps) {
             <div className="bg-gradient-to-br from-blue-600 to-indigo-600 p-1.5 rounded-lg">
               <Mail className="h-3.5 w-3.5 text-white" />
             </div>
-            <span className="font-medium text-gray-600">MailFlow</span>
+            <span className="font-medium text-gray-600">AImailPilot</span>
             <span className="text-gray-300 ml-2">|</span>
             <span className="text-xs ml-2">AI-powered email campaigns</span>
           </div>

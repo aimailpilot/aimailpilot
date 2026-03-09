@@ -384,7 +384,7 @@ export default function MailMeteorDashboard() {
             <div className="bg-gradient-to-br from-orange-500 to-red-500 p-1.5 rounded-lg flex-shrink-0">
               <Mail className="h-4 w-4 text-white" />
             </div>
-            {!sidebarCollapsed && <span className="text-base font-bold text-white truncate">MailFlow</span>}
+            {!sidebarCollapsed && <span className="text-base font-bold text-white truncate">AImailPilot</span>}
           </div>
         </div>
 
@@ -899,7 +899,7 @@ export default function MailMeteorDashboard() {
                     </h3>
                     <div className="divide-y divide-gray-100">
                       {[
-                        { label: 'Current Plan', value: 'MailFlow Pro', extra: <Badge className="bg-emerald-50 text-emerald-700 border-emerald-200 ml-2">Active</Badge> },
+                        { label: 'Current Plan', value: 'AImailPilot Pro', extra: <Badge className="bg-emerald-50 text-emerald-700 border-emerald-200 ml-2">Active</Badge> },
                         { label: 'Billing Period', value: 'Monthly' },
                         { label: 'Next Payment', value: 'April 1, 2026' },
                         { label: 'Daily Email Limit', value: '2,000 emails/day' },

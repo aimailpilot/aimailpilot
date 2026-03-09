@@ -60,7 +60,7 @@ app.use((req, res, next) => {
     host: "0.0.0.0",
     reusePort: true,
   }, () => {
-    log(`MailFlow serving on port ${port}`);
+    log(`AImailPilot serving on port ${port}`);
     // Start the follow-up engine after server is ready
     startFollowupEngine();
     

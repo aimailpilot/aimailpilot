@@ -400,7 +400,7 @@ export class CampaignEngine {
         const clickTrackedContent = this.addClickTracking(trackedContent, trackingId, baseUrl);
 
         // Generate a unique Message-ID for reply tracking
-        const messageId = `<${trackingId}@${(smtpConfig.fromEmail || 'noreply@mailflow.app').split('@')[1] || 'mailflow.app'}>`;
+        const messageId = `<${trackingId}@${(smtpConfig.fromEmail || 'noreply@aimailpilot.com').split('@')[1] || 'aimailpilot.com'}>`;
 
         // Create message record with step number
         const messageRecord = await storage.createCampaignMessage({
@@ -418,10 +418,10 @@ export class CampaignEngine {
         // Send email — try API methods first (Gmail API / Microsoft Graph), fall back to SMTP
         const emailHeaders: Record<string, string> = {
           'Message-ID': messageId,
-          'X-Mailflow-Campaign': campaignId,
-          'X-Mailflow-Contact': contact.id,
-          'X-Mailflow-Tracking': trackingId,
-          'X-Mailflow-Step': String(stepNumber),
+          'X-AImailPilot-Campaign': campaignId,
+          'X-AImailPilot-Contact': contact.id,
+          'X-AImailPilot-Tracking': trackingId,
+          'X-AImailPilot-Step': String(stepNumber),
         };
 
         let result: SendResult;

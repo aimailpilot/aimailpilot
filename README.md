@@ -9,7 +9,9 @@
 ## Features
 
 ### Completed
+- **Multitenancy & Team Management** - Full multi-organization support with team invitations, roles, and org switching
 - **Google OAuth 2.0 Sign-In** - Real Google authentication for user login (configurable from Advanced Settings)
+- **Microsoft OAuth 2.0 Sign-In** - Outlook/Microsoft account authentication
 - **Landing Page** - Professional landing page with Google & Microsoft OAuth login buttons
 - **Campaign Management** - Create, list, filter (All/Active/Scheduled/Drafts/Ended), search campaigns
 - **Campaign Sending Engine** - Real SMTP email sending with per-email error handling and throttling
@@ -25,121 +27,77 @@
 - **Personalization Engine** - Dynamic variables ({{firstName}}, {{company}}, etc.)
 - **Advanced Settings** - Google OAuth, Azure OpenAI, and Elastic Email configuration
 - **SMTP Email Accounts** - Gmail, Outlook, Office 365, Elastic Email, and Custom SMTP support
+- **Unified Inbox** - Aggregated replies from Gmail and Outlook in one place
 
 ### Architecture
 - **Frontend**: React 18 + Wouter routing + TanStack Query + shadcn/ui components
-- **Backend**: Express.js with session-based authentication + Google OAuth 2.0
+- **Backend**: Express.js with session-based authentication + Google/Microsoft OAuth 2.0
 - **Database**: SQLite (better-sqlite3) with WAL mode - persistent data in `./data/mailflow.db`
-- **Auth**: Cookie-based sessions + real Google OAuth 2.0 (fallback to demo mode when not configured)
+- **Auth**: Cookie-based sessions + real Google/Microsoft OAuth 2.0 (fallback to demo mode when not configured)
 - **Email**: Nodemailer SMTP with multiple provider presets
+- **Multitenancy**: Organization-based data isolation with role-based access control
+
+## Multitenancy System
+
+### How It Works
+- **Organizations**: Every user belongs to one or more organizations. All data (campaigns, contacts, templates, etc.) is scoped to an organization.
+- **Auto-Creation**: When a new user signs up via OAuth, a personal organization is automatically created.
+- **Invitation System**: Admins/Owners can invite team members by email. Invitations expire after 7 days.
+- **Auto-Accept**: If a new user signs up and has pending invitations, they are automatically accepted.
+- **Org Switching**: Users who belong to multiple organizations can switch between them via the sidebar dropdown.
+- **Data Isolation**: Each organization's data (campaigns, contacts, templates, settings) is completely isolated.
+
+### Roles
+| Role | Permissions |
+|------|------------|
+| **Owner** | Full control: billing, delete org, manage all settings, transfer ownership |
+| **Admin** | Manage team members, settings, campaigns, contacts |
+| **Member** | Create and manage campaigns, contacts, templates |
+| **Viewer** | View-only access to dashboards and analytics |
+
+### Database Tables
+- `org_members` - Many-to-many mapping of users to organizations with roles
+- `org_invitations` - Pending, accepted, or cancelled team invitations
 
 ## URLs
 - **Production**: https://mailsbellaward.com (when deployed)
 - **Sandbox**: https://3000-isw56zs1g5v3ymi7shlgn-cc2fbc16.sandbox.novita.ai
 
-## Deployment to mailsbellaward.com
-
-### Prerequisites
-1. A VPS/server (Ubuntu 22.04+ recommended) with Node.js 20+
-2. Domain `mailsbellaward.com` pointing to your server's IP
-3. SSL certificate (Let's Encrypt recommended)
-4. Google Cloud OAuth 2.0 credentials
-
-### Step 1: Google OAuth Setup
-1. Go to [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
-2. Create a new project (or select existing)
-3. Enable the **Google People API** and **Gmail API**
-4. Create **OAuth 2.0 Client ID** (Web Application type)
-5. Add these Authorized Redirect URIs:
-   - `https://mailsbellaward.com/api/auth/google/callback`
-6. Copy the **Client ID** and **Client Secret**
-
-### Step 2: Server Setup
-```bash
-# Clone the repository
-git clone <your-repo-url> /opt/mailflow
-cd /opt/mailflow
-
-# Install dependencies
-npm install
-
-# Build for production
-npm run build
-
-# Create environment file
-cat > .env << 'EOF'
-NODE_ENV=production
-PORT=3000
-SESSION_SECRET=your-strong-random-secret-here
-GOOGLE_CLIENT_ID=your-google-client-id.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=your-google-client-secret
-COOKIE_DOMAIN=mailsbellaward.com
-EOF
-
-# Start in production mode
-npm start
-
-# Or use PM2 for process management:
-pm2 start dist/index.js --name mailflow --env production
-pm2 save
-pm2 startup
-```
-
-### Step 3: Nginx Reverse Proxy
-```nginx
-server {
-    listen 80;
-    server_name mailsbellaward.com www.mailsbellaward.com;
-    return 301 https://$server_name$request_uri;
-}
-
-server {
-    listen 443 ssl http2;
-    server_name mailsbellaward.com www.mailsbellaward.com;
-
-    ssl_certificate /etc/letsencrypt/live/mailsbellaward.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/mailsbellaward.com/privkey.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $host;
-        proxy_cache_bypass $http_upgrade;
-    }
-}
-```
-
-### Step 4: SSL with Let's Encrypt
-```bash
-sudo apt install certbot python3-certbot-nginx
-sudo certbot --nginx -d mailsbellaward.com -d www.mailsbellaward.com
-```
-
-### Alternative: Configure via UI
-Instead of environment variables, you can configure Google OAuth credentials from the app itself:
-1. Login with demo mode (first time)
-2. Go to **Advanced Settings** (gear icon in sidebar)
-3. Enter your Google OAuth Client ID and Client Secret in the **Google OAuth Sign-In** section
-4. Click **Save Google OAuth Settings**
-5. Sign out and sign back in - you'll now be redirected to Google's real login page
-
 ## API Endpoints
 
+### Authentication
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/test` | Server health check |
 | GET | `/api/auth/google` | Google OAuth 2.0 login |
-| GET | `/api/auth/google/callback` | OAuth callback handler |
-| GET | `/api/auth/google/status` | Check auth status |
-| GET | `/api/auth/oauth-config-status` | Check OAuth configuration |
+| GET | `/api/auth/google/callback` | Google OAuth callback |
+| GET | `/api/auth/microsoft` | Microsoft OAuth 2.0 login |
+| GET | `/api/auth/microsoft/callback` | Microsoft OAuth callback |
 | GET | `/api/auth/user` | Get current user info |
+| GET | `/api/auth/user-profile` | Get user + org info (enhanced) |
 | POST | `/api/auth/logout` | Logout |
+
+### Organization & Team Management (Multitenancy)
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/organizations` | List user's organizations |
+| POST | `/api/organizations` | Create new organization |
+| GET | `/api/organizations/current` | Get current org details |
+| PUT | `/api/organizations/current` | Update current org (admin+) |
+| POST | `/api/organizations/switch` | Switch active organization |
+| GET | `/api/team/members` | List org team members |
+| PUT | `/api/team/members/:userId/role` | Update member role (admin+) |
+| DELETE | `/api/team/members/:userId` | Remove member (admin+) |
+| POST | `/api/team/leave` | Leave organization |
+| POST | `/api/invitations` | Create invitation (admin+) |
+| GET | `/api/invitations` | List org's pending invitations |
+| DELETE | `/api/invitations/:id` | Cancel invitation (admin+) |
+| POST | `/api/invitations/accept` | Accept invitation by token |
+| GET | `/api/invitations/pending` | Get user's pending invitations |
+
+### Campaigns & Email
+| Method | Path | Description |
+|--------|------|-------------|
 | GET | `/api/dashboard/stats` | Dashboard KPI stats |
 | GET/POST | `/api/campaigns` | List/Create campaigns |
 | POST | `/api/campaigns/:id/send` | Send campaign emails |
@@ -152,21 +110,24 @@ Instead of environment variables, you can configure Google OAuth credentials fro
 | GET/PUT | `/api/settings` | Get/Update API settings |
 | GET | `/api/track/open/:id` | Open tracking pixel |
 | GET | `/api/track/click/:id` | Click tracking redirect |
-| POST | `/api/track/reply/:id` | Reply tracking webhook |
 
 ## User Guide
-1. Open the app URL (mailsbellaward.com)
-2. Click **"Continue with Google"** to sign in with your Gmail account
-3. Browse **Campaigns** - see active, scheduled, draft campaigns
-4. Click **"New campaign"** to create a campaign with the email editor
-5. Go to **Email Accounts** to add your SMTP sending account (Gmail App Password, Elastic Email, etc.)
-6. Navigate to **Templates**, **Contacts**, **Analytics** via sidebar
-7. Use **Advanced Settings** to configure Azure OpenAI for AI features
-8. Use the **Account** dropdown for settings and logout
+1. Open the app URL
+2. Click **"Continue with Google"** or **"Continue with Microsoft"** to sign in
+3. A personal organization is created automatically on first login
+4. Browse **Campaigns** - see active, scheduled, draft campaigns
+5. Click **"New campaign"** to create a campaign with the email editor
+6. Go to **Email Accounts** to add your SMTP sending account
+7. Navigate to **Templates**, **Contacts**, **Analytics** via sidebar
+8. Use **Team** in the sidebar to invite team members and manage roles
+9. Use the **organization dropdown** in the sidebar to switch between orgs
+10. Use **Advanced Settings** to configure Azure OpenAI for AI features
 
 ## Data Models
-- **Organizations** - Multi-tenant support
-- **Users** - Team members with roles (created on first Google OAuth login)
+- **Organizations** - Multi-tenant workspaces with settings
+- **Org Members** - User-to-org mapping with roles (owner/admin/member/viewer)
+- **Org Invitations** - Team invitation system with token-based acceptance
+- **Users** - Team members with roles (created on first OAuth login)
 - **Email Accounts** - SMTP sending accounts (Gmail, Outlook, Elastic Email, Custom)
 - **Campaigns** - Email campaigns with status tracking and analytics
 - **Campaign Messages** - Individual message tracking (open, click, reply, bounce)
@@ -175,12 +136,46 @@ Instead of environment variables, you can configure Google OAuth credentials fro
 - **Segments** - Dynamic contact segments
 - **Email Templates** - Reusable templates with variables
 - **Follow-up Sequences** - Automated multi-step email sequences
-- **API Settings** - Stored configuration (OAuth, Azure OpenAI, Elastic Email)
+- **Unified Inbox** - Aggregated replies from all email accounts
+- **API Settings** - Stored configuration per organization
 - **Tracking Events** - Full event log for opens, clicks, replies, bounces
+
+## Deployment
+
+### Prerequisites
+1. A VPS/server (Ubuntu 22.04+ recommended) with Node.js 20+
+2. Domain pointing to your server's IP
+3. SSL certificate (Let's Encrypt recommended)
+4. Google Cloud OAuth 2.0 credentials (optional - configurable via UI)
+
+### Quick Start
+```bash
+git clone <repo-url> /opt/mailflow
+cd /opt/mailflow
+npm install
+npm run build
+
+# Create environment file
+cat > .env << 'EOF'
+NODE_ENV=production
+PORT=3000
+SESSION_SECRET=your-strong-random-secret-here
+EOF
+
+# Start with PM2
+pm2 start dist/index.js --name mailflow --env production
+pm2 save && pm2 startup
+```
+
+### Configure OAuth via UI
+1. Login with demo mode (first time)
+2. Go to **Advanced Settings** (wrench icon in sidebar)
+3. Enter your Google/Microsoft OAuth Client ID and Secret
+4. Click **Save** and re-authenticate
 
 ## Deployment Status
 - **Platform**: Node.js Express server
 - **Database**: SQLite (./data/mailflow.db)
 - **Status**: Active
 - **Port**: 3000
-- **Last Updated**: 2026-03-02
+- **Last Updated**: 2026-03-09

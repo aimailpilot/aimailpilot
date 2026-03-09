@@ -234,7 +234,7 @@ export class SmtpEmailService {
       if (message.trackingId) {
         mailOptions.headers = {
           ...mailOptions.headers,
-          'X-MailFlow-Track': message.trackingId,
+          'X-AImailPilot-Track': message.trackingId,
         };
       }
 
@@ -265,12 +265,12 @@ export class SmtpEmailService {
   async sendTestEmail(accountId: string, config: SmtpConfig, toEmail: string): Promise<SendResult> {
     return this.sendEmail(accountId, config, {
       to: toEmail,
-      subject: '✅ MailFlow SMTP Test - Connection Successful!',
+      subject: '✅ AImailPilot SMTP Test - Connection Successful!',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
           <div style="background: linear-gradient(135deg, #2563eb, #7c3aed); padding: 30px; border-radius: 12px; text-align: center; color: white;">
             <h1 style="margin: 0 0 10px 0;">✅ Connection Successful!</h1>
-            <p style="margin: 0; opacity: 0.9;">Your SMTP email account is configured correctly in MailFlow.</p>
+            <p style="margin: 0; opacity: 0.9;">Your SMTP email account is configured correctly in AImailPilot.</p>
           </div>
           <div style="padding: 20px; background: #f8fafc; border-radius: 0 0 12px 12px; border: 1px solid #e2e8f0; border-top: none;">
             <h3 style="color: #1e293b; margin-top: 0;">Account Details:</h3>
@@ -280,7 +280,7 @@ export class SmtpEmailService {
               <tr><td style="padding: 8px 0; color: #64748b;">From Email:</td><td style="padding: 8px 0; font-weight: 600;">${config.fromEmail}</td></tr>
               <tr><td style="padding: 8px 0; color: #64748b;">Test Time:</td><td style="padding: 8px 0; font-weight: 600;">${new Date().toLocaleString()}</td></tr>
             </table>
-            <p style="color: #64748b; font-size: 12px; margin-bottom: 0;">This is an automated test from MailFlow.</p>
+            <p style="color: #64748b; font-size: 12px; margin-bottom: 0;">This is an automated test from AImailPilot.</p>
           </div>
         </div>
       `,
