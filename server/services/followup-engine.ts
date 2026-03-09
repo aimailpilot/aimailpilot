@@ -201,7 +201,7 @@ export class FollowupEngine {
    * Process follow-ups for a specific campaign
    */
   private async processCampaignFollowups(campaignId: string, sequenceId: string): Promise<void> {
-    const campaignMessages = await storage.getCampaignMessages(campaignId);
+    const campaignMessages = await storage.getCampaignMessages(campaignId, 5000, 0);
     const followupSteps = await storage.getFollowupSteps(sequenceId);
     
     // Only evaluate original (step 0) messages for follow-up triggers
@@ -209,23 +209,53 @@ export class FollowupEngine {
     const originalMessages = campaignMessages.filter((m: any) => (m.stepNumber || 0) === 0);
     
     for (const message of originalMessages) {
-      await this.processMessageFollowups(message, followupSteps);
+      // CRITICAL FIX: Check if this contact has replied to ANY message in this campaign
+      // (including reply to a follow-up step). If so, skip all pending follow-ups.
+      const contactMessages = campaignMessages.filter((m: any) => m.contactId === message.contactId);
+      const hasRepliedToAny = contactMessages.some((m: any) => !!m.repliedAt);
+      
+      if (hasRepliedToAny) {
+        // Contact has replied — skip all follow-ups and cancel any pending ones
+        for (const step of followupSteps) {
+          if (!(await this.followupAlreadyExecuted(message.id, step.id))) {
+            // Create a skipped execution record so we don't check again
+            await storage.createFollowupExecution({
+              campaignMessageId: message.id,
+              stepId: step.id,
+              contactId: message.contactId,
+              campaignId: campaignId,
+              status: "skipped",
+              scheduledAt: new Date().toISOString(),
+            });
+            console.log(`[Followup] Skipping step ${step.stepNumber} for contact ${message.contactId} — already replied to campaign`);
+          }
+        }
+        continue;
+      }
+      
+      await this.processMessageFollowups(message, followupSteps, campaignId);
     }
   }
 
   /**
    * Process follow-ups for a specific message based on triggers
    */
-  private async processMessageFollowups(message: any, followupSteps: any[]): Promise<void> {
+  private async processMessageFollowups(message: any, followupSteps: any[], campaignId?: string): Promise<void> {
     for (const step of followupSteps) {
       // Skip if already executed — check this first to avoid unnecessary evaluation + logging
       if (await this.followupAlreadyExecuted(message.id, step.id)) {
         continue;
       }
-      const shouldTrigger = await this.evaluateFollowupTrigger(message, step);
+      
+      // CRITICAL FIX: Re-fetch the latest message state from DB before evaluating
+      // This prevents stale data issues when reply tracker updates happen between polling cycles
+      const freshMessage = await storage.getCampaignMessage(message.id);
+      if (!freshMessage) continue;
+      
+      const shouldTrigger = await this.evaluateFollowupTrigger(freshMessage, step);
       
       if (shouldTrigger) {
-        await this.scheduleFollowup(message, step);
+        await this.scheduleFollowup(freshMessage, step);
       }
     }
   }
@@ -337,7 +367,14 @@ export class FollowupEngine {
       // If the follow-up should be sent immediately (no delay configured), send it now
       const hasDelay = (parseInt(step.delayDays) || 0) > 0 || (parseInt(step.delayHours) || 0) > 0 || (parseInt(step.delayMinutes) || 0) > 0;
       if (!hasDelay) {
-        await this.executeFollowup(execution.id);
+        // Double-check: re-read the original message before sending (reply may have arrived)
+        const latestMsg = await storage.getCampaignMessage(message.id);
+        if (latestMsg?.repliedAt && (step.trigger === 'no_reply' || step.trigger === 'if_no_reply')) {
+          await storage.updateFollowupExecution(execution.id, { status: 'skipped' });
+          console.log(`[Followup] Skipped immediate send for step ${step.stepNumber} — contact replied since scheduling`);
+        } else {
+          await this.executeFollowup(execution.id);
+        }
       }
       
     } catch (error) {
@@ -356,6 +393,23 @@ export class FollowupEngine {
       const scheduledAt = new Date(execution.scheduledAt);
       
       if (now >= scheduledAt) {
+        // CRITICAL FIX: Before executing, re-check if contact has replied
+        if (execution.contactId && execution.campaignId) {
+          const step = execution.stepId ? await storage.getFollowupStep(execution.stepId) : null;
+          if (step && (step.trigger === 'no_reply' || step.trigger === 'if_no_reply')) {
+            const allMsgs = await storage.getCampaignMessages(execution.campaignId, 5000, 0);
+            const contactMsgs = allMsgs.filter((m: any) => m.contactId === execution.contactId);
+            const hasReplied = contactMsgs.some((m: any) => !!m.repliedAt);
+            if (hasReplied) {
+              await storage.updateFollowupExecution(execution.id, {
+                status: "skipped",
+                errorMessage: "Contact replied before scheduled send"
+              });
+              console.log(`[Followup] Skipped scheduled follow-up for contact ${execution.contactId} — already replied`);
+              continue;
+            }
+          }
+        }
         await this.executeFollowup(execution.id);
       }
     }
@@ -390,6 +444,24 @@ export class FollowupEngine {
           errorMessage: "Campaign not found"
         });
         return;
+      }
+
+      // CRITICAL FIX: Before sending, check if the contact has replied to ANY message in this campaign
+      // This catches replies that arrived between scheduling and execution
+      const allCampaignMsgs = await storage.getCampaignMessages(campaign.id, 5000, 0);
+      const contactMsgs = allCampaignMsgs.filter((m: any) => m.contactId === contact.id);
+      const contactHasReplied = contactMsgs.some((m: any) => !!m.repliedAt);
+      
+      if (contactHasReplied && (step.trigger === 'no_reply' || step.trigger === 'if_no_reply' || step.trigger === 'no_matter_what' || step.trigger === 'time_delay')) {
+        // For no_reply triggers, always skip if any reply exists
+        if (step.trigger === 'no_reply' || step.trigger === 'if_no_reply') {
+          await storage.updateFollowupExecution(executionId, {
+            status: "skipped",
+            errorMessage: "Contact already replied to campaign"
+          });
+          console.log(`[Followup] Skipped step ${step.stepNumber} for ${contact.email} — contact already replied to campaign`);
+          return;
+        }
       }
 
       // ========== Threading: send follow-up as reply in the same email thread ==========

@@ -158,12 +158,21 @@ export class GmailReplyTracker {
       result.checked = listData.messages.length;
 
       // Pre-load unreplied campaign messages for thread-based matching
+      // Build a map of Gmail providerMessageId -> message for direct matching
+      // Also build a contactId+campaignId -> messages map for finding the correct step
       const unrepliedMessages = await storage.getUnrepliedCampaignMessages(orgId);
-      const threadIdToMessage = new Map<string, any>();
+      const providerIdToMessage = new Map<string, any>();
+      const contactCampaignToMessages = new Map<string, any[]>();
+      
       for (const um of unrepliedMessages) {
         if (um.providerMessageId) {
-          threadIdToMessage.set(um.providerMessageId, um);
+          providerIdToMessage.set(um.providerMessageId, um);
         }
+        // Group by contactId_campaignId for step attribution
+        const key = `${um.contactId}_${um.campaignId}`;
+        const existing = contactCampaignToMessages.get(key) || [];
+        existing.push(um);
+        contactCampaignToMessages.set(key, existing);
       }
 
       // Get all sent campaign messages that haven't been replied to yet
@@ -203,11 +212,28 @@ export class GmailReplyTracker {
           // Method 2: Match via Gmail thread ID (if this message's threadId matches a sent campaign message)
           let threadMatchedMessage: any = null;
           if (trackingIds.length === 0 && msgRef.threadId) {
-            threadMatchedMessage = threadIdToMessage.get(msgRef.threadId);
-            if (threadMatchedMessage && !threadMatchedMessage.repliedAt) {
-              // Thread-based match found — treat it like a tracking ID match
+            // Gmail threadId usually equals the first message's ID in the thread
+            // So it should match the step 0 message's providerMessageId
+            const step0Match = providerIdToMessage.get(msgRef.threadId);
+            if (step0Match && !step0Match.repliedAt) {
+              // Found the step-0 message via thread ID
+              // CRITICAL FIX: Now find the MOST RECENT unreplied message for this contact+campaign
+              // This ensures replies are attributed to the correct step (e.g., if step 2 was the last sent, reply goes to step 2)
+              const key = `${step0Match.contactId}_${step0Match.campaignId}`;
+              const allContactMsgs = contactCampaignToMessages.get(key) || [step0Match];
+              
+              // Sort by sentAt DESC to get most recent first
+              const sorted = [...allContactMsgs].sort((a: any, b: any) => {
+                const aTime = new Date(a.sentAt || 0).getTime();
+                const bTime = new Date(b.sentAt || 0).getTime();
+                return bTime - aTime;
+              });
+              
+              // Pick the most recent unreplied message
+              threadMatchedMessage = sorted.find((m: any) => !m.repliedAt) || step0Match;
+              
               trackingIds.push(threadMatchedMessage.trackingId);
-              console.log(`[GmailReplyTracker] Thread-based reply match: threadId=${msgRef.threadId} -> trackingId=${threadMatchedMessage.trackingId}`);
+              console.log(`[GmailReplyTracker] Thread-based reply match: threadId=${msgRef.threadId} -> step=${threadMatchedMessage.stepNumber || 0}, trackingId=${threadMatchedMessage.trackingId}`);
             }
           }
 
@@ -239,6 +265,13 @@ export class GmailReplyTracker {
             if (campaignMessage.contactId) {
               try {
                 await storage.updateContact(campaignMessage.contactId, { status: 'replied' });
+              } catch (e) { /* ignore */ }
+              
+              // CRITICAL FIX: Cancel all pending follow-ups for this contact in this campaign
+              // This prevents follow-ups from being sent after a reply is detected
+              try {
+                await storage.cancelPendingFollowupsForContact(campaignMessage.contactId, campaignMessage.campaignId);
+                console.log(`[GmailReplyTracker] Cancelled pending follow-ups for contact ${campaignMessage.contactId} in campaign ${campaignMessage.campaignId}`);
               } catch (e) { /* ignore */ }
             }
 

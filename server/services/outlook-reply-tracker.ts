@@ -175,6 +175,12 @@ export class OutlookReplyTracker {
                 try {
                   await storage.updateContact(campaignMessage.contactId, { status: 'replied' });
                 } catch (e) { /* ignore */ }
+                
+                // Cancel pending follow-ups for this contact
+                try {
+                  await storage.cancelPendingFollowupsForContact(campaignMessage.contactId, campaignMessage.campaignId);
+                  console.log(`[OutlookReplyTracker] Cancelled pending follow-ups for contact ${campaignMessage.contactId}`);
+                } catch (e) { /* ignore */ }
               }
 
               // Create tracking event

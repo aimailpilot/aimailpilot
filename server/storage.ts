@@ -1099,7 +1099,11 @@ export class DatabaseStorage {
     return this.getFollowupExecutionById(id);
   }
   async cancelPendingFollowupsForContact(contactId: string, campaignId?: string) {
-    db.prepare("UPDATE followup_executions SET status = 'skipped' WHERE contactId = ? AND status = 'pending'").run(contactId);
+    if (campaignId) {
+      db.prepare("UPDATE followup_executions SET status = 'skipped' WHERE contactId = ? AND campaignId = ? AND status = 'pending'").run(contactId, campaignId);
+    } else {
+      db.prepare("UPDATE followup_executions SET status = 'skipped' WHERE contactId = ? AND status = 'pending'").run(contactId);
+    }
   }
 
   // ========== Analytics Helpers ==========
