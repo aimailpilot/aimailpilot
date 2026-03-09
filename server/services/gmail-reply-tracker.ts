@@ -282,6 +282,7 @@ export class GmailReplyTracker {
               messageId: campaignMessage.id,
               contactId: campaignMessage.contactId,
               trackingId,
+              stepNumber: campaignMessage.stepNumber || 0,
               metadata: {
                 gmailMessageId: msg.id,
                 gmailThreadId: msg.threadId,

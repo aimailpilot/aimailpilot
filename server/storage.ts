@@ -13,6 +13,12 @@ const db = new Database(DB_PATH);
 // Enable WAL mode for better concurrent read performance
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
+// High-volume performance tuning
+db.pragma('synchronous = NORMAL');      // Faster writes (WAL provides crash safety)
+db.pragma('cache_size = -64000');       // 64MB cache (default is 2MB)
+db.pragma('temp_store = MEMORY');       // Use RAM for temp tables
+db.pragma('mmap_size = 268435456');     // 256MB memory-mapped I/O
+db.pragma('wal_autocheckpoint = 1000'); // Checkpoint every 1000 pages
 
 function genId() { return crypto.randomUUID(); }
 function now() { return new Date().toISOString(); }
@@ -392,6 +398,33 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_email_rating ON contacts(
 try { db.exec(`ALTER TABLE messages ADD COLUMN providerMessageId TEXT`); } catch (e) { /* already exists */ }
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_provider_id ON messages(providerMessageId)`); } catch (e) {}
 
+// ========== Critical indexes for high-volume (10-20K emails/day) ==========
+// Messages: needed for follow-up engine (getCampaignMessages filter by contactId+stepNumber)
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_contact ON messages(contactId)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_sent_at ON messages(sentAt)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_replied ON messages(repliedAt)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_campaign_contact ON messages(campaignId, contactId)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_campaign_step ON messages(campaignId, stepNumber)`); } catch (e) {}
+
+// Followup executions: needed for followupAlreadyExecuted check (called N*steps times per cycle)
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_fexec_msg_step ON followup_executions(campaignMessageId, stepId)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_fexec_contact ON followup_executions(contactId, status)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_fexec_campaign ON followup_executions(campaignId, status)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_fexec_status ON followup_executions(status, scheduledAt)`); } catch (e) {}
+
+// Tracking events: needed for high-volume open/click tracking
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_events_tracking ON tracking_events(trackingId)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_events_type ON tracking_events(type, createdAt)`); } catch (e) {}
+// Add stepNumber to tracking_events for correct step attribution
+try { db.exec(`ALTER TABLE tracking_events ADD COLUMN stepNumber INTEGER DEFAULT 0`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_events_step ON tracking_events(campaignId, stepNumber)`); } catch (e) {}
+
+// Campaign followups: needed for processing loop
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_campaign_followups_active ON campaign_followups(isActive, campaignId)`); } catch (e) {}
+
+// Followup steps: needed for step lookups
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_followup_steps_seq ON followup_steps(sequenceId, stepNumber)`); } catch (e) {}
 // ========== Followup steps migrations ==========
 try { db.exec(`ALTER TABLE followup_steps ADD COLUMN delayMinutes INTEGER DEFAULT 0`); } catch (e) { /* already exists */ }
 
@@ -583,6 +616,18 @@ export class DatabaseStorage {
     return this.getEmailAccount(id);
   }
   async deleteEmailAccount(id: string) { db.prepare('DELETE FROM email_accounts WHERE id = ?').run(id); return true; }
+  
+  // Daily send limit helpers
+  async incrementDailySent(id: string, count: number = 1) {
+    db.prepare('UPDATE email_accounts SET dailySent = dailySent + ?, updatedAt = ? WHERE id = ?').run(count, now(), id);
+  }
+  async resetDailySentAll() {
+    db.prepare('UPDATE email_accounts SET dailySent = 0, updatedAt = ?').run(now());
+  }
+  async getAvailableEmailAccounts(organizationId: string) {
+    return db.prepare('SELECT * FROM email_accounts WHERE organizationId = ? AND isActive = 1 AND dailySent < dailyLimit ORDER BY dailySent ASC')
+      .all(organizationId).map(hydrateAccount);
+  }
 
   // ========== LLM Configurations ==========
   async getLlmConfigurations(organizationId: string) { return db.prepare('SELECT * FROM llm_configs WHERE organizationId = ?').all(organizationId); }
@@ -637,6 +682,20 @@ export class DatabaseStorage {
     return (db.prepare('SELECT COUNT(*) as c FROM contacts WHERE organizationId = ?').get(organizationId) as any).c;
   }
   async getContact(id: string) { return hydrateContact(db.prepare('SELECT * FROM contacts WHERE id = ?').get(id)); }
+  // Bulk load contacts by IDs (avoids N+1 query pattern)
+  async getContactsByIds(ids: string[]): Promise<any[]> {
+    if (ids.length === 0) return [];
+    // SQLite has a limit of ~999 bind parameters; chunk if needed
+    const CHUNK = 500;
+    const results: any[] = [];
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const chunk = ids.slice(i, i + CHUNK);
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = db.prepare(`SELECT * FROM contacts WHERE id IN (${placeholders})`).all(...chunk);
+      results.push(...rows.map(hydrateContact));
+    }
+    return results;
+  }
   async getContactByEmail(organizationId: string, email: string) {
     return hydrateContact(db.prepare('SELECT * FROM contacts WHERE organizationId = ? AND email = ?').get(organizationId, email));
   }
@@ -896,9 +955,9 @@ export class DatabaseStorage {
   // ========== Tracking Events ==========
   async createTrackingEvent(event: any) {
     const id = genId();
-    db.prepare('INSERT INTO tracking_events (id, type, campaignId, messageId, contactId, trackingId, url, userAgent, ip, metadata, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+    db.prepare('INSERT INTO tracking_events (id, type, campaignId, messageId, contactId, trackingId, stepNumber, url, userAgent, ip, metadata, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
       id, event.type, event.campaignId || null, event.messageId || null, event.contactId || null, event.trackingId || null,
-      event.url || null, event.userAgent || null, event.ip || null, toJson(event.metadata), now()
+      event.stepNumber || 0, event.url || null, event.userAgent || null, event.ip || null, toJson(event.metadata), now()
     );
     return { id, ...event, createdAt: now() };
   }
@@ -950,6 +1009,7 @@ export class DatabaseStorage {
   }
 
   // Get unopened campaign messages for Gmail API open detection
+  // Increased limit to support 10-20K email/day volume
   async getUnopenedCampaignMessages(orgId: string, cutoff: string) {
     return db.prepare(`
       SELECT m.* FROM messages m
@@ -960,11 +1020,12 @@ export class DatabaseStorage {
       AND m.sentAt >= ?
       AND m.providerMessageId IS NOT NULL
       ORDER BY m.sentAt DESC
-      LIMIT 100
+      LIMIT 2000
     `).all(orgId, cutoff);
   }
 
   // Get unreplied campaign messages for thread-based reply detection
+  // Increased limit to support 10-20K email/day volume
   async getUnrepliedCampaignMessages(orgId: string) {
     return db.prepare(`
       SELECT m.* FROM messages m
@@ -974,7 +1035,7 @@ export class DatabaseStorage {
       AND m.repliedAt IS NULL
       AND m.providerMessageId IS NOT NULL
       ORDER BY m.sentAt DESC
-      LIMIT 200
+      LIMIT 5000
     `).all(orgId);
   }
 
@@ -1066,6 +1127,10 @@ export class DatabaseStorage {
   // ========== Follow-up Executions ==========
   async getFollowupExecution(campaignMessageId: string, stepId: string) {
     return db.prepare('SELECT * FROM followup_executions WHERE campaignMessageId = ? AND stepId = ?').get(campaignMessageId, stepId) || null;
+  }
+  // Batch version: load all executions for a campaign at once (avoids N+1 queries)
+  async getFollowupExecutionsByCampaign(campaignId: string) {
+    return db.prepare('SELECT campaignMessageId, stepId, status FROM followup_executions WHERE campaignId = ?').all(campaignId);
   }
   async getFollowupExecutionById(id: string) { return db.prepare('SELECT * FROM followup_executions WHERE id = ?').get(id) || null; }
   async getPendingFollowupExecutions() {

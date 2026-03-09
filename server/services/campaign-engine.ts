@@ -228,19 +228,16 @@ export class CampaignEngine {
       if (!emailAccount) return { success: false, error: 'Email account not found' };
       if (!emailAccount.smtpConfig) return { success: false, error: 'Email account SMTP not configured' };
 
-      // Get contacts for this campaign
+      // Get contacts for this campaign (batch-loaded to avoid N+1 queries)
       let contacts: any[];
       if (campaign.segmentId) {
         contacts = await storage.getContactsBySegment(campaign.segmentId);
       } else if (campaign.contactIds && campaign.contactIds.length > 0) {
-        contacts = [];
-        for (const cid of campaign.contactIds) {
-          const c = await storage.getContact(cid);
-          if (c) contacts.push(c);
-        }
+        // Bulk load all contacts in one query instead of one-by-one
+        contacts = await storage.getContactsByIds(campaign.contactIds);
         // If contactIds were invalid (e.g. 'paste-0' placeholders), fall back to all org contacts
         if (contacts.length === 0) {
-          console.warn(`[CampaignEngine] contactIds ${JSON.stringify(campaign.contactIds)} resolved to 0 contacts, falling back to all org contacts`);
+          console.warn(`[CampaignEngine] contactIds ${JSON.stringify(campaign.contactIds.slice(0, 5))} resolved to 0 contacts, falling back to all org contacts`);
           contacts = await storage.getContacts(campaign.organizationId, 10000, 0);
         }
       } else {
@@ -303,6 +300,19 @@ export class CampaignEngine {
     const smtpConfig: SmtpConfig = emailAccount.smtpConfig;
     const tracker = this.activeCampaigns.get(campaignId);
     const baseUrl = this.getBaseUrl();
+    
+    // Pre-load campaign config once (avoid per-email DB read)
+    const campaignConfig = await storage.getCampaign(campaignId);
+    
+    // Track sent/bounced counts locally to avoid re-reading campaign for every email
+    let localSentCount = 0;
+    let localBouncedCount = 0;
+    // Batch size for DB count updates (flush every N emails)
+    const FLUSH_INTERVAL = 25;
+    
+    // Track daily limit locally (refresh from DB on flush)
+    let accountDailySent = emailAccount.dailySent || 0;
+    let accountDailyLimit = emailAccount.dailyLimit || 500;
 
     for (let i = 0; i < contacts.length; i++) {
       // Check if paused or stopped
@@ -323,6 +333,26 @@ export class CampaignEngine {
       const contact = contacts[i];
 
       try {
+        // Daily limit enforcement: check before each email
+        if (accountDailySent + localSentCount >= accountDailyLimit) {
+          console.warn(`[CampaignEngine] Daily limit reached (${accountDailyLimit}) for account ${emailAccount.email}. Pausing campaign at ${i}/${contacts.length}.`);
+          // Flush counts before pausing
+          if (localSentCount > 0 || localBouncedCount > 0) {
+            const updatedCampaign = await storage.getCampaign(campaignId);
+            if (updatedCampaign) {
+              await storage.updateCampaign(campaignId, {
+                sentCount: (updatedCampaign.sentCount || 0) + localSentCount,
+                bouncedCount: (updatedCampaign.bouncedCount || 0) + localBouncedCount,
+              });
+            }
+            await storage.incrementDailySent(emailAccount.id, localSentCount);
+            localSentCount = 0;
+            localBouncedCount = 0;
+          }
+          await storage.updateCampaign(campaignId, { status: 'paused' });
+          this.activeCampaigns.delete(campaignId);
+          return; // Stop sending
+        }
         // Personalize
         const personalData: PersonalizationData = {
           firstName: contact.firstName || '',
@@ -358,8 +388,7 @@ export class CampaignEngine {
 
         // Add unsubscribe link if campaign has it enabled
         let contentWithUnsub = personalizedContent;
-        const campaign = await storage.getCampaign(campaignId);
-        if (campaign?.includeUnsubscribe) {
+        if (campaignConfig?.includeUnsubscribe) {
           const unsubUrl = `${baseUrl}/api/track/unsubscribe/${trackingId}`;
           contentWithUnsub += `<p style="text-align:center;margin-top:30px;font-size:11px;color:#999;"><a href="${unsubUrl}" style="color:#999;text-decoration:underline;">Unsubscribe</a></p>`;
         }
@@ -466,13 +495,7 @@ export class CampaignEngine {
             providerMessageId: result.messageId,
           });
           
-          // Update campaign stats
-          const updatedCampaign = await storage.getCampaign(campaignId);
-          if (updatedCampaign) {
-            await storage.updateCampaign(campaignId, {
-              sentCount: (updatedCampaign.sentCount || 0) + 1,
-            });
-          }
+          localSentCount++;
 
           // Create 'sent' tracking event
           await storage.createTrackingEvent({
@@ -489,13 +512,7 @@ export class CampaignEngine {
             errorMessage: result.error,
           });
           
-          // Update bounce count
-          const updatedCampaign = await storage.getCampaign(campaignId);
-          if (updatedCampaign) {
-            await storage.updateCampaign(campaignId, {
-              bouncedCount: (updatedCampaign.bouncedCount || 0) + 1,
-            });
-          }
+          localBouncedCount++;
 
           // Create 'bounce' tracking event
           await storage.createTrackingEvent({
@@ -510,6 +527,24 @@ export class CampaignEngine {
 
           // Tag the contact as bounced so they're excluded from future campaigns
           try { await storage.updateContact(contact.id, { status: 'bounced' }); } catch (e) {}
+        }
+        
+        // Periodically flush campaign stats to DB (every FLUSH_INTERVAL emails)
+        if ((i + 1) % FLUSH_INTERVAL === 0 || i === contacts.length - 1) {
+          const updatedCampaign = await storage.getCampaign(campaignId);
+          if (updatedCampaign) {
+            await storage.updateCampaign(campaignId, {
+              sentCount: (updatedCampaign.sentCount || 0) + localSentCount,
+              bouncedCount: (updatedCampaign.bouncedCount || 0) + localBouncedCount,
+            });
+          }
+          // Update daily sent count on email account
+          if (localSentCount > 0) {
+            await storage.incrementDailySent(emailAccount.id, localSentCount);
+            accountDailySent += localSentCount;
+          }
+          localSentCount = 0;
+          localBouncedCount = 0;
         }
       } catch (emailError) {
         // Log the error but continue to next email — don't crash the entire campaign loop

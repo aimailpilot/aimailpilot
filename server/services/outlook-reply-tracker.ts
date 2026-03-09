@@ -190,6 +190,7 @@ export class OutlookReplyTracker {
                 messageId: campaignMessage.id,
                 contactId: campaignMessage.contactId,
                 trackingId,
+                stepNumber: campaignMessage.stepNumber || 0,
                 metadata: {
                   outlookMessageId: msg.id,
                   outlookConversationId: msg.conversationId,

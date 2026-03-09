@@ -201,49 +201,60 @@ export class FollowupEngine {
    * Process follow-ups for a specific campaign
    */
   private async processCampaignFollowups(campaignId: string, sequenceId: string): Promise<void> {
-    const campaignMessages = await storage.getCampaignMessages(campaignId, 5000, 0);
+    const campaignMessages = await storage.getCampaignMessages(campaignId, 50000, 0);
     const followupSteps = await storage.getFollowupSteps(sequenceId);
     
+    // PERFORMANCE: Batch-load all existing executions for this campaign to avoid N+1 queries
+    const existingExecutions = await storage.getFollowupExecutionsByCampaign(campaignId);
+    const executionSet = new Set(existingExecutions.map((e: any) => `${e.campaignMessageId}_${e.stepId}`));
+    
+    // Build a lookup: contactId -> has any replied message
+    const contactReplied = new Set<string>();
+    for (const m of campaignMessages) {
+      if ((m as any).repliedAt && (m as any).contactId) {
+        contactReplied.add((m as any).contactId);
+      }
+    }
+    
     // Only evaluate original (step 0) messages for follow-up triggers
-    // Step 1+ messages are follow-ups themselves and should not trigger more follow-ups
     const originalMessages = campaignMessages.filter((m: any) => (m.stepNumber || 0) === 0);
     
     for (const message of originalMessages) {
-      // CRITICAL FIX: Check if this contact has replied to ANY message in this campaign
-      // (including reply to a follow-up step). If so, skip all pending follow-ups.
-      const contactMessages = campaignMessages.filter((m: any) => m.contactId === message.contactId);
-      const hasRepliedToAny = contactMessages.some((m: any) => !!m.repliedAt);
+      const msg = message as any;
       
-      if (hasRepliedToAny) {
-        // Contact has replied — skip all follow-ups and cancel any pending ones
+      // CRITICAL: Skip if contact has replied to ANY message in this campaign
+      if (contactReplied.has(msg.contactId)) {
         for (const step of followupSteps) {
-          if (!(await this.followupAlreadyExecuted(message.id, step.id))) {
+          const execKey = `${msg.id}_${step.id}`;
+          if (!executionSet.has(execKey)) {
             // Create a skipped execution record so we don't check again
             await storage.createFollowupExecution({
-              campaignMessageId: message.id,
+              campaignMessageId: msg.id,
               stepId: step.id,
-              contactId: message.contactId,
+              contactId: msg.contactId,
               campaignId: campaignId,
               status: "skipped",
               scheduledAt: new Date().toISOString(),
             });
-            console.log(`[Followup] Skipping step ${step.stepNumber} for contact ${message.contactId} — already replied to campaign`);
+            executionSet.add(execKey);
+            console.log(`[Followup] Skipping step ${step.stepNumber} for contact ${msg.contactId} — already replied to campaign`);
           }
         }
         continue;
       }
       
-      await this.processMessageFollowups(message, followupSteps, campaignId);
+      await this.processMessageFollowups(msg, followupSteps, campaignId, executionSet);
     }
   }
 
   /**
    * Process follow-ups for a specific message based on triggers
    */
-  private async processMessageFollowups(message: any, followupSteps: any[], campaignId?: string): Promise<void> {
+  private async processMessageFollowups(message: any, followupSteps: any[], campaignId?: string, executionSet?: Set<string>): Promise<void> {
     for (const step of followupSteps) {
-      // Skip if already executed — check this first to avoid unnecessary evaluation + logging
-      if (await this.followupAlreadyExecuted(message.id, step.id)) {
+      // Skip if already executed — use batch-loaded set for O(1) check
+      const execKey = `${message.id}_${step.id}`;
+      if (executionSet ? executionSet.has(execKey) : await this.followupAlreadyExecuted(message.id, step.id)) {
         continue;
       }
       
@@ -256,6 +267,8 @@ export class FollowupEngine {
       
       if (shouldTrigger) {
         await this.scheduleFollowup(freshMessage, step);
+        // Add to execution set to avoid re-processing in same cycle
+        if (executionSet) executionSet.add(execKey);
       }
     }
   }
@@ -384,23 +397,47 @@ export class FollowupEngine {
 
   /**
    * Process scheduled follow-ups that are ready to be sent
+   * PERFORMANCE: Groups pending executions by campaignId to batch-load messages once per campaign
    */
   private async processScheduledFollowups(): Promise<void> {
     const pendingExecutions = await storage.getPendingFollowupExecutions();
     
+    if (pendingExecutions.length === 0) return;
+    
+    // Group by campaignId to avoid N+1 queries
+    const byCampaign = new Map<string, any[]>();
     for (const execution of pendingExecutions) {
       const now = new Date();
       const scheduledAt = new Date(execution.scheduledAt);
+      if (now < scheduledAt) continue; // Not ready yet
       
-      if (now >= scheduledAt) {
+      const cid = execution.campaignId || '';
+      const existing = byCampaign.get(cid) || [];
+      existing.push(execution);
+      byCampaign.set(cid, existing);
+    }
+    
+    for (const [campaignId, executions] of byCampaign) {
+      // Batch-load all campaign messages ONCE for this campaign
+      let campaignMsgs: any[] = [];
+      if (campaignId) {
+        campaignMsgs = await storage.getCampaignMessages(campaignId, 50000, 0);
+      }
+      
+      // Build contactId -> hasReplied lookup
+      const contactReplied = new Set<string>();
+      for (const m of campaignMsgs) {
+        if ((m as any).repliedAt && (m as any).contactId) {
+          contactReplied.add((m as any).contactId);
+        }
+      }
+      
+      for (const execution of executions) {
         // CRITICAL FIX: Before executing, re-check if contact has replied
-        if (execution.contactId && execution.campaignId) {
+        if (execution.contactId && campaignId) {
           const step = execution.stepId ? await storage.getFollowupStep(execution.stepId) : null;
           if (step && (step.trigger === 'no_reply' || step.trigger === 'if_no_reply')) {
-            const allMsgs = await storage.getCampaignMessages(execution.campaignId, 5000, 0);
-            const contactMsgs = allMsgs.filter((m: any) => m.contactId === execution.contactId);
-            const hasReplied = contactMsgs.some((m: any) => !!m.repliedAt);
-            if (hasReplied) {
+            if (contactReplied.has(execution.contactId)) {
               await storage.updateFollowupExecution(execution.id, {
                 status: "skipped",
                 errorMessage: "Contact replied before scheduled send"
@@ -410,15 +447,17 @@ export class FollowupEngine {
             }
           }
         }
-        await this.executeFollowup(execution.id);
+        await this.executeFollowup(execution.id, campaignMsgs);
       }
     }
   }
 
   /**
    * Execute a specific follow-up email
+   * @param executionId - the follow-up execution record ID
+   * @param preloadedCampaignMsgs - optional pre-loaded campaign messages to avoid N+1 queries
    */
-  private async executeFollowup(executionId: string): Promise<void> {
+  private async executeFollowup(executionId: string, preloadedCampaignMsgs?: any[]): Promise<void> {
     try {
       const execution = await storage.getFollowupExecutionById(executionId);
       if (!execution || execution.status !== "pending") {
@@ -448,7 +487,10 @@ export class FollowupEngine {
 
       // CRITICAL FIX: Before sending, check if the contact has replied to ANY message in this campaign
       // This catches replies that arrived between scheduling and execution
-      const allCampaignMsgs = await storage.getCampaignMessages(campaign.id, 5000, 0);
+      // Use preloaded campaign messages if available; otherwise load once
+      const allCampaignMsgs = preloadedCampaignMsgs && preloadedCampaignMsgs.length > 0
+        ? preloadedCampaignMsgs
+        : await storage.getCampaignMessages(campaign.id, 50000, 0);
       const contactMsgs = allCampaignMsgs.filter((m: any) => m.contactId === contact.id);
       const contactHasReplied = contactMsgs.some((m: any) => !!m.repliedAt);
       
@@ -470,8 +512,8 @@ export class FollowupEngine {
       // might point to a step-1 message, so always look up the step-0 message.
       let originalMessage: any = campaignMessage;
       if ((campaignMessage as any).stepNumber !== 0 && (campaignMessage as any).stepNumber !== undefined) {
-        const allMsgs = await storage.getCampaignMessages(campaign.id, 1000, 0);
-        const step0Msg = allMsgs.find((m: any) => m.contactId === contact.id && (m.stepNumber || 0) === 0);
+        // Reuse already-loaded campaign messages for threading lookup
+        const step0Msg = allCampaignMsgs.find((m: any) => m.contactId === contact.id && (m.stepNumber || 0) === 0);
         if (step0Msg) {
           originalMessage = step0Msg;
           console.log(`[Followup] Found step-0 original message ${step0Msg.id} with providerMessageId=${step0Msg.providerMessageId}`);

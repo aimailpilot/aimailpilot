@@ -2,6 +2,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { startFollowupEngine } from "./services/followup-engine";
+import { storage } from "./storage";
 
 const app = express();
 app.use(express.json());
@@ -62,5 +63,20 @@ app.use((req, res, next) => {
     log(`MailFlow serving on port ${port}`);
     // Start the follow-up engine after server is ready
     startFollowupEngine();
+    
+    // Daily reset of email account send counters (check every hour, reset at midnight UTC)
+    let lastResetDay = new Date().getUTCDate();
+    setInterval(async () => {
+      const today = new Date().getUTCDate();
+      if (today !== lastResetDay) {
+        lastResetDay = today;
+        try {
+          await storage.resetDailySentAll();
+          log('[DailyReset] Email account daily send counters reset');
+        } catch (e) {
+          console.error('[DailyReset] Failed:', e);
+        }
+      }
+    }, 60 * 60 * 1000); // Check every hour
   });
 })();
