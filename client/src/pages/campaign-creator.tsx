@@ -58,6 +58,7 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
   const [emailAccounts, setEmailAccounts] = useState<any[]>([]);
   const [templates, setTemplates] = useState<any[]>([]);
   const [contacts, setContacts] = useState<any[]>([]);
+  const [contactLists, setContactLists] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState<any>(null);
@@ -140,6 +141,13 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
   const [sheetLoading, setSheetLoading] = useState(false);
   const [sheetPreview, setSheetPreview] = useState<{ headers: string[]; values: string[][]; totalRows: number; validContacts: number } | null>(null);
 
+  // Save sheet contacts as a contact list
+  const [saveAsContactList, setSaveAsContactList] = useState(true);
+  const [sheetListName, setSheetListName] = useState('');
+  const [sheetListMode, setSheetListMode] = useState<'new' | 'existing'>('new');
+  const [sheetExistingListId, setSheetExistingListId] = useState('');
+  const [sheetImportResult, setSheetImportResult] = useState<{ message: string; listName: string } | null>(null);
+
   // Template dialog
   const [templateTab, setTemplateTab] = useState<'recent' | 'all'>('recent');
 
@@ -175,10 +183,11 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
   useEffect(() => {
     (async () => {
       try {
-        const [acctRes, tmplRes, ctcRes] = await Promise.all([
+        const [acctRes, tmplRes, ctcRes, listRes] = await Promise.all([
           fetch('/api/email-accounts', { credentials: 'include' }),
           fetch('/api/templates', { credentials: 'include' }),
-          fetch('/api/contacts', { credentials: 'include' }),
+          fetch('/api/contacts?limit=10000', { credentials: 'include' }),
+          fetch('/api/contact-lists', { credentials: 'include' }),
         ]);
         // Fetch quotas
         const quotaRes = await fetch('/api/email-accounts/quota-summary', { credentials: 'include' }).catch(() => null);
@@ -200,6 +209,10 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
         if (ctcRes.ok) {
           const data = await ctcRes.json();
           setContacts(data.contacts || data || []);
+        }
+        if (listRes.ok) {
+          const lists = await listRes.json();
+          setContactLists(Array.isArray(lists) ? lists : []);
         }
       } catch (e) { console.error('Fetch failed:', e); }
       setLoading(false);
@@ -502,7 +515,7 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
 
   const fetchSheetData = useCallback(async (selectedSheet: string) => {
     if (!sheetUrl || !selectedSheet) return;
-    setSheetLoading(true); setSheetContacts([]); setSheetPreview(null);
+    setSheetLoading(true); setSheetContacts([]); setSheetPreview(null); setSheetImportResult(null);
     try {
       const selectedSheetObj = availableSheets.find(s => s.name === selectedSheet);
       const res = await fetch('/api/sheets/fetch-data', {
@@ -513,31 +526,59 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
       if (res.ok) {
         setSheetPreview({ headers: data.headers || [], values: data.values || [], totalRows: data.totalRows || 0, validContacts: data.validContacts || 0 });
         setSheetContacts(data.contacts || []);
+        // Default list name from sheet name
+        if (!sheetListName.trim()) setSheetListName(selectedSheet || 'Google Sheets Import');
       } else { setSheetError(data.error || 'Failed to fetch sheet data'); }
     } catch (e) { setSheetError('Failed to load sheet data'); }
     setSheetLoading(false);
-  }, [sheetUrl, availableSheets]);
+  }, [sheetUrl, availableSheets, sheetListName]);
 
   const importSheetContacts = async () => {
     if (sheetContacts.length === 0) return;
     try {
-      setSheetLoading(true);
+      setSheetLoading(true); setSheetError(''); setSheetImportResult(null);
+      // Build list name from sheet name or default
+      const importListName = sheetListName.trim() || sheetName || 'Google Sheets Import';
+      const importBody: any = {
+        contacts: sheetContacts,
+        source: 'google_sheets',
+        headers: sheetPreview?.headers || [],
+      };
+      if (saveAsContactList) {
+        if (sheetListMode === 'existing' && sheetExistingListId) {
+          importBody.existingListId = sheetExistingListId;
+        } else {
+          importBody.listName = importListName;
+        }
+      }
       const importRes = await fetch('/api/contacts/import', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-        body: JSON.stringify({ contacts: sheetContacts }),
+        body: JSON.stringify(importBody),
       });
       const result = await importRes.json();
       if (importRes.ok) {
-        const ctcRes = await fetch('/api/contacts', { credentials: 'include' });
+        // Re-fetch all contacts with high limit to find the imported ones
+        const ctcRes = await fetch('/api/contacts?limit=10000', { credentials: 'include' });
         if (ctcRes.ok) {
           const data = await ctcRes.json();
           const allContacts = data.contacts || data || [];
           setContacts(allContacts);
-          const importedEmails = sheetContacts.map(c => c.email.toLowerCase());
-          const matchedIds = allContacts.filter((c: any) => importedEmails.includes(c.email?.toLowerCase())).map((c: any) => c.id);
+          // Match imported contacts by email
+          const importedEmails = new Set(sheetContacts.map((c: any) => c.email?.toLowerCase()).filter(Boolean));
+          const matchedIds = allContacts
+            .filter((c: any) => c.email && importedEmails.has(c.email.toLowerCase()))
+            .map((c: any) => c.id);
           setSelectedContacts(matchedIds);
         }
-        setError(''); setShowRecipients(false);
+        // Re-fetch contact lists
+        const listRes = await fetch('/api/contact-lists', { credentials: 'include' });
+        if (listRes.ok) {
+          const lists = await listRes.json();
+          setContactLists(Array.isArray(lists) ? lists : []);
+        }
+        setSheetImportResult({ message: result.message || `Imported ${result.imported} contacts`, listName: result.listName || '' });
+        setError('');
+        // Don't close dialog — let user see the result and close manually
       } else { setSheetError(result.message || 'Failed to import contacts'); }
     } catch (e) { setSheetError('Failed to import contacts'); }
     finally { setSheetLoading(false); }
@@ -1454,11 +1495,24 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
             <div className="flex-1 p-6 flex flex-col">
               {recipientTab === 'sheets' && (
                 <div className="space-y-4 flex-1 overflow-auto">
+                  {/* Success banner after import */}
+                  {sheetImportResult && (
+                    <div className="bg-green-50 border border-green-200 rounded-lg p-3 flex items-start gap-2">
+                      <CheckCircle className="h-4 w-4 text-green-600 mt-0.5 flex-shrink-0" />
+                      <div className="text-sm text-green-800 flex-1">
+                        <p className="font-medium">{sheetImportResult.message}</p>
+                        {sheetImportResult.listName && <p className="text-green-600 text-xs mt-0.5">Saved to list: "{sheetImportResult.listName}"</p>}
+                        <p className="text-green-600 text-xs mt-1"><strong>{selectedContacts.length}</strong> contacts selected as recipients</p>
+                      </div>
+                      <button onClick={() => { setShowRecipients(false); }} className="text-green-600 hover:text-green-800 text-xs font-medium underline flex-shrink-0">Done</button>
+                    </div>
+                  )}
+
                   <div>
                     <Label className="text-sm text-gray-600 mb-1.5 block">Spreadsheet</Label>
                     <div className="relative">
                       <Input placeholder="Copy/paste spreadsheet URL" value={sheetUrl}
-                        onChange={e => { setSheetUrl(e.target.value); setSheetError(''); setSheetValid(null); setAvailableSheets([]); setSheetContacts([]); setSheetPreview(null); setSheetName(''); }}
+                        onChange={e => { setSheetUrl(e.target.value); setSheetError(''); setSheetValid(null); setAvailableSheets([]); setSheetContacts([]); setSheetPreview(null); setSheetName(''); setSheetImportResult(null); }}
                         className={`pr-10 ${sheetValid === true ? 'border-green-400' : sheetValid === false ? 'border-red-400' : ''}`} />
                       <div className="absolute right-3 top-1/2 -translate-y-1/2">
                         {sheetValidating && <Loader2 className="h-4 w-4 text-blue-500 animate-spin" />}
@@ -1473,7 +1527,7 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                   <div>
                     <Label className="text-sm text-gray-600 mb-1.5 block">Sheet</Label>
                     <select className={`w-full h-10 border rounded-md px-3 text-sm ${availableSheets.length === 0 ? 'border-gray-200 bg-gray-50 text-gray-400 cursor-not-allowed' : 'border-gray-200 bg-white'}`}
-                      value={sheetName} onChange={e => { setSheetName(e.target.value); setSheetError(''); if (e.target.value) fetchSheetData(e.target.value); }}
+                      value={sheetName} onChange={e => { setSheetName(e.target.value); setSheetError(''); setSheetImportResult(null); if (e.target.value) fetchSheetData(e.target.value); }}
                       disabled={availableSheets.length === 0}>
                       <option value="">Select a sheet</option>
                       {availableSheets.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
@@ -1484,25 +1538,68 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                     <div className="space-y-3">
                       <Badge className="bg-green-50 text-green-700 border-green-200">{sheetPreview.validContacts} contacts found</Badge>
                       {sheetContacts.length > 0 && (
-                        <div className="border border-gray-200 rounded-lg overflow-hidden">
-                          <div className="max-h-48 overflow-auto">
-                            <table className="w-full text-xs">
-                              <thead className="bg-gray-50 sticky top-0"><tr>
-                                <th className="px-3 py-2 text-left text-gray-500 font-semibold">Email</th>
-                                <th className="px-3 py-2 text-left text-gray-500 font-semibold">Name</th>
-                              </tr></thead>
-                              <tbody className="divide-y divide-gray-100">
-                                {sheetContacts.slice(0, 8).map((c, i) => (
-                                  <tr key={i} className="hover:bg-blue-50/30">
-                                    <td className="px-3 py-1.5 text-gray-700 font-medium">{c.email}</td>
-                                    <td className="px-3 py-1.5 text-gray-600">{c.firstName || ''} {c.lastName || ''}</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
+                        <>
+                          <div className="border border-gray-200 rounded-lg overflow-hidden">
+                            <div className="max-h-32 overflow-auto">
+                              <table className="w-full text-xs">
+                                <thead className="bg-gray-50 sticky top-0"><tr>
+                                  <th className="px-3 py-2 text-left text-gray-500 font-semibold">Email</th>
+                                  <th className="px-3 py-2 text-left text-gray-500 font-semibold">Name</th>
+                                </tr></thead>
+                                <tbody className="divide-y divide-gray-100">
+                                  {sheetContacts.slice(0, 6).map((c: any, i: number) => (
+                                    <tr key={i} className="hover:bg-blue-50/30">
+                                      <td className="px-3 py-1.5 text-gray-700 font-medium">{c.email}</td>
+                                      <td className="px-3 py-1.5 text-gray-600">{c.firstName || ''} {c.lastName || ''}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                            {sheetContacts.length > 6 && <div className="px-3 py-1.5 bg-gray-50 text-xs text-gray-400 text-center border-t">... and {sheetContacts.length - 6} more</div>}
                           </div>
-                          {sheetContacts.length > 8 && <div className="px-3 py-1.5 bg-gray-50 text-xs text-gray-400 text-center border-t">... and {sheetContacts.length - 8} more</div>}
-                        </div>
+
+                          {/* Save as Contact List section */}
+                          <div className="border border-blue-100 bg-blue-50/40 rounded-lg p-3 space-y-2.5">
+                            <div className="flex items-center gap-2">
+                              <input type="checkbox" id="saveAsList" checked={saveAsContactList} onChange={e => setSaveAsContactList(e.target.checked)}
+                                className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 h-3.5 w-3.5" />
+                              <label htmlFor="saveAsList" className="text-xs font-medium text-gray-700">Save as contact list</label>
+                            </div>
+                            {saveAsContactList && (
+                              <div className="space-y-2 pl-5">
+                                <div className="flex gap-3">
+                                  <label className="flex items-center gap-1.5 cursor-pointer">
+                                    <input type="radio" name="listMode" checked={sheetListMode === 'new'} onChange={() => { setSheetListMode('new'); setSheetExistingListId(''); }}
+                                      className="text-blue-600 focus:ring-blue-500 h-3 w-3" />
+                                    <span className="text-xs text-gray-600">Create new list</span>
+                                  </label>
+                                  {contactLists.length > 0 && (
+                                    <label className="flex items-center gap-1.5 cursor-pointer">
+                                      <input type="radio" name="listMode" checked={sheetListMode === 'existing'} onChange={() => setSheetListMode('existing')}
+                                        className="text-blue-600 focus:ring-blue-500 h-3 w-3" />
+                                      <span className="text-xs text-gray-600">Add to existing list</span>
+                                    </label>
+                                  )}
+                                </div>
+                                {sheetListMode === 'new' && (
+                                  <Input placeholder="List name (e.g. Q1 Leads)" value={sheetListName}
+                                    onChange={e => setSheetListName(e.target.value)}
+                                    className="h-8 text-xs" />
+                                )}
+                                {sheetListMode === 'existing' && contactLists.length > 0 && (
+                                  <select className="w-full h-8 border border-gray-200 rounded-md px-2 text-xs bg-white"
+                                    value={sheetExistingListId} onChange={e => setSheetExistingListId(e.target.value)}>
+                                    <option value="">Select a list</option>
+                                    {contactLists.map((l: any) => (
+                                      <option key={l.id} value={l.id}>{l.name} ({l.contactCount || 0} contacts)</option>
+                                    ))}
+                                  </select>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </>
                       )}
                     </div>
                   )}
@@ -1527,10 +1624,17 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                         if (e.target.value === 'all') {
                           const validContacts = contacts.filter((c: any) => c.status !== 'unsubscribed');
                           setSelectedContacts(validContacts.map((c: any) => c.id));
+                        } else if (e.target.value && e.target.value !== '') {
+                          // Filter contacts by listId
+                          const listContacts = contacts.filter((c: any) => c.listId === e.target.value && c.status !== 'unsubscribed');
+                          setSelectedContacts(listContacts.map((c: any) => c.id));
                         } else { setSelectedContacts([]); }
                       }}>
                       <option value="">Select a list</option>
                       <option value="all">All contacts ({contacts.length})</option>
+                      {contactLists.map((l: any) => (
+                        <option key={l.id} value={l.id}>{l.name} ({l.contactCount || 0})</option>
+                      ))}
                     </select>
                   </div>
                   {selectedContacts.length > 0 && (
@@ -1577,9 +1681,17 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                 </div>
               )}
               <div className="flex justify-end gap-2 mt-4 pt-4 border-t border-gray-100">
-                <Button variant="outline" onClick={() => setShowRecipients(false)}>Close</Button>
+                <Button variant="outline" onClick={() => setShowRecipients(false)}>
+                  {sheetImportResult || selectedContacts.length > 0 ? 'Done' : 'Close'}
+                </Button>
+                {!sheetImportResult && (
                 <Button className="bg-blue-600 hover:bg-blue-700"
-                  disabled={(recipientTab === 'sheets' && sheetContacts.length === 0) || (recipientTab === 'contacts' && selectedContacts.length === 0) || (recipientTab === 'paste' && !pasteEmails.trim())}
+                  disabled={
+                    sheetLoading ||
+                    (recipientTab === 'sheets' && sheetContacts.length === 0) ||
+                    (recipientTab === 'contacts' && selectedContacts.length === 0) ||
+                    (recipientTab === 'paste' && !pasteEmails.trim())
+                  }
                   onClick={async () => {
                     if (recipientTab === 'sheets' && sheetContacts.length > 0) { await importSheetContacts(); return; }
                     if (recipientTab === 'paste' && pasteEmails.trim()) {
@@ -1627,8 +1739,10 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                     if (selectedContacts.length > 0 || (recipientTab === 'paste' && pasteEmails.trim())) { setError(''); }
                     setShowRecipients(false);
                   }}>
-                  {recipientTab === 'sheets' && sheetContacts.length > 0 ? `Import ${sheetContacts.length} contacts` : 'Next'}
+                  {sheetLoading ? <><Loader2 className="h-4 w-4 mr-1 animate-spin" />Importing...</> :
+                   recipientTab === 'sheets' && sheetContacts.length > 0 ? `Import & select ${sheetContacts.length} contacts` : 'Confirm'}
                 </Button>
+                )}
               </div>
             </div>
           </div>
