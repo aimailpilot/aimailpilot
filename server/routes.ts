@@ -204,6 +204,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return invite.organizationId;
     }
     
+    // Check for existing org with no members (created during initial setup)
+    try {
+      const allOrgIds = await storage.getAllOrganizationIds();
+      for (const orgId of allOrgIds) {
+        const memberCount = await storage.getOrgMemberCount(orgId);
+        if (memberCount === 0) {
+          // Adopt this ownerless org (likely created during setup)
+          await storage.addOrgMember(orgId, userId, 'owner');
+          await storage.setDefaultOrganization(userId, orgId);
+          await storage.updateUser(userId, { organizationId: orgId });
+          console.log('[Auth] User adopted ownerless org:', orgId);
+          return orgId;
+        }
+      }
+    } catch (e) {
+      console.error('[Auth] Error checking for ownerless orgs:', e);
+    }
+    
     // No org and no invitations - create a personal org
     const orgName = name ? `${name}'s Organization` : `${email.split('@')[0]}'s Organization`;
     const org = await storage.createOrganizationWithOwner({ name: orgName, domain: email.split('@')[1] || '' }, userId);
@@ -235,16 +253,91 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // ========== AUTH ROUTES ==========
   
-  // Simple login (fallback/dev only)
-  app.post('/api/auth/simple-login', (req, res) => {
-    const userId = 'user-123';
-    const mockUser = { id: userId, email: 'demo@aimailpilot.com', name: 'Demo User', picture: '', provider: 'google', access_token: 'demo-token' };
-    loggedInUsers.add(userId);
-    res.cookie('user_id', userId, { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
-    res.cookie('user_data', JSON.stringify(mockUser), { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
-    (req.session as any).userId = userId;
-    (req.session as any).user = mockUser;
-    res.json({ success: true, user: mockUser });
+  // Simple login - ONLY available in development
+  if (!isProduction) {
+    app.post('/api/auth/simple-login', (req, res) => {
+      const userId = 'user-123';
+      const mockUser = { id: userId, email: 'demo@aimailpilot.com', name: 'Demo User', picture: '', provider: 'google', access_token: 'demo-token' };
+      loggedInUsers.add(userId);
+      res.cookie('user_id', userId, { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
+      res.cookie('user_data', JSON.stringify(mockUser), { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
+      (req.session as any).userId = userId;
+      (req.session as any).user = mockUser;
+      res.json({ success: true, user: mockUser });
+    });
+  }
+
+  // ========== INITIAL SETUP (no auth required) ==========
+  // Check if initial setup is needed (no OAuth configured AND no users exist)
+  app.get('/api/setup/status', async (_req, res) => {
+    try {
+      const { clientId: googleId } = await getStoredOAuthCredentials('google');
+      const { clientId: msId } = await getStoredOAuthCredentials('microsoft');
+      const hasOAuth = !!(googleId || msId);
+      const stats = await storage.getPlatformStats();
+      const hasUsers = stats.totalUsers > 0;
+      const hasSuperAdmin = stats.superAdmins > 0;
+      res.json({
+        needsSetup: !hasOAuth,
+        hasUsers,
+        hasSuperAdmin,
+        googleConfigured: !!googleId,
+        microsoftConfigured: !!msId,
+      });
+    } catch (error) {
+      res.json({ needsSetup: true, hasUsers: false, hasSuperAdmin: false, googleConfigured: false, microsoftConfigured: false });
+    }
+  });
+
+  // Initial setup: Save OAuth credentials (only when no OAuth is configured yet)
+  app.post('/api/setup/oauth', async (req, res) => {
+    try {
+      // Check if OAuth is already configured - if so, block this endpoint
+      const { clientId: existingGoogle } = await getStoredOAuthCredentials('google');
+      const { clientId: existingMs } = await getStoredOAuthCredentials('microsoft');
+      if (existingGoogle || existingMs) {
+        return res.status(403).json({ error: 'OAuth is already configured. Use the admin settings page to modify.' });
+      }
+
+      const { provider, clientId, clientSecret } = req.body;
+      if (!provider || !clientId || !clientSecret) {
+        return res.status(400).json({ error: 'provider, clientId, and clientSecret are required' });
+      }
+      if (!['google', 'microsoft'].includes(provider)) {
+        return res.status(400).json({ error: 'Invalid provider. Use "google" or "microsoft".' });
+      }
+
+      // Store in a default org or first available org
+      let targetOrgId = '';
+      const orgIds = await storage.getAllOrganizationIds();
+      if (orgIds.length > 0) {
+        targetOrgId = orgIds[0];
+      } else {
+        // Create a system org for initial setup (no owner yet - first user to login will claim it)
+        const org = await storage.createOrganization(
+          { name: 'AImailPilot', domain: 'aimailpilot.com' }
+        );
+        targetOrgId = org.id;
+      }
+
+      if (provider === 'google') {
+        await storage.setApiSettings(targetOrgId, {
+          google_oauth_client_id: clientId,
+          google_oauth_client_secret: clientSecret,
+        });
+      } else {
+        await storage.setApiSettings(targetOrgId, {
+          microsoft_oauth_client_id: clientId,
+          microsoft_oauth_client_secret: clientSecret,
+        });
+      }
+
+      console.log(`[Setup] ${provider} OAuth credentials saved to org ${targetOrgId}`);
+      res.json({ success: true, message: `${provider} OAuth configured successfully` });
+    } catch (error) {
+      console.error('[Setup] Failed to save OAuth credentials:', error);
+      res.status(500).json({ error: 'Failed to save OAuth credentials' });
+    }
   });
 
   // ===== REAL GOOGLE OAUTH 2.0 =====
@@ -259,16 +352,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const { clientId, clientSecret } = await getStoredOAuthCredentials('google');
 
       if (!clientId || !clientSecret) {
-        // No OAuth configured - fall back to demo login
-        console.warn('[Auth] Google OAuth not configured, falling back to demo login');
-        const userId = 'google-demo-user';
-        const mockUser = { id: userId, email: 'demo@aimailpilot.com', name: 'Demo User', picture: '', provider: 'google', access_token: 'demo-token' };
-        loggedInUsers.add(userId);
-        res.cookie('user_id', userId, { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
-        res.cookie('user_data', JSON.stringify(mockUser), { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
-        (req.session as any).userId = userId;
-        (req.session as any).user = mockUser;
-        return req.session.save(() => { res.redirect('/?connected=true'); });
+        console.warn('[Auth] Google OAuth not configured');
+        return res.redirect('/?error=oauth_not_configured&provider=google');
       }
 
       const oauth2Client = createOAuth2Client({ clientId, clientSecret, redirectUri });
@@ -368,6 +453,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Ensure user has an organization (create one or accept invitations)
       const userOrgId = await ensureUserOrganization(userId, email, name);
       console.log('[Auth] User org resolved:', userOrgId);
+
+      // Auto-promote first user to SuperAdmin if none exists
+      try {
+        const platformStats = await storage.getPlatformStats();
+        if (platformStats.superAdmins === 0) {
+          await storage.setSuperAdmin(userId, true);
+          console.log('[Auth] Auto-promoted first user to SuperAdmin:', email);
+        }
+      } catch (e) {
+        console.error('[Auth] Failed to check/set SuperAdmin:', e);
+      }
 
       const userObj = {
         id: userId,
@@ -572,16 +668,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const { clientId, clientSecret } = await getStoredOAuthCredentials('microsoft');
 
       if (!clientId || !clientSecret) {
-        // No OAuth configured - fall back to demo login
-        console.warn('[Auth] Microsoft OAuth not configured, falling back to demo login');
-        const userId = 'microsoft-demo-user';
-        const mockUser = { id: userId, email: 'demo@aimailpilot.com', name: 'Demo User', picture: '', provider: 'microsoft', access_token: 'demo-ms-token' };
-        loggedInUsers.add(userId);
-        res.cookie('user_id', userId, { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
-        res.cookie('user_data', JSON.stringify(mockUser), { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: false, secure: false, sameSite: 'lax' });
-        (req.session as any).userId = userId;
-        (req.session as any).user = mockUser;
-        return req.session.save(() => { res.redirect('/?connected=true'); });
+        console.warn('[Auth] Microsoft OAuth not configured');
+        return res.redirect('/?error=oauth_not_configured&provider=microsoft');
       }
 
       // Microsoft OAuth 2.0 authorization URL (using 'common' tenant for multi-tenant support)
@@ -701,6 +789,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Ensure user has an organization
       const userOrgId = await ensureUserOrganization(userId, email, name);
       console.log('[Auth] Microsoft user org resolved:', userOrgId);
+
+      // Auto-promote first user to SuperAdmin if none exists
+      try {
+        const platformStats = await storage.getPlatformStats();
+        if (platformStats.superAdmins === 0) {
+          await storage.setSuperAdmin(userId, true);
+          console.log('[Auth] Auto-promoted first Microsoft user to SuperAdmin:', email);
+        }
+      } catch (e) {
+        console.error('[Auth] Failed to check/set SuperAdmin:', e);
+      }
 
       const userObj = {
         id: userId,

@@ -10,9 +10,10 @@ import { FaGoogle, FaMicrosoft } from "react-icons/fa";
 
 interface LandingPageProps {
   onLogin?: () => void;
+  oauthError?: string | null;
 }
 
-export default function LandingPage({ onLogin }: LandingPageProps) {
+export default function LandingPage({ onLogin, oauthError }: LandingPageProps) {
   const handleGoogleLogin = async () => {
     window.location.href = '/api/auth/google';
   };
@@ -114,6 +115,19 @@ export default function LandingPage({ onLogin }: LandingPageProps) {
               <span className="flex items-center gap-1.5"><CheckCircle className="h-4 w-4 text-green-500" /> No credit card</span>
               <span className="flex items-center gap-1.5"><CheckCircle className="h-4 w-4 text-green-500" /> 2,000 emails/day</span>
             </div>
+
+            {oauthError && (
+              <div className="mt-4 mx-auto max-w-md bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-red-700 text-sm">
+                {oauthError === 'oauth_not_configured' 
+                  ? 'OAuth is not configured yet. Please contact your administrator.'
+                  : oauthError === 'oauth_denied'
+                  ? 'Sign-in was cancelled. Please try again.'
+                  : oauthError === 'oauth_callback_failed'
+                  ? 'Authentication failed. Please try again.'
+                  : `Authentication error: ${oauthError}`
+                }
+              </div>
+            )}
           </div>
 
           {/* App Preview / Dashboard Mockup */}

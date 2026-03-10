@@ -96,6 +96,12 @@ export function serveStatic(app: Express) {
   console.log(`[Static] Serving static files from: ${distPath}`);
   app.use(express.static(distPath));
 
+  // Return 404 for unmatched API routes (don't serve SPA for API endpoints)
+  app.use("/api/*", (_req, res) => {
+    res.status(404).json({ error: 'Not found' });
+  });
+
+  // SPA fallback: serve index.html for all other routes (client-side routing)
   app.use("*", (_req, res) => {
     res.sendFile(path.resolve(distPath, "index.html"));
   });

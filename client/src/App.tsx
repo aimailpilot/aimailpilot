@@ -5,6 +5,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useState, useEffect } from "react";
 import LandingPage from "@/pages/landing-page";
+import SetupPage from "@/pages/setup-page";
 import MailMeteorDashboard from "@/pages/mailmeteor-dashboard";
 import NotFound from "@/pages/not-found";
 
@@ -18,27 +19,33 @@ interface User {
   refreshToken?: string;
 }
 
+interface SetupStatus {
+  needsSetup: boolean;
+  hasUsers: boolean;
+  hasSuperAdmin: boolean;
+  googleConfigured: boolean;
+  microsoftConfigured: boolean;
+}
+
 function Router() {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
 
   useEffect(() => {
     let mounted = true;
     
-    fetch('/api/auth/user', { credentials: 'include' })
-      .then(res => res.ok ? res.json() : null)
-      .then(userData => {
-        if (mounted) {
-          setUser(userData);
-          setIsLoading(false);
-        }
-      })
-      .catch(() => {
-        if (mounted) {
-          setUser(null);
-          setIsLoading(false);
-        }
-      });
+    // Check setup status and auth in parallel
+    Promise.all([
+      fetch('/api/setup/status').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/auth/user', { credentials: 'include' }).then(r => r.ok ? r.json() : null).catch(() => null),
+    ]).then(([setup, userData]) => {
+      if (mounted) {
+        setSetupStatus(setup);
+        setUser(userData);
+        setIsLoading(false);
+      }
+    });
 
     return () => { mounted = false; };
   }, []);
@@ -54,8 +61,17 @@ function Router() {
     );
   }
 
+  // Show setup page if OAuth is not configured
+  if (setupStatus?.needsSetup) {
+    return <SetupPage onComplete={() => window.location.reload()} />;
+  }
+
+  // Check URL for OAuth errors
+  const urlParams = new URLSearchParams(window.location.search);
+  const oauthError = urlParams.get('error');
+
   if (!user) {
-    return <LandingPage onLogin={() => window.location.reload()} />;
+    return <LandingPage onLogin={() => window.location.reload()} oauthError={oauthError} />;
   }
 
   // All views are handled by the dashboard component with internal routing

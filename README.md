@@ -9,9 +9,12 @@
 ## Features
 
 ### Completed
+- **Initial Setup Wizard** - First-time setup page for configuring OAuth credentials (no auth required)
+- **Production Auth Security** - Demo/simple login disabled in production; OAuth required
+- **Auto SuperAdmin** - First user to authenticate automatically becomes SuperAdmin
 - **SuperAdmin Console** - Platform-wide management: user/org administration, impersonation, stats dashboard, role-based access control
 - **Multitenancy & Team Management** - Full multi-organization support with team invitations, roles, and org switching
-- **Google OAuth 2.0 Sign-In** - Real Google authentication for user login (configurable from Advanced Settings)
+- **Google OAuth 2.0 Sign-In** - Real Google authentication for user login (configurable from Advanced Settings or Setup Wizard)
 - **Microsoft OAuth 2.0 Sign-In** - Outlook/Microsoft account authentication
 - **Landing Page** - Professional landing page with Google & Microsoft OAuth login buttons
 - **Campaign Management** - Create, list, filter (All/Active/Scheduled/Drafts/Ended), search campaigns
@@ -34,15 +37,37 @@
 - **Frontend**: React 18 + Wouter routing + TanStack Query + shadcn/ui components
 - **Backend**: Express.js with session-based authentication + Google/Microsoft OAuth 2.0
 - **Database**: SQLite (better-sqlite3) with WAL mode - persistent data in `./data/aimailpilot.db`
-- **Auth**: Cookie-based sessions + real Google/Microsoft OAuth 2.0 (fallback to demo mode when not configured)
+- **Auth**: Cookie-based sessions + real Google/Microsoft OAuth 2.0 (setup wizard for first-time config)
 - **Email**: Nodemailer SMTP with multiple provider presets
 - **Multitenancy**: Organization-based data isolation with role-based access control
+
+## First-Time Setup Flow
+
+When deployed to a fresh server, AImailPilot guides you through setup:
+
+1. **Setup Wizard** - Opens automatically when no OAuth is configured
+   - Configure Google OAuth 2.0 (Client ID + Secret from Google Cloud Console)
+   - Or configure Microsoft OAuth 2.0 (Client ID + Secret from Azure Portal)
+   - The setup page shows the exact redirect URI needed
+2. **First Sign-In** - After configuring OAuth, sign in with Google or Microsoft
+3. **Auto SuperAdmin** - The first authenticated user is automatically promoted to SuperAdmin
+4. **Configure Platform** - As SuperAdmin, you can:
+   - Manage users and organizations
+   - Configure additional OAuth providers
+   - Set up SMTP accounts, AI features, etc.
+
+### Security Notes
+- `POST /api/auth/simple-login` (demo login) is **disabled in production**
+- OAuth fallback to demo mode is **removed** — OAuth must be configured first
+- `POST /api/setup/oauth` is **locked** after OAuth is configured
+- All API routes return proper 404 JSON instead of serving SPA fallback
 
 ## Multitenancy System
 
 ### How It Works
 - **Organizations**: Every user belongs to one or more organizations. All data (campaigns, contacts, templates, etc.) is scoped to an organization.
 - **Auto-Creation**: When a new user signs up via OAuth, a personal organization is automatically created.
+- **Ownerless Org Adoption**: If an organization was created during setup with no owner, the first user to sign in adopts it.
 - **Invitation System**: Admins/Owners can invite team members by email. Invitations expire after 7 days.
 - **Auto-Accept**: If a new user signs up and has pending invitations, they are automatically accepted.
 - **Org Switching**: Users who belong to multiple organizations can switch between them via the sidebar dropdown.
@@ -66,9 +91,10 @@
 The SuperAdmin is a platform-level role that sits above organization owners. SuperAdmins can manage all organizations, users, and platform settings.
 
 ### How to Become SuperAdmin
-1. **First-time setup**: If no SuperAdmin exists, any authenticated user can claim the role by calling `POST /api/setup-superadmin`
-2. **Environment variable**: Set `SUPERADMIN_EMAILS=admin@example.com,admin2@example.com` to auto-promote users on startup
-3. **Existing SuperAdmin**: A SuperAdmin can grant/revoke SuperAdmin status to other users via the console
+1. **Auto-promotion**: The first user to authenticate on a fresh deployment is automatically promoted to SuperAdmin
+2. **First-time setup**: If no SuperAdmin exists, any authenticated user can claim the role by calling `POST /api/setup-superadmin`
+3. **Environment variable**: Set `SUPERADMIN_EMAILS=admin@example.com,admin2@example.com` to auto-promote users on startup
+4. **Existing SuperAdmin**: A SuperAdmin can grant/revoke SuperAdmin status to other users via the console
 
 ### SuperAdmin Features
 | Feature | Description |
@@ -97,10 +123,16 @@ The SuperAdmin is a platform-level role that sits above organization owners. Sup
 | POST | `/api/superadmin/promote-by-email` | Promote user by email |
 
 ## URLs
-- **Production**: https://aimailpilot.com (when deployed)
-- **Sandbox**: https://3000-isw56zs1g5v3ymi7shlgn-cc2fbc16.sandbox.novita.ai
+- **Production**: https://aimailpilot.com
+- **GitHub**: https://github.com/aimailpilot/aimailpilot
 
 ## API Endpoints
+
+### Setup (No Auth Required)
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/setup/status` | Check if initial setup is needed |
+| POST | `/api/setup/oauth` | Save OAuth credentials (only works before OAuth is configured) |
 
 ### Authentication
 | Method | Path | Description |
@@ -150,15 +182,18 @@ The SuperAdmin is a platform-level role that sits above organization owners. Sup
 
 ## User Guide
 1. Open the app URL
-2. Click **"Continue with Google"** or **"Continue with Microsoft"** to sign in
-3. A personal organization is created automatically on first login
-4. Browse **Campaigns** - see active, scheduled, draft campaigns
-5. Click **"New campaign"** to create a campaign with the email editor
-6. Go to **Email Accounts** to add your SMTP sending account
-7. Navigate to **Templates**, **Contacts**, **Analytics** via sidebar
-8. Use **Team** in the sidebar to invite team members and manage roles
-9. Use the **organization dropdown** in the sidebar to switch between orgs
-10. Use **Advanced Settings** to configure Azure OpenAI for AI features
+2. **First time**: Complete the Setup Wizard to configure OAuth (Google or Microsoft)
+3. Click **"Continue with Google"** or **"Continue with Microsoft"** to sign in
+4. The **first user** becomes **SuperAdmin** automatically
+5. A personal organization is created on first login
+6. Browse **Campaigns** - see active, scheduled, draft campaigns
+7. Click **"New campaign"** to create a campaign with the email editor
+8. Go to **Email Accounts** to add your SMTP sending account
+9. Navigate to **Templates**, **Contacts**, **Analytics** via sidebar
+10. Use **Team** in the sidebar to invite team members and manage roles
+11. Use the **organization dropdown** in the sidebar to switch between orgs
+12. Use **Advanced Settings** to configure Azure OpenAI for AI features
+13. Access **SuperAdmin** (orange shield icon) for platform management
 
 ## Data Models
 - **Organizations** - Multi-tenant workspaces with settings
@@ -183,11 +218,10 @@ The SuperAdmin is a platform-level role that sits above organization owners. Sup
 1. A VPS/server (Ubuntu 22.04+ recommended) with Node.js 20+
 2. Domain pointing to your server's IP
 3. SSL certificate (Let's Encrypt recommended)
-4. Google Cloud OAuth 2.0 credentials (optional - configurable via UI)
 
 ### Quick Start
 ```bash
-git clone <repo-url> /opt/aimailpilot
+git clone https://github.com/aimailpilot/aimailpilot /opt/aimailpilot
 cd /opt/aimailpilot
 npm install
 npm run build
@@ -204,15 +238,28 @@ pm2 start dist/index.js --name aimailpilot --env production
 pm2 save && pm2 startup
 ```
 
-### Configure OAuth via UI
-1. Login with demo mode (first time)
-2. Go to **Advanced Settings** (wrench icon in sidebar)
-3. Enter your Google/Microsoft OAuth Client ID and Secret
-4. Click **Save** and re-authenticate
+### Configure OAuth
+1. Open your app URL — the Setup Wizard will appear automatically
+2. Enter your Google/Microsoft OAuth Client ID and Secret
+3. Add the displayed redirect URI to your OAuth provider
+4. Click **Save** and then **Sign In**
+5. First user becomes SuperAdmin automatically
+
+### Environment Variables (Optional)
+```bash
+GOOGLE_CLIENT_ID=xxx       # Alternative to UI setup
+GOOGLE_CLIENT_SECRET=xxx
+MICROSOFT_CLIENT_ID=xxx
+MICROSOFT_CLIENT_SECRET=xxx
+SUPERADMIN_EMAILS=admin@example.com  # Auto-promote to SuperAdmin
+SESSION_SECRET=your-secret
+COOKIE_DOMAIN=aimailpilot.com
+```
 
 ## Deployment Status
 - **Platform**: Node.js Express server
 - **Database**: SQLite (./data/aimailpilot.db)
-- **Status**: Active
+- **Status**: ✅ Active
 - **Port**: 3000
-- **Last Updated**: 2026-03-09
+- **GitHub**: https://github.com/aimailpilot/aimailpilot
+- **Last Updated**: 2026-03-10
