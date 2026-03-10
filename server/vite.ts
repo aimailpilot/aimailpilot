@@ -76,11 +76,24 @@ export function serveStatic(app: Express) {
   }
 
   if (!fs.existsSync(distPath)) {
-    throw new Error(
-      `Could not find the build directory: ${distPath}, make sure to build the client first`,
-    );
+    // Fallback: try from current working directory (Azure deployment)
+    distPath = path.resolve(process.cwd(), "dist", "public");
   }
 
+  if (!fs.existsSync(distPath)) {
+    console.error(`[Static] Could not find build directory. Tried:
+      - ${path.resolve(import.meta.dirname, "public")}
+      - ${path.resolve(import.meta.dirname, "..", "dist", "public")}
+      - ${path.resolve(process.cwd(), "dist", "public")}
+    `);
+    // Don't crash - serve a basic error page instead
+    app.use("*", (_req, res) => {
+      res.status(503).send("Application is starting up. Build artifacts not found.");
+    });
+    return;
+  }
+
+  console.log(`[Static] Serving static files from: ${distPath}`);
   app.use(express.static(distPath));
 
   app.use("*", (_req, res) => {

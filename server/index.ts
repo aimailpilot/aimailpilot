@@ -4,6 +4,16 @@ import { setupVite, serveStatic, log } from "./vite";
 import { startFollowupEngine } from "./services/followup-engine";
 import { storage } from "./storage";
 
+// Global error handling to prevent silent crashes on Azure
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] Uncaught exception:', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[FATAL] Unhandled rejection:', reason);
+});
+
+console.log(`[Startup] Node ${process.version}, env=${process.env.NODE_ENV || 'development'}, port=${process.env.PORT || '3000'}`);
+
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
@@ -55,11 +65,7 @@ app.use((req, res, next) => {
   }
 
   const port = parseInt(process.env.PORT || '3000', 10);
-  server.listen({
-    port,
-    host: "0.0.0.0",
-    reusePort: true,
-  }, () => {
+  server.listen(port, "0.0.0.0", () => {
     log(`AImailPilot serving on port ${port}`);
     // Start the follow-up engine after server is ready
     startFollowupEngine();

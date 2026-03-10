@@ -2,12 +2,34 @@
 // Data is stored in ./data/aimailpilot.db and survives server restarts
 import Database from 'better-sqlite3';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const DB_PATH = path.resolve(__dirname, '..', 'data', 'aimailpilot.db');
+// On Azure App Service, use /home/data for persistent storage
+// Locally, use ./data relative to project root
+function getDbPath(): string {
+  // Check if running on Azure (WEBSITE_SITE_NAME env var is set by Azure)
+  if (process.env.WEBSITE_SITE_NAME) {
+    const azureDataDir = '/home/data';
+    if (!fs.existsSync(azureDataDir)) {
+      fs.mkdirSync(azureDataDir, { recursive: true });
+    }
+    return path.join(azureDataDir, 'aimailpilot.db');
+  }
+  // Local development
+  const localPath = path.resolve(__dirname, '..', 'data', 'aimailpilot.db');
+  const localDir = path.dirname(localPath);
+  if (!fs.existsSync(localDir)) {
+    fs.mkdirSync(localDir, { recursive: true });
+  }
+  return localPath;
+}
+
+const DB_PATH = getDbPath();
+console.log(`[DB] Using database at: ${DB_PATH}`);
 const db = new Database(DB_PATH);
 
 // Enable WAL mode for better concurrent read performance
