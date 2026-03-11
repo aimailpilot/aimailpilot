@@ -467,6 +467,9 @@ export class CampaignEngine {
         const fromEmail = smtpConfig?.fromEmail || emailAccount.email || '';
         const orgId = emailAccount.organizationId || '';
 
+        // Detect if this account uses OAuth (password is a placeholder, not real SMTP creds)
+        const isOAuthAccount = smtpConfig?.auth?.pass === 'OAUTH_TOKEN';
+
         if (provider === 'gmail' || provider === 'google') {
           // Try Gmail API first
           const accessToken = await refreshGmailToken(orgId, fromEmail);
@@ -479,18 +482,27 @@ export class CampaignEngine {
               html: clickTrackedContent,
               headers: emailHeaders,
             });
-            // If Gmail API fails with auth error, fall back to SMTP
+            // If Gmail API fails with auth error, only fall back to SMTP if we have real SMTP credentials
             if (!result.success && result.error?.includes('401')) {
-              console.log(`[CampaignEngine] Gmail API auth failed, falling back to SMTP for ${contact.email}`);
-              result = await smtpEmailService.sendEmail(emailAccount.id, smtpConfig, {
-                to: contact.email, subject: personalizedSubject, html: clickTrackedContent, trackingId, headers: emailHeaders,
-              });
+              if (!isOAuthAccount) {
+                console.log(`[CampaignEngine] Gmail API auth failed, falling back to SMTP for ${contact.email}`);
+                result = await smtpEmailService.sendEmail(emailAccount.id, smtpConfig, {
+                  to: contact.email, subject: personalizedSubject, html: clickTrackedContent, trackingId, headers: emailHeaders,
+                });
+              } else {
+                console.error(`[CampaignEngine] Gmail API auth failed for OAuth account ${fromEmail}. No SMTP fallback available. User needs to re-authenticate.`);
+                result = { success: false, error: `Gmail OAuth token expired for ${fromEmail}. Please re-authenticate with Google in Account Settings.` };
+              }
             }
-          } else {
-            // No OAuth token, use SMTP
+          } else if (!isOAuthAccount) {
+            // No OAuth token but has real SMTP credentials — use SMTP
             result = await smtpEmailService.sendEmail(emailAccount.id, smtpConfig, {
               to: contact.email, subject: personalizedSubject, html: clickTrackedContent, trackingId, headers: emailHeaders,
             });
+          } else {
+            // OAuth account but no token available
+            console.error(`[CampaignEngine] No Gmail OAuth token for ${fromEmail}. User needs to re-authenticate.`);
+            result = { success: false, error: `Gmail OAuth tokens not found for ${fromEmail}. Please re-authenticate with Google in Account Settings.` };
           }
         } else if (provider === 'outlook' || provider === 'microsoft') {
           // Try Microsoft Graph API first
@@ -504,18 +516,27 @@ export class CampaignEngine {
               html: clickTrackedContent,
               headers: emailHeaders,
             });
-            // If Graph fails with auth error, fall back to SMTP
+            // If Graph fails with auth error, only fall back to SMTP if we have real SMTP credentials
             if (!result.success && (result.error?.includes('401') || result.error?.includes('403'))) {
-              console.log(`[CampaignEngine] Graph API auth failed, falling back to SMTP for ${contact.email}`);
-              result = await smtpEmailService.sendEmail(emailAccount.id, smtpConfig, {
-                to: contact.email, subject: personalizedSubject, html: clickTrackedContent, trackingId, headers: emailHeaders,
-              });
+              if (!isOAuthAccount) {
+                console.log(`[CampaignEngine] Graph API auth failed, falling back to SMTP for ${contact.email}`);
+                result = await smtpEmailService.sendEmail(emailAccount.id, smtpConfig, {
+                  to: contact.email, subject: personalizedSubject, html: clickTrackedContent, trackingId, headers: emailHeaders,
+                });
+              } else {
+                console.error(`[CampaignEngine] Microsoft Graph auth failed for OAuth account ${fromEmail}. No SMTP fallback available.`);
+                result = { success: false, error: `Microsoft OAuth token expired for ${fromEmail}. Please re-authenticate in Account Settings.` };
+              }
             }
-          } else {
-            // No OAuth token, use SMTP
+          } else if (!isOAuthAccount) {
+            // No OAuth token but has real SMTP credentials — use SMTP
             result = await smtpEmailService.sendEmail(emailAccount.id, smtpConfig, {
               to: contact.email, subject: personalizedSubject, html: clickTrackedContent, trackingId, headers: emailHeaders,
             });
+          } else {
+            // OAuth account but no token available
+            console.error(`[CampaignEngine] No Microsoft OAuth token for ${fromEmail}. User needs to re-authenticate.`);
+            result = { success: false, error: `Microsoft OAuth tokens not found for ${fromEmail}. Please re-authenticate in Account Settings.` };
           }
         } else {
           // Other providers — SMTP only

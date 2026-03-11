@@ -1058,14 +1058,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get('/api/email-accounts', async (req: any, res) => {
     try {
       const accounts = await storage.getEmailAccounts(req.user.organizationId);
-      // Don't return passwords in the response
-      const safe = accounts.map((a: any) => ({
-        ...a,
-        smtpConfig: a.smtpConfig ? {
-          ...a.smtpConfig,
-          auth: { user: a.smtpConfig.auth?.user, pass: '••••••••' }
-        } : null,
-      }));
+      // Don't return passwords in the response, but expose authMethod for OAuth detection
+      const safe = accounts.map((a: any) => {
+        const isOAuth = a.smtpConfig?.auth?.pass === 'OAUTH_TOKEN';
+        return {
+          ...a,
+          authMethod: isOAuth ? 'oauth' : 'smtp',
+          smtpConfig: a.smtpConfig ? {
+            ...a.smtpConfig,
+            auth: { user: a.smtpConfig.auth?.user, pass: isOAuth ? 'OAUTH_TOKEN' : '••••••••' }
+          } : null,
+        };
+      });
       res.json(safe);
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch email accounts' });
@@ -1080,11 +1084,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const account = await storage.getEmailAccount(req.params.id);
       if (!account) return res.status(404).json({ message: 'Not found' });
+      const isOAuth = account.smtpConfig?.auth?.pass === 'OAUTH_TOKEN';
       res.json({
         ...account,
+        authMethod: isOAuth ? 'oauth' : 'smtp',
         smtpConfig: account.smtpConfig ? {
           ...account.smtpConfig,
-          auth: { user: account.smtpConfig.auth?.user, pass: '••••••••' }
+          auth: { user: account.smtpConfig.auth?.user, pass: isOAuth ? 'OAUTH_TOKEN' : '••••••••' }
         } : null,
       });
     } catch (error) {
@@ -1294,40 +1300,131 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!account) {
         return res.status(404).json({ 
           success: false, 
-          error: `Email account with ID "${req.params.id}" was not found. It may have been deleted or the ID is incorrect.`,
+          error: `Email account with ID "${req.params.id}" was not found.`,
           code: 'ACCOUNT_NOT_FOUND'
         });
       }
-      if (!account.smtpConfig) {
-        return res.status(400).json({ 
-          success: false, 
-          error: 'SMTP is not configured for this account. Please update the account with valid SMTP settings.',
-          code: 'SMTP_NOT_CONFIGURED'
-        });
+
+      const isOAuthAccount = account.smtpConfig?.auth?.pass === 'OAUTH_TOKEN';
+      const orgId = account.organizationId || req.user?.organizationId || '';
+
+      // For OAuth-linked accounts (Gmail API / Microsoft Graph), test via API
+      if (isOAuthAccount) {
+        const provider = account.provider || account.smtpConfig?.provider || '';
+        
+        if (provider === 'gmail' || provider === 'google') {
+          // Test Gmail API connection
+          try {
+            const settings = await storage.getApiSettings(orgId);
+            // Try per-sender tokens first, then org-level
+            let accessToken = settings[`gmail_sender_${account.email}_access_token`] || settings.gmail_access_token;
+            const refreshToken = settings[`gmail_sender_${account.email}_refresh_token`] || settings.gmail_refresh_token;
+            
+            if (!accessToken && !refreshToken) {
+              return res.json({ success: false, error: 'Gmail OAuth tokens not found. Please re-authenticate with Google.', code: 'OAUTH_NO_TOKENS', authMethod: 'oauth' });
+            }
+
+            // Try a lightweight Gmail API call to verify tokens
+            const testResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
+              headers: { Authorization: `Bearer ${accessToken}` },
+            });
+
+            if (testResp.ok) {
+              const profile = await testResp.json() as any;
+              // Optionally send test email
+              const testEmail = req.body.testEmail || account.email;
+              if (testEmail) {
+                const raw = Buffer.from(
+                  `From: ${account.email}\r\nTo: ${testEmail}\r\nSubject: AImailPilot Test Email\r\nContent-Type: text/html; charset="UTF-8"\r\n\r\n<p>This is a test email from AImailPilot sent via Gmail API (OAuth).</p><p>Your Gmail account <strong>${profile.emailAddress}</strong> is working correctly!</p>`
+                ).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+                const sendResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+                  method: 'POST',
+                  headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ raw }),
+                });
+
+                if (sendResp.ok) {
+                  return res.json({ success: true, message: `Test email sent to ${testEmail} via Gmail API`, authMethod: 'oauth', provider: 'gmail', email: profile.emailAddress });
+                } else {
+                  const errText = await sendResp.text();
+                  // If 401, try token refresh
+                  if (sendResp.status === 401 && refreshToken) {
+                    return res.json({ success: false, error: 'Gmail token expired. Please sign out and sign back in with Google to refresh.', code: 'OAUTH_TOKEN_EXPIRED', authMethod: 'oauth' });
+                  }
+                  return res.json({ success: false, error: `Gmail API send failed: ${errText}`, code: 'GMAIL_API_ERROR', authMethod: 'oauth' });
+                }
+              }
+              return res.json({ success: true, message: `Gmail API connected as ${profile.emailAddress}`, authMethod: 'oauth', provider: 'gmail', email: profile.emailAddress });
+            } else if (testResp.status === 401 && refreshToken) {
+              // Token expired - try refresh
+              const clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID || '';
+              const clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET || '';
+              if (clientId && clientSecret) {
+                try {
+                  const oauth2Client = createOAuth2Client({ clientId, clientSecret, redirectUri: '' });
+                  oauth2Client.setCredentials({ refresh_token: refreshToken });
+                  const { credentials } = await oauth2Client.refreshAccessToken();
+                  if (credentials.access_token) {
+                    await storage.setApiSetting(orgId, `gmail_sender_${account.email}_access_token`, credentials.access_token);
+                    await storage.setApiSetting(orgId, 'gmail_access_token', credentials.access_token);
+                    if (credentials.expiry_date) {
+                      await storage.setApiSetting(orgId, `gmail_sender_${account.email}_token_expiry`, String(credentials.expiry_date));
+                      await storage.setApiSetting(orgId, 'gmail_token_expiry', String(credentials.expiry_date));
+                    }
+                    return res.json({ success: true, message: 'Gmail OAuth token refreshed and verified', authMethod: 'oauth', provider: 'gmail', email: account.email });
+                  }
+                } catch (refreshErr) {
+                  console.error('[Test] Gmail token refresh failed:', refreshErr);
+                }
+              }
+              return res.json({ success: false, error: 'Gmail token expired. Please sign out and sign back in with Google.', code: 'OAUTH_TOKEN_EXPIRED', authMethod: 'oauth' });
+            } else {
+              return res.json({ success: false, error: 'Gmail API connection failed. Please re-authenticate.', code: 'GMAIL_API_ERROR', authMethod: 'oauth' });
+            }
+          } catch (gmailErr) {
+            console.error('[Test] Gmail API test error:', gmailErr);
+            return res.json({ success: false, error: 'Failed to test Gmail API connection', code: 'GMAIL_API_ERROR', authMethod: 'oauth' });
+          }
+        } else if (provider === 'outlook' || provider === 'microsoft') {
+          // Test Microsoft Graph connection
+          try {
+            const settings = await storage.getApiSettings(orgId);
+            const accessToken = settings[`outlook_sender_${account.email}_access_token`] || settings.microsoft_access_token;
+            if (!accessToken) {
+              return res.json({ success: false, error: 'Microsoft OAuth tokens not found. Please re-authenticate.', code: 'OAUTH_NO_TOKENS', authMethod: 'oauth' });
+            }
+            const testResp = await fetch('https://graph.microsoft.com/v1.0/me', {
+              headers: { Authorization: `Bearer ${accessToken}` },
+            });
+            if (testResp.ok) {
+              const profile = await testResp.json() as any;
+              return res.json({ success: true, message: `Microsoft Graph connected as ${profile.mail || profile.userPrincipalName}`, authMethod: 'oauth', provider: 'outlook', email: profile.mail || profile.userPrincipalName });
+            } else {
+              return res.json({ success: false, error: 'Microsoft token expired. Please sign out and sign back in.', code: 'OAUTH_TOKEN_EXPIRED', authMethod: 'oauth' });
+            }
+          } catch (msErr) {
+            return res.json({ success: false, error: 'Failed to test Microsoft Graph connection', code: 'MS_GRAPH_ERROR', authMethod: 'oauth' });
+          }
+        }
       }
 
-      // Verify SMTP connection
+      // Non-OAuth: Standard SMTP test
+      if (!account.smtpConfig) {
+        return res.status(400).json({ success: false, error: 'SMTP is not configured.', code: 'SMTP_NOT_CONFIGURED' });
+      }
+
       const verifyResult = await smtpEmailService.verifyConnection(account.smtpConfig);
       if (!verifyResult.success) {
         return res.json({ 
-          success: false, 
-          error: verifyResult.error,
-          code: 'SMTP_VERIFY_FAILED',
-          provider: account.provider,
-          host: account.smtpConfig.host,
+          success: false, error: verifyResult.error, code: 'SMTP_VERIFY_FAILED',
+          provider: account.provider, host: account.smtpConfig.host, authMethod: 'smtp',
         });
       }
 
-      // Send test email
       const testEmail = req.body.testEmail || account.email;
       const sendResult = await smtpEmailService.sendTestEmail(account.id, account.smtpConfig, testEmail);
-      
-      res.json({
-        ...sendResult,
-        provider: account.provider,
-        email: account.email,
-        host: account.smtpConfig.host,
-      });
+      res.json({ ...sendResult, provider: account.provider, email: account.email, host: account.smtpConfig.host, authMethod: 'smtp' });
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : 'Unknown error';
       res.status(500).json({ success: false, error: `Internal error while testing: ${errMsg}`, code: 'INTERNAL_ERROR' });
@@ -1337,11 +1434,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post('/api/email-accounts/:id/verify', async (req: any, res) => {
     try {
       const account = await storage.getEmailAccount(req.params.id);
-      if (!account || !account.smtpConfig) {
-        return res.status(404).json({ message: 'Account not found or SMTP not configured' });
+      if (!account) {
+        return res.status(404).json({ success: false, error: 'Account not found' });
+      }
+
+      const isOAuthAccount = account.smtpConfig?.auth?.pass === 'OAUTH_TOKEN';
+      
+      // OAuth accounts are "verified" if tokens exist
+      if (isOAuthAccount) {
+        const orgId = account.organizationId || req.user?.organizationId || '';
+        const provider = account.provider || '';
+        const settings = await storage.getApiSettings(orgId);
+        
+        if (provider === 'gmail' || provider === 'google') {
+          const hasToken = settings[`gmail_sender_${account.email}_access_token`] || settings.gmail_access_token;
+          return res.json({ success: !!hasToken, authMethod: 'oauth', message: hasToken ? 'Gmail OAuth connected' : 'Gmail OAuth tokens missing' });
+        } else if (provider === 'outlook' || provider === 'microsoft') {
+          const hasToken = settings[`outlook_sender_${account.email}_access_token`] || settings.microsoft_access_token;
+          return res.json({ success: !!hasToken, authMethod: 'oauth', message: hasToken ? 'Outlook OAuth connected' : 'Outlook OAuth tokens missing' });
+        }
+      }
+
+      if (!account.smtpConfig) {
+        return res.status(404).json({ success: false, error: 'SMTP not configured' });
       }
       const result = await smtpEmailService.verifyConnection(account.smtpConfig);
-      res.json(result);
+      res.json({ ...result, authMethod: 'smtp' });
     } catch (error) {
       res.status(500).json({ success: false, error: 'Failed to verify' });
     }

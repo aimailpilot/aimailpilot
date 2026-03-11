@@ -24,6 +24,7 @@ interface EmailAccount {
   isActive: boolean;
   dailyLimit: number;
   dailySent: number;
+  authMethod?: 'oauth' | 'smtp';
   smtpConfig?: {
     host: string;
     port: number;
@@ -256,6 +257,20 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
   };
 
   const parseSmtpError = (error: string): string => {
+    // OAuth-specific errors
+    if (error.includes('OAuth tokens not found') || error.includes('OAUTH_NO_TOKENS')) {
+      return 'OAuth not connected. Please re-authenticate with Google/Microsoft in Account Settings.';
+    }
+    if (error.includes('token expired') || error.includes('OAUTH_TOKEN_EXPIRED') || error.includes('re-authenticate')) {
+      return 'OAuth token expired. Please sign out and sign back in to refresh.';
+    }
+    if (error.includes('Gmail API') && error.includes('401')) {
+      return 'Gmail API authorization expired. Please re-authenticate with Google.';
+    }
+    if (error.includes('Graph API') && (error.includes('401') || error.includes('403'))) {
+      return 'Microsoft authorization expired. Please re-authenticate with Microsoft.';
+    }
+    // Standard SMTP errors
     if (error.includes('BadCredentials') || error.includes('Username and Password not accepted')) {
       return 'Invalid credentials. For Gmail, use an App Password (not your regular password). Enable 2-Step Verification first.';
     }
@@ -520,13 +535,13 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
                       {/* SMTP & Quota Info */}
                       <div className="flex items-center gap-4 text-[11px] text-gray-400">
                         <span className="flex items-center gap-1">
-                          {account.smtpConfig?.auth?.pass === 'OAUTH_TOKEN' ? (
-                            <><Shield className="h-3 w-3 text-emerald-500" /> <span className="text-emerald-600 font-medium">OAuth (Gmail API)</span></>
+                          {(account.authMethod === 'oauth' || account.smtpConfig?.auth?.pass === 'OAUTH_TOKEN') ? (
+                            <><Shield className="h-3 w-3 text-emerald-500" /> <span className="text-emerald-600 font-medium">OAuth ({account.provider === 'outlook' || account.provider === 'microsoft' ? 'Microsoft Graph' : 'Gmail API'})</span></>
                           ) : (
                             <><Server className="h-3 w-3" /> {account.smtpConfig?.host}:{account.smtpConfig?.port}</>
                           )}
                         </span>
-                        {account.smtpConfig?.auth?.pass !== 'OAUTH_TOKEN' && (
+                        {account.authMethod !== 'oauth' && account.smtpConfig?.auth?.pass !== 'OAUTH_TOKEN' && (
                           <span className="flex items-center gap-1">
                             <Lock className="h-3 w-3" />
                             {account.smtpConfig?.secure ? 'SSL/TLS' : 'STARTTLS'}
