@@ -4279,6 +4279,155 @@ Example response:
     }
   });
 
+  // Helper: Send invitation email via the org's best available email channel
+  async function sendInvitationEmail(
+    orgId: string,
+    inviteeEmail: string,
+    inviterName: string,
+    orgName: string,
+    role: string,
+    acceptUrl: string
+  ): Promise<{ sent: boolean; method?: string; error?: string }> {
+    try {
+      const settings = await storage.getApiSettings(orgId);
+      const accounts = await storage.getEmailAccounts(orgId);
+      
+      // Build a nice HTML invitation email
+      const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
+      const htmlBody = `
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <div style="text-align: center; margin-bottom: 30px;">
+            <h1 style="color: #1a56db; font-size: 24px; margin: 0;">AImailPilot</h1>
+            <p style="color: #6b7280; font-size: 14px; margin: 4px 0 0;">AI-Powered Email Campaign Platform</p>
+          </div>
+          <div style="background: #f9fafb; border-radius: 12px; padding: 32px; text-align: center;">
+            <h2 style="color: #111827; font-size: 20px; margin: 0 0 12px;">You're invited to join a team!</h2>
+            <p style="color: #4b5563; font-size: 15px; line-height: 1.6; margin: 0 0 8px;">
+              <strong>${inviterName}</strong> has invited you to join <strong>${orgName}</strong> as a <strong>${roleLabel}</strong>.
+            </p>
+            <p style="color: #6b7280; font-size: 13px; margin: 0 0 24px;">
+              This invitation expires in 7 days.
+            </p>
+            <a href="${acceptUrl}" style="display: inline-block; background: #1a56db; color: white; text-decoration: none; padding: 12px 32px; border-radius: 8px; font-size: 15px; font-weight: 600;">
+              Accept Invitation
+            </a>
+            <p style="color: #9ca3af; font-size: 12px; margin: 20px 0 0;">
+              If you don't have an AImailPilot account, you'll be able to create one when you click the link above.
+            </p>
+          </div>
+          <div style="text-align: center; margin-top: 24px; padding-top: 16px; border-top: 1px solid #e5e7eb;">
+            <p style="color: #9ca3af; font-size: 11px; margin: 0;">
+              This email was sent by AImailPilot. If you didn't expect this invitation, you can safely ignore it.
+            </p>
+          </div>
+        </div>
+      `;
+
+      const subject = `${inviterName} invited you to join ${orgName} on AImailPilot`;
+
+      // Strategy 1: Try Gmail API with org-level or sender tokens
+      const gmailAccessToken = settings.gmail_access_token;
+      const gmailRefreshToken = settings.gmail_refresh_token;
+      const gmailEmail = settings.gmail_user_email;
+      
+      if (gmailAccessToken && gmailEmail) {
+        // Check if token needs refresh
+        let token = gmailAccessToken;
+        const expiry = parseInt(settings.gmail_token_expiry || '0');
+        if (Date.now() >= expiry - 300000 && gmailRefreshToken) {
+          const clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID || '';
+          const clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET || '';
+          if (clientId && clientSecret) {
+            try {
+              const oauth2 = createOAuth2Client({ clientId, clientSecret, redirectUri: '' });
+              oauth2.setCredentials({ refresh_token: gmailRefreshToken });
+              const { credentials } = await oauth2.refreshAccessToken();
+              if (credentials.access_token) {
+                token = credentials.access_token;
+                await storage.setApiSetting(orgId, 'gmail_access_token', token);
+                if (credentials.expiry_date) await storage.setApiSetting(orgId, 'gmail_token_expiry', String(credentials.expiry_date));
+              }
+            } catch (e) { console.error('[InviteEmail] Gmail token refresh failed:', e); }
+          }
+        }
+
+        const raw = createRawEmail({ from: gmailEmail, to: inviteeEmail, subject, body: htmlBody });
+        const resp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ raw }),
+        });
+        if (resp.ok) {
+          console.log(`[InviteEmail] Invitation sent to ${inviteeEmail} via Gmail API from ${gmailEmail}`);
+          return { sent: true, method: 'gmail-api' };
+        }
+        console.error(`[InviteEmail] Gmail API failed (${resp.status}):`, await resp.text());
+      }
+
+      // Strategy 2: Try Microsoft Graph API
+      const msAccessToken = settings.microsoft_access_token;
+      if (msAccessToken) {
+        const message = {
+          subject,
+          body: { contentType: 'HTML', content: htmlBody },
+          toRecipients: [{ emailAddress: { address: inviteeEmail } }],
+        };
+        const resp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${msAccessToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message, saveToSentItems: true }),
+        });
+        if (resp.ok) {
+          console.log(`[InviteEmail] Invitation sent to ${inviteeEmail} via Microsoft Graph`);
+          return { sent: true, method: 'microsoft-graph' };
+        }
+        console.error(`[InviteEmail] Microsoft Graph failed (${resp.status}):`, await resp.text());
+      }
+
+      // Strategy 3: Try any SMTP-configured email account in the org
+      for (const account of accounts) {
+        if (account.smtpConfig && account.smtpConfig.auth?.pass && account.smtpConfig.auth.pass !== 'OAUTH_TOKEN' && account.isActive) {
+          try {
+            const sendResult = await smtpEmailService.sendEmail(account.id, account.smtpConfig, {
+              to: inviteeEmail,
+              subject,
+              html: htmlBody,
+            });
+            if (sendResult.success) {
+              console.log(`[InviteEmail] Invitation sent to ${inviteeEmail} via SMTP (${account.email})`);
+              return { sent: true, method: 'smtp' };
+            }
+          } catch (e) { console.error(`[InviteEmail] SMTP send failed for ${account.email}:`, e); }
+        }
+      }
+
+      // Strategy 4: Try per-sender Gmail tokens for any Gmail account
+      for (const account of accounts) {
+        if (account.provider === 'gmail' && account.isActive) {
+          const senderToken = settings[`gmail_sender_${account.email}_access_token`];
+          if (senderToken) {
+            const raw = createRawEmail({ from: account.email, to: inviteeEmail, subject, body: htmlBody });
+            const resp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${senderToken}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ raw }),
+            });
+            if (resp.ok) {
+              console.log(`[InviteEmail] Invitation sent to ${inviteeEmail} via Gmail API (sender: ${account.email})`);
+              return { sent: true, method: 'gmail-api' };
+            }
+          }
+        }
+      }
+
+      console.warn(`[InviteEmail] No email channel available to send invitation to ${inviteeEmail}`);
+      return { sent: false, error: 'No email sending channel configured. The invitation was created but no email was sent.' };
+    } catch (err) {
+      console.error('[InviteEmail] Unexpected error:', err);
+      return { sent: false, error: err instanceof Error ? err.message : 'Unknown error sending invitation email' };
+    }
+  }
+
   // Create invitation
   app.post('/api/invitations', async (req: any, res) => {
     try {
@@ -4297,8 +4446,31 @@ Example response:
       }
       
       const invitation = await storage.createInvitation(req.user.organizationId, email, role || 'member', req.user.id);
-      res.status(201).json(invitation);
+
+      // Send invitation email asynchronously
+      const baseUrl = getBaseUrlFromRequest(req);
+      const acceptUrl = `${baseUrl}/?invite_token=${invitation.token}`;
+      const org = await storage.getOrganization(req.user.organizationId) as any;
+      const orgName = org?.name || 'AImailPilot';
+      const inviterName = req.user.name || req.user.email || 'A team member';
+
+      const emailResult = await sendInvitationEmail(
+        req.user.organizationId,
+        email,
+        inviterName,
+        orgName,
+        role || 'member',
+        acceptUrl
+      );
+
+      res.status(201).json({
+        ...invitation,
+        emailSent: emailResult.sent,
+        emailMethod: emailResult.method,
+        emailError: emailResult.error,
+      });
     } catch (error) {
+      console.error('[Invitations] Create error:', error);
       res.status(500).json({ message: 'Failed to create invitation' });
     }
   });

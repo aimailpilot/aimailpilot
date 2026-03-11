@@ -66,12 +66,44 @@ function Router() {
     return <SetupPage onComplete={() => window.location.reload()} />;
   }
 
-  // Check URL for OAuth errors
+  // Check URL for OAuth errors and invite tokens
   const urlParams = new URLSearchParams(window.location.search);
   const oauthError = urlParams.get('error');
+  const inviteToken = urlParams.get('invite_token');
 
   if (!user) {
     return <LandingPage onLogin={() => window.location.reload()} oauthError={oauthError} />;
+  }
+
+  // Auto-accept invitation if invite_token is present in URL
+  if (inviteToken) {
+    // Fire-and-forget accept, then clean URL and reload
+    fetch('/api/invitations/accept', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ token: inviteToken }),
+    }).then(res => {
+      if (res.ok) {
+        window.history.replaceState({}, '', '/');
+        window.location.reload();
+      } else {
+        // Clean the URL even if accept fails (e.g., expired)
+        window.history.replaceState({}, '', '/?invite_error=expired');
+        window.location.reload();
+      }
+    }).catch(() => {
+      window.history.replaceState({}, '', '/');
+    });
+
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="flex flex-col items-center">
+          <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-3"></div>
+          <div className="text-gray-600">Accepting invitation...</div>
+        </div>
+      </div>
+    );
   }
 
   // All views are handled by the dashboard component with internal routing

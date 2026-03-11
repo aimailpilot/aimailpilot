@@ -118,11 +118,16 @@ export default function TeamManagement() {
         body: JSON.stringify({ email: inviteEmail, role: inviteRole }),
       });
       if (res.ok) {
-        setSuccess(`Invitation sent to ${inviteEmail}`);
+        const data = await res.json();
+        if (data.emailSent) {
+          setSuccess(`Invitation email sent to ${inviteEmail}`);
+        } else {
+          setSuccess(`Invitation created for ${inviteEmail}. ${data.emailError || 'Email notification could not be sent — share the invite link manually.'}`);
+        }
         setInviteEmail('');
         setShowInviteDialog(false);
         fetchData();
-        setTimeout(() => setSuccess(''), 3000);
+        setTimeout(() => setSuccess(''), 6000);
       } else {
         const data = await res.json();
         setError(data.message || 'Failed to send invitation');
