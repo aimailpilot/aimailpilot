@@ -169,6 +169,7 @@ export interface FollowupTriggerData {
 
 export class FollowupEngine {
   private emailService: EmailService;
+  private _checkCount: number = 0;
 
   constructor() {
     this.emailService = new EmailService();
@@ -182,7 +183,9 @@ export class FollowupEngine {
       // Get all campaigns with active follow-up sequences
       const activeCampaignFollowups = await storage.getActiveCampaignFollowups();
       
-      if (activeCampaignFollowups.length > 0) {
+      // Only log occasionally to avoid spamming (every 10th check, ~every 5 min)
+      this._checkCount = (this._checkCount || 0) + 1;
+      if (activeCampaignFollowups.length > 0 && this._checkCount % 10 === 1) {
         console.log(`[Followup] Processing ${activeCampaignFollowups.length} active campaign follow-up configurations...`);
       }
       
@@ -744,13 +747,13 @@ let followupInterval: NodeJS.Timeout | null = null;
 
 export function startFollowupEngine() {
   if (followupInterval) return;
-  console.log('[Followup] Starting follow-up engine (checking every 60s)...');
+  console.log('[Followup] Starting follow-up engine (checking every 30s)...');
   // Run immediately on start
   followupEngine.processFollowupTriggers().catch(console.error);
-  // Then run every 60 seconds
+  // Then run every 30 seconds
   followupInterval = setInterval(() => {
     followupEngine.processFollowupTriggers().catch(console.error);
-  }, 60 * 1000);
+  }, 30 * 1000);
 }
 
 export function stopFollowupEngine() {
