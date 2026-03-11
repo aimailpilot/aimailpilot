@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -9,9 +9,12 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Inbox, Mail, Send, RefreshCw, Archive, Trash2, Check, CheckCheck,
-  ChevronLeft, ChevronRight, Search, Filter, Loader2, Reply,
-  Building, User, ExternalLink, Clock, Eye, EyeOff, Star,
-  AlertTriangle, XCircle, MailOpen, ArrowLeft, Users
+  ChevronLeft, ChevronRight, Search, Filter, Loader2, Reply, Forward,
+  Building, User, ExternalLink, Clock, Eye, EyeOff, Star, StarOff,
+  AlertTriangle, XCircle, MailOpen, ArrowLeft, Users, Sparkles,
+  Bold, Italic, Underline, Link, List, ListOrdered, Type,
+  Wand2, Brain, Copy, MoreHorizontal, Tag, Paperclip,
+  MessageSquare, Zap, ChevronDown, ChevronUp, X, MailPlus
 } from "lucide-react";
 
 interface InboxMessage {
@@ -50,6 +53,12 @@ interface InboxMessage {
     id: string;
     name: string;
   } | null;
+  accountOwner?: {
+    id: string;
+    email: string;
+    firstName: string;
+    lastName: string;
+  } | null;
 }
 
 interface SyncStatus {
@@ -65,11 +74,12 @@ export default function UnifiedInbox() {
   const [syncing, setSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
 
-  // Role & team filter (admin can filter by member)
+  // Role & team filter
   const [userRole, setUserRole] = useState<string>('member');
   const [teamMembers, setTeamMembers] = useState<any[]>([]);
-  const [memberFilter, setMemberFilter] = useState<string>('all'); // 'all' or userId
+  const [memberFilter, setMemberFilter] = useState<string>('all');
   const [emailAccounts, setEmailAccounts] = useState<any[]>([]);
+  const [accountFilter, setAccountFilter] = useState<string>('all');
 
   // Filters
   const [statusFilter, setStatusFilter] = useState('all');
@@ -81,13 +91,27 @@ export default function UnifiedInbox() {
   const [selectedMessage, setSelectedMessage] = useState<InboxMessage | null>(null);
   const [loadingMessage, setLoadingMessage] = useState(false);
 
-  // Reply
+  // Reply state
   const [showReplyBox, setShowReplyBox] = useState(false);
-  const [replyBody, setReplyBody] = useState('');
   const [sendingReply, setSendingReply] = useState(false);
+  const replyEditorRef = useRef<HTMLDivElement>(null);
+
+  // AI Assistant
+  const [aiDrafting, setAiDrafting] = useState(false);
+  const [aiTone, setAiTone] = useState<string>('professional');
+  const [showAiPanel, setShowAiPanel] = useState(false);
+  const [aiCustomInstructions, setAiCustomInstructions] = useState('');
+
+  // Starred messages (local tracking)
+  const [starredIds, setStarredIds] = useState<Set<string>>(new Set());
 
   // Selected IDs for bulk actions
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  // Quick view panels
+  const [showContactInfo, setShowContactInfo] = useState(false);
+
+  const isAdmin = userRole === 'owner' || userRole === 'admin';
 
   // Fetch user role and team members on mount
   useEffect(() => {
@@ -113,13 +137,11 @@ export default function UnifiedInbox() {
     try {
       const params = new URLSearchParams();
       if (statusFilter !== 'all') params.set('status', statusFilter);
-      // If admin is filtering by a specific member's email account
-      if (memberFilter && memberFilter !== 'all') {
-        // Find accounts owned by this member
+      if (accountFilter && accountFilter !== 'all') {
+        params.set('emailAccountId', accountFilter);
+      } else if (memberFilter && memberFilter !== 'all') {
         const memberAccts = emailAccounts.filter((a: any) => a.userId === memberFilter);
         if (memberAccts.length > 0) {
-          // Filter by the first account (API supports single emailAccountId)
-          // We'll do additional client-side filtering for multiple accounts
           params.set('emailAccountId', memberAccts.map((a: any) => a.id).join(','));
         }
       }
@@ -129,16 +151,15 @@ export default function UnifiedInbox() {
       const resp = await fetch(`/api/inbox?${params}`, { credentials: 'include' });
       if (!resp.ok) throw new Error('Failed to fetch');
       const data = await resp.json();
-      
+
       let filteredMessages = data.messages || [];
-      // Client-side filter when admin filters by member (multi-account)
-      if (memberFilter && memberFilter !== 'all') {
+      if (memberFilter && memberFilter !== 'all' && accountFilter === 'all') {
         const memberAcctIds = new Set(emailAccounts.filter((a: any) => a.userId === memberFilter).map((a: any) => a.id));
         if (memberAcctIds.size > 0) {
           filteredMessages = filteredMessages.filter((m: any) => memberAcctIds.has(m.emailAccountId));
         }
       }
-      
+
       setMessages(filteredMessages);
       setTotal(data.total || 0);
       setUnreadCount(data.unread || 0);
@@ -147,7 +168,7 @@ export default function UnifiedInbox() {
     } finally {
       setLoading(false);
     }
-  }, [statusFilter, page, memberFilter, emailAccounts]);
+  }, [statusFilter, page, memberFilter, accountFilter, emailAccounts]);
 
   const fetchSyncStatus = async () => {
     try {
@@ -161,11 +182,9 @@ export default function UnifiedInbox() {
     fetchSyncStatus();
   }, [fetchMessages]);
 
-  // Auto-refresh every 30 seconds
+  // Auto-refresh every 60 seconds (less aggressive)
   useEffect(() => {
-    const interval = setInterval(() => {
-      fetchMessages();
-    }, 30000);
+    const interval = setInterval(fetchMessages, 60000);
     return () => clearInterval(interval);
   }, [fetchMessages]);
 
@@ -180,9 +199,7 @@ export default function UnifiedInbox() {
       });
       if (resp.ok) {
         const data = await resp.json();
-        if (data.totalNew > 0) {
-          fetchMessages();
-        }
+        if (data.totalNew > 0) fetchMessages();
       }
     } catch (err) {
       console.error('Sync error:', err);
@@ -195,19 +212,15 @@ export default function UnifiedInbox() {
   const openMessage = async (msg: InboxMessage) => {
     setSelectedMessage(msg);
     setShowReplyBox(false);
-    setReplyBody('');
+    setShowAiPanel(false);
+    setShowContactInfo(false);
     setLoadingMessage(true);
 
     try {
-      // Fetch full message with body
       const resp = await fetch(`/api/inbox/${msg.id}`, { credentials: 'include' });
-      if (resp.ok) {
-        const fullMsg = await resp.json();
-        setSelectedMessage(fullMsg);
-      }
+      if (resp.ok) setSelectedMessage(await resp.json());
     } catch {}
 
-    // Mark as read if unread
     if (msg.status === 'unread') {
       try {
         await fetch(`/api/inbox/${msg.id}`, {
@@ -220,16 +233,12 @@ export default function UnifiedInbox() {
         setUnreadCount(prev => Math.max(0, prev - 1));
       } catch {}
     }
-
     setLoadingMessage(false);
   };
 
   const archiveMessage = async (id: string) => {
     try {
-      await fetch(`/api/inbox/${id}/archive`, {
-        method: 'POST',
-        credentials: 'include',
-      });
+      await fetch(`/api/inbox/${id}/archive`, { method: 'POST', credentials: 'include' });
       setMessages(prev => prev.filter(m => m.id !== id));
       if (selectedMessage?.id === id) setSelectedMessage(null);
       setTotal(prev => prev - 1);
@@ -238,39 +247,71 @@ export default function UnifiedInbox() {
 
   const deleteMessage = async (id: string) => {
     try {
-      await fetch(`/api/inbox/${id}`, {
-        method: 'DELETE',
-        credentials: 'include',
-      });
+      await fetch(`/api/inbox/${id}`, { method: 'DELETE', credentials: 'include' });
       setMessages(prev => prev.filter(m => m.id !== id));
       if (selectedMessage?.id === id) setSelectedMessage(null);
       setTotal(prev => prev - 1);
     } catch {}
   };
 
+  // Rich editor commands
+  const execCmd = (cmd: string, value?: string) => {
+    document.execCommand(cmd, false, value);
+    replyEditorRef.current?.focus();
+  };
+
   const sendReply = async () => {
-    if (!selectedMessage || !replyBody.trim()) return;
+    if (!selectedMessage) return;
+    const replyHtml = replyEditorRef.current?.innerHTML || '';
+    if (!replyHtml.trim() || replyHtml === '<br>') return;
     setSendingReply(true);
     try {
       const resp = await fetch(`/api/inbox/${selectedMessage.id}/reply`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ body: replyBody }),
+        body: JSON.stringify({ body: replyHtml }),
       });
       if (resp.ok) {
         setShowReplyBox(false);
-        setReplyBody('');
+        if (replyEditorRef.current) replyEditorRef.current.innerHTML = '';
         setMessages(prev => prev.map(m => m.id === selectedMessage.id ? { ...m, status: 'replied' as const } : m));
         setSelectedMessage(prev => prev ? { ...prev, status: 'replied' } : null);
       } else {
         const err = await resp.json();
         alert(err.message || 'Failed to send reply');
       }
-    } catch (err) {
+    } catch {
       alert('Failed to send reply');
     } finally {
       setSendingReply(false);
+    }
+  };
+
+  // AI Draft generation
+  const generateAiDraft = async () => {
+    if (!selectedMessage) return;
+    setAiDrafting(true);
+    try {
+      const resp = await fetch(`/api/inbox/${selectedMessage.id}/ai-draft`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ tone: aiTone, customInstructions: aiCustomInstructions }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        // Insert AI draft into the reply editor
+        if (replyEditorRef.current) {
+          replyEditorRef.current.innerHTML = data.draft?.replace(/\n/g, '<br>') || '';
+        }
+        setShowReplyBox(true);
+        setShowAiPanel(false);
+      }
+    } catch (err) {
+      console.error('AI draft error:', err);
+    } finally {
+      setAiDrafting(false);
     }
   };
 
@@ -289,13 +330,53 @@ export default function UnifiedInbox() {
     } catch {}
   };
 
+  const bulkArchive = async () => {
+    if (selectedIds.size === 0) return;
+    for (const id of selectedIds) {
+      await fetch(`/api/inbox/${id}/archive`, { method: 'POST', credentials: 'include' }).catch(() => {});
+    }
+    setMessages(prev => prev.filter(m => !selectedIds.has(m.id)));
+    setSelectedIds(new Set());
+    setTotal(prev => prev - selectedIds.size);
+  };
+
+  const bulkDelete = async () => {
+    if (selectedIds.size === 0) return;
+    if (!confirm(`Delete ${selectedIds.size} messages? This cannot be undone.`)) return;
+    for (const id of selectedIds) {
+      await fetch(`/api/inbox/${id}`, { method: 'DELETE', credentials: 'include' }).catch(() => {});
+    }
+    setMessages(prev => prev.filter(m => !selectedIds.has(m.id)));
+    setSelectedIds(new Set());
+    setTotal(prev => prev - selectedIds.size);
+  };
+
   const toggleSelect = (id: string) => {
     setSelectedIds(prev => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
+  };
+
+  const toggleStar = (id: string) => {
+    setStarredIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const selectAll = () => {
+    if (selectedIds.size === messages.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(messages.map(m => m.id)));
+    }
+  };
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text).catch(() => {});
   };
 
   const fmtDate = (d: string) => {
@@ -317,19 +398,19 @@ export default function UnifiedInbox() {
   };
 
   const getStatusBadge = (status: string) => {
-    const map: Record<string, { label: string; className: string }> = {
-      unread: { label: 'Unread', className: 'bg-blue-100 text-blue-700 border-blue-200' },
-      read: { label: 'Read', className: 'bg-gray-100 text-gray-600 border-gray-200' },
-      replied: { label: 'Replied', className: 'bg-green-100 text-green-700 border-green-200' },
-      archived: { label: 'Archived', className: 'bg-amber-100 text-amber-700 border-amber-200' },
+    const map: Record<string, { label: string; className: string; icon: React.ReactNode }> = {
+      unread: { label: 'Unread', className: 'bg-blue-100 text-blue-700 border-blue-200', icon: <Mail className="h-3 w-3" /> },
+      read: { label: 'Read', className: 'bg-gray-100 text-gray-600 border-gray-200', icon: <MailOpen className="h-3 w-3" /> },
+      replied: { label: 'Replied', className: 'bg-green-100 text-green-700 border-green-200', icon: <Reply className="h-3 w-3" /> },
+      archived: { label: 'Archived', className: 'bg-amber-100 text-amber-700 border-amber-200', icon: <Archive className="h-3 w-3" /> },
     };
     return map[status] || map.read;
   };
 
-  const getProviderBadge = (provider: string) => {
-    if (provider === 'gmail') return { label: 'Gmail', className: 'bg-red-50 text-red-600 border-red-200' };
-    if (provider === 'outlook') return { label: 'Outlook', className: 'bg-blue-50 text-blue-600 border-blue-200' };
-    return { label: provider, className: 'bg-gray-50 text-gray-600' };
+  const getProviderIcon = (provider: string) => {
+    if (provider === 'gmail') return <span className="text-[10px] font-bold text-red-500">G</span>;
+    if (provider === 'outlook') return <span className="text-[10px] font-bold text-blue-500">O</span>;
+    return <Mail className="h-3 w-3 text-gray-400" />;
   };
 
   const getInitials = (name: string, email: string) => {
@@ -342,38 +423,64 @@ export default function UnifiedInbox() {
 
   const totalPages = Math.ceil(total / pageSize);
 
-  // === MESSAGE DETAIL VIEW ===
+  // ============ MESSAGE DETAIL VIEW ============
   if (selectedMessage) {
     const s = getStatusBadge(selectedMessage.status);
-    const p = getProviderBadge(selectedMessage.provider);
+    const contact = selectedMessage.contact;
+
     return (
-      <div className="h-full flex flex-col">
+      <div className="h-full flex flex-col bg-gray-50">
         {/* Top bar */}
-        <div className="flex items-center justify-between p-4 border-b bg-white">
-          <div className="flex items-center gap-3">
-            <Button variant="ghost" size="sm" onClick={() => setSelectedMessage(null)}>
-              <ArrowLeft className="h-4 w-4 mr-1" /> Back
+        <div className="flex items-center justify-between px-4 py-2.5 border-b bg-white shadow-sm">
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" onClick={() => setSelectedMessage(null)} className="gap-1.5 text-gray-600 hover:text-gray-900">
+              <ArrowLeft className="h-4 w-4" /> Back
             </Button>
-            <Badge variant="outline" className={s.className}>{s.label}</Badge>
-            <Badge variant="outline" className={p.className}>{p.label}</Badge>
+            <div className="h-5 w-px bg-gray-200" />
+            <Badge variant="outline" className={`${s.className} gap-1 text-[10px]`}>{s.icon}{s.label}</Badge>
+            {selectedMessage.provider && (
+              <Tooltip>
+                <TooltipTrigger>
+                  <div className={`w-5 h-5 rounded-full flex items-center justify-center ${selectedMessage.provider === 'gmail' ? 'bg-red-50' : 'bg-blue-50'}`}>
+                    {getProviderIcon(selectedMessage.provider)}
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent>{selectedMessage.provider === 'gmail' ? 'Gmail' : 'Outlook'}</TooltipContent>
+              </Tooltip>
+            )}
             {selectedMessage.campaign && (
-              <Badge variant="outline" className="bg-violet-50 text-violet-700 border-violet-200">
-                Campaign: {selectedMessage.campaign.name}
+              <Badge variant="outline" className="bg-violet-50 text-violet-700 border-violet-200 text-[10px] gap-1">
+                <Tag className="h-2.5 w-2.5" /> {selectedMessage.campaign.name}
+              </Badge>
+            )}
+            {(selectedMessage as any).accountOwner && isAdmin && (
+              <Badge variant="outline" className="bg-indigo-50 text-indigo-600 border-indigo-200 text-[10px] gap-1">
+                <User className="h-2.5 w-2.5" /> {(selectedMessage as any).accountOwner.firstName || (selectedMessage as any).accountOwner.email?.split('@')[0]}
               </Badge>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1">
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button variant="ghost" size="sm" onClick={() => archiveMessage(selectedMessage.id)}>
-                  <Archive className="h-4 w-4" />
+                <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => toggleStar(selectedMessage.id)}>
+                  {starredIds.has(selectedMessage.id)
+                    ? <Star className="h-4 w-4 text-yellow-500 fill-yellow-400" />
+                    : <StarOff className="h-4 w-4 text-gray-400" />}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Star</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => archiveMessage(selectedMessage.id)}>
+                  <Archive className="h-4 w-4 text-gray-500" />
                 </Button>
               </TooltipTrigger>
               <TooltipContent>Archive</TooltipContent>
             </Tooltip>
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button variant="ghost" size="sm" className="text-red-500" onClick={() => { deleteMessage(selectedMessage.id); setSelectedMessage(null); }}>
+                <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-red-400 hover:text-red-600" onClick={() => { deleteMessage(selectedMessage.id); setSelectedMessage(null); }}>
                   <Trash2 className="h-4 w-4" />
                 </Button>
               </TooltipTrigger>
@@ -382,164 +489,382 @@ export default function UnifiedInbox() {
           </div>
         </div>
 
-        {/* Message header */}
-        <div className="p-6 border-b bg-white">
-          <h2 className="text-xl font-semibold text-gray-900 mb-4">{selectedMessage.subject || '(No Subject)'}</h2>
-          <div className="flex items-start gap-4">
-            <Avatar className="h-10 w-10">
-              <AvatarFallback className="bg-gradient-to-br from-blue-500 to-indigo-600 text-white text-sm font-semibold">
-                {getInitials(selectedMessage.fromName, selectedMessage.fromEmail)}
-              </AvatarFallback>
-            </Avatar>
-            <div className="flex-1">
-              <div className="flex items-center gap-2">
-                <span className="font-semibold text-gray-900">{selectedMessage.fromName || selectedMessage.fromEmail}</span>
-                {selectedMessage.fromName && <span className="text-sm text-gray-500">&lt;{selectedMessage.fromEmail}&gt;</span>}
-              </div>
-              {selectedMessage.contact && (
-                <div className="flex items-center gap-2 text-sm text-gray-500 mt-1">
-                  {selectedMessage.contact.company && (
-                    <span className="flex items-center gap-1"><Building className="h-3 w-3" /> {selectedMessage.contact.company}</span>
-                  )}
-                  {selectedMessage.contact.jobTitle && (
-                    <span className="flex items-center gap-1">• {selectedMessage.contact.jobTitle}</span>
+        {/* Two-panel: message + optional contact sidebar */}
+        <div className="flex-1 flex overflow-hidden">
+          {/* Main message area */}
+          <div className="flex-1 flex flex-col overflow-hidden">
+            {/* Message header */}
+            <div className="px-6 py-4 bg-white border-b">
+              <h2 className="text-lg font-semibold text-gray-900 mb-3 leading-tight">{selectedMessage.subject || '(No Subject)'}</h2>
+              <div className="flex items-start gap-3">
+                <Avatar className="h-10 w-10 flex-shrink-0">
+                  <AvatarFallback className="bg-gradient-to-br from-blue-500 to-indigo-600 text-white text-sm font-semibold">
+                    {getInitials(selectedMessage.fromName, selectedMessage.fromEmail)}
+                  </AvatarFallback>
+                </Avatar>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-semibold text-gray-900 text-sm">{selectedMessage.fromName || selectedMessage.fromEmail}</span>
+                    {selectedMessage.fromName && (
+                      <button onClick={() => copyToClipboard(selectedMessage.fromEmail)} className="text-xs text-gray-400 hover:text-gray-600 flex items-center gap-0.5">
+                        &lt;{selectedMessage.fromEmail}&gt; <Copy className="h-2.5 w-2.5 opacity-50" />
+                      </button>
+                    )}
+                  </div>
+                  <div className="text-xs text-gray-400 mt-0.5 flex items-center gap-2 flex-wrap">
+                    <span className="flex items-center gap-1"><Clock className="h-3 w-3" /> {fmtFullDate(selectedMessage.receivedAt)}</span>
+                    <span>To: {selectedMessage.toEmail}</span>
+                  </div>
+                  {contact && (
+                    <button onClick={() => setShowContactInfo(!showContactInfo)}
+                      className="mt-1.5 flex items-center gap-2 text-xs text-gray-500 hover:text-blue-600 transition-colors">
+                      {contact.company && <span className="flex items-center gap-1"><Building className="h-3 w-3" /> {contact.company}</span>}
+                      {contact.jobTitle && <span>| {contact.jobTitle}</span>}
+                      <ChevronDown className={`h-3 w-3 transition-transform ${showContactInfo ? 'rotate-180' : ''}`} />
+                    </button>
                   )}
                 </div>
-              )}
-              <div className="text-xs text-gray-400 mt-1 flex items-center gap-1">
-                <Clock className="h-3 w-3" /> {fmtFullDate(selectedMessage.receivedAt)}
-                <span className="ml-2">To: {selectedMessage.toEmail}</span>
               </div>
+
+              {/* Contact info panel */}
+              {showContactInfo && contact && (
+                <div className="mt-3 p-3 bg-gray-50 rounded-lg border text-xs">
+                  <div className="grid grid-cols-2 gap-2">
+                    <div><span className="text-gray-400">Name:</span> <span className="font-medium">{contact.firstName} {contact.lastName}</span></div>
+                    <div><span className="text-gray-400">Email:</span> <span className="font-medium">{contact.email}</span></div>
+                    {contact.company && <div><span className="text-gray-400">Company:</span> <span className="font-medium">{contact.company}</span></div>}
+                    {contact.jobTitle && <div><span className="text-gray-400">Title:</span> <span className="font-medium">{contact.jobTitle}</span></div>}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Scrollable content: message body + reply */}
+            <div className="flex-1 overflow-y-auto">
+              {/* Message body */}
+              <div className="px-6 py-4">
+                {loadingMessage ? (
+                  <div className="flex items-center justify-center py-12">
+                    <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
+                  </div>
+                ) : (
+                  <div className="bg-white rounded-xl border shadow-sm">
+                    <div className="p-5">
+                      {selectedMessage.bodyHtml ? (
+                        <div className="prose prose-sm max-w-none [&_img]:max-w-full [&_a]:text-blue-600"
+                          dangerouslySetInnerHTML={{ __html: selectedMessage.bodyHtml }} />
+                      ) : (
+                        <pre className="whitespace-pre-wrap text-sm text-gray-700 font-sans leading-relaxed">
+                          {selectedMessage.body || selectedMessage.snippet || '(No content)'}
+                        </pre>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Action buttons */}
+              <div className="px-6 pb-3">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Button size="sm" onClick={() => { setShowReplyBox(true); setShowAiPanel(false); }} className="gap-1.5 bg-blue-600 hover:bg-blue-700">
+                    <Reply className="h-3.5 w-3.5" /> Reply
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => { setShowAiPanel(!showAiPanel); }} className="gap-1.5 border-purple-200 text-purple-700 hover:bg-purple-50">
+                    <Sparkles className="h-3.5 w-3.5" /> AI Draft
+                  </Button>
+                  {selectedMessage.aiDraft && !showReplyBox && (
+                    <Button size="sm" variant="outline" onClick={() => {
+                      setShowReplyBox(true);
+                      setTimeout(() => {
+                        if (replyEditorRef.current) {
+                          replyEditorRef.current.innerHTML = selectedMessage.aiDraft?.replace(/\n/g, '<br>') || '';
+                        }
+                      }, 100);
+                    }} className="gap-1.5 text-amber-600 border-amber-200 hover:bg-amber-50">
+                      <Brain className="h-3.5 w-3.5" /> Use Saved AI Draft
+                    </Button>
+                  )}
+                </div>
+              </div>
+
+              {/* AI Draft Panel */}
+              {showAiPanel && (
+                <div className="px-6 pb-3">
+                  <div className="bg-gradient-to-br from-purple-50 to-indigo-50 rounded-xl border border-purple-200 p-4">
+                    <div className="flex items-center gap-2 mb-3">
+                      <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center">
+                        <Sparkles className="h-4 w-4 text-white" />
+                      </div>
+                      <div>
+                        <h4 className="text-sm font-semibold text-gray-800">AI Reply Assistant</h4>
+                        <p className="text-[10px] text-gray-500">Generate a context-aware reply using AI</p>
+                      </div>
+                      <button onClick={() => setShowAiPanel(false)} className="ml-auto p-1 hover:bg-white/50 rounded">
+                        <X className="h-4 w-4 text-gray-400" />
+                      </button>
+                    </div>
+
+                    <div className="space-y-3">
+                      <div>
+                        <label className="text-xs font-medium text-gray-600 mb-1 block">Tone</label>
+                        <div className="flex flex-wrap gap-1.5">
+                          {[
+                            { value: 'professional', label: 'Professional', icon: '💼' },
+                            { value: 'friendly', label: 'Friendly', icon: '😊' },
+                            { value: 'concise', label: 'Concise', icon: '⚡' },
+                            { value: 'formal', label: 'Formal', icon: '🎩' },
+                            { value: 'custom', label: 'Custom', icon: '✏️' },
+                          ].map(t => (
+                            <button
+                              key={t.value}
+                              onClick={() => setAiTone(t.value)}
+                              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                                aiTone === t.value
+                                  ? 'bg-purple-600 text-white shadow-sm'
+                                  : 'bg-white text-gray-600 border border-gray-200 hover:border-purple-300'
+                              }`}
+                            >
+                              {t.icon} {t.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {aiTone === 'custom' && (
+                        <div>
+                          <label className="text-xs font-medium text-gray-600 mb-1 block">Custom instructions</label>
+                          <textarea
+                            className="w-full border border-purple-200 rounded-lg p-2.5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-purple-400 bg-white"
+                            rows={2}
+                            placeholder="e.g., Mention our upcoming product launch, be enthusiastic about their interest..."
+                            value={aiCustomInstructions}
+                            onChange={e => setAiCustomInstructions(e.target.value)}
+                          />
+                        </div>
+                      )}
+
+                      <Button
+                        onClick={generateAiDraft}
+                        disabled={aiDrafting}
+                        className="w-full bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white gap-2"
+                      >
+                        {aiDrafting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
+                        {aiDrafting ? 'Generating draft...' : 'Generate AI Reply'}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Rich Reply Editor */}
+              {showReplyBox && (
+                <div className="px-6 pb-6">
+                  <div className="bg-white rounded-xl border shadow-sm overflow-hidden">
+                    {/* Reply header */}
+                    <div className="flex items-center gap-2 px-4 py-2 bg-gray-50 border-b text-xs text-gray-500">
+                      <Reply className="h-3.5 w-3.5 text-blue-500" />
+                      <span>Replying to <strong className="text-gray-700">{selectedMessage.fromName || selectedMessage.fromEmail}</strong></span>
+                      <button onClick={() => setShowReplyBox(false)} className="ml-auto p-0.5 hover:bg-gray-200 rounded">
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+
+                    {/* Toolbar */}
+                    <div className="flex items-center gap-0.5 px-3 py-1.5 border-b bg-white flex-wrap">
+                      <Tooltip><TooltipTrigger asChild>
+                        <button onClick={() => execCmd('bold')} className="p-1.5 hover:bg-gray-100 rounded text-gray-500 hover:text-gray-700">
+                          <Bold className="h-3.5 w-3.5" />
+                        </button>
+                      </TooltipTrigger><TooltipContent>Bold (Ctrl+B)</TooltipContent></Tooltip>
+                      <Tooltip><TooltipTrigger asChild>
+                        <button onClick={() => execCmd('italic')} className="p-1.5 hover:bg-gray-100 rounded text-gray-500 hover:text-gray-700">
+                          <Italic className="h-3.5 w-3.5" />
+                        </button>
+                      </TooltipTrigger><TooltipContent>Italic (Ctrl+I)</TooltipContent></Tooltip>
+                      <Tooltip><TooltipTrigger asChild>
+                        <button onClick={() => execCmd('underline')} className="p-1.5 hover:bg-gray-100 rounded text-gray-500 hover:text-gray-700">
+                          <Underline className="h-3.5 w-3.5" />
+                        </button>
+                      </TooltipTrigger><TooltipContent>Underline (Ctrl+U)</TooltipContent></Tooltip>
+                      <div className="w-px h-5 bg-gray-200 mx-1" />
+                      <Tooltip><TooltipTrigger asChild>
+                        <button onClick={() => execCmd('insertUnorderedList')} className="p-1.5 hover:bg-gray-100 rounded text-gray-500 hover:text-gray-700">
+                          <List className="h-3.5 w-3.5" />
+                        </button>
+                      </TooltipTrigger><TooltipContent>Bullet List</TooltipContent></Tooltip>
+                      <Tooltip><TooltipTrigger asChild>
+                        <button onClick={() => execCmd('insertOrderedList')} className="p-1.5 hover:bg-gray-100 rounded text-gray-500 hover:text-gray-700">
+                          <ListOrdered className="h-3.5 w-3.5" />
+                        </button>
+                      </TooltipTrigger><TooltipContent>Numbered List</TooltipContent></Tooltip>
+                      <div className="w-px h-5 bg-gray-200 mx-1" />
+                      <Tooltip><TooltipTrigger asChild>
+                        <button onClick={() => {
+                          const url = prompt('Enter URL:');
+                          if (url) execCmd('createLink', url);
+                        }} className="p-1.5 hover:bg-gray-100 rounded text-gray-500 hover:text-gray-700">
+                          <Link className="h-3.5 w-3.5" />
+                        </button>
+                      </TooltipTrigger><TooltipContent>Insert Link</TooltipContent></Tooltip>
+                      <div className="w-px h-5 bg-gray-200 mx-1" />
+                      <Tooltip><TooltipTrigger asChild>
+                        <button onClick={() => { setShowAiPanel(true); }} className="p-1.5 hover:bg-purple-100 rounded text-purple-500 hover:text-purple-700">
+                          <Sparkles className="h-3.5 w-3.5" />
+                        </button>
+                      </TooltipTrigger><TooltipContent>AI Assist</TooltipContent></Tooltip>
+                    </div>
+
+                    {/* Editable area */}
+                    <div
+                      ref={replyEditorRef}
+                      contentEditable
+                      className="min-h-[140px] max-h-[300px] overflow-y-auto px-4 py-3 text-sm text-gray-700 focus:outline-none [&_a]:text-blue-600 [&_a]:underline leading-relaxed"
+                      style={{ wordBreak: 'break-word' }}
+                      data-placeholder="Type your reply..."
+                      onFocus={e => { if (e.currentTarget.innerHTML === '' || e.currentTarget.innerHTML === '<br>') e.currentTarget.classList.add('empty'); else e.currentTarget.classList.remove('empty'); }}
+                      onInput={e => { (e.currentTarget as HTMLDivElement).classList.remove('empty'); }}
+                    />
+
+                    {/* Send bar */}
+                    <div className="flex items-center justify-between px-4 py-2.5 border-t bg-gray-50">
+                      <div className="text-[10px] text-gray-400">
+                        Press Ctrl+Enter to send
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button variant="ghost" size="sm" className="text-gray-500" onClick={() => setShowReplyBox(false)}>Cancel</Button>
+                        <Button size="sm" onClick={sendReply} disabled={sendingReply} className="bg-blue-600 hover:bg-blue-700 gap-1.5">
+                          {sendingReply ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                          Send Reply
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
-        </div>
-
-        {/* Message body */}
-        <div className="flex-1 overflow-y-auto p-6 bg-gray-50">
-          {loadingMessage ? (
-            <div className="flex items-center justify-center py-12">
-              <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
-            </div>
-          ) : (
-            <div className="bg-white rounded-lg border p-6 shadow-sm">
-              {selectedMessage.bodyHtml ? (
-                <div
-                  className="prose prose-sm max-w-none"
-                  dangerouslySetInnerHTML={{ __html: selectedMessage.bodyHtml }}
-                />
-              ) : (
-                <pre className="whitespace-pre-wrap text-sm text-gray-700 font-sans leading-relaxed">
-                  {selectedMessage.body || selectedMessage.snippet || '(No content)'}
-                </pre>
-              )}
-            </div>
-          )}
-
-          {/* Reply Box */}
-          {showReplyBox ? (
-            <div className="mt-6 bg-white rounded-lg border p-4 shadow-sm">
-              <div className="text-sm text-gray-500 mb-2 flex items-center gap-1">
-                <Reply className="h-3.5 w-3.5" /> Replying to {selectedMessage.fromName || selectedMessage.fromEmail}
-              </div>
-              <textarea
-                className="w-full border rounded-lg p-3 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
-                rows={6}
-                placeholder="Type your reply..."
-                value={replyBody}
-                onChange={e => setReplyBody(e.target.value)}
-              />
-              <div className="flex items-center justify-between mt-3">
-                <Button variant="ghost" size="sm" onClick={() => setShowReplyBox(false)}>Cancel</Button>
-                <Button size="sm" onClick={sendReply} disabled={sendingReply || !replyBody.trim()}>
-                  {sendingReply ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Send className="h-4 w-4 mr-1" />}
-                  Send Reply
-                </Button>
-              </div>
-            </div>
-          ) : (
-            <div className="mt-6">
-              <Button onClick={() => setShowReplyBox(true)} className="gap-2">
-                <Reply className="h-4 w-4" /> Reply
-              </Button>
-            </div>
-          )}
         </div>
       </div>
     );
   }
 
-  // === INBOX LIST VIEW ===
+  // ============ INBOX LIST VIEW ============
+  const filteredMessages = messages.filter(m => {
+    if (!searchQuery) return true;
+    const q = searchQuery.toLowerCase();
+    return (
+      m.subject?.toLowerCase().includes(q) ||
+      m.fromEmail?.toLowerCase().includes(q) ||
+      m.fromName?.toLowerCase().includes(q) ||
+      m.snippet?.toLowerCase().includes(q)
+    );
+  });
+
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full flex flex-col bg-white">
       {/* Header */}
-      <div className="p-4 border-b bg-white">
-        <div className="flex items-center justify-between mb-3">
+      <div className="px-4 py-3 border-b bg-white">
+        <div className="flex items-center justify-between mb-2.5">
           <div className="flex items-center gap-3">
-            <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-              <Inbox className="h-5 w-5 text-blue-600" /> Unified Inbox
+            <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center">
+                <Inbox className="h-4.5 w-4.5 text-white" />
+              </div>
+              Inbox
             </h2>
             {unreadCount > 0 && (
-              <Badge className="bg-blue-600 text-white">{unreadCount} unread</Badge>
+              <Badge className="bg-blue-600 text-white font-bold text-xs">{unreadCount}</Badge>
             )}
           </div>
           <div className="flex items-center gap-2">
             {syncStatus && (
-              <div className="flex items-center gap-1.5 text-xs text-gray-500 mr-2">
+              <div className="flex items-center gap-1.5 mr-1">
                 {syncStatus.gmail.connected && (
-                  <Badge variant="outline" className="bg-red-50 text-red-600 border-red-200 text-[10px] gap-1">
-                    <div className={`w-1.5 h-1.5 rounded-full ${syncStatus.gmail.active ? 'bg-green-500' : 'bg-gray-400'}`} />
-                    Gmail {syncStatus.gmail.email ? `(${syncStatus.gmail.email.split('@')[0]})` : ''}
-                  </Badge>
+                  <Tooltip><TooltipTrigger>
+                    <div className={`w-6 h-6 rounded-full flex items-center justify-center ${syncStatus.gmail.active ? 'bg-green-100 ring-2 ring-green-300' : 'bg-red-50'}`}>
+                      <span className="text-[10px] font-bold text-red-500">G</span>
+                    </div>
+                  </TooltipTrigger><TooltipContent>Gmail: {syncStatus.gmail.email || 'Connected'}</TooltipContent></Tooltip>
                 )}
                 {syncStatus.outlook.connected && (
-                  <Badge variant="outline" className="bg-blue-50 text-blue-600 border-blue-200 text-[10px] gap-1">
-                    <div className={`w-1.5 h-1.5 rounded-full ${syncStatus.outlook.active ? 'bg-green-500' : 'bg-gray-400'}`} />
-                    Outlook {syncStatus.outlook.email ? `(${syncStatus.outlook.email.split('@')[0]})` : ''}
-                  </Badge>
+                  <Tooltip><TooltipTrigger>
+                    <div className={`w-6 h-6 rounded-full flex items-center justify-center ${syncStatus.outlook.active ? 'bg-green-100 ring-2 ring-green-300' : 'bg-blue-50'}`}>
+                      <span className="text-[10px] font-bold text-blue-500">O</span>
+                    </div>
+                  </TooltipTrigger><TooltipContent>Outlook: {syncStatus.outlook.email || 'Connected'}</TooltipContent></Tooltip>
                 )}
                 {!syncStatus.gmail.connected && !syncStatus.outlook.connected && (
-                  <span className="text-amber-600 flex items-center gap-1">
-                    <AlertTriangle className="h-3.5 w-3.5" /> No email connected
-                  </span>
+                  <Tooltip><TooltipTrigger>
+                    <AlertTriangle className="h-4 w-4 text-amber-500" />
+                  </TooltipTrigger><TooltipContent>No email provider connected</TooltipContent></Tooltip>
                 )}
               </div>
             )}
-            <Button variant="outline" size="sm" onClick={syncInbox} disabled={syncing}>
-              <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${syncing ? 'animate-spin' : ''}`} />
-              {syncing ? 'Syncing...' : 'Sync Now'}
+            <Button variant="outline" size="sm" onClick={syncInbox} disabled={syncing} className="gap-1.5 h-8">
+              <RefreshCw className={`h-3.5 w-3.5 ${syncing ? 'animate-spin' : ''}`} />
+              {syncing ? 'Syncing' : 'Sync'}
             </Button>
           </div>
         </div>
 
         {/* Filters row */}
-        <div className="flex items-center gap-3">
-          <div className="relative flex-1 max-w-xs">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400" />
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="relative flex-1 min-w-[180px] max-w-xs">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400" />
             <Input
-              className="pl-9 h-8 text-sm"
-              placeholder="Search messages..."
+              className="pl-8 h-8 text-sm border-gray-200"
+              placeholder="Search inbox..."
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
             />
           </div>
-          <Select value={statusFilter} onValueChange={v => { setStatusFilter(v); setPage(0); }}>
-            <SelectTrigger className="w-[140px] h-8 text-sm">
-              <SelectValue placeholder="All messages" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All Messages</SelectItem>
-              <SelectItem value="unread">Unread</SelectItem>
-              <SelectItem value="read">Read</SelectItem>
-              <SelectItem value="replied">Replied</SelectItem>
-              <SelectItem value="archived">Archived</SelectItem>
-            </SelectContent>
-          </Select>
+
+          {/* Status filter pills */}
+          <div className="flex items-center gap-1">
+            {[
+              { value: 'all', label: 'All' },
+              { value: 'unread', label: 'Unread' },
+              { value: 'read', label: 'Read' },
+              { value: 'replied', label: 'Replied' },
+              { value: 'archived', label: 'Archived' },
+            ].map(f => (
+              <button
+                key={f.value}
+                onClick={() => { setStatusFilter(f.value); setPage(0); }}
+                className={`px-2.5 py-1 rounded-full text-xs font-medium transition-all ${
+                  statusFilter === f.value
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Admin: filter by account */}
+          {isAdmin && emailAccounts.length > 1 && (
+            <Select value={accountFilter} onValueChange={v => { setAccountFilter(v); setPage(0); }}>
+              <SelectTrigger className="w-[140px] h-8 text-xs">
+                <SelectValue placeholder="All Accounts" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Accounts</SelectItem>
+                {emailAccounts.map((a: any) => (
+                  <SelectItem key={a.id} value={a.id}>
+                    <span className="truncate">{a.email?.split('@')[0]}</span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+
           {/* Admin: filter by team member */}
-          {(userRole === 'owner' || userRole === 'admin') && teamMembers.length > 0 && (
+          {isAdmin && teamMembers.length > 0 && (
             <Select value={memberFilter} onValueChange={v => { setMemberFilter(v); setPage(0); }}>
-              <SelectTrigger className="w-[160px] h-8 text-sm">
+              <SelectTrigger className="w-[140px] h-8 text-xs">
                 <div className="flex items-center gap-1.5">
-                  <User className="h-3 w-3 text-gray-400" />
+                  <Users className="h-3 w-3 text-gray-400" />
                   <SelectValue placeholder="All Members" />
                 </div>
               </SelectTrigger>
@@ -547,175 +872,200 @@ export default function UnifiedInbox() {
                 <SelectItem value="all">All Members</SelectItem>
                 {teamMembers.map((m: any) => (
                   <SelectItem key={m.userId} value={m.userId}>
-                    {m.firstName || m.email?.split('@')[0]} {m.lastName || ''}
+                    {m.firstName || m.email?.split('@')[0]}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
           )}
-          {selectedIds.size > 0 && (
-            <div className="flex items-center gap-2">
-              <Badge variant="outline">{selectedIds.size} selected</Badge>
-              <Button variant="outline" size="sm" className="h-8 text-xs" onClick={bulkMarkRead}>
-                <CheckCheck className="h-3.5 w-3.5 mr-1" /> Mark Read
-              </Button>
-              <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={() => setSelectedIds(new Set())}>
-                Clear
-              </Button>
-            </div>
-          )}
         </div>
+
+        {/* Bulk actions */}
+        {selectedIds.size > 0 && (
+          <div className="flex items-center gap-2 mt-2 py-1.5 px-3 bg-blue-50 rounded-lg border border-blue-200">
+            <Badge variant="outline" className="bg-blue-100 text-blue-700 border-blue-300 text-xs">{selectedIds.size} selected</Badge>
+            <Button variant="ghost" size="sm" className="h-7 text-xs gap-1 text-blue-700 hover:bg-blue-100" onClick={bulkMarkRead}>
+              <CheckCheck className="h-3 w-3" /> Mark Read
+            </Button>
+            <Button variant="ghost" size="sm" className="h-7 text-xs gap-1 text-amber-700 hover:bg-amber-100" onClick={bulkArchive}>
+              <Archive className="h-3 w-3" /> Archive
+            </Button>
+            <Button variant="ghost" size="sm" className="h-7 text-xs gap-1 text-red-600 hover:bg-red-100" onClick={bulkDelete}>
+              <Trash2 className="h-3 w-3" /> Delete
+            </Button>
+            <button onClick={() => setSelectedIds(new Set())} className="ml-auto text-xs text-gray-500 hover:text-gray-700">Clear</button>
+          </div>
+        )}
       </div>
 
       {/* Message list */}
       <div className="flex-1 overflow-y-auto">
         {loading ? (
-          <div className="flex items-center justify-center py-16">
-            <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
-            <span className="ml-2 text-gray-500">Loading messages...</span>
+          <div className="flex flex-col items-center justify-center py-16">
+            <Loader2 className="h-8 w-8 animate-spin text-blue-500 mb-3" />
+            <span className="text-sm text-gray-500">Loading messages...</span>
           </div>
-        ) : messages.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-16 text-gray-400">
-            <Inbox className="h-12 w-12 mb-3 text-gray-300" />
-            <div className="text-base font-medium text-gray-500 mb-1">No messages yet</div>
-            <div className="text-sm text-gray-400 mb-4">
-              {syncStatus?.gmail.connected || syncStatus?.outlook.connected
-                ? 'Click "Sync Now" to check for new replies from your email accounts.'
-                : 'Connect your Gmail or Outlook account to start receiving replies here.'}
+        ) : filteredMessages.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-16 px-4">
+            <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-100 to-indigo-100 flex items-center justify-center mb-4">
+              <Inbox className="h-8 w-8 text-blue-400" />
             </div>
-            {!syncStatus?.gmail.connected && !syncStatus?.outlook.connected && (
-              <Button size="sm" variant="outline" onClick={() => window.location.href = '/api/auth/google'}>
-                Connect Email Account
+            <h3 className="text-base font-semibold text-gray-700 mb-1">No messages</h3>
+            <p className="text-sm text-gray-400 text-center max-w-sm mb-4">
+              {syncStatus?.gmail.connected || syncStatus?.outlook.connected
+                ? 'Your inbox is empty. Click "Sync" to check for new replies.'
+                : 'Connect Gmail or Outlook in Email Accounts to start receiving replies.'}
+            </p>
+            {(syncStatus?.gmail.connected || syncStatus?.outlook.connected) && (
+              <Button size="sm" variant="outline" onClick={syncInbox} className="gap-1.5">
+                <RefreshCw className="h-3.5 w-3.5" /> Sync Now
               </Button>
             )}
           </div>
         ) : (
-          <div className="divide-y">
-            {messages
-              .filter(m => {
-                if (!searchQuery) return true;
-                const q = searchQuery.toLowerCase();
+          <>
+            {/* Select all row */}
+            <div className="flex items-center gap-3 px-4 py-1.5 border-b bg-gray-50/50">
+              <input
+                type="checkbox"
+                checked={selectedIds.size === messages.length && messages.length > 0}
+                onChange={selectAll}
+                className="w-3.5 h-3.5 rounded border-gray-300"
+              />
+              <span className="text-[10px] text-gray-400 uppercase tracking-wide font-medium">
+                {total} message{total !== 1 ? 's' : ''}
+              </span>
+            </div>
+
+            {/* Messages */}
+            <div className="divide-y divide-gray-100">
+              {filteredMessages.map(msg => {
+                const isUnread = msg.status === 'unread';
+                const isSelected = selectedIds.has(msg.id);
+                const isStarred = starredIds.has(msg.id);
+
                 return (
-                  m.subject?.toLowerCase().includes(q) ||
-                  m.fromEmail?.toLowerCase().includes(q) ||
-                  m.fromName?.toLowerCase().includes(q) ||
-                  m.snippet?.toLowerCase().includes(q)
-                );
-              })
-              .map(msg => {
-              const isUnread = msg.status === 'unread';
-              const isSelected = selectedIds.has(msg.id);
-              const providerBadge = getProviderBadge(msg.provider);
+                  <div
+                    key={msg.id}
+                    className={`group flex items-start gap-3 px-4 py-2.5 cursor-pointer transition-all hover:bg-blue-50/40 ${
+                      isUnread ? 'bg-blue-50/20' : ''
+                    } ${isSelected ? 'bg-blue-100/30' : ''}`}
+                  >
+                    {/* Checkbox + Star */}
+                    <div className="flex flex-col items-center gap-1 pt-0.5 flex-shrink-0">
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => toggleSelect(msg.id)}
+                        className="w-3.5 h-3.5 rounded border-gray-300"
+                      />
+                      <button onClick={(e) => { e.stopPropagation(); toggleStar(msg.id); }}
+                        className="p-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                        {isStarred
+                          ? <Star className="h-3 w-3 text-yellow-500 fill-yellow-400" />
+                          : <Star className="h-3 w-3 text-gray-300 hover:text-yellow-400" />}
+                      </button>
+                    </div>
 
-              return (
-                <div
-                  key={msg.id}
-                  className={`flex items-start gap-3 px-4 py-3 cursor-pointer transition-colors hover:bg-gray-50 ${
-                    isUnread ? 'bg-blue-50/40' : ''
-                  } ${isSelected ? 'bg-blue-100/40' : ''} ${
-                    selectedMessage?.id === msg.id ? 'bg-blue-100' : ''
-                  }`}
-                >
-                  {/* Checkbox */}
-                  <div className="pt-1">
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={() => toggleSelect(msg.id)}
-                      className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                    />
-                  </div>
+                    {/* Avatar */}
+                    <Avatar className="h-8 w-8 flex-shrink-0 mt-0.5" onClick={() => openMessage(msg)}>
+                      <AvatarFallback className={`text-[10px] font-semibold ${
+                        msg.provider === 'gmail'
+                          ? 'bg-gradient-to-br from-red-400 to-red-500 text-white'
+                          : 'bg-gradient-to-br from-blue-400 to-blue-500 text-white'
+                      }`}>
+                        {getInitials(msg.fromName, msg.fromEmail)}
+                      </AvatarFallback>
+                    </Avatar>
 
-                  {/* Avatar */}
-                  <Avatar className="h-9 w-9 flex-shrink-0" onClick={() => openMessage(msg)}>
-                    <AvatarFallback className={`text-xs font-semibold ${
-                      msg.provider === 'gmail'
-                        ? 'bg-gradient-to-br from-red-400 to-red-600 text-white'
-                        : 'bg-gradient-to-br from-blue-400 to-blue-600 text-white'
-                    }`}>
-                      {getInitials(msg.fromName, msg.fromEmail)}
-                    </AvatarFallback>
-                  </Avatar>
+                    {/* Content */}
+                    <div className="flex-1 min-w-0" onClick={() => openMessage(msg)}>
+                      <div className="flex items-center gap-1.5 mb-0.5">
+                        <span className={`text-sm truncate ${isUnread ? 'font-bold text-gray-900' : 'font-medium text-gray-700'}`}>
+                          {msg.fromName || msg.fromEmail}
+                        </span>
+                        {msg.contact?.company && (
+                          <span className="hidden sm:flex text-[9px] text-gray-400 items-center gap-0.5 bg-gray-100 px-1.5 py-0 rounded-full">
+                            <Building className="h-2 w-2" /> {msg.contact.company}
+                          </span>
+                        )}
+                        <div className={`w-4 h-4 rounded-full flex items-center justify-center flex-shrink-0 ${msg.provider === 'gmail' ? 'bg-red-50' : 'bg-blue-50'}`}>
+                          {getProviderIcon(msg.provider)}
+                        </div>
+                        {msg.campaignId && (
+                          <span className="text-[9px] text-violet-500 bg-violet-50 px-1.5 py-0 rounded-full">Campaign</span>
+                        )}
+                        {isAdmin && (msg as any).accountOwner && (
+                          <span className="hidden md:flex text-[9px] text-indigo-500 bg-indigo-50 px-1.5 py-0 rounded-full items-center gap-0.5">
+                            <User className="h-2 w-2" />
+                            {(msg as any).accountOwner.firstName || (msg as any).accountOwner.email?.split('@')[0]}
+                          </span>
+                        )}
+                      </div>
+                      <div className={`text-sm truncate ${isUnread ? 'font-semibold text-gray-800' : 'text-gray-600'}`}>
+                        {msg.subject || '(No Subject)'}
+                      </div>
+                      <div className="text-xs text-gray-400 truncate mt-0.5 max-w-[90%]">
+                        {msg.snippet}
+                      </div>
+                    </div>
 
-                  {/* Content */}
-                  <div className="flex-1 min-w-0" onClick={() => openMessage(msg)}>
-                    <div className="flex items-center gap-2 mb-0.5">
-                      <span className={`text-sm truncate max-w-[200px] ${isUnread ? 'font-bold text-gray-900' : 'font-medium text-gray-700'}`}>
-                        {msg.fromName || msg.fromEmail}
+                    {/* Right side */}
+                    <div className="flex flex-col items-end gap-1 flex-shrink-0 pt-0.5">
+                      <span className={`text-[11px] whitespace-nowrap ${isUnread ? 'text-blue-600 font-semibold' : 'text-gray-400'}`}>
+                        {fmtDate(msg.receivedAt)}
                       </span>
-                      {msg.contact?.company && (
-                        <span className="text-[10px] text-gray-400 flex items-center gap-0.5">
-                          <Building className="h-2.5 w-2.5" /> {msg.contact.company}
-                        </span>
-                      )}
-                      <Badge variant="outline" className={`${providerBadge.className} text-[9px] px-1 py-0`}>
-                        {providerBadge.label}
-                      </Badge>
-                      {msg.campaignId && (
-                        <Badge variant="outline" className="bg-violet-50 text-violet-600 border-violet-200 text-[9px] px-1 py-0">
-                          Campaign
-                        </Badge>
-                      )}
-                      {/* Admin: show account owner */}
-                      {(userRole === 'owner' || userRole === 'admin') && (msg as any).accountOwner && (
-                        <span className="text-[9px] text-indigo-500 flex items-center gap-0.5 bg-indigo-50 px-1.5 py-0 rounded-full">
-                          <User className="h-2.5 w-2.5" />
-                          {(msg as any).accountOwner.firstName || (msg as any).accountOwner.email?.split('@')[0]}
-                        </span>
-                      )}
-                    </div>
-                    <div className={`text-sm truncate ${isUnread ? 'font-semibold text-gray-800' : 'text-gray-600'}`}>
-                      {msg.subject || '(No Subject)'}
-                    </div>
-                    <div className="text-xs text-gray-400 truncate mt-0.5">
-                      {msg.snippet}
+                      <div className="flex items-center gap-1">
+                        {isUnread && <div className="w-2 h-2 rounded-full bg-blue-500" />}
+                        {msg.status === 'replied' && <Reply className="h-3 w-3 text-green-500" />}
+                        {msg.aiDraft && <Sparkles className="h-3 w-3 text-purple-400" />}
+                      </div>
+                      <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button onClick={(e) => { e.stopPropagation(); archiveMessage(msg.id); }}
+                          className="p-1 hover:bg-gray-200 rounded-md transition-colors">
+                          <Archive className="h-3 w-3 text-gray-400 hover:text-gray-600" />
+                        </button>
+                        <button onClick={(e) => { e.stopPropagation(); deleteMessage(msg.id); }}
+                          className="p-1 hover:bg-red-100 rounded-md transition-colors">
+                          <Trash2 className="h-3 w-3 text-gray-400 hover:text-red-500" />
+                        </button>
+                      </div>
                     </div>
                   </div>
-
-                  {/* Right side - time + actions */}
-                  <div className="flex flex-col items-end gap-1 flex-shrink-0">
-                    <span className="text-[11px] text-gray-400 whitespace-nowrap">{fmtDate(msg.receivedAt)}</span>
-                    {isUnread && (
-                      <div className="w-2.5 h-2.5 rounded-full bg-blue-500" />
-                    )}
-                    {msg.status === 'replied' && (
-                      <Reply className="h-3.5 w-3.5 text-green-500" />
-                    )}
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <button onClick={(e) => { e.stopPropagation(); archiveMessage(msg.id); }}
-                        className="p-1 hover:bg-gray-200 rounded">
-                        <Archive className="h-3 w-3 text-gray-400" />
-                      </button>
-                      <button onClick={(e) => { e.stopPropagation(); deleteMessage(msg.id); }}
-                        className="p-1 hover:bg-red-100 rounded">
-                        <Trash2 className="h-3 w-3 text-gray-400" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          </>
         )}
       </div>
 
       {/* Pagination */}
       {total > pageSize && (
-        <div className="flex items-center justify-between px-4 py-3 border-t bg-white">
+        <div className="flex items-center justify-between px-4 py-2.5 border-t bg-white">
           <span className="text-xs text-gray-500">
-            Showing {page * pageSize + 1} - {Math.min((page + 1) * pageSize, total)} of {total}
+            {page * pageSize + 1}–{Math.min((page + 1) * pageSize, total)} of {total}
           </span>
           <div className="flex items-center gap-1">
-            <Button variant="ghost" size="sm" disabled={page === 0} onClick={() => setPage(p => p - 1)}>
+            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={page === 0} onClick={() => setPage(p => p - 1)}>
               <ChevronLeft className="h-4 w-4" />
             </Button>
-            <span className="text-sm text-gray-600 px-2">{page + 1} / {totalPages}</span>
-            <Button variant="ghost" size="sm" disabled={page >= totalPages - 1} onClick={() => setPage(p => p + 1)}>
+            <span className="text-xs text-gray-600 px-2">{page + 1}/{totalPages}</span>
+            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={page >= totalPages - 1} onClick={() => setPage(p => p + 1)}>
               <ChevronRight className="h-4 w-4" />
             </Button>
           </div>
         </div>
       )}
+
+      {/* Custom styles for contentEditable placeholder */}
+      <style>{`
+        [contenteditable][data-placeholder]:empty::before,
+        [contenteditable][data-placeholder].empty::before {
+          content: attr(data-placeholder);
+          color: #9ca3af;
+          pointer-events: none;
+        }
+      `}</style>
     </div>
   );
 }

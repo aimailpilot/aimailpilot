@@ -428,26 +428,35 @@ export default function TemplateManager() {
                 <div className="flex items-center gap-2">
                   {/* AI Generate button */}
                   <button onClick={() => setShowAiSection(!showAiSection)}
-                    className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg transition-colors font-medium ${
-                      showAiSection ? 'bg-yellow-100 text-yellow-700 border border-yellow-300' : 'bg-gray-100 text-gray-600 hover:bg-yellow-50 border border-gray-200'
+                    className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-all font-medium ${
+                      showAiSection ? 'bg-purple-100 text-purple-700 border border-purple-300 shadow-sm' : 'bg-gray-100 text-gray-600 hover:bg-purple-50 hover:text-purple-600 border border-gray-200'
                     }`}>
-                    <Sparkles className="h-3 w-3" /> AI Generate
+                    <Sparkles className="h-3 w-3" /> AI Write
                   </button>
                 </div>
               </div>
 
               {/* AI Generation Section */}
               {showAiSection && (
-                <div className="mb-3 p-3 bg-gradient-to-r from-yellow-50 to-orange-50 rounded-xl border border-yellow-200/60 space-y-2">
+                <div className="mb-3 p-4 bg-gradient-to-br from-purple-50 to-indigo-50 rounded-xl border border-purple-200/60 space-y-3">
                   <div className="flex items-center gap-2 mb-1">
-                    <Brain className="h-4 w-4 text-yellow-600" />
-                    <span className="text-xs font-semibold text-yellow-800">AI Template Generator</span>
+                    <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center">
+                      <Brain className="h-4 w-4 text-white" />
+                    </div>
+                    <div>
+                      <span className="text-xs font-bold text-gray-800">AI Template Generator</span>
+                      <p className="text-[10px] text-gray-500">Describe what you want and AI will write the email</p>
+                    </div>
                   </div>
+
+                  {/* Prompt textarea */}
+                  <textarea value={aiPrompt} onChange={e => setAiPrompt(e.target.value)}
+                    placeholder="e.g., Professional welcome email for new SaaS users that highlights the 3 key features and includes a CTA for scheduling a demo..."
+                    className="w-full text-sm border border-purple-200 rounded-lg px-3 py-2.5 bg-white outline-none focus:border-purple-400 focus:ring-2 focus:ring-purple-100 resize-none h-20 transition-all"
+                  />
+
                   <div className="flex gap-2">
-                    <input value={aiPrompt} onChange={e => setAiPrompt(e.target.value)}
-                      placeholder="Describe the email template... (e.g., 'welcome email for new SaaS users')"
-                      className="flex-1 text-xs border border-yellow-200 rounded-lg px-3 py-2 bg-white outline-none focus:border-yellow-400" />
-                    <button className="flex items-center gap-1 px-3 py-2 text-xs font-medium bg-gradient-to-r from-yellow-500 to-orange-500 text-white rounded-lg hover:from-yellow-600 hover:to-orange-600 disabled:opacity-50 whitespace-nowrap"
+                    <button className="flex-1 flex items-center justify-center gap-2 px-3 py-2 text-xs font-semibold bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-lg hover:from-purple-700 hover:to-indigo-700 disabled:opacity-50 whitespace-nowrap transition-all shadow-sm"
                       disabled={aiGenerating || !aiPrompt.trim()}
                       onClick={async () => {
                         if (!aiPrompt.trim()) return;
@@ -469,17 +478,31 @@ export default function TemplateManager() {
                         } catch (e) { console.error('AI generation failed:', e); }
                         setAiGenerating(false);
                       }}>
-                      {aiGenerating ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wand2 className="h-3 w-3" />}
-                      {aiGenerating ? 'Generating...' : 'Generate'}
+                      {aiGenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
+                      {aiGenerating ? 'Writing...' : 'Generate Template'}
                     </button>
                   </div>
-                  <div className="flex flex-wrap gap-1">
-                    {['Welcome onboarding email', 'Cold outreach for SaaS', 'Follow-up after meeting', 'Product launch announcement'].map(p => (
-                      <button key={p} onClick={() => setAiPrompt(p)}
-                        className="text-[10px] px-2 py-0.5 bg-white text-yellow-700 rounded-full border border-yellow-200 hover:bg-yellow-100 transition-colors">
-                        {p}
-                      </button>
-                    ))}
+
+                  {/* Quick prompt suggestions */}
+                  <div>
+                    <p className="text-[10px] text-gray-400 font-medium uppercase tracking-wider mb-1.5">Quick prompts</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {[
+                        { text: 'Welcome onboarding email for new users', emoji: '👋' },
+                        { text: 'Cold outreach for SaaS product to decision makers', emoji: '🚀' },
+                        { text: 'Follow-up after meeting with key takeaways', emoji: '📝' },
+                        { text: 'Product launch announcement with CTA', emoji: '🎉' },
+                        { text: 'Re-engagement email for churned users', emoji: '🔄' },
+                        { text: 'Event invitation with registration link', emoji: '📅' },
+                        { text: 'Customer testimonial request', emoji: '⭐' },
+                        { text: 'Partnership proposal for complementary business', emoji: '🤝' },
+                      ].map(p => (
+                        <button key={p.text} onClick={() => setAiPrompt(p.text)}
+                          className="text-[11px] px-2.5 py-1 bg-white text-gray-600 rounded-lg border border-purple-200 hover:bg-purple-100 hover:text-purple-700 transition-colors flex items-center gap-1">
+                          <span>{p.emoji}</span> {p.text}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
               )}

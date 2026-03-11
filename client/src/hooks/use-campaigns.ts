@@ -21,7 +21,10 @@ export function useCampaigns(options: UseCampaignsOptions = {}) {
       if (!response.ok) throw new Error('Failed to fetch campaigns');
       return response.json();
     },
-    staleTime: 30000,
+    staleTime: 5 * 60 * 1000, // 5 minutes — prevent frequent refetching that disrupts campaign editing
+    refetchOnWindowFocus: false,
+    refetchOnMount: false,
+    refetchInterval: false,
   });
 
   const createCampaignMutation = useMutation({

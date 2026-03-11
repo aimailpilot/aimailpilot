@@ -4329,6 +4329,96 @@ Example response:
     }
   });
 
+  // ========== AI DRAFT FOR INBOX REPLY ==========
+  app.post('/api/inbox/:id/ai-draft', requireAuth, async (req: any, res) => {
+    try {
+      const msg: any = await storage.getInboxMessage(req.params.id);
+      if (!msg) return res.status(404).json({ message: 'Message not found' });
+
+      const { tone, customInstructions } = req.body; // tone: 'professional' | 'friendly' | 'concise' | 'custom'
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      const endpoint = settings.azure_openai_endpoint;
+      const apiKey = settings.azure_openai_api_key;
+      const deploymentName = settings.azure_openai_deployment;
+      const apiVersion = settings.azure_openai_api_version || '2024-08-01-preview';
+
+      if (!endpoint || !apiKey || !deploymentName) {
+        return res.json({
+          draft: `Hi ${msg.fromName || 'there'},\n\nThank you for your email. I appreciate you reaching out.\n\nI'll get back to you shortly with more details.\n\nBest regards`,
+          provider: 'demo',
+          note: 'Configure Azure OpenAI in Advanced Settings for AI-powered drafts.',
+        });
+      }
+
+      // Get contact info for context
+      let contact = null;
+      if (msg.contactId) contact = await storage.getContact(msg.contactId);
+      if (!contact && msg.fromEmail) contact = await storage.getContactByEmail(msg.fromEmail, req.user.organizationId);
+
+      const toneInstructions: Record<string, string> = {
+        professional: 'Write in a professional, business-appropriate tone.',
+        friendly: 'Write in a warm, friendly, and approachable tone.',
+        concise: 'Be very brief and concise. Get straight to the point.',
+        formal: 'Use formal business language appropriate for executives.',
+        custom: customInstructions || 'Write an appropriate reply.',
+      };
+
+      const systemPrompt = `You are an expert email assistant for a business email outreach platform. Generate a contextual reply to the received email. 
+${toneInstructions[tone || 'professional']}
+- Do NOT include a subject line, only the body.
+- Use proper greeting and sign-off.
+- If the original email has a question, answer it helpfully.
+- Keep the reply concise (2-4 paragraphs max).
+- Do NOT use markdown formatting — write plain text or simple HTML.
+- Reference specifics from the original email to make it feel personal.`;
+
+      const contactContext = contact ? `\nSender context: ${contact.firstName || ''} ${contact.lastName || ''}, ${contact.jobTitle || ''} at ${contact.company || 'Unknown Company'}` : '';
+
+      const userPrompt = `Original email from: ${msg.fromName || msg.fromEmail}
+Subject: ${msg.subject || '(no subject)'}
+${contactContext}
+
+Email body:
+${msg.body || msg.snippet || '(no content)'}
+
+Generate an appropriate reply.`;
+
+      const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${deploymentName}/chat/completions?api-version=${apiVersion}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'api-key': apiKey },
+        body: JSON.stringify({
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          max_tokens: 800,
+          temperature: 0.7,
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json() as any;
+        const draft = data?.choices?.[0]?.message?.content || '';
+        // Store the AI draft in the inbox message
+        await storage.updateInboxMessage(msg.id, { aiDraft: draft });
+        return res.json({ draft, provider: 'azure-openai', model: data?.model || deploymentName, tokens: data?.usage?.total_tokens || 0 });
+      }
+
+      // Fallback
+      const errorText = await response.text();
+      console.error('Azure OpenAI draft error:', response.status, errorText);
+      res.json({
+        draft: `Hi ${msg.fromName || 'there'},\n\nThank you for your email regarding "${msg.subject || 'your inquiry'}". I appreciate you reaching out.\n\nI'll review the details and get back to you shortly.\n\nBest regards`,
+        provider: 'fallback',
+        note: 'Azure OpenAI returned an error. Using template reply.',
+      });
+    } catch (error) {
+      console.error('AI draft error:', error);
+      res.status(500).json({ message: 'Failed to generate AI draft' });
+    }
+  });
+
   // ========== SMTP PRESETS ==========
   app.get('/api/smtp-presets', (req, res) => {
     res.json(Object.entries(SMTP_PRESETS).map(([key, config]) => ({

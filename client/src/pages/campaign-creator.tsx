@@ -1104,25 +1104,54 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
         {showAiPanel && (
           <div className="border-t border-gray-100 p-4">
             <div className="flex items-center gap-2 mb-3">
-              <div className="w-6 h-6 rounded-md bg-gradient-to-br from-yellow-400 to-orange-500 flex items-center justify-center">
-                <Brain className="h-3.5 w-3.5 text-white" />
+              <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center">
+                <Brain className="h-4 w-4 text-white" />
               </div>
-              <h3 className="text-sm font-bold text-gray-900">AI Assistant</h3>
+              <div>
+                <h3 className="text-sm font-bold text-gray-900">AI Email Writer</h3>
+                <p className="text-[10px] text-gray-400">Powered by Azure OpenAI</p>
+              </div>
+              <button onClick={() => setShowAiPanel(false)} className="ml-auto p-1 hover:bg-gray-100 rounded-lg">
+                <X className="h-3.5 w-3.5 text-gray-400" />
+              </button>
             </div>
             
             <div className="space-y-3">
-              <select value={aiType} onChange={e => setAiType(e.target.value as any)}
-                className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white">
-                <option value="campaign">Generate email body</option>
-                <option value="subject">Suggest subject lines</option>
-                <option value="personalize">Personalize content</option>
-                <option value="template">Create full template</option>
-              </select>
-              
-              <textarea value={aiPrompt} onChange={e => setAiPrompt(e.target.value)}
-                placeholder={aiType === 'subject' ? 'Describe your email topic...' : 'Describe what the email should say...'}
-                className="w-full text-xs border border-gray-200 rounded-lg px-2.5 py-2 resize-none h-20 outline-none focus:border-blue-300" />
-              
+              {/* Type selector as pills */}
+              <div>
+                <label className="text-[10px] font-medium text-gray-500 uppercase tracking-wider mb-1.5 block">What to generate</label>
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    { value: 'campaign', label: 'Email Body', icon: '✉️' },
+                    { value: 'subject', label: 'Subject Lines', icon: '💡' },
+                    { value: 'personalize', label: 'Personalize', icon: '🎯' },
+                    { value: 'template', label: 'Full Template', icon: '📝' },
+                  ].map(t => (
+                    <button key={t.value}
+                      onClick={() => setAiType(t.value as any)}
+                      className={`px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all ${
+                        aiType === t.value
+                          ? 'bg-purple-600 text-white shadow-sm'
+                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                      }`}
+                    >
+                      {t.icon} {t.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Prompt area */}
+              <div>
+                <label className="text-[10px] font-medium text-gray-500 uppercase tracking-wider mb-1 block">
+                  {aiType === 'subject' ? 'Describe your email topic' : 'Describe what the email should say'}
+                </label>
+                <textarea value={aiPrompt} onChange={e => setAiPrompt(e.target.value)}
+                  placeholder={aiType === 'subject' ? 'e.g., SaaS product launch for HR managers at mid-size companies...' : 'e.g., Cold outreach to CTOs about our AI analytics platform, highlight ROI and offer free trial...'}
+                  className="w-full text-xs border border-gray-200 rounded-lg px-3 py-2.5 resize-none h-24 outline-none focus:border-purple-300 focus:ring-2 focus:ring-purple-100 transition-all" />
+              </div>
+
+              {/* Generate button */}
               <button
                 onClick={async () => {
                   if (!aiPrompt.trim()) return;
@@ -1135,25 +1164,30 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                     if (res.ok) {
                       const data = await res.json();
                       setAiResult({ content: data.content, model: data.model, provider: data.provider });
-                    } else { setAiError('Generation failed. Check Advanced Settings.'); }
+                    } else { setAiError('Generation failed. Configure Azure OpenAI in Advanced Settings.'); }
                   } catch { setAiError('Could not reach server'); }
                   finally { setAiGenerating(false); }
                 }}
                 disabled={aiGenerating || !aiPrompt.trim()}
-                className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-gradient-to-r from-yellow-500 to-orange-500 text-white rounded-lg hover:from-yellow-600 hover:to-orange-600 disabled:opacity-50 transition-all"
+                className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-semibold bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-lg hover:from-purple-700 hover:to-indigo-700 disabled:opacity-50 transition-all shadow-sm"
               >
-                {aiGenerating ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wand2 className="h-3 w-3" />}
-                {aiGenerating ? 'Generating...' : 'Generate'}
+                {aiGenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
+                {aiGenerating ? 'Writing with AI...' : 'Generate with AI'}
               </button>
 
-              {aiError && <div className="text-xs text-red-600 bg-red-50 rounded-lg p-2">{aiError}</div>}
+              {aiError && <div className="text-xs text-red-600 bg-red-50 rounded-lg p-2.5 border border-red-100">{aiError}</div>}
 
               {aiResult && (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <span className="text-[10px] text-gray-400">{aiResult.provider === 'azure-openai' ? 'Azure OpenAI' : 'Demo'}</span>
+                    <span className="text-[10px] font-medium text-gray-500">
+                      {aiResult.provider === 'azure-openai' ? '✨ Azure OpenAI' : '🎭 Demo Mode'}
+                    </span>
+                    <button onClick={() => navigator.clipboard.writeText(aiResult.content)} className="text-[10px] text-gray-400 hover:text-gray-600 flex items-center gap-0.5">
+                      Copy
+                    </button>
                   </div>
-                  <div className="text-xs text-gray-700 bg-gray-50 rounded-lg p-2.5 max-h-32 overflow-y-auto whitespace-pre-wrap border border-gray-100">
+                  <div className="text-xs text-gray-700 bg-white rounded-lg p-3 max-h-36 overflow-y-auto whitespace-pre-wrap border border-gray-200 shadow-inner">
                     {aiResult.content}
                   </div>
                   <div className="flex gap-1.5">
@@ -1162,7 +1196,7 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                         const lines = aiResult.content.split('\n').filter(l => l.trim());
                         const firstLine = lines[0]?.replace(/^\d+[\.\)]\s*/, '').replace(/^["']|["']$/g, '').trim();
                         if (firstLine) updateActiveStep({ subject: firstLine });
-                      }} className="flex-1 text-[11px] px-2 py-1 bg-blue-50 text-blue-700 rounded-md hover:bg-blue-100 font-medium">
+                      }} className="flex-1 text-[11px] px-3 py-1.5 bg-purple-50 text-purple-700 rounded-lg hover:bg-purple-100 font-medium border border-purple-200 transition-colors">
                         Use first suggestion
                       </button>
                     ) : (
@@ -1171,7 +1205,7 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                           updateActiveStep({ content: aiResult.content });
                           if (editorRef.current) editorRef.current.innerHTML = aiResult.content;
                           setHtmlSource(aiResult.content);
-                        }} className="flex-1 text-[11px] px-2 py-1 bg-blue-50 text-blue-700 rounded-md hover:bg-blue-100 font-medium">
+                        }} className="flex-1 text-[11px] px-3 py-1.5 bg-purple-50 text-purple-700 rounded-lg hover:bg-purple-100 font-medium border border-purple-200 transition-colors">
                           Replace content
                         </button>
                         <button onClick={() => {
@@ -1180,7 +1214,7 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                           updateActiveStep({ content: updated });
                           if (editorRef.current) editorRef.current.innerHTML = updated;
                           setHtmlSource(updated);
-                        }} className="flex-1 text-[11px] px-2 py-1 bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200 font-medium">
+                        }} className="flex-1 text-[11px] px-3 py-1.5 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 font-medium border border-gray-200 transition-colors">
                           Append
                         </button>
                       </>
@@ -1189,12 +1223,20 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                 </div>
               )}
 
+              {/* Quick prompt suggestions */}
               <div className="space-y-1">
                 <p className="text-[10px] text-gray-400 font-medium uppercase tracking-wider">Quick prompts</p>
-                {['Cold outreach for SaaS product', 'Follow-up after demo', 'Re-engagement for inactive users', 'Event invitation email'].map(p => (
-                  <button key={p} onClick={() => setAiPrompt(p)}
-                    className="w-full text-left text-[11px] text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded px-2 py-1 transition-colors">
-                    {p}
+                {[
+                  { text: 'Cold outreach for SaaS product to CTOs', emoji: '🚀' },
+                  { text: 'Follow-up after demo call, highlight key features', emoji: '📞' },
+                  { text: 'Re-engagement email for inactive users with special offer', emoji: '🔄' },
+                  { text: 'Partnership proposal to complementary businesses', emoji: '🤝' },
+                  { text: 'Event invitation with early bird registration', emoji: '📅' },
+                  { text: 'Customer feedback request after purchase', emoji: '⭐' },
+                ].map(p => (
+                  <button key={p.text} onClick={() => setAiPrompt(p.text)}
+                    className="w-full text-left text-[11px] text-gray-500 hover:text-purple-600 hover:bg-purple-50 rounded-lg px-2.5 py-1.5 transition-colors flex items-center gap-1.5">
+                    <span>{p.emoji}</span> {p.text}
                   </button>
                 ))}
               </div>
