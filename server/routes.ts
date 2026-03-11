@@ -479,15 +479,48 @@ export async function registerRoutes(app: Express): Promise<Server> {
       try {
         if (tokens.access_token) {
           await storage.setApiSetting(userOrgId, 'gmail_access_token', tokens.access_token);
+          // Also store per-sender tokens for multi-account support
+          await storage.setApiSetting(userOrgId, `gmail_sender_${email}_access_token`, tokens.access_token);
         }
         if (tokens.refresh_token) {
           await storage.setApiSetting(userOrgId, 'gmail_refresh_token', tokens.refresh_token);
+          await storage.setApiSetting(userOrgId, `gmail_sender_${email}_refresh_token`, tokens.refresh_token);
         }
         if (tokens.expiry_date) {
           await storage.setApiSetting(userOrgId, 'gmail_token_expiry', String(tokens.expiry_date));
+          await storage.setApiSetting(userOrgId, `gmail_sender_${email}_token_expiry`, String(tokens.expiry_date));
         }
         await storage.setApiSetting(userOrgId, 'gmail_user_email', email);
         console.log('[Auth] Stored Gmail tokens for reply tracking');
+
+        // Auto-create Gmail email account for sending campaigns
+        try {
+          const existingAccounts = await storage.getEmailAccounts(userOrgId);
+          const alreadyExists = existingAccounts.find((a: any) => a.email === email);
+          if (!alreadyExists) {
+            await storage.createEmailAccount({
+              organizationId: userOrgId,
+              provider: 'gmail',
+              email,
+              displayName: name || email.split('@')[0],
+              smtpConfig: {
+                host: 'smtp.gmail.com', port: 587, secure: false,
+                auth: { user: email, pass: 'OAUTH_TOKEN' },
+                fromName: name || email.split('@')[0],
+                fromEmail: email,
+                replyTo: '',
+                provider: 'gmail',
+              },
+              dailyLimit: 2000,
+              isActive: true,
+            });
+            console.log('[Auth] Auto-created Gmail sender account:', email);
+          } else {
+            console.log('[Auth] Gmail sender account already exists:', email);
+          }
+        } catch (accountError) {
+          console.error('[Auth] Failed to auto-create Gmail sender account:', accountError);
+        }
 
         // Start automatic reply checking
         gmailReplyTracker.startAutoCheck(userOrgId, 5);
@@ -815,16 +848,51 @@ export async function registerRoutes(app: Express): Promise<Server> {
       try {
         if (tokens.access_token) {
           await storage.setApiSetting(userOrgId, 'microsoft_access_token', tokens.access_token);
+          await storage.setApiSetting(userOrgId, `outlook_sender_${email}_access_token`, tokens.access_token);
         }
         if (tokens.refresh_token) {
           await storage.setApiSetting(userOrgId, 'microsoft_refresh_token', tokens.refresh_token);
+          await storage.setApiSetting(userOrgId, `outlook_sender_${email}_refresh_token`, tokens.refresh_token);
         }
         if (tokens.expires_in) {
           const expiryDate = Date.now() + (tokens.expires_in * 1000);
           await storage.setApiSetting(userOrgId, 'microsoft_token_expiry', String(expiryDate));
+          await storage.setApiSetting(userOrgId, `outlook_sender_${email}_token_expiry`, String(expiryDate));
         }
         await storage.setApiSetting(userOrgId, 'microsoft_user_email', email);
         console.log('[Auth] Stored Microsoft tokens for mail integration');
+
+        // Auto-create Outlook email account for sending campaigns
+        try {
+          const existingAccounts = await storage.getEmailAccounts(userOrgId);
+          const alreadyExists = existingAccounts.find((a: any) => a.email === email);
+          if (!alreadyExists) {
+            await storage.createEmailAccount({
+              organizationId: userOrgId,
+              provider: 'outlook',
+              email,
+              displayName: name || email.split('@')[0],
+              smtpConfig: {
+                host: 'smtp-mail.outlook.com', port: 587, secure: false,
+                auth: { user: email, pass: 'OAUTH_TOKEN' },
+                fromName: name || email.split('@')[0],
+                fromEmail: email,
+                replyTo: '',
+                provider: 'outlook',
+              },
+              dailyLimit: 300,
+              isActive: true,
+            });
+            console.log('[Auth] Auto-created Outlook sender account:', email);
+          } else {
+            console.log('[Auth] Outlook sender account already exists:', email);
+          }
+        } catch (accountError) {
+          console.error('[Auth] Failed to auto-create Outlook sender account:', accountError);
+        }
+
+        // Start Outlook reply tracking
+        outlookReplyTracker.startAutoCheck(userOrgId, 5);
       } catch (tokenStoreError) {
         console.error('[Auth] Failed to store Microsoft tokens:', tokenStoreError);
       }

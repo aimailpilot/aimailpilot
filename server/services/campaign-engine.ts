@@ -82,49 +82,79 @@ async function sendViaMicrosoftGraph(
 /**
  * Refresh a Gmail access token if expired.
  */
-async function refreshGmailToken(orgId: string): Promise<string | null> {
+async function refreshGmailToken(orgId: string, senderEmail?: string): Promise<string | null> {
   const settings = await storage.getApiSettings(orgId);
-  const expiry = parseInt(settings.gmail_token_expiry || '0');
-  if (settings.gmail_access_token && Date.now() < expiry - 300000) {
-    return settings.gmail_access_token;
+  
+  // Try per-sender tokens first (for multi-account support)
+  const senderPrefix = senderEmail ? `gmail_sender_${senderEmail}_` : '';
+  let accessToken = senderEmail ? settings[`${senderPrefix}access_token`] : null;
+  let refreshToken = senderEmail ? settings[`${senderPrefix}refresh_token`] : null;
+  let tokenExpiry = senderEmail ? settings[`${senderPrefix}token_expiry`] : null;
+  
+  // Fall back to org-level tokens
+  if (!accessToken) accessToken = settings.gmail_access_token;
+  if (!refreshToken) refreshToken = settings.gmail_refresh_token;
+  if (!tokenExpiry) tokenExpiry = settings.gmail_token_expiry;
+  
+  const expiry = parseInt(tokenExpiry || '0');
+  if (accessToken && Date.now() < expiry - 300000) {
+    return accessToken;
   }
-  if (!settings.gmail_refresh_token) return null;
+  if (!refreshToken) return accessToken || null;
   const clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID;
   const clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET;
-  if (!clientId || !clientSecret) return settings.gmail_access_token || null;
+  if (!clientId || !clientSecret) return accessToken || null;
 
   try {
     const { OAuth2Client } = await import('google-auth-library');
     const oauth2 = new OAuth2Client(clientId, clientSecret);
-    oauth2.setCredentials({ refresh_token: settings.gmail_refresh_token });
+    oauth2.setCredentials({ refresh_token: refreshToken });
     const { credentials } = await oauth2.refreshAccessToken();
     if (credentials.access_token) {
+      // Store refreshed tokens for the specific sender if applicable
+      if (senderEmail) {
+        await storage.setApiSetting(orgId, `${senderPrefix}access_token`, credentials.access_token);
+        if (credentials.expiry_date) await storage.setApiSetting(orgId, `${senderPrefix}token_expiry`, String(credentials.expiry_date));
+      }
+      // Also update org-level tokens
       await storage.setApiSetting(orgId, 'gmail_access_token', credentials.access_token);
       if (credentials.expiry_date) await storage.setApiSetting(orgId, 'gmail_token_expiry', String(credentials.expiry_date));
       return credentials.access_token;
     }
   } catch (e) { console.error('[CampaignEngine] Gmail token refresh failed:', e); }
-  return settings.gmail_access_token || null;
+  return accessToken || null;
 }
 
 /**
  * Refresh a Microsoft access token if expired.
  */
-async function refreshMicrosoftToken(orgId: string): Promise<string | null> {
+async function refreshMicrosoftToken(orgId: string, senderEmail?: string): Promise<string | null> {
   const settings = await storage.getApiSettings(orgId);
-  const expiry = parseInt(settings.microsoft_token_expiry || '0');
-  if (settings.microsoft_access_token && Date.now() < expiry - 300000) {
-    return settings.microsoft_access_token;
+  
+  // Try per-sender tokens first (for multi-account support)
+  const senderPrefix = senderEmail ? `outlook_sender_${senderEmail}_` : '';
+  let accessToken = senderEmail ? settings[`${senderPrefix}access_token`] : null;
+  let refreshToken = senderEmail ? settings[`${senderPrefix}refresh_token`] : null;
+  let tokenExpiry = senderEmail ? settings[`${senderPrefix}token_expiry`] : null;
+  
+  // Fall back to org-level tokens
+  if (!accessToken) accessToken = settings.microsoft_access_token;
+  if (!refreshToken) refreshToken = settings.microsoft_refresh_token;
+  if (!tokenExpiry) tokenExpiry = settings.microsoft_token_expiry;
+  
+  const expiry = parseInt(tokenExpiry || '0');
+  if (accessToken && Date.now() < expiry - 300000) {
+    return accessToken;
   }
-  if (!settings.microsoft_refresh_token) return null;
+  if (!refreshToken) return accessToken || null;
   const clientId = settings.microsoft_oauth_client_id || process.env.MICROSOFT_CLIENT_ID;
   const clientSecret = settings.microsoft_oauth_client_secret || process.env.MICROSOFT_CLIENT_SECRET;
-  if (!clientId || !clientSecret) return settings.microsoft_access_token || null;
+  if (!clientId || !clientSecret) return accessToken || null;
 
   try {
     const body = new URLSearchParams({
       client_id: clientId, client_secret: clientSecret,
-      refresh_token: settings.microsoft_refresh_token,
+      refresh_token: refreshToken,
       grant_type: 'refresh_token',
       scope: 'openid profile email offline_access User.Read Mail.Read Mail.Send',
     });
@@ -134,6 +164,14 @@ async function refreshMicrosoftToken(orgId: string): Promise<string | null> {
     if (resp.ok) {
       const tokens = await resp.json() as any;
       if (tokens.access_token) {
+        // Store refreshed tokens for the specific sender if applicable
+        if (senderEmail) {
+          await storage.setApiSetting(orgId, `${senderPrefix}access_token`, tokens.access_token);
+          if (tokens.refresh_token) await storage.setApiSetting(orgId, `${senderPrefix}refresh_token`, tokens.refresh_token);
+          const exp = Date.now() + (tokens.expires_in || 3600) * 1000;
+          await storage.setApiSetting(orgId, `${senderPrefix}token_expiry`, String(exp));
+        }
+        // Also update org-level tokens
         await storage.setApiSetting(orgId, 'microsoft_access_token', tokens.access_token);
         if (tokens.refresh_token) await storage.setApiSetting(orgId, 'microsoft_refresh_token', tokens.refresh_token);
         const exp = Date.now() + (tokens.expires_in || 3600) * 1000;
@@ -142,7 +180,7 @@ async function refreshMicrosoftToken(orgId: string): Promise<string | null> {
       }
     }
   } catch (e) { console.error('[CampaignEngine] Microsoft token refresh failed:', e); }
-  return settings.microsoft_access_token || null;
+  return accessToken || null;
 }
 
 interface CampaignSendOptions {
@@ -431,7 +469,7 @@ export class CampaignEngine {
 
         if (provider === 'gmail' || provider === 'google') {
           // Try Gmail API first
-          const accessToken = await refreshGmailToken(orgId);
+          const accessToken = await refreshGmailToken(orgId, fromEmail);
           if (accessToken) {
             console.log(`[CampaignEngine] Sending via Gmail API to ${contact.email}`);
             result = await sendViaGmailAPI(accessToken, {
@@ -456,7 +494,7 @@ export class CampaignEngine {
           }
         } else if (provider === 'outlook' || provider === 'microsoft') {
           // Try Microsoft Graph API first
-          const accessToken = await refreshMicrosoftToken(orgId);
+          const accessToken = await refreshMicrosoftToken(orgId, fromEmail);
           if (accessToken) {
             console.log(`[CampaignEngine] Sending via Microsoft Graph to ${contact.email}`);
             result = await sendViaMicrosoftGraph(accessToken, {
