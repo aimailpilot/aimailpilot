@@ -974,9 +974,68 @@ export class DatabaseStorage {
   }
   async deleteEmailTemplate(id: string) { db.prepare('DELETE FROM templates WHERE id = ?').run(id); return true; }
 
+  // ========== Lead Assignment (CRM) ==========
+  async assignContactsToUser(contactIds: string[], userId: string, organizationId: string) {
+    const stmt = db.prepare('UPDATE contacts SET assignedTo = ?, updatedAt = ? WHERE id = ? AND organizationId = ?');
+    const ts = now();
+    const transaction = db.transaction(() => {
+      for (const cid of contactIds) {
+        stmt.run(userId, ts, cid, organizationId);
+      }
+    });
+    transaction();
+    return contactIds.length;
+  }
+  async unassignContacts(contactIds: string[], organizationId: string) {
+    const stmt = db.prepare('UPDATE contacts SET assignedTo = NULL, updatedAt = ? WHERE id = ? AND organizationId = ?');
+    const ts = now();
+    const transaction = db.transaction(() => {
+      for (const cid of contactIds) {
+        stmt.run(ts, cid, organizationId);
+      }
+    });
+    transaction();
+    return contactIds.length;
+  }
+  async getContactsForUser(organizationId: string, userId: string, limit = 50, offset = 0, filters?: { listId?: string }) {
+    if (filters?.listId) {
+      return db.prepare('SELECT * FROM contacts WHERE organizationId = ? AND assignedTo = ? AND listId = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(organizationId, userId, filters.listId, limit, offset).map(hydrateContact);
+    }
+    return db.prepare('SELECT * FROM contacts WHERE organizationId = ? AND assignedTo = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(organizationId, userId, limit, offset).map(hydrateContact);
+  }
+  async getContactsCountForUser(organizationId: string, userId: string, filters?: { listId?: string }) {
+    if (filters?.listId) {
+      return (db.prepare('SELECT COUNT(*) as c FROM contacts WHERE organizationId = ? AND assignedTo = ? AND listId = ?').get(organizationId, userId, filters.listId) as any).c;
+    }
+    return (db.prepare('SELECT COUNT(*) as c FROM contacts WHERE organizationId = ? AND assignedTo = ?').get(organizationId, userId) as any).c;
+  }
+  async searchContactsForUser(organizationId: string, userId: string, query: string, filters?: { listId?: string }) {
+    const q = `%${query}%`;
+    let sql = `SELECT * FROM contacts WHERE organizationId = ? AND assignedTo = ? AND (email LIKE ? OR firstName LIKE ? OR lastName LIKE ? OR company LIKE ?)`;
+    const params: any[] = [organizationId, userId, q, q, q, q];
+    if (filters?.listId) { sql += ' AND listId = ?'; params.push(filters.listId); }
+    sql += ' ORDER BY createdAt DESC LIMIT 200';
+    return db.prepare(sql).all(...params).map(hydrateContact);
+  }
+  async getAssignmentStats(organizationId: string) {
+    const total = (db.prepare('SELECT COUNT(*) as c FROM contacts WHERE organizationId = ?').get(organizationId) as any).c;
+    const assigned = (db.prepare('SELECT COUNT(*) as c FROM contacts WHERE organizationId = ? AND assignedTo IS NOT NULL').get(organizationId) as any).c;
+    const unassigned = total - assigned;
+    const byUser = db.prepare(`
+      SELECT c.assignedTo as userId, u.email, u.firstName, u.lastName, COUNT(*) as contactCount
+      FROM contacts c LEFT JOIN users u ON c.assignedTo = u.id
+      WHERE c.organizationId = ? AND c.assignedTo IS NOT NULL
+      GROUP BY c.assignedTo ORDER BY contactCount DESC
+    `).all(organizationId);
+    return { total, assigned, unassigned, byUser };
+  }
+
   // ========== Campaigns ==========
   async getCampaigns(organizationId: string, limit = 20, offset = 0) {
     return db.prepare('SELECT * FROM campaigns WHERE organizationId = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(organizationId, limit, offset).map(hydrateCampaign);
+  }
+  async getCampaignsForUser(organizationId: string, userId: string, limit = 20, offset = 0) {
+    return db.prepare('SELECT * FROM campaigns WHERE organizationId = ? AND createdBy = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(organizationId, userId, limit, offset).map(hydrateCampaign);
   }
   async getCampaign(id: string) { return hydrateCampaign(db.prepare('SELECT * FROM campaigns WHERE id = ?').get(id)); }
   async createCampaign(campaign: any) {
@@ -1017,6 +1076,32 @@ export class DatabaseStorage {
       totalBounced: row.totalBounced || 0,
       totalUnsubscribed: row.totalUnsubscribed || 0,
     };
+  }
+
+  // Get campaign stats for a specific user (member-scoped)
+  async getCampaignStatsForUser(organizationId: string, userId: string) {
+    const row = db.prepare(`SELECT
+      COUNT(*) as totalCampaigns,
+      SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as activeCampaigns,
+      SUM(sentCount) as totalSent, SUM(openedCount) as totalOpened,
+      SUM(clickedCount) as totalClicked, SUM(repliedCount) as totalReplied,
+      SUM(bouncedCount) as totalBounced, SUM(unsubscribedCount) as totalUnsubscribed
+    FROM campaigns WHERE organizationId = ? AND createdBy = ?`).get(organizationId, userId) as any;
+    return {
+      totalCampaigns: row.totalCampaigns || 0,
+      activeCampaigns: row.activeCampaigns || 0,
+      totalSent: row.totalSent || 0,
+      totalOpened: row.totalOpened || 0,
+      totalClicked: row.totalClicked || 0,
+      totalReplied: row.totalReplied || 0,
+      totalBounced: row.totalBounced || 0,
+      totalUnsubscribed: row.totalUnsubscribed || 0,
+    };
+  }
+
+  // Get contact count for a specific user
+  async getContactsCountForUserTotal(organizationId: string, userId: string) {
+    return (db.prepare('SELECT COUNT(*) as c FROM contacts WHERE organizationId = ? AND assignedTo = ?').get(organizationId, userId) as any).c;
   }
 
   // ========== Campaign Messages ==========

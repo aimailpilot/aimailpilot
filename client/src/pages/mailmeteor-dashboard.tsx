@@ -311,6 +311,10 @@ export default function MailMeteorDashboard() {
     window.location.reload();
   };
 
+  // Determine user role from dashboard stats
+  const userRole = (dashStats as any)?.userRole || 'member';
+  const isAdminOrOwner = userRole === 'owner' || userRole === 'admin';
+
   const sidebarMainItems = [
     { key: 'campaigns' as ViewType, label: 'Campaigns', icon: Send, count: campaigns?.length },
     { key: 'inbox' as ViewType, label: 'Inbox', icon: Inbox, count: inboxUnread },
@@ -323,17 +327,17 @@ export default function MailMeteorDashboard() {
     { key: 'tracking' as ViewType, label: 'Live Feed', icon: Activity },
   ];
 
-  const toolsSubItems = [
+  const toolsSubItems = isAdminOrOwner ? [
     { key: 'followups' as ViewType, label: 'Automations', icon: Zap },
     { key: 'setup' as ViewType, label: 'Email Accounts', icon: Inbox },
-  ];
+  ] : [];
 
   const sidebarBottomItems = [
     ...(isSuperAdmin ? [{ key: 'superadmin' as ViewType, label: 'SuperAdmin', icon: Shield }] : []),
-    { key: 'team' as ViewType, label: 'Team', icon: Users },
+    ...(isAdminOrOwner ? [{ key: 'team' as ViewType, label: 'Team', icon: Users }] : []),
     { key: 'account' as ViewType, label: 'Account', icon: Settings },
-    { key: 'advanced-settings' as ViewType, label: 'Advanced', icon: Wrench },
-    { key: 'billing' as ViewType, label: 'Billing', icon: CreditCard },
+    ...(isAdminOrOwner ? [{ key: 'advanced-settings' as ViewType, label: 'Advanced', icon: Wrench }] : []),
+    ...(isAdminOrOwner ? [{ key: 'billing' as ViewType, label: 'Billing', icon: CreditCard }] : []),
   ];
 
   const getViewTitle = () => {

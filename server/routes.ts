@@ -1030,10 +1030,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
   
   app.get('/api/dashboard/stats', async (req: any, res) => {
     try {
-      const stats = await storage.getCampaignStats(req.user.organizationId);
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      // Members see only their own stats; admins/owners see all org stats
+      const stats = isAdmin
+        ? await storage.getCampaignStats(req.user.organizationId)
+        : await storage.getCampaignStatsForUser(req.user.organizationId, req.user.id);
+      
       const openRate = stats.totalSent > 0 ? ((stats.totalOpened / stats.totalSent) * 100).toFixed(1) : '0';
       const replyRate = stats.totalSent > 0 ? ((stats.totalReplied / stats.totalSent) * 100).toFixed(1) : '0';
       const deliveryRate = stats.totalSent > 0 ? (((stats.totalSent - stats.totalBounced) / stats.totalSent) * 100).toFixed(1) : '0';
+
+      // Get contact counts scoped to user role
+      const totalContacts = isAdmin
+        ? await storage.getContactsCount(req.user.organizationId)
+        : await storage.getContactsCountForUserTotal(req.user.organizationId, req.user.id);
       
       res.json({
         activeCampaigns: stats.activeCampaigns || 0,
@@ -1047,6 +1057,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         totalReplied: stats.totalReplied || 0,
         totalBounced: stats.totalBounced || 0,
         totalUnsubscribed: stats.totalUnsubscribed || 0,
+        totalContacts: totalContacts || 0,
+        // User context
+        userRole: req.user.role,
+        userId: req.user.id,
+        isSuperAdmin: req.user.isSuperAdmin || false,
       });
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch dashboard stats' });
@@ -1731,7 +1746,14 @@ Which account should I use and why? If I need to split across accounts, provide 
     try {
       const limit = parseInt(req.query.limit) || 20;
       const offset = parseInt(req.query.offset) || 0;
-      const campaigns = await storage.getCampaigns(req.user.organizationId, limit, offset);
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      // Members only see their own campaigns; admins/owners see all org campaigns
+      let campaigns;
+      if (isAdmin) {
+        campaigns = await storage.getCampaigns(req.user.organizationId, limit, offset);
+      } else {
+        campaigns = await storage.getCampaignsForUser(req.user.organizationId, req.user.id, limit, offset);
+      }
       res.json(campaigns);
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch campaigns' });
@@ -2375,20 +2397,45 @@ Which account should I use and why? If I need to split across accounts, provide 
       const search = req.query.search as string;
       const status = req.query.status as string;
       const listId = req.query.listId as string;
+      const assignedTo = req.query.assignedTo as string;
       const filters = listId ? { listId } : undefined;
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
       
       let contacts;
-      if (search) {
-        contacts = await storage.searchContacts(req.user.organizationId, search, filters);
+      let total;
+
+      // If admin is filtering by a specific member
+      if (isAdmin && assignedTo) {
+        if (assignedTo === 'unassigned') {
+          // Get unassigned contacts
+          const allContacts = await storage.getContacts(req.user.organizationId, 100000, 0, filters);
+          contacts = allContacts.filter((c: any) => !c.assignedTo);
+          total = contacts.length;
+          contacts = contacts.slice(offset, offset + limit);
+        } else {
+          contacts = search
+            ? await storage.searchContactsForUser(req.user.organizationId, assignedTo, search, filters)
+            : await storage.getContactsForUser(req.user.organizationId, assignedTo, limit, offset, filters);
+          total = await storage.getContactsCountForUser(req.user.organizationId, assignedTo, filters);
+        }
+      } else if (!isAdmin) {
+        // Members only see contacts assigned to them
+        contacts = search
+          ? await storage.searchContactsForUser(req.user.organizationId, req.user.id, search, filters)
+          : await storage.getContactsForUser(req.user.organizationId, req.user.id, limit, offset, filters);
+        total = await storage.getContactsCountForUser(req.user.organizationId, req.user.id, filters);
       } else {
-        contacts = await storage.getContacts(req.user.organizationId, limit, offset, filters);
+        // Admin with no filter — see all org contacts
+        contacts = search
+          ? await storage.searchContacts(req.user.organizationId, search, filters)
+          : await storage.getContacts(req.user.organizationId, limit, offset, filters);
+        total = await storage.getContactsCount(req.user.organizationId, filters);
       }
 
       if (status && status !== 'all') {
         contacts = contacts.filter((c: any) => c.status === status);
       }
 
-      const total = await storage.getContactsCount(req.user.organizationId, filters);
       res.json({ contacts, total, limit, offset });
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch contacts' });
@@ -2732,6 +2779,86 @@ Example response:
       res.json({ success: true, deleted: ids.length });
     } catch (error) {
       res.status(500).json({ message: 'Failed to delete contacts' });
+    }
+  });
+
+  // ========== LEAD ALLOCATION (CRM) ==========
+  
+  // Assign contacts to a team member (admin/owner only)
+  app.post('/api/contacts/assign', async (req: any, res) => {
+    try {
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      if (!isAdmin) return res.status(403).json({ message: 'Only admins can assign leads' });
+      
+      const { contactIds, userId } = req.body;
+      if (!Array.isArray(contactIds) || !userId) return res.status(400).json({ message: 'contactIds array and userId required' });
+      
+      // Verify the target user is a member of this org
+      const membership = await storage.getOrgMember(req.user.organizationId, userId);
+      if (!membership) return res.status(400).json({ message: 'Target user is not a member of this organization' });
+      
+      const count = await storage.assignContactsToUser(contactIds, userId, req.user.organizationId);
+      res.json({ success: true, assigned: count });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to assign contacts' });
+    }
+  });
+
+  // Unassign contacts (admin/owner only)
+  app.post('/api/contacts/unassign', async (req: any, res) => {
+    try {
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      if (!isAdmin) return res.status(403).json({ message: 'Only admins can unassign leads' });
+      
+      const { contactIds } = req.body;
+      if (!Array.isArray(contactIds)) return res.status(400).json({ message: 'contactIds array required' });
+      
+      const count = await storage.unassignContacts(contactIds, req.user.organizationId);
+      res.json({ success: true, unassigned: count });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to unassign contacts' });
+    }
+  });
+
+  // Bulk auto-assign: distribute unassigned contacts evenly among members
+  app.post('/api/contacts/auto-assign', async (req: any, res) => {
+    try {
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      if (!isAdmin) return res.status(403).json({ message: 'Only admins can auto-assign leads' });
+      
+      const { memberIds } = req.body;
+      if (!Array.isArray(memberIds) || memberIds.length === 0) return res.status(400).json({ message: 'memberIds array required' });
+      
+      // Get all unassigned contacts
+      const allContacts = await storage.getContacts(req.user.organizationId, 100000, 0);
+      const unassigned = allContacts.filter((c: any) => !c.assignedTo);
+      
+      if (unassigned.length === 0) return res.json({ success: true, assigned: 0, message: 'No unassigned contacts' });
+      
+      // Round-robin distribute
+      let assigned = 0;
+      for (let i = 0; i < unassigned.length; i++) {
+        const targetMemberId = memberIds[i % memberIds.length];
+        await storage.assignContactsToUser([unassigned[i].id], targetMemberId, req.user.organizationId);
+        assigned++;
+      }
+      
+      res.json({ success: true, assigned, perMember: Math.ceil(unassigned.length / memberIds.length) });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to auto-assign contacts' });
+    }
+  });
+
+  // Get assignment stats
+  app.get('/api/contacts/assignment-stats', async (req: any, res) => {
+    try {
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      if (!isAdmin) return res.status(403).json({ message: 'Admin access required' });
+      
+      const stats = await storage.getAssignmentStats(req.user.organizationId);
+      res.json(stats);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to get assignment stats' });
     }
   });
 

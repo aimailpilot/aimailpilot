@@ -10,7 +10,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   Users, Plus, Search, Upload, Trash2, Edit, Download,
-  Mail, Building, Briefcase, CheckCircle, Loader2, XCircle, Filter, UserPlus,
+  Mail, Building, Briefcase, CheckCircle, Loader2, XCircle, Filter, UserPlus, UserMinus, UserCheck,
   MoreHorizontal, Star, TrendingUp, ArrowUpDown, FileSpreadsheet, List, FolderOpen, X, Eye, Tag,
   AlertTriangle, Ban, Link2, Sheet, Pencil, ExternalLink, ShieldX, ListX, LayoutList,
   Copy, ArrowRight, ChevronDown, Info, Sparkles, RefreshCw,
@@ -57,6 +57,8 @@ interface Contact {
   homePhone?: string;
   emailStatus?: string;
   lastActivityDate?: string;
+  // Assignment
+  assignedTo?: string;
   // Email rating
   emailRating?: number;
   emailRatingGrade?: string;
@@ -125,6 +127,14 @@ export default function ContactsManager() {
   const [aiMappingError, setAiMappingError] = useState('');
   const [showAllFields, setShowAllFields] = useState(false);
 
+  // Lead assignment state
+  const [showAssignDialog, setShowAssignDialog] = useState(false);
+  const [assignTargetUserId, setAssignTargetUserId] = useState('');
+  const [teamMembers, setTeamMembers] = useState<any[]>([]);
+  const [userRole, setUserRole] = useState('admin');
+  const [assignFilterUserId, setAssignFilterUserId] = useState('');
+  const [assignmentStats, setAssignmentStats] = useState<any>(null);
+
   // Create list dialog state
   const [showCreateListDialog, setShowCreateListDialog] = useState(false);
   const [newListName, setNewListName] = useState('');
@@ -159,8 +169,8 @@ export default function ContactsManager() {
     return () => clearTimeout(timer);
   }, [search]);
 
-  useEffect(() => { fetchContacts(); }, [debouncedSearch, statusFilter, activeListId, activeTab]);
-  useEffect(() => { fetchContactLists(); }, []);
+  useEffect(() => { fetchContacts(); }, [debouncedSearch, statusFilter, activeListId, activeTab, assignFilterUserId]);
+  useEffect(() => { fetchContactLists(); fetchTeamMembers(); }, []);
 
   const fetchContacts = async () => {
     setLoading(true);
@@ -179,6 +189,9 @@ export default function ContactsManager() {
       } else if (activeTab === 'all') {
         if (statusFilter !== 'all') params.set('status', statusFilter);
       }
+
+      // Lead assignment filter (admin only)
+      if (assignFilterUserId) params.set('assignedTo', assignFilterUserId);
 
       params.set('limit', '200');
       const res = await fetch(`/api/contacts?${params}`, { credentials: 'include' });
@@ -199,6 +212,79 @@ export default function ContactsManager() {
         setContactLists(data);
       }
     } catch (e) { console.error('Failed to fetch contact lists:', e); }
+  };
+
+  const fetchTeamMembers = async () => {
+    try {
+      const [membersRes, profileRes] = await Promise.all([
+        fetch('/api/team/members', { credentials: 'include' }),
+        fetch('/api/auth/user-profile', { credentials: 'include' }),
+      ]);
+      if (membersRes.ok) setTeamMembers(await membersRes.json());
+      if (profileRes.ok) {
+        const profile = await profileRes.json();
+        setUserRole(profile.role || 'member');
+      }
+      // Fetch assignment stats if admin
+      try {
+        const statsRes = await fetch('/api/contacts/assignment-stats', { credentials: 'include' });
+        if (statsRes.ok) setAssignmentStats(await statsRes.json());
+      } catch {}
+    } catch (e) { console.error('Failed to fetch team data:', e); }
+  };
+
+  const isAdmin = userRole === 'owner' || userRole === 'admin';
+
+  const handleAssignContacts = async () => {
+    if (!assignTargetUserId || selectedIds.length === 0) return;
+    try {
+      const res = await fetch('/api/contacts/assign', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ contactIds: selectedIds, userId: assignTargetUserId }),
+      });
+      if (res.ok) {
+        setShowAssignDialog(false);
+        setSelectedIds([]);
+        setAssignTargetUserId('');
+        await fetchContacts();
+        await fetchTeamMembers();
+      }
+    } catch (e) { console.error('Failed to assign contacts:', e); }
+  };
+
+  const handleUnassignContacts = async (ids: string[]) => {
+    try {
+      const res = await fetch('/api/contacts/unassign', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ contactIds: ids }),
+      });
+      if (res.ok) {
+        setSelectedIds([]);
+        await fetchContacts();
+        await fetchTeamMembers();
+      }
+    } catch (e) { console.error('Failed to unassign contacts:', e); }
+  };
+
+  const handleAutoAssign = async () => {
+    const memberIds = teamMembers.filter(m => m.role !== 'viewer').map(m => m.userId);
+    if (memberIds.length === 0) return;
+    try {
+      const res = await fetch('/api/contacts/auto-assign', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ memberIds }),
+      });
+      if (res.ok) {
+        await fetchContacts();
+        await fetchTeamMembers();
+      }
+    } catch (e) { console.error('Failed to auto-assign:', e); }
   };
 
   const handleAddContact = async () => {
@@ -790,6 +876,17 @@ export default function ContactsManager() {
                 }}>
                   <FileSpreadsheet className="h-4 w-4 mr-2 text-green-600" /> Import Google Sheets
                 </DropdownMenuItem>
+                {isAdmin && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={() => { if (selectedIds.length > 0) { setShowAssignDialog(true); } else { alert('Select contacts first to assign them'); } }}>
+                      <UserPlus className="h-4 w-4 mr-2 text-indigo-500" /> Assign Selected
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={handleAutoAssign}>
+                      <Zap className="h-4 w-4 mr-2 text-amber-500" /> Auto-Assign All
+                    </DropdownMenuItem>
+                  </>
+                )}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={async () => {
                   if (ratingLoading) return;
@@ -1045,6 +1142,66 @@ export default function ContactsManager() {
                   These contacts have bounced and are on the blocklist. They will be <strong>automatically excluded</strong> from all future email campaigns to protect your sender reputation.
                 </AlertDescription>
               </Alert>
+            )}
+
+            {/* Assignment Stats Panel (admin only, all tab) */}
+            {isAdmin && activeTab === 'all' && assignmentStats && assignmentStats.total > 0 && (
+              <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+                    <UserCheck className="h-4 w-4 text-blue-600" /> Lead Assignment Overview
+                  </h3>
+                  <div className="flex items-center gap-3 text-xs">
+                    <span className="text-gray-500">Total: <strong className="text-gray-800">{assignmentStats.total}</strong></span>
+                    <span className="text-green-600">Assigned: <strong>{assignmentStats.assigned}</strong></span>
+                    <span className="text-orange-500">Unassigned: <strong>{assignmentStats.unassigned}</strong></span>
+                  </div>
+                </div>
+                {assignmentStats.byUser && assignmentStats.byUser.length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {assignmentStats.byUser.map((u: any) => (
+                      <button
+                        key={u.userId}
+                        onClick={() => { setAssignFilterUserId(u.userId); setSelectedIds([]); }}
+                        className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs transition-all ${
+                          assignFilterUserId === u.userId
+                            ? 'border-blue-300 bg-blue-50 text-blue-700'
+                            : 'border-gray-200 bg-gray-50 text-gray-600 hover:bg-gray-100'
+                        }`}
+                      >
+                        <Avatar className="h-5 w-5">
+                          <AvatarFallback className="text-[8px] bg-gradient-to-br from-blue-400 to-indigo-500 text-white">
+                            {(u.firstName || u.email?.charAt(0) || '?').charAt(0).toUpperCase()}
+                          </AvatarFallback>
+                        </Avatar>
+                        <span className="font-medium">{u.firstName || u.email?.split('@')[0]}</span>
+                        <Badge variant="secondary" className="h-4 text-[10px] px-1.5">{u.contactCount}</Badge>
+                      </button>
+                    ))}
+                    {assignmentStats.unassigned > 0 && (
+                      <button
+                        onClick={() => { setAssignFilterUserId('unassigned'); setSelectedIds([]); }}
+                        className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs transition-all ${
+                          assignFilterUserId === 'unassigned'
+                            ? 'border-orange-300 bg-orange-50 text-orange-700'
+                            : 'border-gray-200 bg-gray-50 text-gray-600 hover:bg-gray-100'
+                        }`}
+                      >
+                        <span className="font-medium">Unassigned</span>
+                        <Badge variant="secondary" className="h-4 text-[10px] px-1.5">{assignmentStats.unassigned}</Badge>
+                      </button>
+                    )}
+                    {assignFilterUserId && (
+                      <button
+                        onClick={() => { setAssignFilterUserId(''); setSelectedIds([]); }}
+                        className="flex items-center gap-1 px-3 py-1.5 rounded-lg border border-gray-200 text-xs text-gray-400 hover:text-gray-600 hover:bg-gray-50 transition-all"
+                      >
+                        <X className="h-3 w-3" /> Clear filter
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
             )}
 
             {renderContactsTable()}
@@ -1705,6 +1862,76 @@ export default function ContactsManager() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* ====== ASSIGN LEADS DIALOG ====== */}
+      <Dialog open={showAssignDialog} onOpenChange={setShowAssignDialog}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <div className="bg-indigo-50 p-2 rounded-lg"><UserPlus className="h-4 w-4 text-indigo-600" /></div>
+              Assign Leads to Team Member
+            </DialogTitle>
+            <DialogDescription className="text-sm text-gray-500">
+              Assign {selectedIds.length} selected contact{selectedIds.length !== 1 ? 's' : ''} to a team member.
+              Assigned contacts will appear in the member's dashboard.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div>
+              <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2 block">Select Team Member</Label>
+              <div className="space-y-2 max-h-[300px] overflow-y-auto">
+                {teamMembers.filter((m: any) => m.role !== 'viewer').map((member: any) => (
+                  <button
+                    key={member.userId}
+                    onClick={() => setAssignTargetUserId(member.userId)}
+                    className={`w-full flex items-center gap-3 p-3 rounded-lg border transition-all text-left ${
+                      assignTargetUserId === member.userId
+                        ? 'border-indigo-300 bg-indigo-50 ring-1 ring-indigo-200'
+                        : 'border-gray-200 hover:bg-gray-50'
+                    }`}
+                  >
+                    <Avatar className="h-9 w-9">
+                      <AvatarFallback className={`bg-gradient-to-br ${getAvatarColor(member.email)} text-white text-xs font-semibold`}>
+                        {(member.firstName || member.email?.charAt(0) || '?').charAt(0).toUpperCase()}
+                        {(member.lastName || '').charAt(0).toUpperCase()}
+                      </AvatarFallback>
+                    </Avatar>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium text-gray-900">
+                        {member.firstName || member.email?.split('@')[0]} {member.lastName || ''}
+                      </div>
+                      <div className="text-xs text-gray-400 truncate">{member.email}</div>
+                    </div>
+                    <Badge variant="secondary" className="text-[10px] capitalize">
+                      {member.role}
+                    </Badge>
+                    {assignTargetUserId === member.userId && (
+                      <CheckCircle className="h-4 w-4 text-indigo-600 flex-shrink-0" />
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setShowAssignDialog(false); setAssignTargetUserId(''); }}>Cancel</Button>
+            <Button
+              onClick={async () => {
+                await handleAssignContacts();
+                setShowAssignDialog(false);
+                setAssignTargetUserId('');
+                setSelectedIds([]);
+                fetchTeamMembers(); // Refresh assignment stats
+              }}
+              disabled={!assignTargetUserId}
+              className="bg-indigo-600 hover:bg-indigo-700"
+            >
+              <UserPlus className="h-4 w-4 mr-1.5" />
+              Assign {selectedIds.length} Contact{selectedIds.length !== 1 ? 's' : ''}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 
@@ -2036,6 +2263,27 @@ export default function ContactsManager() {
               )}
             </div>
 
+            {/* Filter by Team Member (admin only) */}
+            {isAdmin && !isSpecialTab && teamMembers.length > 0 && (
+              <Select value={assignFilterUserId || '_all'} onValueChange={(v) => { setAssignFilterUserId(v === '_all' ? '' : v); setSelectedIds([]); }}>
+                <SelectTrigger className="h-9 w-[180px] text-xs border-gray-200 bg-white">
+                  <div className="flex items-center gap-1.5">
+                    <UserCheck className="h-3.5 w-3.5 text-gray-400" />
+                    <SelectValue placeholder="All Members" />
+                  </div>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="_all">All Members</SelectItem>
+                  <SelectItem value="unassigned">Unassigned</SelectItem>
+                  {teamMembers.map((m: any) => (
+                    <SelectItem key={m.userId} value={m.userId}>
+                      {m.firstName || m.email?.split('@')[0]} {m.lastName || ''}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+
             {/* Status Filter (for All and Lists tab only) */}
             {!isSpecialTab && (
               <div className="flex items-center gap-0.5 bg-gray-100/80 rounded-lg p-0.5">
@@ -2056,9 +2304,21 @@ export default function ContactsManager() {
           </div>
 
           {selectedIds.length > 0 && (
-            <Button variant="outline" size="sm" onClick={handleBulkDelete} className="text-red-600 border-red-200 hover:bg-red-50">
-              <Trash2 className="h-3.5 w-3.5 mr-1.5" /> Delete ({selectedIds.length})
-            </Button>
+            <div className="flex items-center gap-2">
+              {isAdmin && (
+                <Button variant="outline" size="sm" onClick={() => setShowAssignDialog(true)} className="text-blue-600 border-blue-200 hover:bg-blue-50">
+                  <UserPlus className="h-3.5 w-3.5 mr-1.5" /> Assign ({selectedIds.length})
+                </Button>
+              )}
+              {isAdmin && (
+                <Button variant="outline" size="sm" onClick={() => handleUnassignContacts(selectedIds)} className="text-orange-600 border-orange-200 hover:bg-orange-50">
+                  <UserMinus className="h-3.5 w-3.5 mr-1.5" /> Unassign
+                </Button>
+              )}
+              <Button variant="outline" size="sm" onClick={handleBulkDelete} className="text-red-600 border-red-200 hover:bg-red-50">
+                <Trash2 className="h-3.5 w-3.5 mr-1.5" /> Delete ({selectedIds.length})
+              </Button>
+            </div>
           )}
         </div>
 
@@ -2116,7 +2376,7 @@ export default function ContactsManager() {
             {/* Table Header */}
             <div className={`grid ${isSpecialTab
               ? 'grid-cols-[40px_1fr_160px_48px]'
-              : 'grid-cols-[40px_1fr_1fr_80px_130px_100px_48px]'
+              : isAdmin ? 'grid-cols-[40px_1fr_1fr_80px_100px_100px_100px_48px]' : 'grid-cols-[40px_1fr_1fr_80px_130px_100px_48px]'
             } gap-3 px-4 py-2.5 border-b border-gray-100 bg-gray-50/60`}>
               <div className="flex items-center">
                 <input type="checkbox" checked={selectedIds.length === contacts.length && contacts.length > 0} onChange={toggleSelectAll} className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600" />
@@ -2126,6 +2386,7 @@ export default function ContactsManager() {
               </div>
               {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Company</div>}
               {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1"><BarChart3 className="h-2.5 w-2.5" /> Rating</div>}
+              {!isSpecialTab && isAdmin && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1"><UserCheck className="h-2.5 w-2.5" /> Assigned</div>}
               {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Tags</div>}
               <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1">
                 Created <ArrowUpDown className="h-2.5 w-2.5" />
@@ -2138,6 +2399,7 @@ export default function ContactsManager() {
               const sc = getStatusConfig(contact.status);
               const isSelected = selectedIds.includes(contact.id);
               const isFlagged = contact.status === 'bounced' || contact.status === 'unsubscribed';
+              const assignedMember = contact.assignedTo ? teamMembers.find((m: any) => m.userId === contact.assignedTo) : null;
 
               return (
                 <div
@@ -2145,7 +2407,7 @@ export default function ContactsManager() {
                   onClick={() => openDetail(contact)}
                   className={`grid ${isSpecialTab
                     ? 'grid-cols-[40px_1fr_160px_48px]'
-                    : 'grid-cols-[40px_1fr_1fr_80px_130px_100px_48px]'
+                    : isAdmin ? 'grid-cols-[40px_1fr_1fr_80px_100px_100px_100px_48px]' : 'grid-cols-[40px_1fr_1fr_80px_130px_100px_48px]'
                   } gap-3 px-4 py-3 border-b border-gray-50 items-center transition-all group cursor-pointer ${
                     isSelected ? 'bg-blue-50/50' : isFlagged ? 'bg-red-50/20' : 'hover:bg-gray-50/80'
                   }`}
@@ -2216,6 +2478,31 @@ export default function ContactsManager() {
                         ? getRatingBadge(contact.emailRating, contact.emailRatingGrade)
                         : <span className="text-[10px] text-gray-300">--</span>
                       }
+                    </div>
+                  )}
+
+                  {/* Assigned To (admin only, not in special tabs) */}
+                  {!isSpecialTab && isAdmin && (
+                    <div className="flex items-center">
+                      {assignedMember ? (
+                        <Tooltip>
+                          <TooltipTrigger>
+                            <div className="flex items-center gap-1.5">
+                              <Avatar className="h-5 w-5">
+                                <AvatarFallback className="text-[8px] bg-gradient-to-br from-indigo-400 to-purple-500 text-white">
+                                  {(assignedMember.firstName || assignedMember.email?.charAt(0) || '?').charAt(0).toUpperCase()}
+                                </AvatarFallback>
+                              </Avatar>
+                              <span className="text-[10px] text-gray-600 truncate max-w-[60px]">
+                                {assignedMember.firstName || assignedMember.email?.split('@')[0]}
+                              </span>
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent><p className="text-xs">{assignedMember.email}</p></TooltipContent>
+                        </Tooltip>
+                      ) : (
+                        <span className="text-[10px] text-gray-300">--</span>
+                      )}
                     </div>
                   )}
 

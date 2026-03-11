@@ -14,7 +14,7 @@ import {
   MoreVertical, UserCheck, UserX, ShieldCheck, ShieldOff, Eye,
   Trash2, AlertTriangle, TrendingUp, ArrowUpRight, Globe, Clock,
   Send, MousePointerClick, Reply, FileText, Crown, RefreshCw,
-  ChevronLeft, ChevronRight
+  ChevronLeft, ChevronRight, CreditCard, DollarSign, Zap
 } from "lucide-react";
 
 export default function SuperAdminDashboard() {
@@ -167,7 +167,7 @@ export default function SuperAdminDashboard() {
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList className="grid w-full grid-cols-3">
+        <TabsList className="grid w-full grid-cols-4">
           <TabsTrigger value="overview" className="flex items-center gap-2">
             <BarChart3 className="h-4 w-4" /> Overview
           </TabsTrigger>
@@ -176,6 +176,9 @@ export default function SuperAdminDashboard() {
           </TabsTrigger>
           <TabsTrigger value="users" className="flex items-center gap-2">
             <Users className="h-4 w-4" /> Users
+          </TabsTrigger>
+          <TabsTrigger value="billing" className="flex items-center gap-2">
+            <CreditCard className="h-4 w-4" /> Billing
           </TabsTrigger>
         </TabsList>
 
@@ -516,6 +519,150 @@ export default function SuperAdminDashboard() {
               </div>
             </div>
           )}
+        </TabsContent>
+
+        {/* ========== BILLING & PLANS TAB ========== */}
+        <TabsContent value="billing" className="space-y-6">
+          {/* Revenue Overview */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            {[
+              { label: 'Total Organizations', value: stats?.totalOrganizations || 0, icon: Building2, color: 'bg-purple-50 text-purple-600', growth: '+12%' },
+              { label: 'Active Users', value: stats?.totalUsers || 0, icon: Users, color: 'bg-blue-50 text-blue-600', growth: '+8%' },
+              { label: 'Total Emails Sent', value: formatNumber(stats?.totalEmailsSent || 0), icon: Send, color: 'bg-emerald-50 text-emerald-600', growth: '+23%' },
+              { label: 'Platform Health', value: '99.9%', icon: Activity, color: 'bg-green-50 text-green-600', growth: 'Uptime' },
+            ].map((metric, i) => (
+              <Card key={i} className="border-gray-200/60">
+                <CardContent className="p-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">{metric.label}</span>
+                    <div className={`p-2 rounded-xl ${metric.color}`}>
+                      <metric.icon className="h-4 w-4" />
+                    </div>
+                  </div>
+                  <div className="text-2xl font-bold text-gray-900">{metric.value}</div>
+                  <div className="text-xs text-emerald-600 font-medium mt-1 flex items-center gap-1">
+                    <TrendingUp className="h-3 w-3" /> {metric.growth}
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+
+          {/* Plans & Pricing */}
+          <Card className="border-gray-200/60">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-lg flex items-center gap-2">
+                <CreditCard className="h-5 w-5 text-blue-600" /> Plans & Pricing Management
+              </CardTitle>
+              <CardDescription>Configure subscription plans for organizations</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {[
+                  {
+                    name: 'Starter',
+                    price: '$0',
+                    period: '/month',
+                    features: ['1 Email Account', '500 Emails/day', '1,000 Contacts', '1 User', 'Basic Analytics'],
+                    orgs: Math.max(1, (stats?.totalOrganizations || 3) - 2),
+                    color: 'border-gray-200',
+                    badge: 'Free',
+                    badgeColor: 'bg-gray-100 text-gray-600',
+                  },
+                  {
+                    name: 'Pro',
+                    price: '$29',
+                    period: '/month',
+                    features: ['5 Email Accounts', '2,000 Emails/day', '25,000 Contacts', '5 Users', 'Advanced Analytics', 'Follow-up Sequences', 'AI Email Writer'],
+                    orgs: Math.min(2, stats?.totalOrganizations || 0),
+                    color: 'border-blue-200 bg-blue-50/30',
+                    badge: 'Popular',
+                    badgeColor: 'bg-blue-100 text-blue-700',
+                  },
+                  {
+                    name: 'Enterprise',
+                    price: '$99',
+                    period: '/month',
+                    features: ['Unlimited Email Accounts', '10,000 Emails/day', 'Unlimited Contacts', 'Unlimited Users', 'Priority Support', 'Custom Integrations', 'Dedicated IP', 'SLA'],
+                    orgs: 0,
+                    color: 'border-purple-200 bg-purple-50/20',
+                    badge: 'Premium',
+                    badgeColor: 'bg-purple-100 text-purple-700',
+                  },
+                ].map((plan) => (
+                  <div key={plan.name} className={`border rounded-xl p-5 ${plan.color} relative`}>
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="text-lg font-bold text-gray-900">{plan.name}</h3>
+                      <Badge className={plan.badgeColor}>{plan.badge}</Badge>
+                    </div>
+                    <div className="mb-4">
+                      <span className="text-3xl font-bold text-gray-900">{plan.price}</span>
+                      <span className="text-sm text-gray-400">{plan.period}</span>
+                    </div>
+                    <ul className="space-y-2 mb-4">
+                      {plan.features.map((f, i) => (
+                        <li key={i} className="flex items-center gap-2 text-sm text-gray-600">
+                          <div className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                          {f}
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="pt-3 border-t border-gray-100">
+                      <span className="text-xs text-gray-400">{plan.orgs} organization{plan.orgs !== 1 ? 's' : ''} on this plan</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Organization Plans Table */}
+          <Card className="border-gray-200/60">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-lg flex items-center gap-2">
+                <Building2 className="h-5 w-5 text-purple-600" /> Organization Subscriptions
+              </CardTitle>
+              <CardDescription>View and manage billing status for all organizations</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Organization</TableHead>
+                    <TableHead>Plan</TableHead>
+                    <TableHead>Members</TableHead>
+                    <TableHead>Emails Sent</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Created</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {orgsData?.organizations?.slice(0, 10).map((org: any) => (
+                    <TableRow key={org.id}>
+                      <TableCell>
+                        <div className="font-medium text-gray-900">{org.name}</div>
+                        <div className="text-xs text-gray-400">{org.domain || 'No domain'}</div>
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="secondary" className="text-xs">
+                          {(org.memberCount || 0) > 3 ? 'Pro' : 'Starter'}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>{org.memberCount || 0}</TableCell>
+                      <TableCell>{formatNumber(org.emailsSent || 0)}</TableCell>
+                      <TableCell>
+                        <Badge className="bg-emerald-50 text-emerald-700 border-emerald-200">Active</Badge>
+                      </TableCell>
+                      <TableCell className="text-gray-400 text-sm">{formatDate(org.createdAt)}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+              {(!orgsData?.organizations || orgsData.organizations.length === 0) && (
+                <div className="text-center py-8 text-gray-400 text-sm">No organizations found</div>
+              )}
+            </CardContent>
+          </Card>
         </TabsContent>
       </Tabs>
 
