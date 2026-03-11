@@ -60,71 +60,100 @@ function getBaseUrlFromRequest(req: any): string {
 // Simple auth middleware
 const requireAuth = async (req: any, res: any, next: any) => {
   const userId = req.cookies?.user_id || req.session?.userId;
-  if (userId && loggedInUsers.has(userId)) {
-    // Get user data from session
-    const sessionUser = (req.session as any)?.user;
-    
-    // Determine the active organization for this user
-    // Priority: 1) query param ?orgId, 2) session orgId, 3) user's default org from DB
-    let orgId = req.query?.orgId || (req.session as any)?.activeOrgId;
-    let orgRole = 'admin';
-    
-    if (!orgId) {
-      // Look up user's default organization from database
-      try {
-        const defaultOrg = await storage.getUserDefaultOrganization(userId);
-        if (defaultOrg) {
-          orgId = defaultOrg.id;
-          orgRole = defaultOrg.memberRole || 'admin';
-          // Cache in session for future requests
-          (req.session as any).activeOrgId = orgId;
-        }
-      } catch (e) {
-        // Fallback: try user's organizationId from DB
-        try {
-          const dbUser = await storage.getUser(userId);
-          if (dbUser) orgId = (dbUser as any).organizationId;
-        } catch (e2) { /* ignore */ }
-      }
-    } else {
-      // Verify user has access to the requested org
-      try {
-        const membership = await storage.getOrgMember(orgId, userId);
-        if (membership) {
-          orgRole = (membership as any).role;
-        } else {
-          // User doesn't have access to this org
-          return res.status(403).json({ error: 'Access denied to this organization' });
-        }
-      } catch (e) { /* fallback */ }
-    }
-    
-    if (!orgId) {
-      return res.status(400).json({ error: 'No organization found. Please create or join an organization.' });
-    }
-    
-    req.user = { 
-      id: userId, 
-      organizationId: orgId, 
-      role: orgRole,
-      email: sessionUser?.email || 'unknown',
-      name: sessionUser?.name || 'Unknown',
-      isSuperAdmin: false,
-    };
-    // Check superadmin status
-    try {
-      req.user.isSuperAdmin = await storage.isSuperAdmin(userId);
-    } catch (e) { /* ignore */ }
-    // Auto-detect public URL for tracking links
-    const host = req.headers['x-forwarded-host'] || req.headers['host'];
-    if (host && !host.includes('localhost')) {
-      const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
-      campaignEngine.setPublicBaseUrl(`${proto}://${host}`);
-    }
-    next();
-  } else {
-    res.status(401).json({ error: 'Not authenticated' });
+  
+  if (!userId) {
+    return res.status(401).json({ error: 'Not authenticated' });
   }
+  
+  // If userId exists but not in loggedInUsers (e.g. server restarted),
+  // verify against the database and auto-re-authenticate
+  if (!loggedInUsers.has(userId)) {
+    try {
+      const dbUser = await storage.getUser(userId) as any;
+      if (dbUser && dbUser.isActive !== false) {
+        // User exists in DB - re-add to loggedInUsers
+        loggedInUsers.add(userId);
+        // Restore session data from DB if not already in session
+        if (!(req.session as any)?.user) {
+          (req.session as any).userId = userId;
+          (req.session as any).user = {
+            id: dbUser.id,
+            email: dbUser.email,
+            name: dbUser.name || dbUser.email,
+            provider: dbUser.provider || 'google',
+          };
+        }
+        console.log(`[Auth] Auto-restored session for user ${dbUser.email} (${userId}) from DB after server restart`);
+      } else {
+        // User not found in DB - invalid cookie
+        return res.status(401).json({ error: 'Not authenticated' });
+      }
+    } catch (e) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+  }
+  
+  // Get user data from session
+  const sessionUser = (req.session as any)?.user;
+  
+  // Determine the active organization for this user
+  // Priority: 1) query param ?orgId, 2) session orgId, 3) user's default org from DB
+  let orgId = req.query?.orgId || (req.session as any)?.activeOrgId;
+  let orgRole = 'admin';
+  
+  if (!orgId) {
+    // Look up user's default organization from database
+    try {
+      const defaultOrg = await storage.getUserDefaultOrganization(userId);
+      if (defaultOrg) {
+        orgId = defaultOrg.id;
+        orgRole = defaultOrg.memberRole || 'admin';
+        // Cache in session for future requests
+        (req.session as any).activeOrgId = orgId;
+      }
+    } catch (e) {
+      // Fallback: try user's organizationId from DB
+      try {
+        const dbUser = await storage.getUser(userId);
+        if (dbUser) orgId = (dbUser as any).organizationId;
+      } catch (e2) { /* ignore */ }
+    }
+  } else {
+    // Verify user has access to the requested org
+    try {
+      const membership = await storage.getOrgMember(orgId, userId);
+      if (membership) {
+        orgRole = (membership as any).role;
+      } else {
+        // User doesn't have access to this org
+        return res.status(403).json({ error: 'Access denied to this organization' });
+      }
+    } catch (e) { /* fallback */ }
+  }
+  
+  if (!orgId) {
+    return res.status(400).json({ error: 'No organization found. Please create or join an organization.' });
+  }
+  
+  req.user = { 
+    id: userId, 
+    organizationId: orgId, 
+    role: orgRole,
+    email: sessionUser?.email || 'unknown',
+    name: sessionUser?.name || 'Unknown',
+    isSuperAdmin: false,
+  };
+  // Check superadmin status
+  try {
+    req.user.isSuperAdmin = await storage.isSuperAdmin(userId);
+  } catch (e) { /* ignore */ }
+  // Auto-detect public URL for tracking links
+  const host = req.headers['x-forwarded-host'] || req.headers['host'];
+  if (host && !host.includes('localhost')) {
+    const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+    campaignEngine.setPublicBaseUrl(`${proto}://${host}`);
+  }
+  next();
 };
 
 // SuperAdmin middleware - must be used AFTER requireAuth
@@ -927,10 +956,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get('/api/auth/google/status', async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     const userId = req.cookies?.user_id;
-    if (userId && loggedInUsers.has(userId)) {
-      const session = req.session as any;
-      const user = session?.user;
-      return res.json({ connected: true, email: user?.email || 'unknown', demo: !user?.access_token || user?.access_token === 'demo-token' });
+    if (userId) {
+      // Auto-restore session from DB if needed (after server restart)
+      if (!loggedInUsers.has(userId)) {
+        try {
+          const dbUser = await storage.getUser(userId) as any;
+          if (dbUser && dbUser.isActive !== false) {
+            loggedInUsers.add(userId);
+            if (!(req.session as any)?.user) {
+              (req.session as any).userId = userId;
+              (req.session as any).user = {
+                id: dbUser.id, email: dbUser.email,
+                name: dbUser.name || dbUser.email, provider: dbUser.provider || 'google',
+              };
+            }
+          }
+        } catch (e) { /* ignore */ }
+      }
+      if (loggedInUsers.has(userId)) {
+        const session = req.session as any;
+        const user = session?.user;
+        return res.json({ connected: true, email: user?.email || 'unknown', demo: !user?.access_token || user?.access_token === 'demo-token' });
+      }
     }
     res.json({ connected: false });
   });
@@ -938,35 +985,55 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get('/api/auth/microsoft/status', async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     const userId = req.cookies?.user_id;
-    if (userId && loggedInUsers.has(userId)) {
-      const session = req.session as any;
-      const user = session?.user;
-      if (user?.provider === 'microsoft') {
-        return res.json({ connected: true, email: user?.email || 'unknown', demo: !user?.access_token || user?.access_token === 'demo-ms-token' });
-      }
-      // Also check if Microsoft tokens are stored (user logged in with Google but connected Outlook too)
-      try {
-        // Try to find the user's org and check for MS tokens
-        const dbUser = await storage.getUserByEmail(user?.email || '') as any;
-        if (dbUser) {
-          const userOrg = await storage.getUserDefaultOrganization(dbUser.id);
-          if (userOrg) {
-            const settings = await storage.getApiSettings(userOrg.id);
-            if (settings.microsoft_access_token && settings.microsoft_user_email) {
-              return res.json({ connected: true, email: settings.microsoft_user_email, demo: false });
+    if (userId) {
+      // Auto-restore session from DB if needed (after server restart)
+      if (!loggedInUsers.has(userId)) {
+        try {
+          const dbUser = await storage.getUser(userId) as any;
+          if (dbUser && dbUser.isActive !== false) {
+            loggedInUsers.add(userId);
+            if (!(req.session as any)?.user) {
+              (req.session as any).userId = userId;
+              (req.session as any).user = {
+                id: dbUser.id, email: dbUser.email,
+                name: dbUser.name || dbUser.email, provider: dbUser.provider || 'google',
+              };
             }
           }
+        } catch (e) { /* ignore */ }
+      }
+      if (loggedInUsers.has(userId)) {
+        const session = req.session as any;
+        const user = session?.user;
+        if (user?.provider === 'microsoft') {
+          return res.json({ connected: true, email: user?.email || 'unknown', demo: !user?.access_token || user?.access_token === 'demo-ms-token' });
         }
-      } catch (e) { /* ignore */ }
+        // Also check if Microsoft tokens are stored (user logged in with Google but connected Outlook too)
+        try {
+          // Try to find the user's org and check for MS tokens
+          const dbUser = await storage.getUserByEmail(user?.email || '') as any;
+          if (dbUser) {
+            const userOrg = await storage.getUserDefaultOrganization(dbUser.id);
+            if (userOrg) {
+              const settings = await storage.getApiSettings(userOrg.id);
+              if (settings.microsoft_access_token && settings.microsoft_user_email) {
+                return res.json({ connected: true, email: settings.microsoft_user_email, demo: false });
+              }
+            }
+          }
+        } catch (e) { /* ignore */ }
+      }
     }
     res.json({ connected: false });
   });
 
-  app.get('/api/auth/user', (req, res) => {
+  app.get('/api/auth/user', async (req, res) => {
     const session = req.session as any;
     if (session?.user) return res.json(session.user);
     const userId = req.cookies?.user_id;
     const userData = req.cookies?.user_data;
+    
+    // Try restoring from cookie data first (existing behavior)
     if (userId && loggedInUsers.has(userId) && userData) {
       try {
         const user = JSON.parse(userData);
@@ -975,6 +1042,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.json(user);
       } catch (err) { /* ignore */ }
     }
+    
+    // Auto-restore from DB if server was restarted (loggedInUsers cleared)
+    if (userId && !loggedInUsers.has(userId)) {
+      try {
+        const dbUser = await storage.getUser(userId) as any;
+        if (dbUser && dbUser.isActive !== false) {
+          loggedInUsers.add(userId);
+          const userObj = {
+            id: dbUser.id,
+            email: dbUser.email,
+            name: dbUser.name || dbUser.email,
+            provider: dbUser.provider || 'google',
+          };
+          (req.session as any).userId = userId;
+          (req.session as any).user = userObj;
+          console.log(`[Auth] Auto-restored /api/auth/user session for ${dbUser.email} (${userId})`);
+          return res.json(userObj);
+        }
+      } catch (e) { /* ignore */ }
+    }
+    
     res.status(401).json({ error: 'Not authenticated' });
   });
 
