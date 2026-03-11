@@ -500,6 +500,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           if (!alreadyExists) {
             await storage.createEmailAccount({
               organizationId: userOrgId,
+              userId: userId,
               provider: 'gmail',
               email,
               displayName: name || email.split('@')[0],
@@ -663,9 +664,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Check if account already exists
       const existing = (await storage.getEmailAccounts(orgId)).find((a: any) => a.email === gmailEmail);
       if (!existing) {
+        // Get the authenticated user's ID from session/cookies
+        const currentUserId = (req.session as any)?.userId || req.cookies?.user_id || null;
         // Create email account
         await storage.createEmailAccount({
           organizationId: orgId,
+          userId: currentUserId,
           provider: 'gmail',
           email: gmailEmail,
           displayName,
@@ -869,6 +873,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           if (!alreadyExists) {
             await storage.createEmailAccount({
               organizationId: userOrgId,
+              userId: userId,
               provider: 'outlook',
               email,
               displayName: name || email.split('@')[0],
@@ -1072,12 +1077,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get('/api/email-accounts', async (req: any, res) => {
     try {
-      const role = req.user.role;
-      const isAdmin = role === 'owner' || role === 'admin';
-      // Admins see all org accounts; members see only their own
-      const accounts = isAdmin
-        ? await storage.getEmailAccounts(req.user.organizationId)
-        : await storage.getEmailAccountsForUser(req.user.organizationId, req.user.id);
+      // All org members can see org email accounts (they need them to send campaigns)
+      // Email accounts are a shared resource, not member-scoped
+      const accounts = await storage.getEmailAccounts(req.user.organizationId);
       // Don't return passwords in the response, but expose authMethod for OAuth detection
       const safe = accounts.map((a: any) => {
         const isOAuth = a.smtpConfig?.auth?.pass === 'OAUTH_TOKEN';
@@ -1557,11 +1559,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get('/api/email-accounts/quota-summary', async (req: any, res) => {
     try {
-      const role = req.user.role;
-      const isAdmin = role === 'owner' || role === 'admin';
-      const accounts = isAdmin
-        ? await storage.getEmailAccounts(req.user.organizationId)
-        : await storage.getEmailAccountsForUser(req.user.organizationId, req.user.id);
+      // All org members can see quota summary (email accounts are shared resources)
+      const accounts = await storage.getEmailAccounts(req.user.organizationId);
       const accountQuotas = accounts.map((a: any) => {
         const quota = smtpEmailService.getDailyQuota(a.id, a.provider);
         return {
