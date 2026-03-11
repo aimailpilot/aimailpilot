@@ -160,8 +160,9 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
   const [showAiPanel, setShowAiPanel] = useState(false);
   const [aiPrompt, setAiPrompt] = useState('');
   const [aiType, setAiType] = useState<'template' | 'campaign' | 'subject' | 'personalize'>('campaign');
+  const [aiFormat, setAiFormat] = useState<'text' | 'html' | 'both'>('html');
   const [aiGenerating, setAiGenerating] = useState(false);
-  const [aiResult, setAiResult] = useState<{ content: string; model: string; provider: string } | null>(null);
+  const [aiResult, setAiResult] = useState<{ content: string; model: string; provider: string; textContent?: string; htmlContent?: string; format?: string } | null>(null);
   const [aiError, setAiError] = useState('');
 
   // Editor ref
@@ -909,6 +910,220 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
               </div>
             )}
 
+            {/* AI Email Writer - Above Editor */}
+            <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden mb-4">
+              <button onClick={() => setShowAiPanel(!showAiPanel)}
+                className="w-full flex items-center justify-between px-4 py-3 hover:bg-gray-50/50 transition-colors">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center">
+                    <Brain className="h-4.5 w-4.5 text-white" />
+                  </div>
+                  <div className="text-left">
+                    <h3 className="text-sm font-bold text-gray-900">AI Email Writer</h3>
+                    <p className="text-[10px] text-gray-400">Powered by Azure OpenAI</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline" className="text-[10px] bg-purple-50 text-purple-600 border-purple-200">
+                    {aiFormat === 'text' ? 'Text' : aiFormat === 'html' ? 'HTML' : 'Text + HTML'}
+                  </Badge>
+                  <ChevronDown className={`h-4 w-4 text-gray-400 transition-transform ${showAiPanel ? 'rotate-180' : ''}`} />
+                </div>
+              </button>
+
+              {showAiPanel && (
+                <div className="border-t border-gray-100 p-4 space-y-3">
+                  {/* Format selector */}
+                  <div>
+                    <label className="text-[10px] font-medium text-gray-500 uppercase tracking-wider mb-1.5 block">Email Format</label>
+                    <div className="flex gap-1.5">
+                      {[
+                        { value: 'text', label: 'Text Email', icon: '📝', desc: 'Plain text only' },
+                        { value: 'html', label: 'HTML Email', icon: '🎨', desc: 'Rich HTML markup' },
+                        { value: 'both', label: 'Both', icon: '📋', desc: 'Text + HTML versions' },
+                      ].map(f => (
+                        <button key={f.value}
+                          onClick={() => setAiFormat(f.value as any)}
+                          className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium transition-all border text-center ${
+                            aiFormat === f.value
+                              ? 'bg-purple-600 text-white border-purple-600 shadow-sm'
+                              : 'bg-white text-gray-600 border-gray-200 hover:bg-purple-50 hover:border-purple-300'
+                          }`}>
+                          <span className="block">{f.icon} {f.label}</span>
+                          <span className={`block text-[9px] mt-0.5 ${aiFormat === f.value ? 'text-purple-200' : 'text-gray-400'}`}>{f.desc}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Type selector as pills */}
+                  <div>
+                    <label className="text-[10px] font-medium text-gray-500 uppercase tracking-wider mb-1.5 block">What to generate</label>
+                    <div className="flex flex-wrap gap-1.5">
+                      {[
+                        { value: 'campaign', label: 'Email Body', icon: '✉️' },
+                        { value: 'subject', label: 'Subject Lines', icon: '💡' },
+                        { value: 'personalize', label: 'Personalize', icon: '🎯' },
+                        { value: 'template', label: 'Full Template', icon: '📝' },
+                      ].map(t => (
+                        <button key={t.value}
+                          onClick={() => setAiType(t.value as any)}
+                          className={`px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all ${
+                            aiType === t.value
+                              ? 'bg-purple-600 text-white shadow-sm'
+                              : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                          }`}>
+                          {t.icon} {t.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Prompt area */}
+                  <div>
+                    <label className="text-[10px] font-medium text-gray-500 uppercase tracking-wider mb-1 block">
+                      {aiType === 'subject' ? 'Describe your email topic' : 'Describe what the email should say'}
+                    </label>
+                    <textarea value={aiPrompt} onChange={e => setAiPrompt(e.target.value)}
+                      placeholder={aiType === 'subject' ? 'e.g., SaaS product launch for HR managers...' : 'e.g., Cold outreach to CTOs about our AI analytics platform, highlight ROI...'}
+                      className="w-full text-xs border border-gray-200 rounded-lg px-3 py-2.5 resize-none h-20 outline-none focus:border-purple-300 focus:ring-2 focus:ring-purple-100 transition-all" />
+                  </div>
+
+                  {/* Generate button */}
+                  <button
+                    onClick={async () => {
+                      if (!aiPrompt.trim()) return;
+                      setAiGenerating(true); setAiError(''); setAiResult(null);
+                      try {
+                        const res = await fetch('/api/llm/generate', {
+                          method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+                          body: JSON.stringify({ prompt: aiPrompt, type: aiType, format: aiFormat, context: { subject: activeStep?.subject, recipients: selectedContacts.length } }),
+                        });
+                        if (res.ok) {
+                          const data = await res.json();
+                          setAiResult({ content: data.content, model: data.model, provider: data.provider, textContent: data.textContent, htmlContent: data.htmlContent, format: data.format });
+                        } else { setAiError('Generation failed. Configure Azure OpenAI in Advanced Settings.'); }
+                      } catch { setAiError('Could not reach server'); }
+                      finally { setAiGenerating(false); }
+                    }}
+                    disabled={aiGenerating || !aiPrompt.trim()}
+                    className="w-full flex items-center justify-center gap-2 px-3 py-2.5 text-xs font-semibold bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-lg hover:from-purple-700 hover:to-indigo-700 disabled:opacity-50 transition-all shadow-sm"
+                  >
+                    {aiGenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
+                    {aiGenerating ? 'Writing with AI...' : `Generate ${aiFormat === 'both' ? 'Text + HTML' : aiFormat === 'text' ? 'Text' : 'HTML'} Email`}
+                  </button>
+
+                  {aiError && <div className="text-xs text-red-600 bg-red-50 rounded-lg p-2.5 border border-red-100">{aiError}</div>}
+
+                  {/* AI Result */}
+                  {aiResult && (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-medium text-gray-500">
+                          {aiResult.provider === 'azure-openai' ? '✨ Azure OpenAI' : '🎭 Demo Mode'}
+                          {aiResult.format && <span className="ml-1.5 text-purple-500">({aiResult.format === 'both' ? 'Text + HTML' : aiResult.format})</span>}
+                        </span>
+                      </div>
+
+                      {/* Both format: show two tabs */}
+                      {aiResult.format === 'both' && aiResult.textContent && aiResult.htmlContent ? (
+                        <div className="space-y-2">
+                          <div>
+                            <div className="text-[10px] font-semibold text-gray-600 mb-1 flex items-center gap-1">📝 Text Version</div>
+                            <div className="text-xs text-gray-700 bg-white rounded-lg p-3 max-h-28 overflow-y-auto whitespace-pre-wrap border border-gray-200 shadow-inner font-mono">{aiResult.textContent}</div>
+                            <div className="flex gap-1.5 mt-1.5">
+                              <button onClick={() => {
+                                updateActiveStep({ content: aiResult.textContent! });
+                                if (editorRef.current) editorRef.current.innerHTML = aiResult.textContent!;
+                                setHtmlSource(aiResult.textContent!);
+                              }} className="flex-1 text-[11px] px-3 py-1.5 bg-purple-50 text-purple-700 rounded-lg hover:bg-purple-100 font-medium border border-purple-200">
+                                Use Text Version
+                              </button>
+                              <button onClick={() => navigator.clipboard.writeText(aiResult.textContent!)} className="text-[11px] px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 border border-gray-200">
+                                Copy
+                              </button>
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-[10px] font-semibold text-gray-600 mb-1 flex items-center gap-1">🎨 HTML Version</div>
+                            <div className="text-xs text-gray-700 bg-white rounded-lg p-3 max-h-28 overflow-y-auto whitespace-pre-wrap border border-gray-200 shadow-inner">{aiResult.htmlContent}</div>
+                            <div className="flex gap-1.5 mt-1.5">
+                              <button onClick={() => {
+                                updateActiveStep({ content: aiResult.htmlContent! });
+                                if (editorRef.current) editorRef.current.innerHTML = aiResult.htmlContent!;
+                                setHtmlSource(aiResult.htmlContent!);
+                              }} className="flex-1 text-[11px] px-3 py-1.5 bg-purple-50 text-purple-700 rounded-lg hover:bg-purple-100 font-medium border border-purple-200">
+                                Use HTML Version
+                              </button>
+                              <button onClick={() => navigator.clipboard.writeText(aiResult.htmlContent!)} className="text-[11px] px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 border border-gray-200">
+                                Copy
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        /* Single format result */
+                        <div>
+                          <div className="text-xs text-gray-700 bg-white rounded-lg p-3 max-h-36 overflow-y-auto whitespace-pre-wrap border border-gray-200 shadow-inner">{aiResult.content}</div>
+                          <div className="flex gap-1.5 mt-1.5">
+                            {aiType === 'subject' ? (
+                              <button onClick={() => {
+                                const lines = aiResult.content.split('\n').filter((l: string) => l.trim());
+                                const firstLine = lines[0]?.replace(/^\d+[\.\)]\s*/, '').replace(/^["']|["']$/g, '').trim();
+                                if (firstLine) updateActiveStep({ subject: firstLine });
+                              }} className="flex-1 text-[11px] px-3 py-1.5 bg-purple-50 text-purple-700 rounded-lg hover:bg-purple-100 font-medium border border-purple-200">
+                                Use first suggestion
+                              </button>
+                            ) : (
+                              <>
+                                <button onClick={() => {
+                                  updateActiveStep({ content: aiResult.content });
+                                  if (editorRef.current) editorRef.current.innerHTML = aiResult.content;
+                                  setHtmlSource(aiResult.content);
+                                }} className="flex-1 text-[11px] px-3 py-1.5 bg-purple-50 text-purple-700 rounded-lg hover:bg-purple-100 font-medium border border-purple-200">
+                                  Replace content
+                                </button>
+                                <button onClick={() => {
+                                  const curr = activeStep?.content || '';
+                                  const updated = curr + '\n' + aiResult.content;
+                                  updateActiveStep({ content: updated });
+                                  if (editorRef.current) editorRef.current.innerHTML = updated;
+                                  setHtmlSource(updated);
+                                }} className="flex-1 text-[11px] px-3 py-1.5 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 font-medium border border-gray-200">
+                                  Append
+                                </button>
+                              </>
+                            )}
+                            <button onClick={() => navigator.clipboard.writeText(aiResult.content)} className="text-[11px] px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 border border-gray-200">
+                              Copy
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Quick prompt suggestions */}
+                  {!aiResult && (
+                    <div className="space-y-1">
+                      <p className="text-[10px] text-gray-400 font-medium uppercase tracking-wider">Quick prompts</p>
+                      {[
+                        { text: 'Cold outreach for SaaS product to CTOs', emoji: '🚀' },
+                        { text: 'Follow-up after demo call, highlight key features', emoji: '📞' },
+                        { text: 'Re-engagement email for inactive users with special offer', emoji: '🔄' },
+                        { text: 'Partnership proposal to complementary businesses', emoji: '🤝' },
+                      ].map(p => (
+                        <button key={p.text} onClick={() => setAiPrompt(p.text)}
+                          className="w-full text-left text-[11px] text-gray-500 hover:text-purple-600 hover:bg-purple-50 rounded-lg px-2.5 py-1.5 transition-colors flex items-center gap-1.5">
+                          <span>{p.emoji}</span> {p.text}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
             {/* Rich Text / HTML Editor */}
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
               {/* Developer mode toggle + Toolbar */}
@@ -1050,12 +1265,6 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
 
       {/* ==================== RIGHT PANEL ==================== */}
       <div className="w-64 border-l border-gray-200 bg-white flex-shrink-0 overflow-y-auto relative">
-        {/* AI Sparkle button */}
-        <div className="absolute top-3 right-3">
-          <button onClick={() => setShowAiPanel(!showAiPanel)} className={`p-1.5 rounded-lg transition-colors ${showAiPanel ? 'bg-yellow-100 text-yellow-600' : 'hover:bg-yellow-50 text-yellow-500 hover:text-yellow-600'}`} title="AI Assistant">
-            <Sparkles className="h-5 w-5" />
-          </button>
-        </div>
 
         {/* Settings Section */}
         <div className="p-5 pt-4">
@@ -1099,150 +1308,6 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
             <Switch checked={unsubscribeLink} onCheckedChange={setUnsubscribeLink} />
           </div>
         </div>
-
-        {/* AI Generation Panel */}
-        {showAiPanel && (
-          <div className="border-t border-gray-100 p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center">
-                <Brain className="h-4 w-4 text-white" />
-              </div>
-              <div>
-                <h3 className="text-sm font-bold text-gray-900">AI Email Writer</h3>
-                <p className="text-[10px] text-gray-400">Powered by Azure OpenAI</p>
-              </div>
-              <button onClick={() => setShowAiPanel(false)} className="ml-auto p-1 hover:bg-gray-100 rounded-lg">
-                <X className="h-3.5 w-3.5 text-gray-400" />
-              </button>
-            </div>
-            
-            <div className="space-y-3">
-              {/* Type selector as pills */}
-              <div>
-                <label className="text-[10px] font-medium text-gray-500 uppercase tracking-wider mb-1.5 block">What to generate</label>
-                <div className="flex flex-wrap gap-1.5">
-                  {[
-                    { value: 'campaign', label: 'Email Body', icon: '✉️' },
-                    { value: 'subject', label: 'Subject Lines', icon: '💡' },
-                    { value: 'personalize', label: 'Personalize', icon: '🎯' },
-                    { value: 'template', label: 'Full Template', icon: '📝' },
-                  ].map(t => (
-                    <button key={t.value}
-                      onClick={() => setAiType(t.value as any)}
-                      className={`px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all ${
-                        aiType === t.value
-                          ? 'bg-purple-600 text-white shadow-sm'
-                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                      }`}
-                    >
-                      {t.icon} {t.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Prompt area */}
-              <div>
-                <label className="text-[10px] font-medium text-gray-500 uppercase tracking-wider mb-1 block">
-                  {aiType === 'subject' ? 'Describe your email topic' : 'Describe what the email should say'}
-                </label>
-                <textarea value={aiPrompt} onChange={e => setAiPrompt(e.target.value)}
-                  placeholder={aiType === 'subject' ? 'e.g., SaaS product launch for HR managers at mid-size companies...' : 'e.g., Cold outreach to CTOs about our AI analytics platform, highlight ROI and offer free trial...'}
-                  className="w-full text-xs border border-gray-200 rounded-lg px-3 py-2.5 resize-none h-24 outline-none focus:border-purple-300 focus:ring-2 focus:ring-purple-100 transition-all" />
-              </div>
-
-              {/* Generate button */}
-              <button
-                onClick={async () => {
-                  if (!aiPrompt.trim()) return;
-                  setAiGenerating(true); setAiError(''); setAiResult(null);
-                  try {
-                    const res = await fetch('/api/llm/generate', {
-                      method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-                      body: JSON.stringify({ prompt: aiPrompt, type: aiType, context: { subject: activeStep?.subject, recipients: selectedContacts.length } }),
-                    });
-                    if (res.ok) {
-                      const data = await res.json();
-                      setAiResult({ content: data.content, model: data.model, provider: data.provider });
-                    } else { setAiError('Generation failed. Configure Azure OpenAI in Advanced Settings.'); }
-                  } catch { setAiError('Could not reach server'); }
-                  finally { setAiGenerating(false); }
-                }}
-                disabled={aiGenerating || !aiPrompt.trim()}
-                className="w-full flex items-center justify-center gap-2 px-3 py-2 text-xs font-semibold bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-lg hover:from-purple-700 hover:to-indigo-700 disabled:opacity-50 transition-all shadow-sm"
-              >
-                {aiGenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
-                {aiGenerating ? 'Writing with AI...' : 'Generate with AI'}
-              </button>
-
-              {aiError && <div className="text-xs text-red-600 bg-red-50 rounded-lg p-2.5 border border-red-100">{aiError}</div>}
-
-              {aiResult && (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-medium text-gray-500">
-                      {aiResult.provider === 'azure-openai' ? '✨ Azure OpenAI' : '🎭 Demo Mode'}
-                    </span>
-                    <button onClick={() => navigator.clipboard.writeText(aiResult.content)} className="text-[10px] text-gray-400 hover:text-gray-600 flex items-center gap-0.5">
-                      Copy
-                    </button>
-                  </div>
-                  <div className="text-xs text-gray-700 bg-white rounded-lg p-3 max-h-36 overflow-y-auto whitespace-pre-wrap border border-gray-200 shadow-inner">
-                    {aiResult.content}
-                  </div>
-                  <div className="flex gap-1.5">
-                    {aiType === 'subject' ? (
-                      <button onClick={() => {
-                        const lines = aiResult.content.split('\n').filter(l => l.trim());
-                        const firstLine = lines[0]?.replace(/^\d+[\.\)]\s*/, '').replace(/^["']|["']$/g, '').trim();
-                        if (firstLine) updateActiveStep({ subject: firstLine });
-                      }} className="flex-1 text-[11px] px-3 py-1.5 bg-purple-50 text-purple-700 rounded-lg hover:bg-purple-100 font-medium border border-purple-200 transition-colors">
-                        Use first suggestion
-                      </button>
-                    ) : (
-                      <>
-                        <button onClick={() => {
-                          updateActiveStep({ content: aiResult.content });
-                          if (editorRef.current) editorRef.current.innerHTML = aiResult.content;
-                          setHtmlSource(aiResult.content);
-                        }} className="flex-1 text-[11px] px-3 py-1.5 bg-purple-50 text-purple-700 rounded-lg hover:bg-purple-100 font-medium border border-purple-200 transition-colors">
-                          Replace content
-                        </button>
-                        <button onClick={() => {
-                          const curr = activeStep?.content || '';
-                          const updated = curr + '\n' + aiResult.content;
-                          updateActiveStep({ content: updated });
-                          if (editorRef.current) editorRef.current.innerHTML = updated;
-                          setHtmlSource(updated);
-                        }} className="flex-1 text-[11px] px-3 py-1.5 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 font-medium border border-gray-200 transition-colors">
-                          Append
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* Quick prompt suggestions */}
-              <div className="space-y-1">
-                <p className="text-[10px] text-gray-400 font-medium uppercase tracking-wider">Quick prompts</p>
-                {[
-                  { text: 'Cold outreach for SaaS product to CTOs', emoji: '🚀' },
-                  { text: 'Follow-up after demo call, highlight key features', emoji: '📞' },
-                  { text: 'Re-engagement email for inactive users with special offer', emoji: '🔄' },
-                  { text: 'Partnership proposal to complementary businesses', emoji: '🤝' },
-                  { text: 'Event invitation with early bird registration', emoji: '📅' },
-                  { text: 'Customer feedback request after purchase', emoji: '⭐' },
-                ].map(p => (
-                  <button key={p.text} onClick={() => setAiPrompt(p.text)}
-                    className="w-full text-left text-[11px] text-gray-500 hover:text-purple-600 hover:bg-purple-50 rounded-lg px-2.5 py-1.5 transition-colors flex items-center gap-1.5">
-                    <span>{p.emoji}</span> {p.text}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
 
         {/* Sequence Section */}
         {steps.length > 0 && (

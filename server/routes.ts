@@ -3618,7 +3618,9 @@ Example response:
 
   app.post('/api/llm/generate', async (req: any, res) => {
     try {
-      const { prompt, type, context } = req.body;
+      const { prompt, type, context, format } = req.body;
+      // format: 'text' | 'html' | 'both' (default 'html')
+      const emailFormat = format || 'html';
 
       // Try to use Azure OpenAI if configured
       const settings = await storage.getApiSettings(req.user.organizationId);
@@ -3628,14 +3630,22 @@ Example response:
       const apiVersion = settings.azure_openai_api_version || '2024-08-01-preview';
 
       if (endpoint && apiKey && deploymentName) {
+        // Build format instructions
+        const formatInstructions: Record<string, string> = {
+          text: 'Return ONLY plain text content. No HTML tags at all. Use line breaks for formatting.',
+          html: 'Return the content as well-formatted HTML email markup with proper tags (<p>, <strong>, <a>, <ul>, etc). Do NOT include <html>, <head>, or <body> wrappers.',
+          both: 'Return BOTH versions separated by the marker ===TEXT_VERSION=== and ===HTML_VERSION===. First output ===TEXT_VERSION=== followed by the plain text version (no HTML tags). Then output ===HTML_VERSION=== followed by the HTML version (with proper tags like <p>, <strong>, <a>). Do NOT include <html>, <head>, or <body> wrappers in the HTML version.',
+        };
+        const formatSuffix = formatInstructions[emailFormat] || formatInstructions.html;
+
         // Use Azure OpenAI
         const systemPrompts: Record<string, string> = {
-          template: 'You are an expert email marketing copywriter. Generate professional email templates with personalization variables like {{firstName}}, {{company}}, {{jobTitle}}. Return only the email HTML content.',
-          campaign: 'You are an expert email campaign strategist. Generate compelling campaign email content that drives engagement. Use personalization variables like {{firstName}}, {{company}}. Return only the email HTML content.',
-          personalize: 'You are an AI email personalization expert. Take the provided template and personalize it for the specific recipient. Make it feel custom-written while maintaining the core message. Return only the personalized email content.',
+          template: `You are an expert email marketing copywriter. Generate professional email templates with personalization variables like {{firstName}}, {{company}}, {{jobTitle}}. ${formatSuffix}`,
+          campaign: `You are an expert email campaign strategist. Generate compelling campaign email content that drives engagement. Use personalization variables like {{firstName}}, {{company}}. ${formatSuffix}`,
+          personalize: `You are an AI email personalization expert. Take the provided template and personalize it for the specific recipient. Make it feel custom-written while maintaining the core message. ${formatSuffix}`,
           subject: 'You are an email subject line expert. Generate 3-5 compelling subject line options. Return them as a numbered list.',
-          reply: 'You are a professional email assistant. Generate an appropriate, contextual reply to the provided email. Return only the reply content.',
-          default: 'You are an expert email marketing copywriter. Generate personalized, professional email content that drives engagement and responses.',
+          reply: `You are a professional email assistant. Generate an appropriate, contextual reply to the provided email. ${formatSuffix}`,
+          default: `You are an expert email marketing copywriter. Generate personalized, professional email content that drives engagement and responses. ${formatSuffix}`,
         };
 
         const systemPrompt = systemPrompts[type || 'default'] || systemPrompts.default;
@@ -3659,9 +3669,26 @@ Example response:
 
         if (response.ok) {
           const data = await response.json() as any;
-          const content = data?.choices?.[0]?.message?.content || '';
+          const rawContent = data?.choices?.[0]?.message?.content || '';
+          
+          // Parse 'both' format: split into text and html versions
+          if (emailFormat === 'both' && rawContent.includes('===TEXT_VERSION===')) {
+            const textMatch = rawContent.match(/===TEXT_VERSION===\s*([\s\S]*?)(?====HTML_VERSION===)/);
+            const htmlMatch = rawContent.match(/===HTML_VERSION===\s*([\s\S]*?)$/);
+            return res.json({
+              content: htmlMatch ? htmlMatch[1].trim() : rawContent,
+              textContent: textMatch ? textMatch[1].trim() : rawContent.replace(/<[^>]+>/g, ''),
+              htmlContent: htmlMatch ? htmlMatch[1].trim() : rawContent,
+              format: 'both',
+              model: data?.model || deploymentName,
+              tokens: data?.usage?.total_tokens || 0,
+              provider: 'azure-openai',
+            });
+          }
+          
           return res.json({
-            content,
+            content: rawContent,
+            format: emailFormat,
             model: data?.model || deploymentName,
             tokens: data?.usage?.total_tokens || 0,
             provider: 'azure-openai',
@@ -3673,13 +3700,28 @@ Example response:
       }
 
       // Fallback: demo response
-      res.json({
-        content: `Here's a professionally crafted email based on your request:\n\nSubject: Quick Follow-up\n\nHi {{firstName}},\n\nI hope this message finds you well. I wanted to reach out regarding ${prompt || 'our recent discussion'}.\n\nI'd love to schedule a quick call to discuss further. Would you have 15 minutes this week?\n\nBest regards,\nThe AImailPilot Team`,
+      const demoText = `Hi {{firstName}},\n\nI hope this message finds you well. I wanted to reach out regarding ${prompt || 'our recent discussion'}.\n\nI'd love to schedule a quick call to discuss further. Would you have 15 minutes this week?\n\nBest regards,\nThe AImailPilot Team`;
+      const demoHtml = `<p>Hi {{firstName}},</p>\n<p>I hope this message finds you well. I wanted to reach out regarding ${prompt || 'our recent discussion'}.</p>\n<p>I'd love to schedule a quick call to discuss further. Would you have 15 minutes this week?</p>\n<p>Best regards,<br/>The AImailPilot Team</p>`;
+      
+      const demoResponse: any = {
         model: 'demo',
         tokens: 150,
         provider: 'demo',
+        format: emailFormat,
         note: 'Configure Azure OpenAI in Advanced Settings for real AI-powered generation.',
-      });
+      };
+      
+      if (emailFormat === 'both') {
+        demoResponse.content = demoHtml;
+        demoResponse.textContent = demoText;
+        demoResponse.htmlContent = demoHtml;
+      } else if (emailFormat === 'text') {
+        demoResponse.content = demoText;
+      } else {
+        demoResponse.content = demoHtml;
+      }
+      
+      res.json(demoResponse);
     } catch (error) {
       console.error('LLM generation error:', error);
       res.status(500).json({ message: 'Failed to generate content' });

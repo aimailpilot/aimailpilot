@@ -55,6 +55,9 @@ export default function TemplateManager() {
   const [aiPrompt, setAiPrompt] = useState('');
   const [aiGenerating, setAiGenerating] = useState(false);
   const [showAiSection, setShowAiSection] = useState(false);
+  const [aiFormat, setAiFormat] = useState<'text' | 'html' | 'both'>('html');
+  const [aiResult, setAiResult] = useState<{ content: string; model: string; provider: string; textContent?: string; htmlContent?: string; format?: string } | null>(null);
+  const [aiError, setAiError] = useState('');
 
   const categories = ['general', 'onboarding', 'follow-up', 'marketing', 'outreach', 'newsletter', 'transactional'];
 
@@ -445,7 +448,33 @@ export default function TemplateManager() {
                     </div>
                     <div>
                       <span className="text-xs font-bold text-gray-800">AI Template Generator</span>
-                      <p className="text-[10px] text-gray-500">Describe what you want and AI will write the email</p>
+                      <p className="text-[10px] text-gray-500">Powered by Azure OpenAI</p>
+                    </div>
+                    <button onClick={() => setShowAiSection(false)} className="ml-auto p-1 hover:bg-purple-100 rounded-lg">
+                      <X className="h-3.5 w-3.5 text-gray-400" />
+                    </button>
+                  </div>
+
+                  {/* Format selector */}
+                  <div>
+                    <label className="text-[10px] font-medium text-gray-500 uppercase tracking-wider mb-1.5 block">Email Format</label>
+                    <div className="flex gap-1.5">
+                      {[
+                        { value: 'text', label: 'Text Email', icon: '📝', desc: 'Plain text only' },
+                        { value: 'html', label: 'HTML Email', icon: '🎨', desc: 'Rich HTML markup' },
+                        { value: 'both', label: 'Both', icon: '📋', desc: 'Text + HTML versions' },
+                      ].map(f => (
+                        <button key={f.value}
+                          onClick={() => setAiFormat(f.value as any)}
+                          className={`flex-1 px-3 py-2 rounded-lg text-xs font-medium transition-all border text-center ${
+                            aiFormat === f.value
+                              ? 'bg-purple-600 text-white border-purple-600 shadow-sm'
+                              : 'bg-white text-gray-600 border-gray-200 hover:bg-purple-50 hover:border-purple-300'
+                          }`}>
+                          <span className="block">{f.icon} {f.label}</span>
+                          <span className={`block text-[9px] mt-0.5 ${aiFormat === f.value ? 'text-purple-200' : 'text-gray-400'}`}>{f.desc}</span>
+                        </button>
+                      ))}
                     </div>
                   </div>
 
@@ -455,55 +484,102 @@ export default function TemplateManager() {
                     className="w-full text-sm border border-purple-200 rounded-lg px-3 py-2.5 bg-white outline-none focus:border-purple-400 focus:ring-2 focus:ring-purple-100 resize-none h-20 transition-all"
                   />
 
-                  <div className="flex gap-2">
-                    <button className="flex-1 flex items-center justify-center gap-2 px-3 py-2 text-xs font-semibold bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-lg hover:from-purple-700 hover:to-indigo-700 disabled:opacity-50 whitespace-nowrap transition-all shadow-sm"
-                      disabled={aiGenerating || !aiPrompt.trim()}
-                      onClick={async () => {
-                        if (!aiPrompt.trim()) return;
-                        setAiGenerating(true);
-                        try {
-                          const res = await fetch('/api/llm/generate', {
-                            method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-                            body: JSON.stringify({ prompt: aiPrompt, type: 'template', context: { category: formCategory, name: formName } }),
-                          });
-                          if (res.ok) {
-                            const data = await res.json();
-                            setFormContent(data.content);
-                            if (editorRef.current && editorMode === 'visual') {
-                              editorRef.current.innerHTML = data.content;
-                            }
-                            const subjectMatch = data.content.match(/Subject:\s*(.+)/i);
-                            if (subjectMatch && !formSubject) setFormSubject(subjectMatch[1].trim());
-                          }
-                        } catch (e) { console.error('AI generation failed:', e); }
-                        setAiGenerating(false);
-                      }}>
-                      {aiGenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
-                      {aiGenerating ? 'Writing...' : 'Generate Template'}
-                    </button>
-                  </div>
+                  <button className="w-full flex items-center justify-center gap-2 px-3 py-2.5 text-xs font-semibold bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-lg hover:from-purple-700 hover:to-indigo-700 disabled:opacity-50 whitespace-nowrap transition-all shadow-sm"
+                    disabled={aiGenerating || !aiPrompt.trim()}
+                    onClick={async () => {
+                      if (!aiPrompt.trim()) return;
+                      setAiGenerating(true); setAiError(''); setAiResult(null);
+                      try {
+                        const res = await fetch('/api/llm/generate', {
+                          method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+                          body: JSON.stringify({ prompt: aiPrompt, type: 'template', format: aiFormat, context: { category: formCategory, name: formName } }),
+                        });
+                        if (res.ok) {
+                          const data = await res.json();
+                          setAiResult({ content: data.content, model: data.model, provider: data.provider, textContent: data.textContent, htmlContent: data.htmlContent, format: data.format });
+                        } else { setAiError('Generation failed. Configure Azure OpenAI in Advanced Settings.'); }
+                      } catch (e) { console.error('AI generation failed:', e); setAiError('Could not reach server'); }
+                      setAiGenerating(false);
+                    }}>
+                    {aiGenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
+                    {aiGenerating ? 'Writing...' : `Generate ${aiFormat === 'both' ? 'Text + HTML' : aiFormat === 'text' ? 'Text' : 'HTML'} Template`}
+                  </button>
+
+                  {aiError && <div className="text-xs text-red-600 bg-red-50 rounded-lg p-2.5 border border-red-100">{aiError}</div>}
+
+                  {/* AI Result */}
+                  {aiResult && (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-medium text-gray-500">
+                          {aiResult.provider === 'azure-openai' ? '✨ Azure OpenAI' : '🎭 Demo Mode'}
+                          {aiResult.format && <span className="ml-1.5 text-purple-500">({aiResult.format === 'both' ? 'Text + HTML' : aiResult.format})</span>}
+                        </span>
+                      </div>
+
+                      {aiResult.format === 'both' && aiResult.textContent && aiResult.htmlContent ? (
+                        <div className="space-y-2">
+                          <div>
+                            <div className="text-[10px] font-semibold text-gray-600 mb-1">📝 Text Version</div>
+                            <div className="text-xs text-gray-700 bg-white rounded-lg p-3 max-h-24 overflow-y-auto whitespace-pre-wrap border border-gray-200 shadow-inner font-mono">{aiResult.textContent}</div>
+                            <div className="flex gap-1.5 mt-1.5">
+                              <button onClick={() => {
+                                setFormContent(aiResult.textContent!);
+                                if (editorRef.current && editorMode === 'visual') editorRef.current.innerHTML = aiResult.textContent!;
+                              }} className="flex-1 text-[11px] px-3 py-1.5 bg-purple-50 text-purple-700 rounded-lg hover:bg-purple-100 font-medium border border-purple-200">Use Text</button>
+                              <button onClick={() => navigator.clipboard.writeText(aiResult.textContent!)} className="text-[11px] px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 border border-gray-200">Copy</button>
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-[10px] font-semibold text-gray-600 mb-1">🎨 HTML Version</div>
+                            <div className="text-xs text-gray-700 bg-white rounded-lg p-3 max-h-24 overflow-y-auto whitespace-pre-wrap border border-gray-200 shadow-inner">{aiResult.htmlContent}</div>
+                            <div className="flex gap-1.5 mt-1.5">
+                              <button onClick={() => {
+                                setFormContent(aiResult.htmlContent!);
+                                if (editorRef.current && editorMode === 'visual') editorRef.current.innerHTML = aiResult.htmlContent!;
+                              }} className="flex-1 text-[11px] px-3 py-1.5 bg-purple-50 text-purple-700 rounded-lg hover:bg-purple-100 font-medium border border-purple-200">Use HTML</button>
+                              <button onClick={() => navigator.clipboard.writeText(aiResult.htmlContent!)} className="text-[11px] px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 border border-gray-200">Copy</button>
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        <div>
+                          <div className="text-xs text-gray-700 bg-white rounded-lg p-3 max-h-32 overflow-y-auto whitespace-pre-wrap border border-gray-200 shadow-inner">{aiResult.content}</div>
+                          <div className="flex gap-1.5 mt-1.5">
+                            <button onClick={() => {
+                              setFormContent(aiResult.content);
+                              if (editorRef.current && editorMode === 'visual') editorRef.current.innerHTML = aiResult.content;
+                              const subjectMatch = aiResult.content.match(/Subject:\s*(.+)/i);
+                              if (subjectMatch && !formSubject) setFormSubject(subjectMatch[1].trim());
+                            }} className="flex-1 text-[11px] px-3 py-1.5 bg-purple-50 text-purple-700 rounded-lg hover:bg-purple-100 font-medium border border-purple-200">Use Content</button>
+                            <button onClick={() => navigator.clipboard.writeText(aiResult.content)} className="text-[11px] px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 border border-gray-200">Copy</button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* Quick prompt suggestions */}
-                  <div>
-                    <p className="text-[10px] text-gray-400 font-medium uppercase tracking-wider mb-1.5">Quick prompts</p>
-                    <div className="flex flex-wrap gap-1.5">
-                      {[
-                        { text: 'Welcome onboarding email for new users', emoji: '👋' },
-                        { text: 'Cold outreach for SaaS product to decision makers', emoji: '🚀' },
-                        { text: 'Follow-up after meeting with key takeaways', emoji: '📝' },
-                        { text: 'Product launch announcement with CTA', emoji: '🎉' },
-                        { text: 'Re-engagement email for churned users', emoji: '🔄' },
-                        { text: 'Event invitation with registration link', emoji: '📅' },
-                        { text: 'Customer testimonial request', emoji: '⭐' },
-                        { text: 'Partnership proposal for complementary business', emoji: '🤝' },
-                      ].map(p => (
-                        <button key={p.text} onClick={() => setAiPrompt(p.text)}
-                          className="text-[11px] px-2.5 py-1 bg-white text-gray-600 rounded-lg border border-purple-200 hover:bg-purple-100 hover:text-purple-700 transition-colors flex items-center gap-1">
-                          <span>{p.emoji}</span> {p.text}
-                        </button>
-                      ))}
+                  {!aiResult && (
+                    <div>
+                      <p className="text-[10px] text-gray-400 font-medium uppercase tracking-wider mb-1.5">Quick prompts</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {[
+                          { text: 'Welcome onboarding email for new users', emoji: '👋' },
+                          { text: 'Cold outreach for SaaS product to decision makers', emoji: '🚀' },
+                          { text: 'Follow-up after meeting with key takeaways', emoji: '📝' },
+                          { text: 'Product launch announcement with CTA', emoji: '🎉' },
+                          { text: 'Re-engagement email for churned users', emoji: '🔄' },
+                          { text: 'Partnership proposal for complementary business', emoji: '🤝' },
+                        ].map(p => (
+                          <button key={p.text} onClick={() => setAiPrompt(p.text)}
+                            className="text-[11px] px-2.5 py-1 bg-white text-gray-600 rounded-lg border border-purple-200 hover:bg-purple-100 hover:text-purple-700 transition-colors flex items-center gap-1">
+                            <span>{p.emoji}</span> {p.text}
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                  </div>
+                  )}
                 </div>
               )}
 
