@@ -1072,7 +1072,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get('/api/email-accounts', async (req: any, res) => {
     try {
-      const accounts = await storage.getEmailAccounts(req.user.organizationId);
+      const role = req.user.role;
+      const isAdmin = role === 'owner' || role === 'admin';
+      // Admins see all org accounts; members see only their own
+      const accounts = isAdmin
+        ? await storage.getEmailAccounts(req.user.organizationId)
+        : await storage.getEmailAccountsForUser(req.user.organizationId, req.user.id);
       // Don't return passwords in the response, but expose authMethod for OAuth detection
       const safe = accounts.map((a: any) => {
         const isOAuth = a.smtpConfig?.auth?.pass === 'OAUTH_TOKEN';
@@ -1229,6 +1234,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const account = await storage.createEmailAccount({
         organizationId: orgId,
+        userId: req.user.id,
         provider: 'gmail',
         email: gmailEmail,
         displayName: displayName || gmailEmail.split('@')[0],
@@ -1283,9 +1289,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         provider: (provider as 'gmail' | 'outlook' | 'custom') || 'custom',
       };
 
-      // Create account
+      // Create account — userId links to the user who adds this account
       const account = await storage.createEmailAccount({
         organizationId: req.user.organizationId,
+        userId: req.user.id,
         provider: provider || 'custom',
         email,
         displayName: displayName || email,
@@ -1550,7 +1557,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get('/api/email-accounts/quota-summary', async (req: any, res) => {
     try {
-      const accounts = await storage.getEmailAccounts(req.user.organizationId);
+      const role = req.user.role;
+      const isAdmin = role === 'owner' || role === 'admin';
+      const accounts = isAdmin
+        ? await storage.getEmailAccounts(req.user.organizationId)
+        : await storage.getEmailAccountsForUser(req.user.organizationId, req.user.id);
       const accountQuotas = accounts.map((a: any) => {
         const quota = smtpEmailService.getDailyQuota(a.id, a.provider);
         return {
@@ -1584,6 +1595,47 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch quota summary' });
+    }
+  });
+
+  // Admin endpoint: get email accounts grouped by team member
+  app.get('/api/email-accounts/by-member', async (req: any, res) => {
+    try {
+      const role = req.user.role;
+      if (role !== 'owner' && role !== 'admin') {
+        return res.status(403).json({ message: 'Admin access required' });
+      }
+      const accounts = await storage.getEmailAccounts(req.user.organizationId);
+      const members = await storage.getOrgMembers(req.user.organizationId);
+      
+      // Group accounts by userId
+      const byMember: Record<string, any> = {};
+      for (const acct of accounts as any[]) {
+        const uid = acct.userId || 'unassigned';
+        if (!byMember[uid]) {
+          const member = members.find((m: any) => m.userId === uid);
+          byMember[uid] = {
+            userId: uid,
+            email: (member as any)?.email || 'Unassigned',
+            firstName: (member as any)?.firstName || '',
+            lastName: (member as any)?.lastName || '',
+            role: (member as any)?.role || '',
+            accounts: [],
+          };
+        }
+        byMember[uid].accounts.push({
+          id: acct.id,
+          email: acct.email,
+          displayName: acct.displayName,
+          provider: acct.provider,
+          isActive: acct.isActive,
+          dailyLimit: acct.dailyLimit,
+          dailySent: acct.dailySent,
+        });
+      }
+      res.json(Object.values(byMember));
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch accounts by member' });
     }
   });
 
@@ -4018,18 +4070,29 @@ Example response:
 
   // ========== UNIFIED INBOX ==========
 
-  // List inbox messages with filters
+  // List inbox messages with filters — admin sees all, members see only their own accounts
   app.get('/api/inbox', requireAuth, async (req: any, res) => {
     try {
       const { status, emailAccountId, campaignId, limit, offset } = req.query;
-      const messages = await storage.getInboxMessages(
-        req.user.organizationId,
-        { status, emailAccountId, campaignId },
-        parseInt(limit as string) || 50,
-        parseInt(offset as string) || 0
-      );
-      const total = await storage.getInboxMessageCount(req.user.organizationId, { status });
-      const unread = await storage.getInboxUnreadCount(req.user.organizationId);
+      const role = req.user.role;
+      const isAdmin = role === 'owner' || role === 'admin';
+      const parsedLimit = parseInt(limit as string) || 50;
+      const parsedOffset = parseInt(offset as string) || 0;
+      const filters = { status, emailAccountId, campaignId };
+
+      let messages: any[];
+      let total: number;
+      let unread: number;
+
+      if (isAdmin) {
+        messages = await storage.getInboxMessages(req.user.organizationId, filters, parsedLimit, parsedOffset);
+        total = await storage.getInboxMessageCount(req.user.organizationId, { status });
+        unread = await storage.getInboxUnreadCount(req.user.organizationId);
+      } else {
+        messages = await storage.getInboxMessagesForUser(req.user.organizationId, req.user.id, filters, parsedLimit, parsedOffset);
+        total = await storage.getInboxMessageCountForUser(req.user.organizationId, req.user.id, { status });
+        unread = await storage.getInboxUnreadCountForUser(req.user.organizationId, req.user.id);
+      }
 
       // Enrich messages with contact info
       const enriched = await Promise.all(messages.map(async (m: any) => {
@@ -4041,9 +4104,19 @@ Example response:
         if (!contact && m.fromEmail) {
           contact = await storage.getContactByEmail(m.fromEmail, req.user.organizationId);
         }
+        // Add account owner info for admin view
+        let accountOwner = null;
+        if (isAdmin && m.emailAccountId) {
+          const acct = await storage.getEmailAccount(m.emailAccountId);
+          if (acct && (acct as any).userId) {
+            const owner = await storage.getUser((acct as any).userId);
+            if (owner) accountOwner = { id: owner.id, email: owner.email, firstName: (owner as any).firstName, lastName: (owner as any).lastName };
+          }
+        }
         return {
           ...m,
           contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company, jobTitle: contact.jobTitle } : null,
+          accountOwner,
         };
       }));
 
@@ -4071,7 +4144,11 @@ Example response:
   // Get unread count — MUST be before /:id routes
   app.get('/api/inbox/unread-count', requireAuth, async (req: any, res) => {
     try {
-      const count = await storage.getInboxUnreadCount(req.user.organizationId);
+      const role = req.user.role;
+      const isAdmin = role === 'owner' || role === 'admin';
+      const count = isAdmin
+        ? await storage.getInboxUnreadCount(req.user.organizationId)
+        : await storage.getInboxUnreadCountForUser(req.user.organizationId, req.user.id);
       res.json({ unread: count });
     } catch (error) {
       res.status(500).json({ message: 'Failed to get unread count' });

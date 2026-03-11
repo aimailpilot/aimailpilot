@@ -485,6 +485,24 @@ try {
   }
 } catch (e) { /* ignore */ }
 
+// ========== Email account ownership migration: add userId ==========
+try { db.exec(`ALTER TABLE email_accounts ADD COLUMN userId TEXT`); } catch (e) { /* already exists */ }
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_email_accounts_user ON email_accounts(userId)`); } catch (e) {}
+// Backfill: assign existing email accounts to the org owner/admin if userId is null
+try {
+  const unowned = db.prepare(`SELECT ea.id, ea.organizationId FROM email_accounts ea WHERE ea.userId IS NULL`).all() as any[];
+  if (unowned.length > 0) {
+    for (const acct of unowned) {
+      // Find the org owner or first admin
+      const owner = db.prepare(`SELECT userId FROM org_members WHERE organizationId = ? AND role IN ('owner','admin') ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END LIMIT 1`).get(acct.organizationId) as any;
+      if (owner) {
+        db.prepare('UPDATE email_accounts SET userId = ? WHERE id = ?').run(owner.userId, acct.id);
+      }
+    }
+    console.log(`[Migration] Assigned userId to ${unowned.length} email account(s)`);
+  }
+} catch (e) { /* ignore */ }
+
 // ========== Critical indexes for high-volume (10-20K emails/day) ==========
 // Messages: needed for follow-up engine (getCampaignMessages filter by contactId+stepNumber)
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_contact ON messages(contactId)`); } catch (e) {}
@@ -687,14 +705,17 @@ export class DatabaseStorage {
   async getEmailAccounts(organizationId: string) {
     return db.prepare('SELECT * FROM email_accounts WHERE organizationId = ?').all(organizationId).map(hydrateAccount);
   }
+  async getEmailAccountsForUser(organizationId: string, userId: string) {
+    return db.prepare('SELECT * FROM email_accounts WHERE organizationId = ? AND userId = ?').all(organizationId, userId).map(hydrateAccount);
+  }
   async getEmailAccount(id: string) { return hydrateAccount(db.prepare('SELECT * FROM email_accounts WHERE id = ?').get(id)); }
   async getEmailAccountByEmail(organizationId: string, email: string) {
     return hydrateAccount(db.prepare('SELECT * FROM email_accounts WHERE organizationId = ? AND email = ?').get(organizationId, email));
   }
   async createEmailAccount(account: any) {
     const id = genId(); const ts2 = now();
-    db.prepare('INSERT INTO email_accounts (id, organizationId, provider, email, displayName, smtpConfig, dailyLimit, dailySent, isActive, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
-      id, account.organizationId, account.provider || 'custom', account.email, account.displayName || account.email, toJson(account.smtpConfig), account.dailyLimit || 500, 0, 1, ts2, ts2
+    db.prepare('INSERT INTO email_accounts (id, organizationId, userId, provider, email, displayName, smtpConfig, dailyLimit, dailySent, isActive, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, account.organizationId, account.userId || null, account.provider || 'custom', account.email, account.displayName || account.email, toJson(account.smtpConfig), account.dailyLimit || 500, 0, 1, ts2, ts2
     );
     return this.getEmailAccount(id);
   }
@@ -719,6 +740,10 @@ export class DatabaseStorage {
   async getAvailableEmailAccounts(organizationId: string) {
     return db.prepare('SELECT * FROM email_accounts WHERE organizationId = ? AND isActive = 1 AND dailySent < dailyLimit ORDER BY dailySent ASC')
       .all(organizationId).map(hydrateAccount);
+  }
+  async getAvailableEmailAccountsForUser(organizationId: string, userId: string) {
+    return db.prepare('SELECT * FROM email_accounts WHERE organizationId = ? AND userId = ? AND isActive = 1 AND dailySent < dailyLimit ORDER BY dailySent ASC')
+      .all(organizationId, userId).map(hydrateAccount);
   }
 
   // ========== LLM Configurations ==========
@@ -1488,10 +1513,33 @@ export class DatabaseStorage {
     return db.prepare(sql).all(...params);
   }
 
+  // Member-scoped inbox: only messages from email accounts owned by this user
+  async getInboxMessagesForUser(organizationId: string, userId: string, filters?: { status?: string; emailAccountId?: string; campaignId?: string }, limit = 50, offset = 0) {
+    let sql = `SELECT ui.* FROM unified_inbox ui
+      INNER JOIN email_accounts ea ON ea.id = ui.emailAccountId
+      WHERE ui.organizationId = ? AND ea.userId = ?`;
+    const params: any[] = [organizationId, userId];
+    if (filters?.status && filters.status !== 'all') { sql += ' AND ui.status = ?'; params.push(filters.status); }
+    if (filters?.emailAccountId) { sql += ' AND ui.emailAccountId = ?'; params.push(filters.emailAccountId); }
+    if (filters?.campaignId) { sql += ' AND ui.campaignId = ?'; params.push(filters.campaignId); }
+    sql += ' ORDER BY ui.receivedAt DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+    return db.prepare(sql).all(...params);
+  }
+
   async getInboxMessageCount(organizationId: string, filters?: { status?: string }) {
     let sql = 'SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ?';
     const params: any[] = [organizationId];
     if (filters?.status && filters.status !== 'all') { sql += ' AND status = ?'; params.push(filters.status); }
+    return (db.prepare(sql).get(...params) as any).c;
+  }
+
+  async getInboxMessageCountForUser(organizationId: string, userId: string, filters?: { status?: string }) {
+    let sql = `SELECT COUNT(*) as c FROM unified_inbox ui
+      INNER JOIN email_accounts ea ON ea.id = ui.emailAccountId
+      WHERE ui.organizationId = ? AND ea.userId = ?`;
+    const params: any[] = [organizationId, userId];
+    if (filters?.status && filters.status !== 'all') { sql += ' AND ui.status = ?'; params.push(filters.status); }
     return (db.prepare(sql).get(...params) as any).c;
   }
 
@@ -1539,6 +1587,12 @@ export class DatabaseStorage {
 
   async getInboxUnreadCount(organizationId: string) {
     return (db.prepare('SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND status = ?').get(organizationId, 'unread') as any).c;
+  }
+
+  async getInboxUnreadCountForUser(organizationId: string, userId: string) {
+    return (db.prepare(`SELECT COUNT(*) as c FROM unified_inbox ui
+      INNER JOIN email_accounts ea ON ea.id = ui.emailAccountId
+      WHERE ui.organizationId = ? AND ea.userId = ? AND ui.status = ?`).get(organizationId, userId, 'unread') as any).c;
   }
 
   // ========== Organization Members (Multitenancy) ==========

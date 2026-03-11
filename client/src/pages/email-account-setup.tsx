@@ -13,7 +13,7 @@ import {
   Mail, Plus, Trash2, TestTube, CheckCircle, XCircle, 
   Loader2, Shield, Eye, EyeOff, AlertCircle, Inbox, Server,
   ExternalLink, Zap, Globe, Lock, Send, RefreshCw, Copy,
-  ChevronRight, Wifi, WifiOff, Clock, Settings
+  ChevronRight, Wifi, WifiOff, Clock, Settings, User
 } from "lucide-react";
 
 interface EmailAccount {
@@ -24,6 +24,7 @@ interface EmailAccount {
   isActive: boolean;
   dailyLimit: number;
   dailySent: number;
+  userId?: string;
   authMethod?: 'oauth' | 'smtp';
   smtpConfig?: {
     host: string;
@@ -54,6 +55,8 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
   const [testResults, setTestResults] = useState<Map<string, { success: boolean; error?: string; timestamp?: string }>>(new Map());
   const [showPassword, setShowPassword] = useState(false);
   const [gmailUseSmtp, setGmailUseSmtp] = useState(false); // false = OAuth, true = SMTP manual
+  const [userRole, setUserRole] = useState<string>('admin');
+  const [teamMembers, setTeamMembers] = useState<any[]>([]);
 
   const [formProvider, setFormProvider] = useState('gmail');
   const [formEmail, setFormEmail] = useState('');
@@ -77,6 +80,22 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
     fetchAccounts();
     fetchPresets();
     fetchGmailOAuthStatus();
+    // Fetch user profile and team members for ownership display
+    (async () => {
+      try {
+        const [profileRes, membersRes] = await Promise.all([
+          fetch('/api/auth/user-profile', { credentials: 'include' }),
+          fetch('/api/team/members', { credentials: 'include' }),
+        ]);
+        if (profileRes.ok) {
+          const profile = await profileRes.json();
+          setUserRole(profile.role || 'member');
+        }
+        if (membersRes.ok) {
+          setTeamMembers(await membersRes.json());
+        }
+      } catch (e) { /* ignore */ }
+    })();
   }, []);
 
   // Handle redirect from Gmail OAuth connect flow
@@ -530,7 +549,19 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
                           <Badge variant="secondary" className="text-[10px]">Inactive</Badge>
                         )}
                       </div>
-                      <div className="text-xs text-gray-400 mb-2">{account.email}</div>
+                      <div className="text-xs text-gray-400 mb-2">
+                        {account.email}
+                        {(userRole === 'owner' || userRole === 'admin') && account.userId && (() => {
+                          const owner = teamMembers.find((m: any) => m.userId === account.userId);
+                          if (owner) return (
+                            <span className="ml-2 inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 bg-indigo-50 text-indigo-600 rounded-full font-medium">
+                              <User className="h-2.5 w-2.5" />
+                              {owner.firstName || owner.email?.split('@')[0]}
+                            </span>
+                          );
+                          return null;
+                        })()}
+                      </div>
 
                       {/* SMTP & Quota Info */}
                       <div className="flex items-center gap-4 text-[11px] text-gray-400">

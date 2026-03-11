@@ -11,7 +11,7 @@ import {
   Inbox, Mail, Send, RefreshCw, Archive, Trash2, Check, CheckCheck,
   ChevronLeft, ChevronRight, Search, Filter, Loader2, Reply,
   Building, User, ExternalLink, Clock, Eye, EyeOff, Star,
-  AlertTriangle, XCircle, MailOpen, ArrowLeft
+  AlertTriangle, XCircle, MailOpen, ArrowLeft, Users
 } from "lucide-react";
 
 interface InboxMessage {
@@ -65,6 +65,12 @@ export default function UnifiedInbox() {
   const [syncing, setSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
 
+  // Role & team filter (admin can filter by member)
+  const [userRole, setUserRole] = useState<string>('member');
+  const [teamMembers, setTeamMembers] = useState<any[]>([]);
+  const [memberFilter, setMemberFilter] = useState<string>('all'); // 'all' or userId
+  const [emailAccounts, setEmailAccounts] = useState<any[]>([]);
+
   // Filters
   const [statusFilter, setStatusFilter] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -83,18 +89,57 @@ export default function UnifiedInbox() {
   // Selected IDs for bulk actions
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
+  // Fetch user role and team members on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const [profileRes, membersRes, accountsRes] = await Promise.all([
+          fetch('/api/auth/user-profile', { credentials: 'include' }),
+          fetch('/api/team/members', { credentials: 'include' }),
+          fetch('/api/email-accounts', { credentials: 'include' }),
+        ]);
+        if (profileRes.ok) {
+          const profile = await profileRes.json();
+          setUserRole(profile.role || 'member');
+        }
+        if (membersRes.ok) setTeamMembers(await membersRes.json());
+        if (accountsRes.ok) setEmailAccounts(await accountsRes.json());
+      } catch (e) { /* ignore */ }
+    })();
+  }, []);
+
   const fetchMessages = useCallback(async () => {
     setLoading(true);
     try {
       const params = new URLSearchParams();
       if (statusFilter !== 'all') params.set('status', statusFilter);
+      // If admin is filtering by a specific member's email account
+      if (memberFilter && memberFilter !== 'all') {
+        // Find accounts owned by this member
+        const memberAccts = emailAccounts.filter((a: any) => a.userId === memberFilter);
+        if (memberAccts.length > 0) {
+          // Filter by the first account (API supports single emailAccountId)
+          // We'll do additional client-side filtering for multiple accounts
+          params.set('emailAccountId', memberAccts.map((a: any) => a.id).join(','));
+        }
+      }
       params.set('limit', String(pageSize));
       params.set('offset', String(page * pageSize));
 
       const resp = await fetch(`/api/inbox?${params}`, { credentials: 'include' });
       if (!resp.ok) throw new Error('Failed to fetch');
       const data = await resp.json();
-      setMessages(data.messages || []);
+      
+      let filteredMessages = data.messages || [];
+      // Client-side filter when admin filters by member (multi-account)
+      if (memberFilter && memberFilter !== 'all') {
+        const memberAcctIds = new Set(emailAccounts.filter((a: any) => a.userId === memberFilter).map((a: any) => a.id));
+        if (memberAcctIds.size > 0) {
+          filteredMessages = filteredMessages.filter((m: any) => memberAcctIds.has(m.emailAccountId));
+        }
+      }
+      
+      setMessages(filteredMessages);
       setTotal(data.total || 0);
       setUnreadCount(data.unread || 0);
     } catch (err) {
@@ -102,7 +147,7 @@ export default function UnifiedInbox() {
     } finally {
       setLoading(false);
     }
-  }, [statusFilter, page]);
+  }, [statusFilter, page, memberFilter, emailAccounts]);
 
   const fetchSyncStatus = async () => {
     try {
@@ -489,6 +534,25 @@ export default function UnifiedInbox() {
               <SelectItem value="archived">Archived</SelectItem>
             </SelectContent>
           </Select>
+          {/* Admin: filter by team member */}
+          {(userRole === 'owner' || userRole === 'admin') && teamMembers.length > 0 && (
+            <Select value={memberFilter} onValueChange={v => { setMemberFilter(v); setPage(0); }}>
+              <SelectTrigger className="w-[160px] h-8 text-sm">
+                <div className="flex items-center gap-1.5">
+                  <User className="h-3 w-3 text-gray-400" />
+                  <SelectValue placeholder="All Members" />
+                </div>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Members</SelectItem>
+                {teamMembers.map((m: any) => (
+                  <SelectItem key={m.userId} value={m.userId}>
+                    {m.firstName || m.email?.split('@')[0]} {m.lastName || ''}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
           {selectedIds.size > 0 && (
             <div className="flex items-center gap-2">
               <Badge variant="outline">{selectedIds.size} selected</Badge>
@@ -591,6 +655,13 @@ export default function UnifiedInbox() {
                         <Badge variant="outline" className="bg-violet-50 text-violet-600 border-violet-200 text-[9px] px-1 py-0">
                           Campaign
                         </Badge>
+                      )}
+                      {/* Admin: show account owner */}
+                      {(userRole === 'owner' || userRole === 'admin') && (msg as any).accountOwner && (
+                        <span className="text-[9px] text-indigo-500 flex items-center gap-0.5 bg-indigo-50 px-1.5 py-0 rounded-full">
+                          <User className="h-2.5 w-2.5" />
+                          {(msg as any).accountOwner.firstName || (msg as any).accountOwner.email?.split('@')[0]}
+                        </span>
                       )}
                     </div>
                     <div className={`text-sm truncate ${isUnread ? 'font-semibold text-gray-800' : 'text-gray-600'}`}>
