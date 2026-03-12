@@ -587,6 +587,26 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
 
                     {/* Actions */}
                     <div className="flex items-center gap-2 flex-shrink-0">
+                      {/* OAuth token expired - Re-authenticate button */}
+                      {thisTestResult && !thisTestResult.success && (
+                        (thisTestResult.error || '').match(/OAuth|token.*expired|re-authenticate|401|403|OAUTH/i)
+                      ) && (account.authMethod === 'oauth' || account.smtpConfig?.auth?.pass === 'OAUTH_TOKEN') && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            if (account.provider === 'outlook' || account.provider === 'microsoft') {
+                              window.location.href = '/api/auth/microsoft?email=' + encodeURIComponent(account.email);
+                            } else {
+                              window.location.href = '/api/auth/gmail-connect?email=' + encodeURIComponent(account.email);
+                            }
+                          }}
+                          className="h-8 text-xs bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100 hover:text-amber-800"
+                        >
+                          <RefreshCw className="h-3 w-3 mr-1" /> Re-authenticate
+                        </Button>
+                      )}
+
                       {/* Test result */}
                       {thisTestResult && (
                         <Tooltip>
@@ -599,7 +619,7 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
                               ) : (
                                 <Badge className="bg-red-50 text-red-700 border-red-200 border text-xs max-w-[240px] cursor-help">
                                   <XCircle className="h-3 w-3 mr-1 flex-shrink-0" />
-                                  <span className="truncate">{thisTestResult.error || 'Failed'}</span>
+                                  <span className="truncate">{parseSmtpError(thisTestResult.error || 'Failed')}</span>
                                 </Badge>
                               )}
                             </div>
@@ -607,7 +627,10 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
                           <TooltipContent side="bottom" className="max-w-sm">
                             <div className="space-y-1">
                               <div className="font-medium">{thisTestResult.success ? 'Connection successful' : 'Connection failed'}</div>
-                              {thisTestResult.error && <div className="text-xs opacity-80">{thisTestResult.error}</div>}
+                              {thisTestResult.error && <div className="text-xs opacity-80">{parseSmtpError(thisTestResult.error)}</div>}
+                              {!thisTestResult.success && (account.authMethod === 'oauth' || account.smtpConfig?.auth?.pass === 'OAUTH_TOKEN') && (
+                                <div className="text-xs text-amber-600 font-medium mt-1">Click "Re-authenticate" to refresh your OAuth token</div>
+                              )}
                               {thisTestResult.timestamp && <div className="text-xs opacity-60">Tested at {thisTestResult.timestamp}</div>}
                             </div>
                           </TooltipContent>

@@ -4168,10 +4168,28 @@ Example response:
     try {
       const settings = await storage.getApiSettings(organizationId);
       let accessToken = settings.gmail_access_token;
-      const refreshToken = settings.gmail_refresh_token;
-      const tokenExpiry = settings.gmail_token_expiry;
+      let refreshToken = settings.gmail_refresh_token;
+      let tokenExpiry = settings.gmail_token_expiry;
       const clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID;
       const clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET;
+
+      // If no org-level token, try per-sender tokens (any sender account with valid tokens)
+      if (!accessToken || !refreshToken) {
+        const allKeys = Object.keys(settings);
+        const senderTokenKeys = allKeys.filter(k => k.startsWith('gmail_sender_') && k.endsWith('_access_token'));
+        for (const key of senderTokenKeys) {
+          const email = key.replace('gmail_sender_', '').replace('_access_token', '');
+          const senderAccess = settings[key];
+          const senderRefresh = settings[`gmail_sender_${email}_refresh_token`];
+          if (senderAccess && senderRefresh) {
+            accessToken = senderAccess;
+            refreshToken = senderRefresh;
+            tokenExpiry = settings[`gmail_sender_${email}_token_expiry`];
+            console.log('[GoogleAuth] Using per-sender token for:', email);
+            break;
+          }
+        }
+      }
 
       if (!accessToken || !refreshToken) return null;
 
@@ -4257,9 +4275,22 @@ Example response:
           } else {
             const errText = await apiRes.text();
             console.log('[sheets/fetch-info] Google Sheets API returned', apiRes.status, '- falling back to public CSV. Error:', errText.slice(0, 200));
-            // If 403 with insufficient scopes, tell user to re-login
-            if (apiRes.status === 403 && errText.includes('insufficient')) {
-              // Still try public CSV as fallback, but remember to suggest re-login
+            // If 403 with insufficient scopes or permission denied, give specific guidance
+            if (apiRes.status === 403) {
+              if (errText.includes('insufficient') || errText.includes('PERMISSION_DENIED') || errText.includes('Request had insufficient authentication scopes')) {
+                // OAuth token lacks spreadsheets scope - need re-auth
+                return res.json({ 
+                  valid: false, 
+                  error: 'Google Sheets permission not granted. Please go to Email Accounts > Connect Gmail to re-authenticate with Google (this will grant Sheets access).',
+                  needsReauth: true 
+                });
+              }
+            }
+            if (apiRes.status === 404) {
+              return res.json({
+                valid: false,
+                error: 'Spreadsheet not found. Please check the URL is correct and you have access to this sheet.'
+              });
             }
           }
         } catch (apiErr) {
@@ -4280,16 +4311,17 @@ Example response:
 
       if (!testRes.ok) {
         const hint = accessToken 
-          ? 'Cannot access this spreadsheet. Please log out and log back in with Google to grant Google Sheets permission, or make the sheet public.'
-          : 'Cannot access this spreadsheet. Please log in with Google first, or make sure the sheet is shared with "Anyone with the link".';
-        return res.status(400).json({ valid: false, error: hint });
+          ? 'Cannot access this spreadsheet. Your Google account may not have permission. Try re-authenticating: go to Email Accounts and click "Connect Gmail" to refresh your Google access.'
+          : 'Cannot access this spreadsheet. Please connect a Gmail account first (Email Accounts > Connect Gmail), or make sure the sheet is shared with "Anyone with the link".';
+        return res.status(400).json({ valid: false, error: hint, needsAuth: !accessToken });
       }
 
       const testCsv = await testRes.text();
       if (testCsv.trim().startsWith('<!DOCTYPE') || testCsv.trim().startsWith('<html')) {
         return res.status(400).json({ 
           valid: false, 
-          error: 'Cannot access this spreadsheet. Please log in with Google first, or share the sheet publicly.' 
+          error: 'Cannot access this spreadsheet. Please connect a Gmail account (Email Accounts > Connect Gmail), or share the sheet with "Anyone with the link".', 
+          needsAuth: !accessToken 
         });
       }
 
@@ -4393,14 +4425,14 @@ Example response:
 
         if (!csvRes.ok) {
           const hint = accessToken
-            ? 'Cannot access sheet data. The sheet may not be in your Google account.'
-            : 'Cannot access sheet data. Please log in with Google first, or share the sheet publicly.';
+            ? 'Cannot access sheet data. Your Google account may not have permission. Try re-authenticating via Email Accounts > Connect Gmail.'
+            : 'Cannot access sheet data. Please connect a Gmail account first (Email Accounts > Connect Gmail), or share the sheet with "Anyone with the link".';
           return res.status(400).json({ error: hint });
         }
 
         const csvText = await csvRes.text();
         if (csvText.trim().startsWith('<!DOCTYPE') || csvText.trim().startsWith('<html')) {
-          return res.status(400).json({ error: 'Cannot access this spreadsheet. Please log in with Google or share publicly.' });
+          return res.status(400).json({ error: 'Cannot access this spreadsheet. Please connect a Gmail account (Email Accounts > Connect Gmail), or share the sheet with "Anyone with the link".' });
         }
 
         const rows = parseCSV(csvText);

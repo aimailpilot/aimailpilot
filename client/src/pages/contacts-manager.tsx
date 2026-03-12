@@ -1771,7 +1771,7 @@ export default function ContactsManager() {
               Import from Google Sheets
             </DialogTitle>
             <DialogDescription className="text-sm text-gray-500">
-              Paste a public Google Sheets URL. The sheet must be shared with "Anyone with the link".
+              Paste a Google Sheets URL. Your connected Gmail account will be used to access the sheet. If the sheet is not in your account, share it with "Anyone with the link".
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
@@ -1795,7 +1795,19 @@ export default function ContactsManager() {
             {gsError && (
               <Alert variant="destructive" className="py-2">
                 <XCircle className="h-4 w-4" />
-                <AlertDescription className="text-sm">{gsError}</AlertDescription>
+                <AlertDescription className="text-sm">
+                  {gsError}
+                  {(gsError.includes('connect') || gsError.includes('log in') || gsError.includes('Cannot access')) && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="ml-2 h-7 text-xs bg-white text-red-700 border-red-200 hover:bg-red-50"
+                      onClick={() => window.location.href = '/api/auth/gmail-connect'}
+                    >
+                      <RefreshCw className="h-3 w-3 mr-1" /> Connect Gmail
+                    </Button>
+                  )}
+                </AlertDescription>
               </Alert>
             )}
 
