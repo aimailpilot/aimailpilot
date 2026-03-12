@@ -132,7 +132,7 @@ async function scoreReplyQualityWithAI(
   contactId: string,
   organizationId: string
 ): Promise<{ score: number; label: string }> {
-  const settings = await storage.getApiSettings(organizationId);
+  const settings = await storage.getApiSettingsWithAzureFallback(organizationId);
   const endpoint = settings.azure_openai_endpoint;
   const apiKey = settings.azure_openai_api_key;
   const deploymentName = settings.azure_openai_deployment;

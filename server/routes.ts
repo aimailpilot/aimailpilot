@@ -1755,7 +1755,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
 
       // Try Azure OpenAI for intelligent recommendation
-      const settings = await storage.getApiSettings(req.user.organizationId);
+      const settings = await storage.getApiSettingsWithAzureFallback(req.user.organizationId);
       const endpoint = settings.azure_openai_endpoint;
       const apiKey = settings.azure_openai_api_key;
       const deploymentName = settings.azure_openai_deployment;
@@ -2901,7 +2901,7 @@ Which account should I use and why? If I need to split across accounts, provide 
         return res.status(400).json({ message: 'csvHeaders array is required' });
       }
 
-      const settings = await storage.getApiSettings(req.user.organizationId);
+      const settings = await storage.getApiSettingsWithAzureFallback(req.user.organizationId);
       const endpoint = settings.azure_openai_endpoint;
       const apiKey = settings.azure_openai_api_key;
       const deploymentName = settings.azure_openai_deployment;
@@ -3363,12 +3363,15 @@ Example response:
       console.error('Tracking error:', error);
     }
 
-    // Return 1x1 transparent GIF
+    // Return 1x1 transparent GIF — with aggressive anti-caching headers
     const pixel = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
     res.writeHead(200, {
       'Content-Type': 'image/gif',
       'Content-Length': pixel.length,
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Cache-Control': 'no-cache, no-store, must-revalidate, private, max-age=0',
+      'Pragma': 'no-cache',
+      'Expires': '0',
+      'X-Content-Type-Options': 'nosniff',
     });
     res.end(pixel);
   });
@@ -3757,7 +3760,7 @@ Example response:
 
   app.post('/api/settings/test-azure-openai', async (req: any, res) => {
     try {
-      const settings = await storage.getApiSettings(req.user.organizationId);
+      const settings = await storage.getApiSettingsWithAzureFallback(req.user.organizationId);
       const endpoint = settings.azure_openai_endpoint;
       const apiKey = settings.azure_openai_api_key;
       const deploymentName = settings.azure_openai_deployment;
@@ -3831,7 +3834,7 @@ Example response:
   // Check Azure OpenAI configuration status for the current organization
   app.get('/api/llm/status', async (req: any, res) => {
     try {
-      const settings = await storage.getApiSettings(req.user.organizationId);
+      const settings = await storage.getApiSettingsWithAzureFallback(req.user.organizationId);
       const endpoint = settings.azure_openai_endpoint;
       const apiKey = settings.azure_openai_api_key;
       const deploymentName = settings.azure_openai_deployment;
@@ -3857,7 +3860,7 @@ Example response:
       // Try to use Azure OpenAI if configured
       const orgId = req.user.organizationId;
       console.log(`[LLM] Generate request for org: ${orgId}, user: ${req.user.email}, type: ${type || 'default'}, format: ${emailFormat}`);
-      const settings = await storage.getApiSettings(orgId);
+      const settings = await storage.getApiSettingsWithAzureFallback(orgId);
       const endpoint = settings.azure_openai_endpoint;
       const apiKey = settings.azure_openai_api_key;
       const deploymentName = settings.azure_openai_deployment;
@@ -3980,7 +3983,7 @@ Example response:
         return res.status(400).json({ message: 'Subject and content are required' });
       }
 
-      const settings = await storage.getApiSettings(req.user.organizationId);
+      const settings = await storage.getApiSettingsWithAzureFallback(req.user.organizationId);
       const endpoint = settings.azure_openai_endpoint;
       const apiKey = settings.azure_openai_api_key;
       const deploymentName = settings.azure_openai_deployment;
@@ -4646,7 +4649,42 @@ Example response:
           return res.status(500).json({ message: `Gmail send failed: ${errText}` });
         }
 
-        await storage.updateInboxMessage(msg.id, { status: 'replied', repliedAt: new Date().toISOString() });
+        const sendResult = await sendResp.json() as any;
+        
+        // Store reply details: update original message and create a sent-reply record
+        await storage.updateInboxMessage(msg.id, { 
+          status: 'replied', 
+          repliedAt: new Date().toISOString(),
+          replyContent: replyBody,
+          repliedBy: req.user.email || req.user.id,
+        });
+
+        // Also store the sent reply as a new inbox message for the conversation trail
+        try {
+          const senderName = req.user.name || req.user.email || 'Me';
+          await storage.createInboxMessage({
+            organizationId: req.user.organizationId,
+            emailAccountId: msg.emailAccountId,
+            campaignId: msg.campaignId,
+            messageId: msg.messageId,
+            contactId: msg.contactId,
+            gmailMessageId: sendResult.id || null,
+            gmailThreadId: msg.gmailThreadId || sendResult.threadId || null,
+            fromEmail: senderEmail,
+            fromName: senderName,
+            toEmail: msg.fromEmail,
+            subject: msg.subject?.startsWith('Re:') ? msg.subject : `Re: ${msg.subject}`,
+            snippet: replyBody.replace(/<[^>]+>/g, '').substring(0, 200),
+            body: replyBody.replace(/<[^>]+>/g, ''),
+            bodyHtml: replyBody,
+            status: 'sent',
+            provider: 'gmail',
+            receivedAt: new Date().toISOString(),
+          });
+        } catch (e) {
+          console.warn('[Inbox] Failed to store sent reply record:', e);
+        }
+        
         res.json({ success: true, provider: 'gmail' });
 
       } else if (provider === 'outlook') {
@@ -4666,7 +4704,40 @@ Example response:
           return res.status(500).json({ message: `Outlook send failed: ${errText}` });
         }
 
-        await storage.updateInboxMessage(msg.id, { status: 'replied', repliedAt: new Date().toISOString() });
+        // Store reply details
+        await storage.updateInboxMessage(msg.id, { 
+          status: 'replied', 
+          repliedAt: new Date().toISOString(),
+          replyContent: replyBody,
+          repliedBy: req.user.email || req.user.id,
+        });
+
+        // Store the sent reply as a new inbox message for conversation trail
+        try {
+          const senderEmail = settings.microsoft_user_email || msg.toEmail;
+          const senderName = req.user.name || req.user.email || 'Me';
+          await storage.createInboxMessage({
+            organizationId: req.user.organizationId,
+            emailAccountId: msg.emailAccountId,
+            campaignId: msg.campaignId,
+            messageId: msg.messageId,
+            contactId: msg.contactId,
+            outlookMessageId: null,
+            fromEmail: senderEmail,
+            fromName: senderName,
+            toEmail: msg.fromEmail,
+            subject: msg.subject?.startsWith('Re:') ? msg.subject : `Re: ${msg.subject}`,
+            snippet: replyBody.replace(/<[^>]+>/g, '').substring(0, 200),
+            body: replyBody.replace(/<[^>]+>/g, ''),
+            bodyHtml: replyBody,
+            status: 'sent',
+            provider: 'outlook',
+            receivedAt: new Date().toISOString(),
+          });
+        } catch (e) {
+          console.warn('[Inbox] Failed to store sent reply record:', e);
+        }
+
         res.json({ success: true, provider: 'outlook' });
 
       } else {
@@ -4686,7 +4757,7 @@ Example response:
       if (!msg) return res.status(404).json({ message: 'Message not found' });
 
       const { tone, customInstructions } = req.body; // tone: 'professional' | 'friendly' | 'concise' | 'custom'
-      const settings = await storage.getApiSettings(req.user.organizationId);
+      const settings = await storage.getApiSettingsWithAzureFallback(req.user.organizationId);
       const endpoint = settings.azure_openai_endpoint;
       const apiKey = settings.azure_openai_api_key;
       const deploymentName = settings.azure_openai_deployment;
@@ -4705,6 +4776,54 @@ Example response:
       if (msg.contactId) contact = await storage.getContact(msg.contactId);
       if (!contact && msg.fromEmail) contact = await storage.getContactByEmail(msg.fromEmail, req.user.organizationId);
 
+      // ========== BUILD FULL CONVERSATION TRAIL ==========
+      // Collect the entire email thread for AI context
+      let conversationTrail = '';
+      try {
+        // Method 1: Get all inbox messages in the same thread (by gmailThreadId)
+        const threadMessages: any[] = [];
+        if (msg.gmailThreadId) {
+          const allInbox = await storage.getInboxMessages(req.user.organizationId, {}, 50, 0) as any[];
+          const threadMsgs = allInbox.filter((m: any) => m.gmailThreadId === msg.gmailThreadId);
+          threadMsgs.sort((a: any, b: any) => new Date(a.receivedAt).getTime() - new Date(b.receivedAt).getTime());
+          threadMessages.push(...threadMsgs);
+        }
+
+        // Method 2: Get the original campaign message that started this thread
+        let originalCampaignContent = '';
+        if (msg.messageId) {
+          const campaignMsg = await storage.getCampaignMessage(msg.messageId);
+          if (campaignMsg) {
+            const campaign = await storage.getCampaign(campaignMsg.campaignId);
+            originalCampaignContent = `\n--- Original Campaign Email (${campaign?.name || 'Campaign'}) ---\nSubject: ${campaignMsg.subject || campaign?.subject || '(no subject)'}\n${(campaignMsg as any).content || (campaignMsg as any).body || ''}`;
+          }
+        }
+
+        // Build the trail
+        const trailParts: string[] = [];
+        if (originalCampaignContent) {
+          trailParts.push(originalCampaignContent);
+        }
+        for (const tm of threadMessages) {
+          if (tm.id === msg.id) continue; // Skip the current message (already included separately)
+          const direction = tm.status === 'sent' ? 'You sent' : `${tm.fromName || tm.fromEmail} wrote`;
+          const msgBody = (tm.body || tm.snippet || '').substring(0, 1000);
+          if (msgBody.trim()) {
+            trailParts.push(`\n--- ${direction} (${tm.receivedAt}) ---\nSubject: ${tm.subject || ''}\n${msgBody}`);
+          }
+          // Also include any stored reply content
+          if (tm.replyContent) {
+            trailParts.push(`\n--- Your reply ---\n${tm.replyContent.substring(0, 1000)}`);
+          }
+        }
+        
+        if (trailParts.length > 0) {
+          conversationTrail = '\n\n========== FULL CONVERSATION TRAIL ==========\n' + trailParts.join('\n');
+        }
+      } catch (e) {
+        console.warn('[AI Draft] Could not build conversation trail:', e);
+      }
+
       const toneInstructions: Record<string, string> = {
         professional: 'Write in a professional, business-appropriate tone.',
         friendly: 'Write in a warm, friendly, and approachable tone.',
@@ -4715,23 +4834,27 @@ Example response:
 
       const systemPrompt = `You are an expert email assistant for a business email outreach platform. Generate a contextual reply to the received email. 
 ${toneInstructions[tone || 'professional']}
+- You will be provided with the FULL CONVERSATION TRAIL including the original campaign email and all previous replies.
+- Read and understand the ENTIRE conversation context before drafting your reply.
+- Your reply should be consistent with the conversation history and address the latest message specifically.
 - Do NOT include a subject line, only the body.
 - Use proper greeting and sign-off.
 - If the original email has a question, answer it helpfully.
 - Keep the reply concise (2-4 paragraphs max).
 - Do NOT use markdown formatting — write plain text or simple HTML.
-- Reference specifics from the original email to make it feel personal.`;
+- Reference specifics from the conversation to make it feel personal and contextual.`;
 
       const contactContext = contact ? `\nSender context: ${contact.firstName || ''} ${contact.lastName || ''}, ${contact.jobTitle || ''} at ${contact.company || 'Unknown Company'}` : '';
 
-      const userPrompt = `Original email from: ${msg.fromName || msg.fromEmail}
+      const userPrompt = `Latest email from: ${msg.fromName || msg.fromEmail}
 Subject: ${msg.subject || '(no subject)'}
 ${contactContext}
 
-Email body:
+Latest email body:
 ${msg.body || msg.snippet || '(no content)'}
+${conversationTrail}
 
-Generate an appropriate reply.`;
+Generate an appropriate reply to the LATEST email above, considering the full conversation context.`;
 
       const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${deploymentName}/chat/completions?api-version=${apiVersion}`;
       const response = await fetch(url, {
@@ -4742,7 +4865,7 @@ Generate an appropriate reply.`;
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
           ],
-          max_tokens: 800,
+          max_tokens: 1200,
           temperature: 0.7,
         }),
       });

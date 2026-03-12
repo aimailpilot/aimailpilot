@@ -533,6 +533,10 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_followup_steps_seq ON followup_ste
 // ========== Followup steps migrations ==========
 try { db.exec(`ALTER TABLE followup_steps ADD COLUMN delayMinutes INTEGER DEFAULT 0`); } catch (e) { /* already exists */ }
 
+// ========== Unified Inbox migrations ==========
+try { db.exec(`ALTER TABLE unified_inbox ADD COLUMN replyContent TEXT`); } catch (e) { /* already exists */ }
+try { db.exec(`ALTER TABLE unified_inbox ADD COLUMN repliedBy TEXT`); } catch (e) { /* already exists */ }
+
 // ========== SEED DATA (only on first run) ==========
 const ORG_ID = '550e8400-e29b-41d4-a716-446655440001';
 
@@ -1574,8 +1578,8 @@ export class DatabaseStorage {
     const existing = await this.getInboxMessage(id);
     if (!existing) throw new Error('Inbox message not found');
     const m = { ...existing, ...data } as any;
-    db.prepare('UPDATE unified_inbox SET status=?, aiDraft=?, repliedAt=? WHERE id=?').run(
-      m.status, m.aiDraft || null, m.repliedAt || null, id
+    db.prepare('UPDATE unified_inbox SET status=?, aiDraft=?, repliedAt=?, replyContent=?, repliedBy=? WHERE id=?').run(
+      m.status, m.aiDraft || null, m.repliedAt || null, m.replyContent || null, m.repliedBy || null, id
     );
     return this.getInboxMessage(id);
   }
@@ -1793,6 +1797,47 @@ export class DatabaseStorage {
   async isSuperAdmin(userId: string): Promise<boolean> {
     const user = db.prepare('SELECT isSuperAdmin FROM users WHERE id = ?').get(userId) as any;
     return user?.isSuperAdmin === 1;
+  }
+
+  // Get the default organization of the first superadmin user
+  async getSuperAdminOrgId(): Promise<string | null> {
+    const superAdmin = db.prepare(`
+      SELECT u.id FROM users u WHERE u.isSuperAdmin = 1 LIMIT 1
+    `).get() as any;
+    if (!superAdmin) return null;
+    const org = db.prepare(`
+      SELECT organizationId FROM org_members WHERE userId = ? AND isDefault = 1 LIMIT 1
+    `).get(superAdmin.id) as any;
+    if (org) return org.organizationId;
+    // Fallback to first org
+    const firstOrg = db.prepare(`
+      SELECT organizationId FROM org_members WHERE userId = ? ORDER BY joinedAt ASC LIMIT 1
+    `).get(superAdmin.id) as any;
+    return firstOrg?.organizationId || null;
+  }
+
+  // Get API settings with Azure fallback from superadmin org
+  async getApiSettingsWithAzureFallback(organizationId: string): Promise<Record<string, string>> {
+    const settings = await this.getApiSettings(organizationId);
+
+    // If Azure OpenAI is already configured for this org, return as-is
+    if (settings.azure_openai_endpoint && settings.azure_openai_api_key && settings.azure_openai_deployment) {
+      return settings;
+    }
+
+    // Fallback: try superadmin's org for Azure keys
+    const superAdminOrgId = await this.getSuperAdminOrgId();
+    if (superAdminOrgId && superAdminOrgId !== organizationId) {
+      const superSettings = await this.getApiSettings(superAdminOrgId);
+      const azureKeys = ['azure_openai_endpoint', 'azure_openai_api_key', 'azure_openai_deployment', 'azure_openai_api_version'];
+      for (const key of azureKeys) {
+        if (superSettings[key] && !settings[key]) {
+          settings[key] = superSettings[key];
+        }
+      }
+    }
+
+    return settings;
   }
 
   async setSuperAdmin(userId: string, isSuperAdmin: boolean): Promise<void> {

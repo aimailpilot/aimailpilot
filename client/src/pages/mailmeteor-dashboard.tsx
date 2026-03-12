@@ -336,7 +336,7 @@ export default function MailMeteorDashboard() {
     ...(isSuperAdmin ? [{ key: 'superadmin' as ViewType, label: 'SuperAdmin', icon: Shield }] : []),
     ...(isAdminOrOwner ? [{ key: 'team' as ViewType, label: 'Team', icon: Users }] : []),
     { key: 'account' as ViewType, label: 'Account', icon: Settings },
-    ...(isAdminOrOwner ? [{ key: 'advanced-settings' as ViewType, label: 'Advanced', icon: Wrench }] : []),
+    ...(isSuperAdmin ? [{ key: 'advanced-settings' as ViewType, label: 'Advanced', icon: Wrench }] : []),
     ...(isAdminOrOwner ? [{ key: 'billing' as ViewType, label: 'Billing', icon: CreditCard }] : []),
   ];
 

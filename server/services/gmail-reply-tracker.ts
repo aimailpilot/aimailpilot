@@ -113,20 +113,48 @@ export class GmailReplyTracker {
   }
 
   /**
-   * Call Gmail API with proper error handling
+   * Call Gmail API with proper error handling and retry logic
    */
-  private async gmailFetch(accessToken: string, endpoint: string): Promise<any> {
+  private async gmailFetch(accessToken: string, endpoint: string, retries: number = 2): Promise<any> {
     const url = `https://gmail.googleapis.com/gmail/v1/users/me/${endpoint}`;
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
+    let lastError: Error | null = null;
+    
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const response = await fetch(url, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Gmail API error (${response.status}): ${errorText}`);
+        if (response.status === 429) {
+          // Rate limited — wait and retry
+          const retryAfter = parseInt(response.headers.get('Retry-After') || '5');
+          console.warn(`[GmailReplyTracker] Rate limited, waiting ${retryAfter}s (attempt ${attempt + 1}/${retries + 1})`);
+          await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
+          continue;
+        }
+
+        if (response.status === 401) {
+          // Token expired during this check cycle
+          throw new Error(`Gmail API auth error (401): Token may have expired`);
+        }
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Gmail API error (${response.status}): ${errorText}`);
+        }
+
+        return response.json();
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        if (attempt < retries) {
+          const delay = (attempt + 1) * 2000; // 2s, 4s backoff
+          console.warn(`[GmailReplyTracker] Gmail API call failed (attempt ${attempt + 1}), retrying in ${delay}ms:`, lastError.message);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
     }
-
-    return response.json();
+    
+    throw lastError || new Error('Gmail API call failed after retries');
   }
 
   /**
@@ -200,11 +228,18 @@ export class GmailReplyTracker {
           if (fromLower.includes('mailer-daemon') || 
               fromLower.includes('postmaster') ||
               fromLower.includes('mail delivery') ||
+              fromLower.includes('noreply') ||
+              fromLower.includes('no-reply') ||
               subject.toLowerCase().includes('delivery status notification') ||
               subject.toLowerCase().includes('undeliverable') ||
-              subject.toLowerCase().includes('mail delivery failed')) {
+              subject.toLowerCase().includes('mail delivery failed') ||
+              subject.toLowerCase().includes('out of office') ||
+              subject.toLowerCase().includes('automatic reply')) {
             continue;
           }
+
+          // Extract sender email from "Name <email>" format
+          const senderEmail = (from.match(/<([^>]+)>/) || [, from.split('@').length === 2 ? from.trim() : ''])[1]?.toLowerCase() || '';
 
           // Check if this is a reply to one of our campaign messages
           // Method 1: Match via In-Reply-To / References headers (Message-ID matching)
@@ -236,6 +271,26 @@ export class GmailReplyTracker {
               
               trackingIds.push(threadMatchedMessage.trackingId);
               console.log(`[GmailReplyTracker] Thread-based reply match: threadId=${msgRef.threadId} -> step=${threadMatchedMessage.stepNumber || 0}, trackingId=${threadMatchedMessage.trackingId}`);
+            }
+          }
+
+          // Method 3: Match by sender email address + "Re:" subject pattern
+          // If no header/thread match, check if the sender email matches any contact
+          // we sent a campaign to AND the subject starts with "Re:" (indicating a reply)
+          if (trackingIds.length === 0 && senderEmail && subject.toLowerCase().startsWith('re:')) {
+            for (const [key, msgs] of contactCampaignToMessages.entries()) {
+              for (const um of msgs) {
+                if (um.repliedAt) continue;
+                // Match by contact email
+                const contact = um.contactId ? await storage.getContact(um.contactId) : null;
+                if (contact && contact.email?.toLowerCase() === senderEmail) {
+                  threadMatchedMessage = um;
+                  trackingIds.push(um.trackingId);
+                  console.log(`[GmailReplyTracker] Email-based reply match: ${senderEmail} -> campaign=${um.campaignId}, step=${um.stepNumber || 0}`);
+                  break;
+                }
+              }
+              if (trackingIds.length > 0) break;
             }
           }
 
@@ -429,10 +484,14 @@ export class GmailReplyTracker {
       if (result.newReplies > 0) {
         console.log(`[GmailReplyTracker] Auto-check found ${result.newReplies} new replies`);
       }
+      if (result.errors.length > 0) {
+        console.warn(`[GmailReplyTracker] Auto-check completed with ${result.errors.length} error(s):`, result.errors[0]);
+      }
       // Also check for opens via Gmail API (sent messages thread activity)
       await this.checkForOpensViaApi(orgId);
     } catch (error) {
-      console.error('[GmailReplyTracker] Auto-check error:', error);
+      // CRITICAL: Never let an error stop the auto-checker — it must keep running
+      console.error('[GmailReplyTracker] Auto-check error (will retry next cycle):', error instanceof Error ? error.message : error);
     } finally {
       this.isChecking = false;
     }

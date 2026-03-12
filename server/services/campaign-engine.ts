@@ -631,9 +631,11 @@ export class CampaignEngine {
 
   /**
    * Add open tracking pixel to HTML (with absolute URL)
+   * Uses cache-busting parameter to prevent email proxy caching
    */
   private addTrackingPixel(html: string, trackingId: string, baseUrl: string): string {
-    const pixel = `<img src="${baseUrl}/api/track/open/${trackingId}" width="1" height="1" style="display:none;width:1px;height:1px;" alt="" />`;
+    const cacheBuster = Date.now();
+    const pixel = `<img src="${baseUrl}/api/track/open/${trackingId}?cb=${cacheBuster}" width="1" height="1" style="display:none;width:1px;height:1px;border:0;" alt="" />`;
     // Insert before closing body tag, or append
     if (html.includes('</body>')) {
       return html.replace('</body>', `${pixel}</body>`);

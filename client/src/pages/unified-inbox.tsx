@@ -39,6 +39,8 @@ interface InboxMessage {
   provider: 'gmail' | 'outlook';
   aiDraft?: string;
   repliedAt?: string;
+  replyContent?: string;
+  repliedBy?: string;
   receivedAt: string;
   createdAt: string;
   contact?: {
@@ -579,6 +581,20 @@ export default function UnifiedInbox() {
                         </pre>
                       )}
                     </div>
+
+                    {/* Show your reply if one was sent */}
+                    {selectedMessage.replyContent && (
+                      <div className="border-t border-blue-100 bg-blue-50/50">
+                        <div className="px-5 py-3 flex items-center gap-2 text-xs text-blue-700 font-medium">
+                          <Send className="h-3 w-3" /> Your Reply {selectedMessage.repliedBy && <span className="text-blue-500">({selectedMessage.repliedBy})</span>}
+                          {selectedMessage.repliedAt && <span className="text-blue-400 ml-auto">{new Date(selectedMessage.repliedAt).toLocaleString()}</span>}
+                        </div>
+                        <div className="px-5 pb-4">
+                          <div className="prose prose-sm max-w-none text-blue-900 bg-white/70 rounded-lg p-3 border border-blue-100"
+                            dangerouslySetInnerHTML={{ __html: selectedMessage.replyContent }} />
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
