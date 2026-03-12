@@ -1,6 +1,3 @@
-import OpenAI from "openai";
-import { GoogleGenerativeAI } from "@google/generative-ai";
-import Anthropic from '@anthropic-ai/sdk';
 import { storage } from "../storage";
 
 /*
@@ -16,10 +13,12 @@ interface LLMProvider {
 }
 
 class OpenAIProvider implements LLMProvider {
-  private client: OpenAI;
+  private client: any;
   private model: string;
 
   constructor(apiKey: string, model = "gpt-4o", baseURL?: string) {
+    // Lazy-load OpenAI at construction time (already inside try/catch in LLMService)
+    const OpenAI = require("openai").default || require("openai");
     this.client = new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });
     this.model = model;
   }
@@ -66,10 +65,11 @@ class OpenAIProvider implements LLMProvider {
 }
 
 class GeminiProvider implements LLMProvider {
-  private client: GoogleGenerativeAI;
+  private client: any;
   private model: string;
 
   constructor(apiKey: string, model = "gemini-2.5-pro") {
+    const { GoogleGenerativeAI } = require("@google/generative-ai");
     this.client = new GoogleGenerativeAI(apiKey);
     this.model = model;
   }
@@ -114,10 +114,11 @@ class GeminiProvider implements LLMProvider {
 }
 
 class AnthropicProvider implements LLMProvider {
-  private client: Anthropic;
+  private client: any;
   private model: string;
 
   constructor(apiKey: string, model = "claude-sonnet-4-20250514") {
+    const Anthropic = require("@anthropic-ai/sdk").default || require("@anthropic-ai/sdk");
     this.client = new Anthropic({ apiKey });
     this.model = model;
   }
@@ -155,21 +156,46 @@ class AnthropicProvider implements LLMProvider {
 
 export class LLMService {
   private providers: Map<string, LLMProvider> = new Map();
+  private initialized = false;
 
   constructor() {
-    // Initialize providers if API keys are available
-    const openaiKey = process.env.OPENAI_API_KEY;
-    const geminiKey = process.env.GEMINI_API_KEY;
-    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    // Defer initialization to avoid crashing the server if packages are missing
+    this.initProviders();
+  }
 
-    if (openaiKey) {
-      this.providers.set('openai', new OpenAIProvider(openaiKey));
-    }
-    if (geminiKey) {
-      this.providers.set('gemini', new GeminiProvider(geminiKey));
-    }
-    if (anthropicKey) {
-      this.providers.set('anthropic', new AnthropicProvider(anthropicKey));
+  private initProviders() {
+    try {
+      const openaiKey = process.env.OPENAI_API_KEY;
+      const geminiKey = process.env.GEMINI_API_KEY;
+      const anthropicKey = process.env.ANTHROPIC_API_KEY;
+
+      if (openaiKey) {
+        try {
+          this.providers.set('openai', new OpenAIProvider(openaiKey));
+        } catch (e) {
+          console.warn('[LLM] Failed to initialize OpenAI provider:', (e as Error).message);
+        }
+      }
+      if (geminiKey) {
+        try {
+          this.providers.set('gemini', new GeminiProvider(geminiKey));
+        } catch (e) {
+          console.warn('[LLM] Failed to initialize Gemini provider:', (e as Error).message);
+        }
+      }
+      if (anthropicKey) {
+        try {
+          this.providers.set('anthropic', new AnthropicProvider(anthropicKey));
+        } catch (e) {
+          console.warn('[LLM] Failed to initialize Anthropic provider:', (e as Error).message);
+        }
+      }
+
+      this.initialized = true;
+      console.log(`[LLM] Initialized ${this.providers.size} provider(s): ${Array.from(this.providers.keys()).join(', ') || 'none'}`);
+    } catch (error) {
+      console.warn('[LLM] Failed to initialize providers (non-fatal):', (error as Error).message);
+      this.initialized = true; // Mark as initialized even on failure so we don't retry
     }
   }
 
@@ -185,7 +211,12 @@ export class LLMService {
         throw new Error('No LLM configuration found');
       }
 
-      const provider = this.providers.get(llmConfig.provider);
+      // Try to load provider dynamically from DB config if not in env
+      let provider = this.providers.get(llmConfig.provider);
+      if (!provider) {
+        // Attempt dynamic loading from API settings
+        provider = await this.loadProviderFromSettings(organizationId, llmConfig);
+      }
       if (!provider) {
         throw new Error(`LLM provider ${llmConfig.provider} not available`);
       }
@@ -230,7 +261,10 @@ export class LLMService {
         throw new Error('No LLM configuration found');
       }
 
-      const provider = this.providers.get(llmConfig.provider);
+      let provider = this.providers.get(llmConfig.provider);
+      if (!provider) {
+        provider = await this.loadProviderFromSettings(organizationId, llmConfig);
+      }
       if (!provider) {
         throw new Error(`LLM provider ${llmConfig.provider} not available`);
       }
@@ -286,5 +320,37 @@ export class LLMService {
       console.error('Failed to load Azure OpenAI provider:', error);
       return false;
     }
+  }
+
+  /**
+   * Attempt to load a provider dynamically from org API settings (for API keys stored in DB)
+   */
+  private async loadProviderFromSettings(organizationId: string, llmConfig: any): Promise<LLMProvider | null> {
+    try {
+      const settings = await storage.getApiSettings(organizationId);
+      
+      if (llmConfig.provider === 'openai' && settings.openai_api_key) {
+        const provider = new OpenAIProvider(settings.openai_api_key, llmConfig.model || 'gpt-4o');
+        this.providers.set('openai', provider);
+        return provider;
+      }
+      if (llmConfig.provider === 'gemini' && settings.gemini_api_key) {
+        const provider = new GeminiProvider(settings.gemini_api_key, llmConfig.model || 'gemini-2.5-pro');
+        this.providers.set('gemini', provider);
+        return provider;
+      }
+      if (llmConfig.provider === 'anthropic' && settings.anthropic_api_key) {
+        const provider = new AnthropicProvider(settings.anthropic_api_key, llmConfig.model || 'claude-sonnet-4-20250514');
+        this.providers.set('anthropic', provider);
+        return provider;
+      }
+      if (llmConfig.provider === 'azure-openai') {
+        const loaded = await this.loadAzureProvider(organizationId);
+        return loaded ? (this.providers.get('azure-openai') || null) : null;
+      }
+    } catch (e) {
+      console.warn(`[LLM] Failed to load provider ${llmConfig.provider} from settings:`, (e as Error).message);
+    }
+    return null;
   }
 }

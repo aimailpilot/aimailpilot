@@ -35,10 +35,13 @@ export interface DraftLeadEmailResult {
  * This is intentionally non-invasive: it does not change schemas or existing behavior.
  */
 export class SalesAgentService {
-  private llmService: LLMService;
+  private _llmService: LLMService | null = null;
 
-  constructor() {
-    this.llmService = new LLMService();
+  private get llmService(): LLMService {
+    if (!this._llmService) {
+      this._llmService = new LLMService();
+    }
+    return this._llmService;
   }
 
   /**

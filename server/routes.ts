@@ -10,6 +10,20 @@ import { gmailReplyTracker } from "./services/gmail-reply-tracker";
 import { outlookReplyTracker } from "./services/outlook-reply-tracker";
 import { calculateContactRating, batchRecalculateRatings } from "./services/email-rating-engine";
 import { OAuth2Client } from 'google-auth-library';
+// Lazy import for sales-agent to avoid crashing if LLM packages are missing
+let _salesAgentService: any = null;
+function getSalesAgentService() {
+  if (!_salesAgentService) {
+    try {
+      const { salesAgentService } = require("./services/sales-agent");
+      _salesAgentService = salesAgentService;
+    } catch (e) {
+      console.warn('[SalesAgent] Failed to load sales agent service:', (e as Error).message);
+      return null;
+    }
+  }
+  return _salesAgentService;
+}
 
 // In-memory user store for simplified authentication
 const loggedInUsers = new Set<string>();
@@ -3297,16 +3311,19 @@ Example response:
   // ========== SALES AGENT / LEADS (non-breaking, additive) ==========
   // Uses existing contacts + LLM to provide a simple AI sales helper.
   // All routes are scoped by organization via requireAuth.
-  const { salesAgentService } = await import("./services/sales-agent.js");
 
   // Get prioritized leads for the current organization
   app.get('/api/sales/leads', async (req: any, res) => {
     try {
+      const svc = getSalesAgentService();
+      if (!svc) {
+        return res.status(503).json({ message: 'Sales agent service is not available. LLM packages may not be configured.' });
+      }
       const limit = req.query.limit ? parseInt(req.query.limit, 10) : 100;
       const status = (req.query.status as string) || 'all';
       const minScore = req.query.minScore ? parseInt(req.query.minScore as string, 10) : undefined;
 
-      const leads = await salesAgentService.getPrioritizedLeads(req.user.organizationId, {
+      const leads = await svc.getPrioritizedLeads(req.user.organizationId, {
         limit,
         status,
         minScore,
@@ -3322,6 +3339,10 @@ Example response:
   // Draft an AI email for a specific lead/contact
   app.post('/api/sales/leads/:contactId/draft-email', async (req: any, res) => {
     try {
+      const svc = getSalesAgentService();
+      if (!svc) {
+        return res.status(503).json({ message: 'Sales agent service is not available. LLM packages may not be configured.' });
+      }
       const contactId = req.params.contactId as string;
       const { productDescription, tone, callToAction, templateContent } = req.body || {};
 
@@ -3329,7 +3350,7 @@ Example response:
         return res.status(400).json({ message: 'productDescription is required' });
       }
 
-      const result = await salesAgentService.draftEmailForLead(
+      const result = await svc.draftEmailForLead(
         req.user.organizationId,
         contactId,
         {
