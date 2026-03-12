@@ -599,12 +599,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
       } catch (e) { /* use env vars */ }
 
       if (!clientId || !clientSecret) {
-        return res.redirect('/setup?error=oauth_not_configured');
+        return res.redirect('/?view=setup&error=oauth_not_configured');
       }
 
       const oauth2Client = createOAuth2Client({ clientId, clientSecret, redirectUri });
       // Use login_hint if provided (for connecting specific account)
       const loginHint = req.query.email as string || '';
+      // Support returnTo parameter so we can redirect back to the page that initiated the flow
+      const returnTo = req.query.returnTo as string || '';
       const authUrl = oauth2Client.generateAuthUrl({
         access_type: 'offline',
         prompt: 'consent',
@@ -615,7 +617,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           'https://www.googleapis.com/auth/userinfo.profile',
           'https://www.googleapis.com/auth/spreadsheets.readonly',
         ],
-        state: JSON.stringify({ redirectUri, purpose: 'add_sender', orgId }),
+        state: JSON.stringify({ redirectUri, purpose: 'add_sender', orgId, returnTo }),
         ...(loginHint ? { login_hint: loginHint } : {}),
       });
 
@@ -623,7 +625,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.redirect(authUrl);
     } catch (error) {
       console.error('[Auth] Gmail connect init error:', error);
-      res.redirect('/setup?error=gmail_connect_failed');
+      res.redirect('/?view=setup&error=gmail_connect_failed');
     }
   });
 
@@ -632,7 +634,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const { code, state, error: oauthError } = req.query;
       if (oauthError || !code) {
-        return res.redirect('/setup?error=gmail_connect_denied');
+        return res.redirect('/?view=setup&error=gmail_connect_denied');
       }
 
       let redirectUri = `${getBaseUrlFromRequest(req)}/api/auth/gmail-connect/callback`;
@@ -668,7 +670,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         headers: { Authorization: `Bearer ${tokens.access_token}` },
       });
       if (!userInfoResp.ok) {
-        return res.redirect('/setup?error=gmail_userinfo_failed');
+        return res.redirect('/?view=setup&error=gmail_userinfo_failed');
       }
       const googleUser = await userInfoResp.json() as any;
       const gmailEmail = googleUser.email;
@@ -718,10 +720,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
         console.log(`[Auth] Gmail sender already exists: ${gmailEmail}, tokens updated`);
       }
 
-      res.redirect('/setup?gmail_connected=' + encodeURIComponent(gmailEmail));
+      // Redirect back to the page that initiated the flow, or default to setup
+      let returnTo = '';
+      try {
+        if (state) {
+          const parsed = JSON.parse(state as string);
+          if (parsed.returnTo) returnTo = parsed.returnTo;
+        }
+      } catch (e) { /* ignore */ }
+
+      if (returnTo === 'contacts') {
+        res.redirect('/?view=contacts&gmail_connected=' + encodeURIComponent(gmailEmail));
+      } else {
+        res.redirect('/?view=setup&gmail_connected=' + encodeURIComponent(gmailEmail));
+      }
     } catch (error) {
       console.error('[Auth] Gmail connect callback error:', error);
-      res.redirect('/setup?error=gmail_connect_callback_failed');
+      res.redirect('/?view=setup&error=gmail_connect_callback_failed');
     }
   });
 

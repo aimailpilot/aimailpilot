@@ -242,6 +242,24 @@ export default function MailMeteorDashboard() {
     retry: false,
   });
 
+  // Handle URL query params: ?view=setup&gmail_connected=email@gmail.com
+  // This allows OAuth callbacks and deep links to navigate to the correct section
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const viewParam = params.get('view');
+    if (viewParam && ['campaigns', 'templates', 'contacts', 'inbox', 'setup', 'analytics', 'verification', 'tracking', 'account', 'billing', 'followups', 'insights', 'tools', 'advanced-settings', 'team', 'superadmin'].includes(viewParam)) {
+      setCurrentView(viewParam as ViewType);
+    }
+    // Clean URL params after processing (but keep gmail_connected/error for child components)
+    // Don't clean yet - let child components read them first
+    // We'll clean after a short delay
+    if (viewParam) {
+      setTimeout(() => {
+        window.history.replaceState({}, '', window.location.pathname);
+      }, 500);
+    }
+  }, []);
+
   // Fetch inbox unread count for sidebar badge
   const [inboxUnread, setInboxUnread] = useState(0);
   useEffect(() => {

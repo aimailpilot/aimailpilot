@@ -178,6 +178,19 @@ export default function ContactsManager() {
     return () => clearTimeout(timer);
   }, [search]);
 
+  // Handle return from Gmail OAuth flow - auto-open Google Sheets dialog with success message
+  const [gmailConnectMsg, setGmailConnectMsg] = useState('');
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const gmailConnected = params.get('gmail_connected');
+    if (gmailConnected) {
+      setGmailConnectMsg(`Gmail account ${gmailConnected} connected! You can now import Google Sheets.`);
+      setShowGoogleSheetsDialog(true);
+      // Clear the message after a while
+      setTimeout(() => setGmailConnectMsg(''), 10000);
+    }
+  }, []);
+
   useEffect(() => { fetchContacts(); }, [debouncedSearch, statusFilter, activeListId, activeTab, assignFilterUserId]);
   useEffect(() => { fetchContactLists(); fetchTeamMembers(); }, []);
 
@@ -1775,6 +1788,15 @@ export default function ContactsManager() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
+            {/* Gmail connected success message */}
+            {gmailConnectMsg && (
+              <Alert className="py-2 bg-green-50 border-green-200">
+                <CheckCircle className="h-4 w-4 text-green-600" />
+                <AlertDescription className="text-sm text-green-700">
+                  {gmailConnectMsg}
+                </AlertDescription>
+              </Alert>
+            )}
             {/* URL input */}
             <div>
               <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Google Sheets URL</Label>
@@ -1797,14 +1819,14 @@ export default function ContactsManager() {
                 <XCircle className="h-4 w-4" />
                 <AlertDescription className="text-sm">
                   {gsError}
-                  {(gsError.includes('connect') || gsError.includes('log in') || gsError.includes('Cannot access')) && (
+                  {(gsError.includes('connect') || gsError.includes('log in') || gsError.includes('Cannot access') || gsError.includes('permission') || gsError.includes('Permission') || gsError.includes('re-authenticate') || gsError.includes('Re-authenticate')) && (
                     <Button
                       variant="outline"
                       size="sm"
                       className="ml-2 h-7 text-xs bg-white text-red-700 border-red-200 hover:bg-red-50"
-                      onClick={() => window.location.href = '/api/auth/gmail-connect'}
+                      onClick={() => window.location.href = '/api/auth/gmail-connect?returnTo=contacts'}
                     >
-                      <RefreshCw className="h-3 w-3 mr-1" /> Connect Gmail
+                      <RefreshCw className="h-3 w-3 mr-1" /> Re-authenticate Gmail
                     </Button>
                   )}
                 </AlertDescription>
