@@ -1168,6 +1168,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.use('/api/campaigns', requireAuth);
   app.use('/api/dashboard', requireAuth);
   app.use('/api/contacts', requireAuth);
+  app.use('/api/sales', requireAuth);
   app.use('/api/templates', requireAuth);
   app.use('/api/analytics', requireAuth);
   app.use('/api/email-accounts', requireAuth);
@@ -3336,6 +3337,59 @@ Example response:
       res.json({ success: true, ...result });
     } catch (error) {
       res.status(500).json({ message: 'Failed to batch recalculate ratings' });
+    }
+  });
+
+  // ========== SALES AGENT / LEADS (non-breaking, additive) ==========
+  // Uses existing contacts + LLM to provide a simple AI sales helper.
+  // All routes are scoped by organization via requireAuth.
+  const { salesAgentService } = await import("./services/sales-agent.js");
+
+  // Get prioritized leads for the current organization
+  app.get('/api/sales/leads', async (req: any, res) => {
+    try {
+      const limit = req.query.limit ? parseInt(req.query.limit, 10) : 100;
+      const status = (req.query.status as string) || 'all';
+      const minScore = req.query.minScore ? parseInt(req.query.minScore as string, 10) : undefined;
+
+      const leads = await salesAgentService.getPrioritizedLeads(req.user.organizationId, {
+        limit,
+        status,
+        minScore,
+      });
+
+      res.json({ leads, limit });
+    } catch (error) {
+      console.error('[SalesAgent] Failed to get leads:', error);
+      res.status(500).json({ message: 'Failed to fetch leads' });
+    }
+  });
+
+  // Draft an AI email for a specific lead/contact
+  app.post('/api/sales/leads/:contactId/draft-email', async (req: any, res) => {
+    try {
+      const contactId = req.params.contactId as string;
+      const { productDescription, tone, callToAction, templateContent } = req.body || {};
+
+      if (!productDescription || typeof productDescription !== 'string') {
+        return res.status(400).json({ message: 'productDescription is required' });
+      }
+
+      const result = await salesAgentService.draftEmailForLead(
+        req.user.organizationId,
+        contactId,
+        {
+          productDescription,
+          tone,
+          callToAction,
+          templateContent,
+        }
+      );
+
+      res.json(result);
+    } catch (error) {
+      console.error('[SalesAgent] Failed to draft email:', error);
+      res.status(500).json({ message: 'Failed to draft email for lead' });
     }
   });
 

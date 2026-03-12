@@ -35,8 +35,9 @@ import AccountSettings from "./account-settings";
 import UnifiedInbox from "./unified-inbox";
 import TeamManagement from "./team-management";
 import SuperAdminDashboard from "./superadmin-dashboard";
+import SalesLeadsPage from "./sales-leads";
 
-type ViewType = 'campaigns' | 'templates' | 'contacts' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings' | 'team' | 'superadmin';
+type ViewType = 'campaigns' | 'templates' | 'contacts' | 'leads' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings' | 'team' | 'superadmin';
 
 // Live Tracking Feed component - fetches real tracking events
 function LiveTrackingFeed({ dashStats }: { dashStats: any }) {
@@ -338,6 +339,7 @@ export default function MailMeteorDashboard() {
     { key: 'inbox' as ViewType, label: 'Inbox', icon: Inbox, count: inboxUnread },
     { key: 'templates' as ViewType, label: 'Templates', icon: FileText },
     { key: 'contacts' as ViewType, label: 'Contacts', icon: Users },
+    { key: 'leads' as ViewType, label: 'Leads (AI)', icon: Target },
   ];
 
   const insightsSubItems = [
@@ -361,7 +363,7 @@ export default function MailMeteorDashboard() {
   const getViewTitle = () => {
     if (viewMode === 'campaign') return 'New Campaign';
     const titles: Record<ViewType, string> = {
-      campaigns: 'Campaigns', inbox: 'Unified Inbox', templates: 'Templates', contacts: 'Contacts',
+      campaigns: 'Campaigns', inbox: 'Unified Inbox', templates: 'Templates', contacts: 'Contacts', leads: 'Sales Leads',
       setup: 'Email Accounts', analytics: 'Analytics', followups: 'Automations',
       verification: 'Email Verification', tracking: 'Live Activity Feed',
       account: 'Account', billing: 'Billing', insights: 'Insights', tools: 'Tools',
@@ -379,6 +381,7 @@ export default function MailMeteorDashboard() {
       inbox: 'All replies from Gmail and Outlook in one place',
       templates: 'Build reusable email templates',
       contacts: 'Manage your contacts and segments',
+      leads: 'Prioritized leads with AI-powered outbound drafts',
       setup: 'Connect your email accounts',
       analytics: 'Track your email performance',
       followups: 'Automate follow-up sequences',
@@ -895,6 +898,9 @@ export default function MailMeteorDashboard() {
 
           {/* Contacts */}
           {viewMode === 'dashboard' && currentView === 'contacts' && <ContactsManager />}
+
+          {/* Sales Leads (AI agent) */}
+          {viewMode === 'dashboard' && currentView === 'leads' && <SalesLeadsPage />}
 
           {/* Follow-ups */}
           {viewMode === 'dashboard' && currentView === 'followups' && <FollowupSequenceBuilder />}
