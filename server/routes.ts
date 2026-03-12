@@ -590,13 +590,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const redirectUri = `${baseUrl}/api/auth/gmail-connect/callback`;
       const orgId = req.user.organizationId;
 
-      let clientId = process.env.GOOGLE_CLIENT_ID || '';
-      let clientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
+      // Look for Google OAuth credentials: user's org first, then superadmin's org, then all orgs, then env vars
+      let clientId = '';
+      let clientSecret = '';
       try {
         const settings = await storage.getApiSettings(orgId);
-        if (settings.google_oauth_client_id) clientId = settings.google_oauth_client_id;
-        if (settings.google_oauth_client_secret) clientSecret = settings.google_oauth_client_secret;
-      } catch (e) { /* use env vars */ }
+        if (settings.google_oauth_client_id) {
+          clientId = settings.google_oauth_client_id;
+          clientSecret = settings.google_oauth_client_secret || '';
+        }
+      } catch (e) { /* ignore */ }
+
+      // Fallback: try superadmin's org
+      if (!clientId || !clientSecret) {
+        try {
+          const superAdminOrgId = await storage.getSuperAdminOrgId();
+          if (superAdminOrgId && superAdminOrgId !== orgId) {
+            const superSettings = await storage.getApiSettings(superAdminOrgId);
+            if (superSettings.google_oauth_client_id) {
+              clientId = superSettings.google_oauth_client_id;
+              clientSecret = superSettings.google_oauth_client_secret || '';
+              console.log('[Auth] Using Google OAuth credentials from superadmin org');
+            }
+          }
+        } catch (e) { /* ignore */ }
+      }
+
+      // Fallback: search all orgs (via existing helper)
+      if (!clientId || !clientSecret) {
+        const creds = await getStoredOAuthCredentials('google');
+        clientId = creds.clientId;
+        clientSecret = creds.clientSecret;
+      }
 
       if (!clientId || !clientSecret) {
         return res.redirect('/?view=setup&error=oauth_not_configured');
@@ -653,13 +678,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
         orgId = orgIds[0] || '';
       }
 
-      let clientId = process.env.GOOGLE_CLIENT_ID || '';
-      let clientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
+      let clientId = '';
+      let clientSecret = '';
       try {
         const settings = await storage.getApiSettings(orgId);
-        if (settings.google_oauth_client_id) clientId = settings.google_oauth_client_id;
-        if (settings.google_oauth_client_secret) clientSecret = settings.google_oauth_client_secret;
-      } catch (e) { /* use env vars */ }
+        if (settings.google_oauth_client_id) {
+          clientId = settings.google_oauth_client_id;
+          clientSecret = settings.google_oauth_client_secret || '';
+        }
+      } catch (e) { /* ignore */ }
+
+      // Fallback: try superadmin's org, then all orgs, then env vars
+      if (!clientId || !clientSecret) {
+        try {
+          const superAdminOrgId = await storage.getSuperAdminOrgId();
+          if (superAdminOrgId && superAdminOrgId !== orgId) {
+            const superSettings = await storage.getApiSettings(superAdminOrgId);
+            if (superSettings.google_oauth_client_id) {
+              clientId = superSettings.google_oauth_client_id;
+              clientSecret = superSettings.google_oauth_client_secret || '';
+            }
+          }
+        } catch (e) { /* ignore */ }
+      }
+      if (!clientId || !clientSecret) {
+        const creds = await getStoredOAuthCredentials('google');
+        clientId = creds.clientId;
+        clientSecret = creds.clientSecret;
+      }
 
       const oauth2Client = createOAuth2Client({ clientId, clientSecret, redirectUri });
       const { tokens } = await oauth2Client.getToken(code as string);
@@ -4185,8 +4231,24 @@ Example response:
       let accessToken = settings.gmail_access_token;
       let refreshToken = settings.gmail_refresh_token;
       let tokenExpiry = settings.gmail_token_expiry;
-      const clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID;
-      const clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET;
+      let clientId = settings.google_oauth_client_id || '';
+      let clientSecret = settings.google_oauth_client_secret || '';
+
+      // If no OAuth credentials in user's org, try superadmin's org, then env vars
+      if (!clientId || !clientSecret) {
+        try {
+          const superAdminOrgId = await storage.getSuperAdminOrgId();
+          if (superAdminOrgId && superAdminOrgId !== organizationId) {
+            const superSettings = await storage.getApiSettings(superAdminOrgId);
+            if (superSettings.google_oauth_client_id) {
+              clientId = superSettings.google_oauth_client_id;
+              clientSecret = superSettings.google_oauth_client_secret || '';
+            }
+          }
+        } catch (e) { /* ignore */ }
+      }
+      if (!clientId) clientId = process.env.GOOGLE_CLIENT_ID || '';
+      if (!clientSecret) clientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
 
       // If no org-level token, try per-sender tokens (any sender account with valid tokens)
       if (!accessToken || !refreshToken) {
