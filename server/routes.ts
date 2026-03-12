@@ -490,14 +490,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
           await storage.setApiSetting(effectiveOrgId, `gmail_sender_${email}_token_expiry`, String(tokens.expiry_date));
         }
 
-        // Also update primary gmail tokens if this is the primary account
+        // ALWAYS update org-level tokens on re-auth so Google Sheets API etc. use the freshest token
+        // (which includes all requested scopes like spreadsheets.readonly)
+        await storage.setApiSetting(effectiveOrgId, 'gmail_access_token', tokens.access_token!);
+        if (tokens.refresh_token) await storage.setApiSetting(effectiveOrgId, 'gmail_refresh_token', tokens.refresh_token);
+        if (tokens.expiry_date) await storage.setApiSetting(effectiveOrgId, 'gmail_token_expiry', String(tokens.expiry_date));
         const primaryEmail = (await storage.getApiSettings(effectiveOrgId)).gmail_user_email;
-        if (email === primaryEmail || !primaryEmail) {
-          await storage.setApiSetting(effectiveOrgId, 'gmail_access_token', tokens.access_token!);
-          if (tokens.refresh_token) await storage.setApiSetting(effectiveOrgId, 'gmail_refresh_token', tokens.refresh_token);
-          if (tokens.expiry_date) await storage.setApiSetting(effectiveOrgId, 'gmail_token_expiry', String(tokens.expiry_date));
-          if (!primaryEmail) await storage.setApiSetting(effectiveOrgId, 'gmail_user_email', email);
-        }
+        if (!primaryEmail) await storage.setApiSetting(effectiveOrgId, 'gmail_user_email', email);
 
         // Create or update email account
         const existingAccounts = await storage.getEmailAccounts(effectiveOrgId);
@@ -4344,9 +4343,6 @@ Example response:
   async function getGoogleAccessToken(organizationId: string): Promise<string | null> {
     try {
       const settings = await storage.getApiSettings(organizationId);
-      let accessToken = settings.gmail_access_token;
-      let refreshToken = settings.gmail_refresh_token;
-      let tokenExpiry = settings.gmail_token_expiry;
       let clientId = settings.google_oauth_client_id || '';
       let clientSecret = settings.google_oauth_client_secret || '';
 
@@ -4366,55 +4362,89 @@ Example response:
       if (!clientId) clientId = process.env.GOOGLE_CLIENT_ID || '';
       if (!clientSecret) clientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
 
-      // If no org-level token, try per-sender tokens (any sender account with valid tokens)
-      if (!accessToken || !refreshToken) {
-        const allKeys = Object.keys(settings);
-        const senderTokenKeys = allKeys.filter(k => k.startsWith('gmail_sender_') && k.endsWith('_access_token'));
-        for (const key of senderTokenKeys) {
-          const email = key.replace('gmail_sender_', '').replace('_access_token', '');
-          const senderAccess = settings[key];
-          const senderRefresh = settings[`gmail_sender_${email}_refresh_token`];
-          if (senderAccess && senderRefresh) {
-            accessToken = senderAccess;
-            refreshToken = senderRefresh;
-            tokenExpiry = settings[`gmail_sender_${email}_token_expiry`];
-            console.log('[GoogleAuth] Using per-sender token for:', email);
-            break;
-          }
-        }
-      }
+      // Collect ALL available token pairs (org-level + per-sender) and try the freshest first
+      const tokenCandidates: { accessToken: string; refreshToken: string; tokenExpiry: string; label: string }[] = [];
 
-      if (!accessToken || !refreshToken) return null;
-
-      // Check if token is expired (with 5 min buffer)
-      if (tokenExpiry && Date.now() > parseInt(tokenExpiry) - 5 * 60 * 1000) {
-        if (!clientId || !clientSecret) return null;
-        console.log('[GoogleAuth] Access token expired, refreshing...');
-        const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({
-            client_id: clientId,
-            client_secret: clientSecret,
-            refresh_token: refreshToken,
-            grant_type: 'refresh_token',
-          }),
+      // Org-level tokens first
+      if (settings.gmail_access_token && settings.gmail_refresh_token) {
+        tokenCandidates.push({
+          accessToken: settings.gmail_access_token,
+          refreshToken: settings.gmail_refresh_token,
+          tokenExpiry: settings.gmail_token_expiry || '0',
+          label: 'org-level',
         });
-        if (tokenRes.ok) {
-          const tokenData = await tokenRes.json() as any;
-          accessToken = tokenData.access_token;
-          await storage.setApiSetting(organizationId, 'gmail_access_token', accessToken!);
-          if (tokenData.expires_in) {
-            await storage.setApiSetting(organizationId, 'gmail_token_expiry', String(Date.now() + tokenData.expires_in * 1000));
+      }
+
+      // Per-sender tokens
+      const allKeys = Object.keys(settings);
+      const senderTokenKeys = allKeys.filter(k => k.startsWith('gmail_sender_') && k.endsWith('_access_token'));
+      for (const key of senderTokenKeys) {
+        const email = key.replace('gmail_sender_', '').replace('_access_token', '');
+        const senderAccess = settings[key];
+        const senderRefresh = settings[`gmail_sender_${email}_refresh_token`];
+        if (senderAccess && senderRefresh) {
+          // Don't duplicate if same as org-level
+          if (senderAccess !== settings.gmail_access_token || senderRefresh !== settings.gmail_refresh_token) {
+            tokenCandidates.push({
+              accessToken: senderAccess,
+              refreshToken: senderRefresh,
+              tokenExpiry: settings[`gmail_sender_${email}_token_expiry`] || '0',
+              label: `sender:${email}`,
+            });
           }
-          console.log('[GoogleAuth] Token refreshed successfully');
-        } else {
-          console.error('[GoogleAuth] Token refresh failed:', tokenRes.status);
-          return null;
         }
       }
 
-      return accessToken || null;
+      if (tokenCandidates.length === 0) return null;
+
+      // Sort by expiry (freshest first - highest expiry = newest token)
+      tokenCandidates.sort((a, b) => parseInt(b.tokenExpiry || '0') - parseInt(a.tokenExpiry || '0'));
+
+      // Try each token pair until one works
+      for (const candidate of tokenCandidates) {
+        let { accessToken, refreshToken, tokenExpiry } = candidate;
+
+        // Check if token is expired (with 5 min buffer)
+        const isExpired = tokenExpiry && Date.now() > parseInt(tokenExpiry) - 5 * 60 * 1000;
+        if (isExpired) {
+          if (!clientId || !clientSecret) continue;
+          console.log(`[GoogleAuth] Token expired for ${candidate.label}, refreshing...`);
+          try {
+            const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: new URLSearchParams({
+                client_id: clientId,
+                client_secret: clientSecret,
+                refresh_token: refreshToken,
+                grant_type: 'refresh_token',
+              }),
+            });
+            if (tokenRes.ok) {
+              const tokenData = await tokenRes.json() as any;
+              accessToken = tokenData.access_token;
+              // Store refreshed token back at org level
+              await storage.setApiSetting(organizationId, 'gmail_access_token', accessToken!);
+              if (tokenData.expires_in) {
+                await storage.setApiSetting(organizationId, 'gmail_token_expiry', String(Date.now() + tokenData.expires_in * 1000));
+              }
+              console.log(`[GoogleAuth] Token refreshed successfully from ${candidate.label}`);
+              return accessToken || null;
+            } else {
+              console.error(`[GoogleAuth] Token refresh failed for ${candidate.label}:`, tokenRes.status);
+              continue; // Try next candidate
+            }
+          } catch (e) {
+            console.error(`[GoogleAuth] Token refresh error for ${candidate.label}:`, e);
+            continue;
+          }
+        }
+
+        // Token is still valid
+        return accessToken || null;
+      }
+
+      return null;
     } catch (e) {
       console.error('[GoogleAuth] Error getting access token:', e);
       return null;
