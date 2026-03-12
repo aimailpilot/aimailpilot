@@ -163,6 +163,15 @@ export default function ContactsManager() {
   const [gsImportResult, setGsImportResult] = useState<any>(null);
   const [gsToExistingList, setGsToExistingList] = useState<string>('');
 
+  // Quick Send Email state
+  const [showSendEmailDialog, setShowSendEmailDialog] = useState(false);
+  const [sendEmailAccountId, setSendEmailAccountId] = useState('');
+  const [sendEmailSubject, setSendEmailSubject] = useState('');
+  const [sendEmailContent, setSendEmailContent] = useState('');
+  const [sendEmailAccounts, setSendEmailAccounts] = useState<any[]>([]);
+  const [sendEmailLoading, setSendEmailLoading] = useState(false);
+  const [sendEmailResult, setSendEmailResult] = useState<any>(null);
+
   // Debounced search
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedSearch(search), 300);
@@ -335,6 +344,36 @@ export default function ContactsManager() {
     await fetchContacts();
     await fetchContactLists();
   };
+
+  // Quick Send Email
+  const openSendEmailDialog = async () => {
+    if (selectedIds.length === 0) { alert('Select contacts first'); return; }
+    setSendEmailSubject(''); setSendEmailContent(''); setSendEmailResult(null); setSendEmailLoading(false);
+    try {
+      const res = await fetch('/api/email-accounts', { credentials: 'include' });
+      if (res.ok) {
+        const accounts = await res.json();
+        setSendEmailAccounts(accounts);
+        if (accounts.length > 0 && !sendEmailAccountId) setSendEmailAccountId(accounts[0].id);
+      }
+    } catch (e) { console.error('Failed to load email accounts:', e); }
+    setShowSendEmailDialog(true);
+  };
+
+  const handleSendEmail = async () => {
+    if (!sendEmailAccountId || !sendEmailSubject.trim() || !sendEmailContent.trim()) return;
+    setSendEmailLoading(true); setSendEmailResult(null);
+    try {
+      const res = await fetch('/api/contacts/send-email', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ contactIds: selectedIds, emailAccountId: sendEmailAccountId, subject: sendEmailSubject, content: sendEmailContent }),
+      });
+      const data = await res.json();
+      setSendEmailResult(data);
+    } catch (e) { setSendEmailResult({ success: false, error: 'Failed to send emails' }); }
+    setSendEmailLoading(false);
+  };
+
 
   const handleDeleteList = async (listId: string) => {
     if (!confirm('Delete this list? Contacts will remain but lose their list association.')) return;
@@ -887,6 +926,10 @@ export default function ContactsManager() {
                     </DropdownMenuItem>
                   </>
                 )}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={openSendEmailDialog}>
+                  <Mail className="h-4 w-4 mr-2 text-blue-500" /> Send Email {selectedIds.length > 0 ? `(${selectedIds.length})` : ''}
+                </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={async () => {
                   if (ratingLoading) return;
@@ -1932,6 +1975,97 @@ export default function ContactsManager() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* ==================== SEND EMAIL DIALOG ==================== */}
+      <Dialog open={showSendEmailDialog} onOpenChange={setShowSendEmailDialog}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <div className="bg-blue-50 p-2 rounded-lg"><Mail className="h-4 w-4 text-blue-600" /></div>
+              Send Email to {selectedIds.length} Contact{selectedIds.length !== 1 ? 's' : ''}
+            </DialogTitle>
+            <DialogDescription className="text-sm text-gray-500">
+              Compose and send an email to selected contacts. Use {'{{firstName}}'}, {'{{lastName}}'}, {'{{company}}'}, {'{{jobTitle}}'} for personalization.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            {/* From Account */}
+            <div>
+              <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1 block">From</Label>
+              <Select value={sendEmailAccountId} onValueChange={setSendEmailAccountId}>
+                <SelectTrigger className="h-9 text-sm">
+                  <SelectValue placeholder="Select email account" />
+                </SelectTrigger>
+                <SelectContent>
+                  {sendEmailAccounts.map((acc: any) => (
+                    <SelectItem key={acc.id} value={acc.id}>
+                      <span className="flex items-center gap-2">
+                        <Mail className="h-3.5 w-3.5 text-gray-400" />
+                        {acc.email} <Badge variant="secondary" className="text-[10px] ml-1">{acc.authMethod === 'oauth' ? 'OAuth' : 'SMTP'}</Badge>
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {sendEmailAccounts.length === 0 && (
+                <p className="text-xs text-amber-600 mt-1">No email accounts found. Add one in Account settings.</p>
+              )}
+            </div>
+
+            {/* Subject */}
+            <div>
+              <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1 block">Subject</Label>
+              <Input
+                value={sendEmailSubject} onChange={e => setSendEmailSubject(e.target.value)}
+                placeholder="e.g., Quick question about {{company}}"
+                className="h-9 text-sm"
+              />
+            </div>
+
+            {/* Content */}
+            <div>
+              <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1 block">Email Content (HTML)</Label>
+              <textarea
+                value={sendEmailContent} onChange={e => setSendEmailContent(e.target.value)}
+                placeholder={"Hi {{firstName}},\n\nI wanted to reach out about...\n\nBest regards"}
+                className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2.5 resize-none h-40 outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-100 transition-all font-mono"
+              />
+              <div className="flex gap-1.5 mt-1.5 flex-wrap">
+                {['{{firstName}}', '{{lastName}}', '{{company}}', '{{jobTitle}}', '{{email}}'].map(v => (
+                  <button key={v} onClick={() => setSendEmailContent(prev => prev + v)} className="text-[10px] px-2 py-0.5 bg-blue-50 text-blue-600 rounded-md hover:bg-blue-100 border border-blue-100">
+                    {v}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Result */}
+            {sendEmailResult && (
+              <Alert className={sendEmailResult.sent > 0 ? 'border-green-200 bg-green-50' : 'border-red-200 bg-red-50'}>
+                <AlertDescription className="text-sm">
+                  {sendEmailResult.error ? (
+                    <span className="text-red-700">{sendEmailResult.error}</span>
+                  ) : (
+                    <span className={sendEmailResult.sent > 0 ? 'text-green-700' : 'text-red-700'}>
+                      ✅ Sent: {sendEmailResult.sent} | ❌ Failed: {sendEmailResult.failed} | Total: {sendEmailResult.total}
+                    </span>
+                  )}
+                </AlertDescription>
+              </Alert>
+            )}
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setShowSendEmailDialog(false)}>Cancel</Button>
+            <Button
+              onClick={handleSendEmail}
+              disabled={sendEmailLoading || !sendEmailAccountId || !sendEmailSubject.trim() || !sendEmailContent.trim()}
+              className="bg-blue-600 hover:bg-blue-700 text-white"
+            >
+              {sendEmailLoading ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Sending...</> : <><Mail className="h-3.5 w-3.5 mr-1.5" /> Send to {selectedIds.length} Contact{selectedIds.length !== 1 ? 's' : ''}</>}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 
@@ -2317,6 +2451,9 @@ export default function ContactsManager() {
               )}
               <Button variant="outline" size="sm" onClick={handleBulkDelete} className="text-red-600 border-red-200 hover:bg-red-50">
                 <Trash2 className="h-3.5 w-3.5 mr-1.5" /> Delete ({selectedIds.length})
+              </Button>
+              <Button variant="outline" size="sm" onClick={openSendEmailDialog} className="text-blue-600 border-blue-200 hover:bg-blue-50">
+                <Mail className="h-3.5 w-3.5 mr-1.5" /> Send Email ({selectedIds.length})
               </Button>
             </div>
           )}

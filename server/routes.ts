@@ -394,6 +394,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           'https://www.googleapis.com/auth/userinfo.profile',
           'https://www.googleapis.com/auth/gmail.readonly',
           'https://www.googleapis.com/auth/gmail.send',
+          'https://www.googleapis.com/auth/spreadsheets.readonly',
           'openid',
         ],
         state: JSON.stringify({ redirectUri }),
@@ -612,6 +613,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           'https://www.googleapis.com/auth/gmail.readonly',
           'https://www.googleapis.com/auth/userinfo.email',
           'https://www.googleapis.com/auth/userinfo.profile',
+          'https://www.googleapis.com/auth/spreadsheets.readonly',
         ],
         state: JSON.stringify({ redirectUri, purpose: 'add_sender', orgId }),
         ...(loginHint ? { login_hint: loginHint } : {}),
@@ -1118,6 +1120,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.use('/api/account', requireAuth);
   app.use('/api/settings', requireAuth);
   app.use('/api/llm', requireAuth);
+  app.use('/api/sheets', requireAuth);
 
   // ========== DASHBOARD ==========
   
@@ -2768,6 +2771,123 @@ Which account should I use and why? If I need to split across accounts, provide 
     }
   });
 
+  // Quick send email to selected contacts from contact management
+  app.post('/api/contacts/send-email', async (req: any, res) => {
+    try {
+      const { contactIds, emailAccountId, subject, content } = req.body;
+      if (!Array.isArray(contactIds) || contactIds.length === 0) {
+        return res.status(400).json({ success: false, error: 'Select at least one contact' });
+      }
+      if (!emailAccountId) return res.status(400).json({ success: false, error: 'Email account is required' });
+      if (!subject || !content) return res.status(400).json({ success: false, error: 'Subject and content are required' });
+
+      const account = await storage.getEmailAccount(emailAccountId) as any;
+      if (!account) return res.status(404).json({ success: false, error: 'Email account not found' });
+
+      // Determine sending method: Gmail OAuth or SMTP
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      const isGmail = account.provider === 'gmail';
+      let gmailAccessToken: string | null = null;
+
+      if (isGmail) {
+        // Try sender-specific tokens first, then org-wide tokens
+        gmailAccessToken = settings[`gmail_sender_${account.email}_access_token`] || settings.gmail_access_token || null;
+        const gmailRefreshToken = settings[`gmail_sender_${account.email}_refresh_token`] || settings.gmail_refresh_token;
+        const gmailTokenExpiry = settings[`gmail_sender_${account.email}_token_expiry`] || settings.gmail_token_expiry;
+        const clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID;
+        const clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET;
+
+        // Refresh token if expired
+        if (gmailAccessToken && gmailRefreshToken && gmailTokenExpiry && Date.now() > parseInt(gmailTokenExpiry) - 60000) {
+          if (clientId && clientSecret) {
+            try {
+              const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: gmailRefreshToken, grant_type: 'refresh_token' }),
+              });
+              if (tokenRes.ok) {
+                const tokenData = await tokenRes.json() as any;
+                gmailAccessToken = tokenData.access_token;
+                const settingPrefix = settings[`gmail_sender_${account.email}_access_token`] ? `gmail_sender_${account.email}` : 'gmail';
+                await storage.setApiSetting(req.user.organizationId, `${settingPrefix}_access_token`, gmailAccessToken!);
+                if (tokenData.expires_in) {
+                  await storage.setApiSetting(req.user.organizationId, `${settingPrefix}_token_expiry`, String(Date.now() + tokenData.expires_in * 1000));
+                }
+              }
+            } catch (e) { console.error('[QuickSend] Token refresh error:', e); }
+          }
+        }
+      }
+
+      // Fetch all contacts
+      const results: { email: string; success: boolean; error?: string }[] = [];
+      let sent = 0;
+      let failed = 0;
+
+      for (const contactId of contactIds) {
+        try {
+          const contact = await storage.getContact(contactId) as any;
+          if (!contact || !contact.email) {
+            results.push({ email: contactId, success: false, error: 'Contact not found' });
+            failed++;
+            continue;
+          }
+
+          // Personalize content
+          const data: Record<string, string> = {
+            firstName: contact.firstName || '', lastName: contact.lastName || '',
+            email: contact.email, company: contact.company || '', jobTitle: contact.jobTitle || '',
+            fullName: `${contact.firstName || ''} ${contact.lastName || ''}`.trim(),
+          };
+          const pSubject = subject.replace(/\{\{(\w+)\}\}/g, (_: string, key: string) => data[key] || `{{${key}}}`);
+          const pContent = content.replace(/\{\{(\w+)\}\}/g, (_: string, key: string) => data[key] || `{{${key}}}`);
+
+          if (isGmail && gmailAccessToken) {
+            // Send via Gmail API
+            const rawEmail = createRawEmail({ from: account.email, to: contact.email, subject: pSubject, body: pContent });
+            const gmailRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${gmailAccessToken}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ raw: rawEmail }),
+            });
+            if (gmailRes.ok) {
+              results.push({ email: contact.email, success: true });
+              sent++;
+            } else {
+              const errText = await gmailRes.text();
+              results.push({ email: contact.email, success: false, error: `Gmail API error: ${gmailRes.status}` });
+              failed++;
+              console.error(`[QuickSend] Gmail error for ${contact.email}:`, errText.slice(0, 200));
+            }
+          } else if (account.smtpConfig) {
+            // Send via SMTP
+            const result = await smtpEmailService.sendEmail(account.id, account.smtpConfig, {
+              to: contact.email, subject: pSubject, html: pContent,
+            });
+            if (result.success) { sent++; } else { failed++; }
+            results.push({ email: contact.email, ...result });
+          } else {
+            results.push({ email: contact.email, success: false, error: 'No sending method configured' });
+            failed++;
+          }
+
+          // Small delay between sends
+          if (contactIds.length > 1) await new Promise(r => setTimeout(r, 500));
+        } catch (e) {
+          const errMsg = e instanceof Error ? e.message : 'Unknown error';
+          results.push({ email: contactId, success: false, error: errMsg });
+          failed++;
+        }
+      }
+
+      res.json({ success: true, sent, failed, total: contactIds.length, results });
+    } catch (error) {
+      console.error('[QuickSend] Error:', error);
+      res.status(500).json({ success: false, error: 'Failed to send emails' });
+    }
+  });
+
   // AI-powered column mapping using Azure OpenAI
   app.post('/api/contacts/ai-map-columns', async (req: any, res) => {
     try {
@@ -3927,7 +4047,55 @@ Example response:
     return rows;
   }
 
-  // Fetch spreadsheet info (sheet names) using the Google Sheets CSV export
+  // Helper: Get a valid Google access token for the user's organization
+  // Refreshes the token automatically if expired
+  async function getGoogleAccessToken(organizationId: string): Promise<string | null> {
+    try {
+      const settings = await storage.getApiSettings(organizationId);
+      let accessToken = settings.gmail_access_token;
+      const refreshToken = settings.gmail_refresh_token;
+      const tokenExpiry = settings.gmail_token_expiry;
+      const clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID;
+      const clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET;
+
+      if (!accessToken || !refreshToken) return null;
+
+      // Check if token is expired (with 5 min buffer)
+      if (tokenExpiry && Date.now() > parseInt(tokenExpiry) - 5 * 60 * 1000) {
+        if (!clientId || !clientSecret) return null;
+        console.log('[GoogleAuth] Access token expired, refreshing...');
+        const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            client_id: clientId,
+            client_secret: clientSecret,
+            refresh_token: refreshToken,
+            grant_type: 'refresh_token',
+          }),
+        });
+        if (tokenRes.ok) {
+          const tokenData = await tokenRes.json() as any;
+          accessToken = tokenData.access_token;
+          await storage.setApiSetting(organizationId, 'gmail_access_token', accessToken!);
+          if (tokenData.expires_in) {
+            await storage.setApiSetting(organizationId, 'gmail_token_expiry', String(Date.now() + tokenData.expires_in * 1000));
+          }
+          console.log('[GoogleAuth] Token refreshed successfully');
+        } else {
+          console.error('[GoogleAuth] Token refresh failed:', tokenRes.status);
+          return null;
+        }
+      }
+
+      return accessToken || null;
+    } catch (e) {
+      console.error('[GoogleAuth] Error getting access token:', e);
+      return null;
+    }
+  }
+
+  // Fetch spreadsheet info (sheet names) using Google Sheets API v4 with OAuth, fallback to public CSV export
   // NOTE: Wrapped with .then().catch() for Express 4 async safety
   app.post('/api/sheets/fetch-info', (req: any, res, next) => {
     (async () => {
@@ -3946,44 +4114,73 @@ Example response:
 
       console.log('[sheets/fetch-info] Extracted spreadsheet ID:', spreadsheetId);
 
-      // Strategy: Try to export the default sheet as CSV to verify access
-      // Then try to discover other sheets via gid probing
+      // Strategy 1: Try Google Sheets API v4 with user's OAuth token
+      const accessToken = await getGoogleAccessToken(req.user.organizationId);
+      if (accessToken) {
+        try {
+          const apiUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=spreadsheetId,properties.title,sheets.properties`;
+          const apiRes = await fetch(apiUrl, {
+            headers: { 'Authorization': `Bearer ${accessToken}` },
+          });
+          
+          if (apiRes.ok) {
+            const data = await apiRes.json() as any;
+            const sheets = (data.sheets || []).map((s: any) => ({
+              id: s.properties?.sheetId ?? 0,
+              name: s.properties?.title || 'Sheet1',
+              index: s.properties?.index ?? 0,
+            }));
+            
+            console.log('[sheets/fetch-info] Google Sheets API success, found', sheets.length, 'sheets');
+            return res.json({
+              id: spreadsheetId,
+              title: data.properties?.title || 'Google Spreadsheet',
+              sheets,
+              valid: true,
+              method: 'oauth',
+            });
+          } else {
+            const errText = await apiRes.text();
+            console.log('[sheets/fetch-info] Google Sheets API returned', apiRes.status, '- falling back to public CSV. Error:', errText.slice(0, 200));
+            // If 403 with insufficient scopes, tell user to re-login
+            if (apiRes.status === 403 && errText.includes('insufficient')) {
+              // Still try public CSV as fallback, but remember to suggest re-login
+            }
+          }
+        } catch (apiErr) {
+          console.log('[sheets/fetch-info] Google Sheets API error, falling back to public CSV:', apiErr);
+        }
+      }
+
+      // Strategy 2: Fallback to public CSV export (for publicly shared sheets)
       const sheets: { id: number; name: string; index: number }[] = [];
 
-      // First, try to export gid=0 (default sheet) to verify the spreadsheet is accessible
       const testCsvUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv&gid=0`;
-      console.log('[sheets/fetch-info] Testing CSV access:', testCsvUrl);
+      console.log('[sheets/fetch-info] Trying public CSV access:', testCsvUrl);
       
       const testRes = await fetch(testCsvUrl, {
         headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
         redirect: 'follow',
       });
 
-      console.log('[sheets/fetch-info] CSV test response status:', testRes.status);
-
       if (!testRes.ok) {
-        return res.status(400).json({ 
-          valid: false, 
-          error: 'Cannot access this spreadsheet. Make sure it is shared with "Anyone with the link" can view.' 
-        });
+        const hint = accessToken 
+          ? 'Cannot access this spreadsheet. Please log out and log back in with Google to grant Google Sheets permission, or make the sheet public.'
+          : 'Cannot access this spreadsheet. Please log in with Google first, or make sure the sheet is shared with "Anyone with the link".';
+        return res.status(400).json({ valid: false, error: hint });
       }
 
       const testCsv = await testRes.text();
-      
-      // Check if we got an HTML error page instead of CSV
       if (testCsv.trim().startsWith('<!DOCTYPE') || testCsv.trim().startsWith('<html')) {
         return res.status(400).json({ 
           valid: false, 
-          error: 'Cannot access this spreadsheet. Please make sure it is shared publicly with "Anyone with the link".' 
+          error: 'Cannot access this spreadsheet. Please log in with Google first, or share the sheet publicly.' 
         });
       }
 
-      // Default sheet is accessible
       sheets.push({ id: 0, name: 'Sheet1', index: 0 });
 
       // Try to discover additional sheets by probing common gids
-      // Google Sheets assigns gid values, the first sheet is usually 0
-      // We'll try a few common additional sheet gids
       const probGids = [1, 2, 3];
       for (const gid of probGids) {
         try {
@@ -4001,57 +4198,14 @@ Example response:
         } catch { /* ignore probe failures */ }
       }
 
-      // Try to get real sheet names from the HTML page (best effort)
-      try {
-        const htmlUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit?usp=sharing`;
-        const htmlRes = await fetch(htmlUrl, {
-          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
-          redirect: 'follow',
-        });
-        
-        if (htmlRes.ok) {
-          const html = await htmlRes.text();
-          
-          // Try multiple regex patterns to extract sheet names
-          const extractedSheets: { id: number; name: string }[] = [];
-          
-          // Pattern 1: sheet tab buttons  
-          const tabRegex1 = /class="[^"]*docs-sheet-tab[^"]*"[^>]*>(?:<[^>]*>)*([^<]+)/gi;
-          let m;
-          while ((m = tabRegex1.exec(html)) !== null) {
-            const name = m[1].trim();
-            if (name && name.length < 100) extractedSheets.push({ id: extractedSheets.length, name });
-          }
-          
-          // Pattern 2: sheet button text
-          if (extractedSheets.length === 0) {
-            const tabRegex2 = /sheet-button[^>]*>(?:<[^>]*>)*\s*([^<]+)/gi;
-            while ((m = tabRegex2.exec(html)) !== null) {
-              const name = m[1].trim();
-              if (name && name.length < 100) extractedSheets.push({ id: extractedSheets.length, name });
-            }
-          }
-
-          // If we found real names, update the sheets array
-          if (extractedSheets.length > 0) {
-            sheets.length = 0; // Clear
-            extractedSheets.forEach((s, i) => {
-              sheets.push({ id: i, name: s.name, index: i });
-            });
-          }
-        }
-      } catch (htmlErr) {
-        console.log('[sheets/fetch-info] HTML extraction failed (non-critical):', htmlErr);
-        // Keep the sheets we already have from CSV probing
-      }
-
-      console.log('[sheets/fetch-info] Found sheets:', JSON.stringify(sheets));
+      console.log('[sheets/fetch-info] Public CSV found sheets:', JSON.stringify(sheets));
       
       return res.json({
         id: spreadsheetId,
         title: 'Google Spreadsheet',
         sheets,
         valid: true,
+        method: 'public',
       });
     })().catch((error) => {
       console.error('[sheets/fetch-info] Error:', error);
@@ -4061,7 +4215,7 @@ Example response:
     });
   });
 
-  // Fetch sheet data (actual rows) using CSV export
+  // Fetch sheet data (actual rows) using Google Sheets API v4 with OAuth, fallback to public CSV
   app.post('/api/sheets/fetch-data', (req: any, res, next) => {
     (async () => {
       const body = req.body || {};
@@ -4077,35 +4231,73 @@ Example response:
         return res.status(400).json({ error: 'Invalid Google Sheets URL' });
       }
 
-      // Export as CSV using gid
-      const sheetGid = gid !== undefined ? gid : 0;
-      const csvUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv&gid=${sheetGid}`;
-      console.log('[sheets/fetch-data] Fetching CSV:', csvUrl);
-      
-      const csvRes = await fetch(csvUrl, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
-        redirect: 'follow',
-      });
+      let headers: string[] = [];
+      let dataRows: string[][] = [];
 
-      if (!csvRes.ok) {
-        return res.status(400).json({ error: 'Cannot export sheet data. Make sure the spreadsheet is shared publicly.' });
+      // Strategy 1: Try Google Sheets API v4 with OAuth
+      const accessToken = await getGoogleAccessToken(req.user.organizationId);
+      let usedOAuth = false;
+      
+      if (accessToken) {
+        try {
+          // Use the sheet name for range, default to first sheet
+          const range = sheetName ? encodeURIComponent(sheetName) : 'Sheet1';
+          const apiUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}?valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=FORMATTED_STRING`;
+          const apiRes = await fetch(apiUrl, {
+            headers: { 'Authorization': `Bearer ${accessToken}` },
+          });
+          
+          if (apiRes.ok) {
+            const data = await apiRes.json() as any;
+            const allRows: string[][] = (data.values || []).map((row: any[]) => row.map(String));
+            if (allRows.length > 0) {
+              headers = allRows[0];
+              dataRows = allRows.slice(1);
+              usedOAuth = true;
+              console.log('[sheets/fetch-data] Google Sheets API success:', headers.length, 'cols,', dataRows.length, 'rows');
+            }
+          } else {
+            const errText = await apiRes.text();
+            console.log('[sheets/fetch-data] Sheets API returned', apiRes.status, '- falling back to CSV. Error:', errText.slice(0, 200));
+          }
+        } catch (apiErr) {
+          console.log('[sheets/fetch-data] Sheets API error, falling back to CSV:', apiErr);
+        }
       }
 
-      const csvText = await csvRes.text();
-      
-      // Check if we got an HTML error page instead of CSV
-      if (csvText.trim().startsWith('<!DOCTYPE') || csvText.trim().startsWith('<html')) {
-        return res.status(400).json({ error: 'Cannot access this spreadsheet. Please check sharing settings.' });
+      // Strategy 2: Fallback to public CSV export
+      if (!usedOAuth) {
+        const sheetGid = gid !== undefined ? gid : 0;
+        const csvUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv&gid=${sheetGid}`;
+        console.log('[sheets/fetch-data] Trying public CSV:', csvUrl);
+        
+        const csvRes = await fetch(csvUrl, {
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
+          redirect: 'follow',
+        });
+
+        if (!csvRes.ok) {
+          const hint = accessToken
+            ? 'Cannot access sheet data. The sheet may not be in your Google account.'
+            : 'Cannot access sheet data. Please log in with Google first, or share the sheet publicly.';
+          return res.status(400).json({ error: hint });
+        }
+
+        const csvText = await csvRes.text();
+        if (csvText.trim().startsWith('<!DOCTYPE') || csvText.trim().startsWith('<html')) {
+          return res.status(400).json({ error: 'Cannot access this spreadsheet. Please log in with Google or share publicly.' });
+        }
+
+        const rows = parseCSV(csvText);
+        if (rows.length > 0) {
+          headers = rows[0];
+          dataRows = rows.slice(1);
+        }
       }
 
-      const rows = parseCSV(csvText);
-
-      if (rows.length === 0) {
+      if (headers.length === 0) {
         return res.json({ headers: [], values: [], contacts: [], totalRows: 0, validContacts: 0 });
       }
-
-      const headers = rows[0];
-      const dataRows = rows.slice(1);
 
       // Auto-detect column mapping
       const emailCol = headers.findIndex(h => /email|e-mail|mail/i.test(h));
@@ -4114,7 +4306,6 @@ Example response:
       const companyCol = headers.findIndex(h => /company|organization|org|business/i.test(h));
       const nameCol = headers.findIndex(h => /^name$/i.test(h));
 
-      // Build contacts from data - include ALL column headers as fields
       const mappedColIndices = new Set([emailCol, firstNameCol, lastNameCol, companyCol, nameCol].filter(i => i >= 0));
       const contacts = dataRows
         .filter(row => {
@@ -4125,14 +4316,12 @@ Example response:
           let firstName = firstNameCol >= 0 ? (row[firstNameCol] || '') : '';
           let lastName = lastNameCol >= 0 ? (row[lastNameCol] || '') : '';
           
-          // If no first/last name columns but there's a "name" column, split it
           if (!firstName && !lastName && nameCol >= 0 && row[nameCol]) {
             const parts = row[nameCol].trim().split(/\s+/);
             firstName = parts[0] || '';
             lastName = parts.slice(1).join(' ') || '';
           }
 
-          // Build contact with all columns preserved
           const contact: Record<string, any> = {
             email: emailCol >= 0 ? (row[emailCol] || '').trim() : '',
             firstName: firstName.trim(),
@@ -4140,7 +4329,6 @@ Example response:
             company: companyCol >= 0 ? (row[companyCol] || '').trim() : '',
           };
 
-          // Add all unmapped columns as extra fields (preserved for import)
           headers.forEach((header, idx) => {
             if (!mappedColIndices.has(idx) && row[idx]) {
               contact[header] = row[idx].trim();
@@ -4150,15 +4338,16 @@ Example response:
           return contact;
         });
 
-      console.log('[sheets/fetch-data] Found', contacts.length, 'contacts from', dataRows.length, 'rows with', headers.length, 'columns');
+      console.log('[sheets/fetch-data] Found', contacts.length, 'contacts from', dataRows.length, 'rows');
 
       return res.json({
         headers,
-        values: rows,
+        values: [headers, ...dataRows],
         contacts,
         totalRows: dataRows.length,
         validContacts: contacts.length,
         allHeaders: headers,
+        method: usedOAuth ? 'oauth' : 'public',
         columnMapping: {
           email: emailCol >= 0 ? headers[emailCol] : null,
           firstName: firstNameCol >= 0 ? headers[firstNameCol] : (nameCol >= 0 ? headers[nameCol] : null),
