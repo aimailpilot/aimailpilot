@@ -13,8 +13,27 @@ import {
   MoreHorizontal, Code, Sparkles, Tag, Clock, Hash, Brain, Wand2,
   X, Bold, Italic, Underline, Link, Image, List, ListOrdered,
   AlignLeft, AlignCenter, AlignRight, Type, Strikethrough, ChevronDown,
-  Monitor, Info
+  Monitor, Info, User, Users, Star, TrendingUp, AlertTriangle, Mail,
+  MessageSquare, MousePointer, Shield, ArrowUpDown, ChevronRight
 } from "lucide-react";
+
+interface TemplateCreator {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  name: string;
+}
+
+interface TemplateScore {
+  total: number;
+  openRate: number;
+  replyRate: number;
+  clickRate: number;
+  spamScore: number;
+  campaignsUsed: number;
+  grade: string;
+}
 
 interface Template {
   id: string;
@@ -24,15 +43,26 @@ interface Template {
   content: string;
   variables: string[];
   usageCount: number;
+  createdBy?: string;
   createdAt: string;
   updatedAt: string;
+  creator?: TemplateCreator | null;
+  score?: TemplateScore;
 }
 
+type TabView = 'mine' | 'team';
+type SortField = 'name' | 'updatedAt' | 'score' | 'usageCount';
+type SortDir = 'asc' | 'desc';
+
 export default function TemplateManager() {
-  const [templates, setTemplates] = useState<Template[]>([]);
+  const [myTemplates, setMyTemplates] = useState<Template[]>([]);
+  const [teamTemplates, setTeamTemplates] = useState<Template[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('all');
+  const [activeTab, setActiveTab] = useState<TabView>('mine');
+  const [sortField, setSortField] = useState<SortField>('updatedAt');
+  const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [showEditor, setShowEditor] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   const [editTemplate, setEditTemplate] = useState<Template | null>(null);
@@ -71,13 +101,17 @@ export default function TemplateManager() {
     { name: 'senderName', label: 'Sender Name', icon: '✉️' },
   ];
 
-  useEffect(() => { fetchTemplates(); }, []);
+  useEffect(() => { fetchAllTemplates(); }, []);
 
-  const fetchTemplates = async () => {
+  const fetchAllTemplates = async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/templates', { credentials: 'include' });
-      if (res.ok) setTemplates(await res.json());
+      const [mineRes, teamRes] = await Promise.all([
+        fetch('/api/templates/mine', { credentials: 'include' }),
+        fetch('/api/templates/team', { credentials: 'include' }),
+      ]);
+      if (mineRes.ok) setMyTemplates(await mineRes.json());
+      if (teamRes.ok) setTeamTemplates(await teamRes.json());
     } catch (e) { console.error('Failed to fetch templates:', e); }
     setLoading(false);
   };
@@ -132,7 +166,7 @@ export default function TemplateManager() {
       });
       if (res.ok) {
         setShowEditor(false);
-        await fetchTemplates();
+        await fetchAllTemplates();
       }
     } catch (e) { console.error('Save failed:', e); }
     setFormLoading(false);
@@ -141,7 +175,7 @@ export default function TemplateManager() {
   const handleDelete = async (id: string) => {
     if (!confirm('Delete this template?')) return;
     await fetch(`/api/templates/${id}`, { method: 'DELETE', credentials: 'include' });
-    await fetchTemplates();
+    await fetchAllTemplates();
   };
 
   const handleDuplicate = async (template: Template) => {
@@ -158,7 +192,7 @@ export default function TemplateManager() {
           variables: template.variables,
         }),
       });
-      await fetchTemplates();
+      await fetchAllTemplates();
     } catch (e) { console.error('Duplicate failed:', e); }
   };
 
@@ -180,7 +214,6 @@ export default function TemplateManager() {
     } catch (e) { /* ignore */ }
   };
 
-  // Preview current form content
   const handlePreviewForm = async () => {
     try {
       const res = await fetch('/api/campaigns/preview', {
@@ -221,28 +254,36 @@ export default function TemplateManager() {
 
   const toggleEditorMode = () => {
     if (editorMode === 'visual') {
-      // Going to HTML - capture from contentEditable
-      if (editorRef.current) {
-        setFormContent(editorRef.current.innerHTML);
-      }
+      if (editorRef.current) setFormContent(editorRef.current.innerHTML);
       setEditorMode('html');
     } else {
-      // Going to visual - apply HTML content
       setEditorMode('visual');
       setTimeout(() => {
-        if (editorRef.current) {
-          editorRef.current.innerHTML = formContent || '';
-        }
+        if (editorRef.current) editorRef.current.innerHTML = formContent || '';
       }, 50);
     }
   };
 
-  const filteredTemplates = templates.filter(t => {
+  const currentTemplates = activeTab === 'mine' ? myTemplates : teamTemplates;
+
+  const filteredTemplates = currentTemplates.filter(t => {
     const matchesSearch = !search || t.name.toLowerCase().includes(search.toLowerCase()) || 
       t.category.toLowerCase().includes(search.toLowerCase()) ||
-      t.subject.toLowerCase().includes(search.toLowerCase());
+      t.subject.toLowerCase().includes(search.toLowerCase()) ||
+      (t.creator?.name || '').toLowerCase().includes(search.toLowerCase());
     const matchesCategory = categoryFilter === 'all' || t.category === categoryFilter;
     return matchesSearch && matchesCategory;
+  });
+
+  const sortedTemplates = [...filteredTemplates].sort((a, b) => {
+    const dir = sortDir === 'asc' ? 1 : -1;
+    switch (sortField) {
+      case 'name': return dir * a.name.localeCompare(b.name);
+      case 'updatedAt': return dir * (new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime());
+      case 'score': return dir * ((a.score?.total || 0) - (b.score?.total || 0));
+      case 'usageCount': return dir * ((a.usageCount || 0) - (b.usageCount || 0));
+      default: return 0;
+    }
   });
 
   const getCategoryConfig = (cat: string) => {
@@ -258,21 +299,56 @@ export default function TemplateManager() {
     return configs[cat] || configs.general;
   };
 
-  const uniqueCategories = ['all', ...new Set(templates.map(t => t.category))];
+  const getGradeColor = (grade: string) => {
+    switch (grade) {
+      case 'A': return 'bg-emerald-100 text-emerald-700 border-emerald-200';
+      case 'B': return 'bg-blue-100 text-blue-700 border-blue-200';
+      case 'C': return 'bg-yellow-100 text-yellow-700 border-yellow-200';
+      case 'D': return 'bg-orange-100 text-orange-700 border-orange-200';
+      case 'F': return 'bg-red-100 text-red-700 border-red-200';
+      default: return 'bg-gray-100 text-gray-500 border-gray-200';
+    }
+  };
+
+  const getInitials = (creator?: TemplateCreator | null) => {
+    if (!creator) return '?';
+    const f = creator.firstName?.[0] || '';
+    const l = creator.lastName?.[0] || '';
+    if (f || l) return (f + l).toUpperCase();
+    return (creator.name?.[0] || creator.email?.[0] || '?').toUpperCase();
+  };
+
+  const getAvatarColor = (name: string) => {
+    const colors = [
+      'bg-blue-500', 'bg-indigo-500', 'bg-purple-500', 'bg-pink-500',
+      'bg-rose-500', 'bg-orange-500', 'bg-amber-500', 'bg-emerald-500',
+      'bg-teal-500', 'bg-cyan-500'
+    ];
+    let hash = 0;
+    for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
+    return colors[Math.abs(hash) % colors.length];
+  };
+
+  const uniqueCategories = ['all', ...new Set([...myTemplates, ...teamTemplates].map(t => t.category))];
+
+  const toggleSort = (field: SortField) => {
+    if (sortField === field) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortField(field); setSortDir('desc'); }
+  };
 
   return (
-    <div className="p-6 space-y-5">
+    <div className="p-6 space-y-4">
       {/* Header Bar */}
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-3 flex-1">
-          <div className="relative flex-1 max-w-sm">
+          <div className="relative flex-1 max-w-xs">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400" />
             <Input placeholder="Search templates..." value={search} onChange={(e) => setSearch(e.target.value)} className="pl-9 h-9 text-sm bg-white border-gray-200" />
           </div>
           <div className="flex items-center gap-0.5 bg-gray-100/80 rounded-lg p-0.5">
             {uniqueCategories.slice(0, 6).map((cat) => (
               <button key={cat} onClick={() => setCategoryFilter(cat)}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all capitalize ${
+                className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-all capitalize ${
                   categoryFilter === cat ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
                 }`}>
                 {cat}
@@ -285,7 +361,43 @@ export default function TemplateManager() {
         </Button>
       </div>
 
-      {/* Templates Grid */}
+      {/* Tabs: My Templates | Team Templates */}
+      <div className="flex items-center gap-1 border-b border-gray-200">
+        <button
+          onClick={() => setActiveTab('mine')}
+          className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-all ${
+            activeTab === 'mine'
+              ? 'border-blue-600 text-blue-600'
+              : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+          }`}
+        >
+          <User className="h-4 w-4" />
+          My Templates
+          <span className={`text-xs px-1.5 py-0.5 rounded-full ${
+            activeTab === 'mine' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-500'
+          }`}>
+            {myTemplates.length}
+          </span>
+        </button>
+        <button
+          onClick={() => setActiveTab('team')}
+          className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-all ${
+            activeTab === 'team'
+              ? 'border-blue-600 text-blue-600'
+              : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+          }`}
+        >
+          <Users className="h-4 w-4" />
+          Team Templates
+          <span className={`text-xs px-1.5 py-0.5 rounded-full ${
+            activeTab === 'team' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-500'
+          }`}>
+            {teamTemplates.length}
+          </span>
+        </button>
+      </div>
+
+      {/* Templates List View */}
       {loading ? (
         <div className="flex items-center justify-center py-20">
           <div className="flex flex-col items-center gap-3">
@@ -293,79 +405,180 @@ export default function TemplateManager() {
             <span className="text-sm text-gray-400">Loading templates...</span>
           </div>
         </div>
-      ) : filteredTemplates.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-24">
-          <div className="bg-gradient-to-br from-blue-50 to-indigo-50 w-20 h-20 rounded-2xl flex items-center justify-center mb-5 shadow-sm">
-            <FileText className="h-10 w-10 text-blue-400" />
+      ) : sortedTemplates.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-20">
+          <div className="bg-gradient-to-br from-blue-50 to-indigo-50 w-16 h-16 rounded-2xl flex items-center justify-center mb-4 shadow-sm">
+            {activeTab === 'mine' ? <FileText className="h-8 w-8 text-blue-400" /> : <Users className="h-8 w-8 text-blue-400" />}
           </div>
-          <h3 className="text-lg font-semibold text-gray-900 mb-1.5">No templates yet</h3>
-          <p className="text-sm text-gray-400 mb-6 max-w-sm text-center">Create reusable email templates with personalization variables</p>
-          <Button className="bg-gradient-to-r from-blue-600 to-indigo-600 shadow-sm" onClick={() => openEditor()}>
-            <Plus className="h-4 w-4 mr-2" /> Create Template
-          </Button>
+          <h3 className="text-base font-semibold text-gray-900 mb-1">
+            {activeTab === 'mine' ? 'No templates yet' : 'No team templates'}
+          </h3>
+          <p className="text-sm text-gray-400 mb-5 max-w-sm text-center">
+            {activeTab === 'mine'
+              ? 'Create reusable email templates with personalization variables'
+              : 'Other team members have not created templates yet'}
+          </p>
+          {activeTab === 'mine' && (
+            <Button className="bg-gradient-to-r from-blue-600 to-indigo-600 shadow-sm" size="sm" onClick={() => openEditor()}>
+              <Plus className="h-3.5 w-3.5 mr-1.5" /> Create Template
+            </Button>
+          )}
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {filteredTemplates.map((template) => {
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          {/* List Header */}
+          <div className="grid grid-cols-[1fr_140px_100px_100px_80px_48px] gap-3 px-4 py-2.5 bg-gray-50/80 border-b border-gray-100 text-[11px] font-semibold text-gray-500 uppercase tracking-wider">
+            <button onClick={() => toggleSort('name')} className="flex items-center gap-1 hover:text-gray-700 text-left">
+              Template {sortField === 'name' && <ArrowUpDown className="h-3 w-3" />}
+            </button>
+            <span>Creator</span>
+            <button onClick={() => toggleSort('score')} className="flex items-center gap-1 hover:text-gray-700">
+              Score {sortField === 'score' && <ArrowUpDown className="h-3 w-3" />}
+            </button>
+            <button onClick={() => toggleSort('usageCount')} className="flex items-center gap-1 hover:text-gray-700">
+              Usage {sortField === 'usageCount' && <ArrowUpDown className="h-3 w-3" />}
+            </button>
+            <button onClick={() => toggleSort('updatedAt')} className="flex items-center gap-1 hover:text-gray-700">
+              Date {sortField === 'updatedAt' && <ArrowUpDown className="h-3 w-3" />}
+            </button>
+            <span></span>
+          </div>
+
+          {/* Template Rows */}
+          {sortedTemplates.map((template) => {
             const catConfig = getCategoryConfig(template.category);
+            const score = template.score;
+            const isTeam = activeTab === 'team';
+
             return (
-              <Card key={template.id} className="group border-gray-200/60 shadow-sm hover:shadow-md hover:border-blue-200/50 transition-all duration-200">
-                <CardContent className="p-0">
-                  <div className="p-4 pb-3">
-                    <div className="flex items-start justify-between mb-2">
-                      <div className="flex-1 min-w-0">
-                        <h4 className="font-semibold text-gray-900 truncate text-sm">{template.name}</h4>
-                        <div className="flex items-center gap-2 mt-1.5">
-                          <Badge variant="outline" className={`text-[10px] font-medium ${catConfig.bg} ${catConfig.text} ${catConfig.border}`}>
-                            <span className="mr-0.5">{catConfig.icon}</span> {template.category}
-                          </Badge>
-                          {template.usageCount > 0 && (
-                            <span className="text-[10px] text-gray-400 flex items-center gap-0.5"><Hash className="h-3 w-3" /> Used {template.usageCount}x</span>
-                          )}
+              <div key={template.id} className="grid grid-cols-[1fr_140px_100px_100px_80px_48px] gap-3 px-4 py-3 border-b border-gray-50 hover:bg-blue-50/30 transition-colors group items-center">
+                {/* Template Info */}
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 mb-0.5">
+                    <h4 className="font-semibold text-gray-900 text-sm truncate">{template.name}</h4>
+                    <Badge variant="outline" className={`text-[10px] font-medium shrink-0 ${catConfig.bg} ${catConfig.text} ${catConfig.border}`}>
+                      <span className="mr-0.5">{catConfig.icon}</span> {template.category}
+                    </Badge>
+                  </div>
+                  <p className="text-xs text-gray-500 truncate">{template.subject}</p>
+                  {template.variables?.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {template.variables.slice(0, 3).map(v => (
+                        <span key={v} className="text-[9px] px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded-full font-medium border border-blue-100">{`{{${v}}}`}</span>
+                      ))}
+                      {template.variables.length > 3 && <span className="text-[9px] text-gray-400">+{template.variables.length - 3}</span>}
+                    </div>
+                  )}
+                </div>
+
+                {/* Creator */}
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className={`w-6 h-6 rounded-full ${getAvatarColor(template.creator?.name || template.creator?.email || '?')} flex items-center justify-center shrink-0`}>
+                    <span className="text-[10px] font-bold text-white">{getInitials(template.creator)}</span>
+                  </div>
+                  <span className="text-xs text-gray-600 truncate">{template.creator?.name || 'Unknown'}</span>
+                </div>
+
+                {/* Score */}
+                <div className="flex items-center gap-1.5">
+                  {score && score.grade !== 'N/A' ? (
+                    <>
+                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${getGradeColor(score.grade)}`}>
+                        {score.grade}
+                      </span>
+                      <div className="flex flex-col">
+                        <div className="flex items-center gap-1">
+                          <Mail className="h-2.5 w-2.5 text-gray-400" />
+                          <span className="text-[10px] text-gray-500">{score.openRate}%</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <MessageSquare className="h-2.5 w-2.5 text-gray-400" />
+                          <span className="text-[10px] text-gray-500">{score.replyRate}%</span>
                         </div>
                       </div>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="sm" className="h-7 w-7 p-0 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <MoreHorizontal className="h-3.5 w-3.5" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end" className="w-40">
-                          <DropdownMenuItem onClick={() => handlePreview(template)}><Eye className="h-3.5 w-3.5 mr-2" /> Preview</DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => openEditor(template)}><Edit className="h-3.5 w-3.5 mr-2" /> Edit</DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => handleDuplicate(template)}><Copy className="h-3.5 w-3.5 mr-2" /> Duplicate</DropdownMenuItem>
-                          <DropdownMenuSeparator />
-                          <DropdownMenuItem onClick={() => handleDelete(template.id)} className="text-red-600"><Trash2 className="h-3.5 w-3.5 mr-2" /> Delete</DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </div>
-                    <div className="bg-gray-50 rounded-lg px-3 py-2 mb-3">
-                      <div className="text-[10px] font-medium text-gray-400 uppercase tracking-wide mb-0.5">Subject</div>
-                      <div className="text-sm text-gray-700 truncate">{template.subject}</div>
-                    </div>
-                    {template.variables?.length > 0 && (
-                      <div className="flex flex-wrap gap-1 mb-2">
-                        {template.variables.slice(0, 4).map(v => (
-                          <span key={v} className="text-[10px] px-2 py-0.5 bg-blue-50 text-blue-600 rounded-full font-medium border border-blue-100">{`{{${v}}}`}</span>
-                        ))}
-                        {template.variables.length > 4 && <span className="text-[10px] text-gray-400 px-1">+{template.variables.length - 4} more</span>}
-                      </div>
+                    </>
+                  ) : (
+                    <span className="text-[10px] text-gray-400 italic">No data</span>
+                  )}
+                </div>
+
+                {/* Usage */}
+                <div className="flex items-center gap-1">
+                  <Hash className="h-3 w-3 text-gray-400" />
+                  <span className="text-xs text-gray-600">{template.usageCount || 0}</span>
+                  {score && score.campaignsUsed > 0 && (
+                    <span className="text-[10px] text-gray-400">({score.campaignsUsed} camp.)</span>
+                  )}
+                </div>
+
+                {/* Date */}
+                <span className="text-[10px] text-gray-400">
+                  {new Date(template.updatedAt || template.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                </span>
+
+                {/* Actions */}
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="ghost" size="sm" className="h-7 w-7 p-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <MoreHorizontal className="h-3.5 w-3.5" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-44">
+                    <DropdownMenuItem onClick={() => handlePreview(template)}>
+                      <Eye className="h-3.5 w-3.5 mr-2" /> Preview
+                    </DropdownMenuItem>
+                    {isTeam ? (
+                      <>
+                        <DropdownMenuItem onClick={() => handleDuplicate(template)}>
+                          <Copy className="h-3.5 w-3.5 mr-2" /> Copy to My Templates
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => {
+                          // Open editor with a copy (not editing original)
+                          setEditTemplate(null);
+                          setFormName(`${template.name} (copy)`);
+                          setFormCategory(template.category);
+                          setFormSubject(template.subject);
+                          setFormContent(template.content);
+                          setEditorMode('visual');
+                          setShowEditor(true);
+                        }}>
+                          <Edit className="h-3.5 w-3.5 mr-2" /> Edit as Copy
+                        </DropdownMenuItem>
+                      </>
+                    ) : (
+                      <>
+                        <DropdownMenuItem onClick={() => openEditor(template)}>
+                          <Edit className="h-3.5 w-3.5 mr-2" /> Edit
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handleDuplicate(template)}>
+                          <Copy className="h-3.5 w-3.5 mr-2" /> Duplicate
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onClick={() => handleDelete(template.id)} className="text-red-600">
+                          <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete
+                        </DropdownMenuItem>
+                      </>
                     )}
-                  </div>
-                  <div className="border-t border-gray-100 px-4 py-2.5 flex items-center justify-between bg-gray-50/30">
-                    <span className="text-[10px] text-gray-400 flex items-center gap-1">
-                      <Clock className="h-3 w-3" />
-                      {new Date(template.updatedAt || template.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                    </span>
-                    <div className="flex items-center gap-0.5">
-                      <Button variant="ghost" size="sm" className="h-7 text-xs px-2" onClick={() => handlePreview(template)}><Eye className="h-3 w-3 mr-1" /> Preview</Button>
-                      <Button variant="ghost" size="sm" className="h-7 text-xs px-2" onClick={() => openEditor(template)}><Edit className="h-3 w-3 mr-1" /> Edit</Button>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
             );
           })}
+
+          {/* Score Legend Footer */}
+          <div className="px-4 py-2.5 bg-gray-50/50 border-t border-gray-100 flex items-center gap-4 text-[10px] text-gray-400">
+            <span className="font-medium text-gray-500">Score:</span>
+            <span className="flex items-center gap-1"><Mail className="h-3 w-3" /> Opens</span>
+            <span className="flex items-center gap-1"><MessageSquare className="h-3 w-3" /> Replies</span>
+            <span className="flex items-center gap-1"><MousePointer className="h-3 w-3" /> Clicks</span>
+            <span className="flex items-center gap-1"><Shield className="h-3 w-3" /> Spam check</span>
+            <span className="ml-auto">
+              Grade: <span className="font-semibold text-emerald-600">A</span>=80+
+              <span className="font-semibold text-blue-600 ml-1">B</span>=60+
+              <span className="font-semibold text-yellow-600 ml-1">C</span>=40+
+              <span className="font-semibold text-orange-600 ml-1">D</span>=20+
+            </span>
+          </div>
         </div>
       )}
 
@@ -429,7 +642,6 @@ export default function TemplateManager() {
               <div className="flex items-center justify-between mb-1.5">
                 <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Email Content</Label>
                 <div className="flex items-center gap-2">
-                  {/* AI Generate button */}
                   <button onClick={() => setShowAiSection(!showAiSection)}
                     className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-all font-medium ${
                       showAiSection ? 'bg-purple-100 text-purple-700 border border-purple-300 shadow-sm' : 'bg-gray-100 text-gray-600 hover:bg-purple-50 hover:text-purple-600 border border-gray-200'
@@ -497,9 +709,7 @@ export default function TemplateManager() {
                         if (res.ok) {
                           const data = await res.json();
                           setAiResult({ content: data.content, model: data.model, provider: data.provider, textContent: data.textContent, htmlContent: data.htmlContent, format: data.format });
-                          if (data.provider === 'demo' && data.note) {
-                            setAiError(data.note);
-                          }
+                          if (data.provider === 'demo' && data.note) setAiError(data.note);
                         } else { setAiError('Generation failed. Check Azure OpenAI configuration in Advanced Settings for your current organization.'); }
                       } catch (e) { console.error('AI generation failed:', e); setAiError('Could not reach server'); }
                       setAiGenerating(false);

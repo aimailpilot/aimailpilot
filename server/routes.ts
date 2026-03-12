@@ -3205,12 +3205,92 @@ Example response:
 
   // ========== TEMPLATES ==========
 
+  // Helper: enrich templates with creator info and performance scores
+  async function enrichTemplatesWithScores(templates: any[], organizationId: string, storage: any) {
+    const spamWords = ['free', 'urgent', 'act now', 'limited time', 'guaranteed', 'no obligation', 'risk free', 'click here', 'buy now', 'order now', 'winner', 'congratulations', 'earn money', 'make money', 'cash', 'discount', '100%', 'double your', 'million', 'billion'];
+    const campaigns = await storage.getCampaigns(organizationId);
+    
+    return Promise.all(templates.map(async (t: any) => {
+      let creator = null;
+      if (t.createdBy) {
+        try {
+          const user = await storage.getUser(t.createdBy);
+          if (user) {
+            creator = {
+              id: user.id,
+              email: user.email,
+              firstName: (user as any).firstName || '',
+              lastName: (user as any).lastName || '',
+              name: (user as any).name || (user as any).firstName || user.email?.split('@')[0] || 'Unknown',
+            };
+          }
+        } catch (e) { /* ignore */ }
+      }
+
+      let score = { total: 0, openRate: 0, replyRate: 0, clickRate: 0, spamScore: 0, campaignsUsed: 0, grade: 'N/A' as string };
+      try {
+        const matchingCampaigns = campaigns.filter((c: any) =>
+          c.templateId === t.id || (c.subject === t.subject && c.content === t.content)
+        );
+        if (matchingCampaigns.length > 0) {
+          let totalSent = 0, totalOpened = 0, totalReplied = 0, totalClicked = 0;
+          for (const camp of matchingCampaigns) {
+            totalSent += (camp as any).totalRecipients || (camp as any).sentCount || 0;
+            totalOpened += (camp as any).openedCount || 0;
+            totalReplied += (camp as any).repliedCount || 0;
+            totalClicked += (camp as any).clickedCount || 0;
+          }
+          score.campaignsUsed = matchingCampaigns.length;
+          score.openRate = totalSent > 0 ? Math.round((totalOpened / totalSent) * 100) : 0;
+          score.replyRate = totalSent > 0 ? Math.round((totalReplied / totalSent) * 100) : 0;
+          score.clickRate = totalSent > 0 ? Math.round((totalClicked / totalSent) * 100) : 0;
+        }
+        const contentLower = ((t.content || '') + ' ' + (t.subject || '')).toLowerCase();
+        const spamHits = spamWords.filter(w => contentLower.includes(w));
+        score.spamScore = Math.min(spamHits.length * 10, 100);
+        if (score.campaignsUsed > 0) {
+          const spamPenalty = Math.max(0, 100 - score.spamScore);
+          score.total = Math.round((score.openRate * 0.3) + (score.replyRate * 0.4) + (score.clickRate * 0.1) + (spamPenalty * 0.2));
+          score.grade = score.total >= 80 ? 'A' : score.total >= 60 ? 'B' : score.total >= 40 ? 'C' : score.total >= 20 ? 'D' : 'F';
+        } else if (score.spamScore > 0) {
+          score.total = Math.max(0, 100 - score.spamScore);
+          score.grade = score.spamScore === 0 ? '—' : score.spamScore <= 20 ? 'B' : score.spamScore <= 50 ? 'C' : 'D';
+        }
+      } catch (e) { /* ignore */ }
+
+      return { ...t, creator, score };
+    }));
+  }
+
   app.get('/api/templates', async (req: any, res) => {
     try {
       const templates = await storage.getEmailTemplates(req.user.organizationId);
-      res.json(templates);
+      const enriched = await enrichTemplatesWithScores(templates, req.user.organizationId, storage);
+      res.json(enriched);
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch templates' });
+    }
+  });
+
+  // Get user's own templates
+  app.get('/api/templates/mine', async (req: any, res) => {
+    try {
+      const templates = await storage.getEmailTemplatesByUser(req.user.organizationId, req.user.id);
+      const enriched = await enrichTemplatesWithScores(templates, req.user.organizationId, storage);
+      res.json(enriched);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch your templates' });
+    }
+  });
+
+  // Get team templates (other users' templates in same org)
+  app.get('/api/templates/team', async (req: any, res) => {
+    try {
+      const templates = await storage.getEmailTemplatesExcludingUser(req.user.organizationId, req.user.id);
+      const enriched = await enrichTemplatesWithScores(templates, req.user.organizationId, storage);
+      res.json(enriched);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch team templates' });
     }
   });
 
