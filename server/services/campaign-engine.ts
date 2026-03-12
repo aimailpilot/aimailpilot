@@ -1,5 +1,5 @@
 import { storage } from '../storage';
-import { smtpEmailService, type SmtpConfig, type SendResult } from './smtp-email-service';
+import { smtpEmailService, type SmtpConfig, type SendResult, getProviderDailyLimit } from './smtp-email-service';
 
 /**
  * Send email via Gmail API using OAuth access token.
@@ -540,8 +540,9 @@ export class CampaignEngine {
     const FLUSH_INTERVAL = 25;
     
     // Track daily limit locally (refresh from DB on flush)
+    // Use the account's stored dailyLimit, falling back to provider-based limit
     let accountDailySent = emailAccount.dailySent || 0;
-    let accountDailyLimit = emailAccount.dailyLimit || 500;
+    let accountDailyLimit = emailAccount.dailyLimit || getProviderDailyLimit(emailAccount.provider || smtpConfig?.provider || 'custom');
 
     // Track daily sends for autopilot maxPerDay enforcement (separate from account daily limit)
     let autopilotDailySent = 0;

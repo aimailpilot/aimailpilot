@@ -4,7 +4,7 @@ import { storage } from "./storage";
 import session from "express-session";
 import cookieParser from "cookie-parser";
 import MemoryStore from "memorystore";
-import { smtpEmailService, SMTP_PRESETS, type SmtpConfig } from "./services/smtp-email-service";
+import { smtpEmailService, SMTP_PRESETS, type SmtpConfig, getProviderDailyLimit } from "./services/smtp-email-service";
 import { campaignEngine } from "./services/campaign-engine";
 import { gmailReplyTracker } from "./services/gmail-reply-tracker";
 import { outlookReplyTracker } from "./services/outlook-reply-tracker";
@@ -542,7 +542,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 replyTo: '',
                 provider: 'gmail',
               },
-              dailyLimit: 2000,
+              dailyLimit: getProviderDailyLimit('gmail'),
               isActive: true,
             });
             console.log('[Auth] Auto-created Gmail sender account:', email);
@@ -758,7 +758,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             fromName: displayName, fromEmail: gmailEmail, replyTo: '',
             provider: 'gmail',
           },
-          dailyLimit: 2000,
+          dailyLimit: getProviderDailyLimit('gmail'),
           isActive: true,
         });
         console.log(`[Auth] New Gmail sender added via OAuth: ${gmailEmail}`);
@@ -977,7 +977,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 replyTo: '',
                 provider: 'outlook',
               },
-              dailyLimit: 300,
+              dailyLimit: getProviderDailyLimit('outlook'),
               isActive: true,
             });
             console.log('[Auth] Auto-created Outlook sender account:', email);
@@ -1398,7 +1398,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         email: gmailEmail,
         displayName: displayName || gmailEmail.split('@')[0],
         smtpConfig,
-        dailyLimit: 2000,
+        dailyLimit: getProviderDailyLimit('gmail'),
         isActive: true,
       });
 
@@ -1456,7 +1456,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         email,
         displayName: displayName || email,
         smtpConfig,
-        dailyLimit: provider === 'gmail' ? 2000 : provider === 'outlook' ? 300 : 500,
+        dailyLimit: getProviderDailyLimit(provider),
         isActive: true,
       });
 
@@ -3735,7 +3735,7 @@ Example response:
 
   app.get('/api/account/info', async (req: any, res) => {
     const accounts = await storage.getEmailAccounts(req.user.organizationId);
-    const totalQuota = accounts.reduce((sum: number, a: any) => sum + (a.dailyLimit || 500), 0) || 500;
+    const totalQuota = accounts.reduce((sum: number, a: any) => sum + (a.dailyLimit || getProviderDailyLimit(a.provider)), 0) || 500;
     const sessionUser = (req.session as any)?.user;
     
     res.json({

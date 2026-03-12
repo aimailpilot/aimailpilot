@@ -1,6 +1,31 @@
 import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
 
+/**
+ * Get the daily sending limit for an email provider.
+ * Each linked email account has its own independent limit.
+ * - Gmail (Google Workspace): 2,000/day
+ * - Outlook/Microsoft 365: 10,000/day
+ * - Elastic Email: Unlimited (no cap)
+ * - Custom/Other SMTP: 500/day
+ */
+export function getProviderDailyLimit(provider: string): number {
+  switch (provider?.toLowerCase()) {
+    case 'gmail':
+    case 'google':
+      return 2000;
+    case 'outlook':
+    case 'microsoft':
+      return 10000;
+    case 'elasticemail':
+    case 'elastic-email':
+    case 'elastic_email':
+      return 999999999; // Effectively unlimited
+    default:
+      return 500;
+  }
+}
+
 export interface SmtpConfig {
   host: string;
   port: number;
@@ -202,7 +227,7 @@ export class SmtpEmailService {
   async sendEmail(accountId: string, config: SmtpConfig, message: EmailMessage): Promise<SendResult> {
     try {
       // Check daily limit
-      const dailyLimit = config.provider === 'gmail' ? 2000 : config.provider === 'outlook' ? 300 : config.provider === 'elasticemail' ? 100000 : 500;
+      const dailyLimit = getProviderDailyLimit(config.provider);
       const today = new Date().toISOString().split('T')[0];
       const sentData = this.dailySentCounts.get(accountId);
       
@@ -291,7 +316,7 @@ export class SmtpEmailService {
    * Get daily quota info
    */
   getDailyQuota(accountId: string, provider: string): { daily: number; sent: number; remaining: number } {
-    const dailyLimit = provider === 'gmail' ? 2000 : provider === 'outlook' ? 300 : provider === 'elasticemail' ? 100000 : 500;
+    const dailyLimit = getProviderDailyLimit(provider);
     const today = new Date().toISOString().split('T')[0];
     const sentData = this.dailySentCounts.get(accountId);
     const sent = (sentData && sentData.date === today) ? sentData.count : 0;

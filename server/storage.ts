@@ -543,6 +543,14 @@ try { db.exec(`ALTER TABLE campaigns ADD COLUMN sendingConfig TEXT`); } catch (e
 try { db.exec(`ALTER TABLE campaigns ADD COLUMN includeUnsubscribe INTEGER DEFAULT 0`); } catch (e) { /* already exists */ }
 try { db.exec(`ALTER TABLE campaigns ADD COLUMN trackOpens INTEGER DEFAULT 1`); } catch (e) { /* already exists */ }
 
+// Migrate existing email accounts to correct provider-based daily limits
+// Gmail=2000, Outlook=10000, ElasticEmail=unlimited, Custom=500
+try {
+  db.exec(`UPDATE email_accounts SET dailyLimit = 2000 WHERE provider IN ('gmail', 'google') AND dailyLimit < 2000`);
+  db.exec(`UPDATE email_accounts SET dailyLimit = 10000 WHERE provider IN ('outlook', 'microsoft') AND dailyLimit < 10000`);
+  db.exec(`UPDATE email_accounts SET dailyLimit = 999999999 WHERE provider IN ('elasticemail', 'elastic-email', 'elastic_email')`);
+} catch (e) { /* ignore */ }
+
 // ========== SEED DATA (only on first run) ==========
 const ORG_ID = '550e8400-e29b-41d4-a716-446655440001';
 
