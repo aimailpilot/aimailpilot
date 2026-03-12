@@ -1168,9 +1168,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get('/api/email-accounts', async (req: any, res) => {
     try {
-      // All org members can see org email accounts (they need them to send campaigns)
-      // Email accounts are a shared resource, not member-scoped
-      const accounts = await storage.getEmailAccounts(req.user.organizationId);
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      const allAccounts = await storage.getEmailAccounts(req.user.organizationId);
+      
+      // Non-admin members only see their OWN accounts; admins see all
+      const accounts = isAdmin 
+        ? allAccounts 
+        : allAccounts.filter((a: any) => a.userId === req.user.id);
+      
       // Don't return passwords in the response, but expose authMethod for OAuth detection
       const safe = accounts.map((a: any) => {
         const isOAuth = a.smtpConfig?.auth?.pass === 'OAUTH_TOKEN';
@@ -3823,6 +3828,26 @@ Example response:
 
   // ========== LLM ==========
 
+  // Check Azure OpenAI configuration status for the current organization
+  app.get('/api/llm/status', async (req: any, res) => {
+    try {
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      const endpoint = settings.azure_openai_endpoint;
+      const apiKey = settings.azure_openai_api_key;
+      const deploymentName = settings.azure_openai_deployment;
+      const configured = !!(endpoint && apiKey && deploymentName);
+      res.json({
+        configured,
+        provider: configured ? 'azure-openai' : 'demo',
+        endpoint: endpoint ? endpoint.replace(/\/[^/]*$/, '/***') : null,
+        deployment: deploymentName || null,
+        organizationId: req.user.organizationId,
+      });
+    } catch (error) {
+      res.json({ configured: false, provider: 'demo', error: 'Failed to check configuration' });
+    }
+  });
+
   app.post('/api/llm/generate', async (req: any, res) => {
     try {
       const { prompt, type, context, format } = req.body;
@@ -3830,11 +3855,17 @@ Example response:
       const emailFormat = format || 'html';
 
       // Try to use Azure OpenAI if configured
-      const settings = await storage.getApiSettings(req.user.organizationId);
+      const orgId = req.user.organizationId;
+      console.log(`[LLM] Generate request for org: ${orgId}, user: ${req.user.email}, type: ${type || 'default'}, format: ${emailFormat}`);
+      const settings = await storage.getApiSettings(orgId);
       const endpoint = settings.azure_openai_endpoint;
       const apiKey = settings.azure_openai_api_key;
       const deploymentName = settings.azure_openai_deployment;
       const apiVersion = settings.azure_openai_api_version || '2024-08-01-preview';
+
+      if (!endpoint || !apiKey || !deploymentName) {
+        console.log(`[LLM] Azure OpenAI NOT configured for org ${orgId}. endpoint=${!!endpoint}, apiKey=${!!apiKey}, deployment=${!!deploymentName}. Falling back to demo.`);
+      }
 
       if (endpoint && apiKey && deploymentName) {
         // Build format instructions
@@ -3915,7 +3946,8 @@ Example response:
         tokens: 150,
         provider: 'demo',
         format: emailFormat,
-        note: 'Configure Azure OpenAI in Advanced Settings for real AI-powered generation.',
+        note: 'Azure OpenAI is not configured for your current organization. Go to Advanced Settings to configure Azure OpenAI endpoint, API key, and deployment name.',
+        organizationId: orgId,
       };
       
       if (emailFormat === 'both') {

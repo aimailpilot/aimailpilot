@@ -497,7 +497,10 @@ export default function TemplateManager() {
                         if (res.ok) {
                           const data = await res.json();
                           setAiResult({ content: data.content, model: data.model, provider: data.provider, textContent: data.textContent, htmlContent: data.htmlContent, format: data.format });
-                        } else { setAiError('Generation failed. Configure Azure OpenAI in Advanced Settings.'); }
+                          if (data.provider === 'demo' && data.note) {
+                            setAiError(data.note);
+                          }
+                        } else { setAiError('Generation failed. Check Azure OpenAI configuration in Advanced Settings for your current organization.'); }
                       } catch (e) { console.error('AI generation failed:', e); setAiError('Could not reach server'); }
                       setAiGenerating(false);
                     }}>

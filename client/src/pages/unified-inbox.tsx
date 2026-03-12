@@ -182,14 +182,34 @@ export default function UnifiedInbox() {
     fetchSyncStatus();
   }, [fetchMessages]);
 
-  // Auto-refresh every 60 seconds (less aggressive)
+  // Auto-refresh inbox messages every 30 seconds
   useEffect(() => {
-    const interval = setInterval(fetchMessages, 60000);
+    const interval = setInterval(fetchMessages, 30000);
     return () => clearInterval(interval);
   }, [fetchMessages]);
 
-  const syncInbox = async () => {
-    setSyncing(true);
+  // Auto-sync from Gmail/Outlook every 3 minutes to pull new replies
+  useEffect(() => {
+    // Initial sync on mount (after a short delay to let the page load)
+    const initialTimeout = setTimeout(() => {
+      syncInbox(false);
+    }, 5000);
+    
+    const syncInterval = setInterval(() => {
+      // Only auto-sync if not already syncing
+      if (!syncing) {
+        syncInbox(false);
+      }
+    }, 180000); // 3 minutes
+    
+    return () => {
+      clearTimeout(initialTimeout);
+      clearInterval(syncInterval);
+    };
+  }, []);
+
+  const syncInbox = async (manual = true) => {
+    if (manual) setSyncing(true);
     try {
       const resp = await fetch('/api/inbox/sync', {
         method: 'POST',
@@ -204,7 +224,7 @@ export default function UnifiedInbox() {
     } catch (err) {
       console.error('Sync error:', err);
     } finally {
-      setSyncing(false);
+      if (manual) setSyncing(false);
       fetchSyncStatus();
     }
   };
