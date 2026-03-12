@@ -215,12 +215,34 @@ async function refreshMicrosoftToken(orgId: string, senderEmail?: string): Promi
   return accessToken || null;
 }
 
+interface AutopilotDaySchedule {
+  enabled: boolean;
+  startTime: string; // HH:MM
+  endTime: string;   // HH:MM
+}
+
+interface AutopilotConfig {
+  enabled: boolean;
+  days: { [dayName: string]: AutopilotDaySchedule };
+  maxPerDay: number;
+  delayBetween: number;
+  delayUnit: 'seconds' | 'minutes';
+}
+
+interface SendingConfig {
+  delayBetweenEmails: number;
+  batchSize?: number;
+  autopilot?: AutopilotConfig | null;
+  timezoneOffset?: number | null; // minutes offset from UTC (e.g. -330 for IST)
+}
+
 interface CampaignSendOptions {
   campaignId: string;
   delayBetweenEmails?: number; // ms between each email (throttling)
   batchSize?: number;
   startTime?: Date;
   stepNumber?: number; // which step in the sequence (0 = initial, 1+ = follow-ups)
+  sendingConfig?: SendingConfig | null;
 }
 
 interface PersonalizationData {
@@ -235,6 +257,101 @@ interface PersonalizationData {
 export class CampaignEngine {
   private activeCampaigns: Map<string, { timer: any; paused: boolean; progress: number; total: number }> = new Map();
   private _publicBaseUrl: string | null = null;
+
+  /**
+   * Check if we're currently within the allowed sending window based on autopilot config.
+   * Returns { canSend, reason, pauseUntilMs } where pauseUntilMs is the ms to wait until the next window opens.
+   */
+  private checkSendingWindow(sendingConfig: SendingConfig | null | undefined): { canSend: boolean; reason?: string; pauseUntilMs?: number } {
+    if (!sendingConfig?.autopilot?.enabled) return { canSend: true };
+
+    const autopilot = sendingConfig.autopilot;
+    // Calculate user's local time using their timezone offset
+    const now = new Date();
+    const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
+    // timezoneOffset is browser's getTimezoneOffset() which is minutes behind UTC (e.g. IST = -330)
+    // So user's local time = UTC - timezoneOffset
+    const userLocalMs = utcMs - (sendingConfig.timezoneOffset || 0) * 60000;
+    const userLocal = new Date(userLocalMs);
+    
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const dayName = dayNames[userLocal.getDay()];
+    const dayConfig = autopilot.days?.[dayName];
+
+    if (!dayConfig || !dayConfig.enabled) {
+      // Find next enabled day
+      const pauseMs = this.msUntilNextSendWindow(autopilot, sendingConfig.timezoneOffset || 0);
+      return { canSend: false, reason: `Sending disabled on ${dayName}`, pauseUntilMs: pauseMs };
+    }
+
+    // Check time window for today
+    const currentHH = String(userLocal.getHours()).padStart(2, '0');
+    const currentMM = String(userLocal.getMinutes()).padStart(2, '0');
+    const currentTime = `${currentHH}:${currentMM}`;
+
+    if (dayConfig.startTime && currentTime < dayConfig.startTime) {
+      // Before start time — wait until start
+      const [sh, sm] = dayConfig.startTime.split(':').map(Number);
+      const startMs = new Date(userLocal);
+      startMs.setHours(sh, sm, 0, 0);
+      const waitMs = startMs.getTime() - userLocal.getTime();
+      return { canSend: false, reason: `Before sending hours (starts at ${dayConfig.startTime})`, pauseUntilMs: Math.max(waitMs, 60000) };
+    }
+
+    if (dayConfig.endTime && currentTime >= dayConfig.endTime) {
+      // After end time — wait until next day's window
+      const pauseMs = this.msUntilNextSendWindow(autopilot, sendingConfig.timezoneOffset || 0);
+      return { canSend: false, reason: `After sending hours (ended at ${dayConfig.endTime})`, pauseUntilMs: pauseMs };
+    }
+
+    return { canSend: true };
+  }
+
+  /**
+   * Calculate how many ms until the next sending window opens.
+   */
+  private msUntilNextSendWindow(autopilot: AutopilotConfig, timezoneOffset: number): number {
+    const now = new Date();
+    const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
+    const userLocalMs = utcMs - timezoneOffset * 60000;
+    const userLocal = new Date(userLocalMs);
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+    for (let daysAhead = 0; daysAhead <= 7; daysAhead++) {
+      const checkDate = new Date(userLocal);
+      checkDate.setDate(checkDate.getDate() + (daysAhead === 0 ? 0 : daysAhead));
+      const dayName = dayNames[checkDate.getDay()];
+      const dayConfig = autopilot.days?.[dayName];
+
+      if (dayConfig?.enabled && dayConfig.startTime) {
+        const [sh, sm] = dayConfig.startTime.split(':').map(Number);
+        const windowStart = new Date(checkDate);
+        windowStart.setHours(sh, sm, 0, 0);
+
+        if (daysAhead === 0) {
+          // Same day — check if the window hasn't ended yet or starts later today
+          if (dayConfig.endTime) {
+            const currentHH = String(userLocal.getHours()).padStart(2, '0');
+            const currentMM = String(userLocal.getMinutes()).padStart(2, '0');
+            const currentTime = `${currentHH}:${currentMM}`;
+            if (currentTime >= dayConfig.endTime) continue; // Window ended today, check tomorrow
+          }
+          if (windowStart.getTime() > userLocal.getTime()) {
+            // Window starts later today
+            return windowStart.getTime() - userLocal.getTime();
+          }
+          // We're currently in the window (shouldn't be called if canSend=true)
+          continue;
+        } else {
+          // Future day — calculate ms until that day's start time
+          windowStart.setDate(userLocal.getDate() + daysAhead);
+          return windowStart.getTime() - userLocal.getTime();
+        }
+      }
+    }
+    // Fallback: wait 1 hour
+    return 3600000;
+  }
 
   /**
    * Set the public base URL for tracking links (call from route handler with req info).
@@ -284,7 +401,7 @@ export class CampaignEngine {
    * Start sending a campaign
    */
   async startCampaign(options: CampaignSendOptions): Promise<{ success: boolean; error?: string }> {
-    const { campaignId, delayBetweenEmails = 2000, batchSize = 10, stepNumber = 0 } = options;
+    const { campaignId, delayBetweenEmails = 2000, batchSize = 10, stepNumber = 0, sendingConfig: optSendingConfig } = options;
 
     try {
       const campaign = await storage.getCampaign(campaignId);
@@ -376,8 +493,17 @@ export class CampaignEngine {
         total: contacts.length,
       });
 
+      // Load sendingConfig: prefer what was passed in options, then from the campaign DB record
+      const savedConfig: SendingConfig | null = campaign.sendingConfig || null;
+      const activeSendingConfig: SendingConfig = optSendingConfig || savedConfig || { delayBetweenEmails };
+      
+      // Use the configured delay from sendingConfig if available, otherwise use the parameter
+      const effectiveDelay = activeSendingConfig.delayBetweenEmails || delayBetweenEmails;
+      
+      console.log(`[CampaignEngine] Starting campaign ${campaignId} with delay=${effectiveDelay}ms, autopilot=${activeSendingConfig.autopilot?.enabled ? 'ON' : 'OFF'}, maxPerDay=${activeSendingConfig.autopilot?.maxPerDay || 'unlimited'}`);
+
       // Send emails in batches with throttling
-      this.sendBatched(campaignId, contacts, emailAccount, subject, content, delayBetweenEmails, batchSize, stepNumber);
+      this.sendBatched(campaignId, contacts, emailAccount, subject, content, effectiveDelay, batchSize, stepNumber, activeSendingConfig);
 
       return { success: true };
     } catch (error) {
@@ -387,7 +513,7 @@ export class CampaignEngine {
   }
 
   /**
-   * Send emails in batches with throttling
+   * Send emails in batches with throttling and time-window enforcement
    */
   private async sendBatched(
     campaignId: string,
@@ -397,7 +523,8 @@ export class CampaignEngine {
     content: string,
     delay: number,
     batchSize: number,
-    stepNumber: number = 0
+    stepNumber: number = 0,
+    sendingConfig?: SendingConfig | null
   ): Promise<void> {
     const smtpConfig: SmtpConfig = emailAccount.smtpConfig;
     const tracker = this.activeCampaigns.get(campaignId);
@@ -416,6 +543,10 @@ export class CampaignEngine {
     let accountDailySent = emailAccount.dailySent || 0;
     let accountDailyLimit = emailAccount.dailyLimit || 500;
 
+    // Track daily sends for autopilot maxPerDay enforcement (separate from account daily limit)
+    let autopilotDailySent = 0;
+    const autopilotMaxPerDay = sendingConfig?.autopilot?.enabled ? (sendingConfig.autopilot.maxPerDay || 500) : Infinity;
+
     for (let i = 0; i < contacts.length; i++) {
       // Check if paused or stopped
       if (!tracker || tracker.paused) {
@@ -431,6 +562,97 @@ export class CampaignEngine {
 
       // Check if campaign was deleted/stopped
       if (!this.activeCampaigns.has(campaignId)) break;
+
+      // ===== TIME WINDOW ENFORCEMENT =====
+      // Check if we're within the allowed sending window based on autopilot schedule
+      const windowCheck = this.checkSendingWindow(sendingConfig);
+      if (!windowCheck.canSend) {
+        console.log(`[CampaignEngine] Campaign ${campaignId} outside sending window: ${windowCheck.reason}. Pausing for ${Math.round((windowCheck.pauseUntilMs || 0) / 60000)} minutes.`);
+        
+        // Flush any pending counts before sleeping
+        if (localSentCount > 0 || localBouncedCount > 0) {
+          const updatedCampaign = await storage.getCampaign(campaignId);
+          if (updatedCampaign) {
+            await storage.updateCampaign(campaignId, {
+              sentCount: (updatedCampaign.sentCount || 0) + localSentCount,
+              bouncedCount: (updatedCampaign.bouncedCount || 0) + localBouncedCount,
+            });
+          }
+          if (localSentCount > 0) {
+            await storage.incrementDailySent(emailAccount.id, localSentCount);
+            accountDailySent += localSentCount;
+          }
+          localSentCount = 0;
+          localBouncedCount = 0;
+        }
+
+        // Auto-pause the campaign and wait until next window
+        await storage.updateCampaign(campaignId, { status: 'paused' });
+        if (tracker) tracker.paused = true;
+
+        // Sleep until the next sending window opens (check every 60s in case of manual resume)
+        const sleepUntil = Date.now() + (windowCheck.pauseUntilMs || 3600000);
+        while (Date.now() < sleepUntil) {
+          // Check if campaign was stopped or deleted during sleep
+          if (!this.activeCampaigns.has(campaignId)) return;
+          
+          // Re-check sending window periodically (in case timezone/schedule changed)
+          const recheck = this.checkSendingWindow(sendingConfig);
+          if (recheck.canSend) break;
+          
+          await new Promise(resolve => setTimeout(resolve, 60000)); // Check every 60 seconds
+        }
+
+        // Check again if campaign still exists after sleeping
+        if (!this.activeCampaigns.has(campaignId)) return;
+
+        // Resume the campaign
+        if (tracker) tracker.paused = false;
+        await storage.updateCampaign(campaignId, { status: 'active' });
+        console.log(`[CampaignEngine] Campaign ${campaignId} sending window opened, resuming.`);
+        
+        // Reset daily counters when a new day starts
+        autopilotDailySent = 0;
+      }
+
+      // ===== AUTOPILOT MAX PER DAY ENFORCEMENT =====
+      if (autopilotDailySent >= autopilotMaxPerDay) {
+        console.log(`[CampaignEngine] Campaign ${campaignId} reached autopilot daily limit (${autopilotMaxPerDay}). Pausing until next window.`);
+        
+        // Flush counts
+        if (localSentCount > 0 || localBouncedCount > 0) {
+          const updatedCampaign = await storage.getCampaign(campaignId);
+          if (updatedCampaign) {
+            await storage.updateCampaign(campaignId, {
+              sentCount: (updatedCampaign.sentCount || 0) + localSentCount,
+              bouncedCount: (updatedCampaign.bouncedCount || 0) + localBouncedCount,
+            });
+          }
+          if (localSentCount > 0) {
+            await storage.incrementDailySent(emailAccount.id, localSentCount);
+            accountDailySent += localSentCount;
+          }
+          localSentCount = 0;
+          localBouncedCount = 0;
+        }
+
+        // Pause until next day's window
+        await storage.updateCampaign(campaignId, { status: 'paused' });
+        if (tracker) tracker.paused = true;
+        
+        const sleepMs = this.msUntilNextSendWindow(sendingConfig?.autopilot!, sendingConfig?.timezoneOffset || 0);
+        const sleepUntil = Date.now() + sleepMs;
+        while (Date.now() < sleepUntil) {
+          if (!this.activeCampaigns.has(campaignId)) return;
+          await new Promise(resolve => setTimeout(resolve, 60000));
+        }
+
+        if (!this.activeCampaigns.has(campaignId)) return;
+        if (tracker) tracker.paused = false;
+        await storage.updateCampaign(campaignId, { status: 'active' });
+        autopilotDailySent = 0;
+        console.log(`[CampaignEngine] Campaign ${campaignId} daily limit reset, resuming.`);
+      }
 
       const contact = contacts[i];
 
@@ -619,6 +841,7 @@ export class CampaignEngine {
           });
           
           localSentCount++;
+          autopilotDailySent++;
 
           // Create 'sent' tracking event
           await storage.createTrackingEvent({

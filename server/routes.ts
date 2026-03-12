@@ -2021,10 +2021,23 @@ Which account should I use and why? If I need to split across accounts, provide 
         campaignEngine.setPublicBaseUrl(`${proto}://${host}`);
       }
 
+      const delayBetweenEmails = req.body.delayBetweenEmails || 2000;
+
+      // Persist the sending config so it survives pause/resume/restart
+      const sendingConfig = {
+        delayBetweenEmails,
+        batchSize: req.body.batchSize || 10,
+        autopilot: req.body.autopilot || null,
+        // Store the user's timezone offset so we can calculate their local time
+        timezoneOffset: req.body.timezoneOffset || null,
+      };
+      await storage.updateCampaign(req.params.id, { sendingConfig });
+
       const result = await campaignEngine.startCampaign({
         campaignId: req.params.id,
-        delayBetweenEmails: req.body.delayBetweenEmails || 2000,
+        delayBetweenEmails,
         batchSize: req.body.batchSize || 10,
+        sendingConfig,
       });
       res.json(result);
     } catch (error) {
@@ -2051,9 +2064,21 @@ Which account should I use and why? If I need to split across accounts, provide 
     const success = campaignEngine.resumeCampaign(req.params.id);
     if (!success) {
       // Campaign not in memory (e.g. server restarted while paused).
-      // Re-start the campaign — startCampaign now skips already-sent contacts.
+      // Re-start — startCampaign skips already-sent contacts.
+      // Read saved sending config to restore delay/throttle/time-window settings.
       try {
-        const result = await campaignEngine.startCampaign({ campaignId: req.params.id });
+        const campaign = await storage.getCampaign(req.params.id);
+        const savedConfig = campaign?.sendingConfig || {};
+        const delayBetweenEmails = savedConfig.delayBetweenEmails || 2000;
+
+        console.log(`[Campaign] Resuming ${req.params.id} with saved config: delay=${delayBetweenEmails}ms, autopilot=${savedConfig.autopilot?.enabled ? 'ON' : 'OFF'}, maxPerDay=${savedConfig.autopilot?.maxPerDay || 'unlimited'}`);
+
+        const result = await campaignEngine.startCampaign({
+          campaignId: req.params.id,
+          delayBetweenEmails,
+          batchSize: savedConfig.batchSize || 10,
+          sendingConfig: savedConfig,
+        });
         return res.json(result);
       } catch (e) {
         return res.status(500).json({ success: false, error: 'Failed to resume campaign' });
@@ -2132,10 +2157,18 @@ Which account should I use and why? If I need to split across accounts, provide 
 
   app.post('/api/campaigns/:id/schedule', async (req: any, res) => {
     try {
-      const { scheduledAt, delayBetweenEmails } = req.body;
+      const { scheduledAt, delayBetweenEmails, autopilot, timezoneOffset } = req.body;
       if (!scheduledAt) return res.status(400).json({ message: 'scheduledAt is required' });
       
-      campaignEngine.scheduleCampaign(req.params.id, new Date(scheduledAt), { delayBetweenEmails });
+      // Persist sending config for scheduled campaigns too
+      const sendingConfig = {
+        delayBetweenEmails: delayBetweenEmails || 2000,
+        autopilot: autopilot || null,
+        timezoneOffset: timezoneOffset || null,
+      };
+      await storage.updateCampaign(req.params.id, { sendingConfig });
+      
+      campaignEngine.scheduleCampaign(req.params.id, new Date(scheduledAt), { delayBetweenEmails, sendingConfig });
       res.json({ success: true, scheduledAt });
     } catch (error) {
       res.status(500).json({ message: 'Failed to schedule campaign' });

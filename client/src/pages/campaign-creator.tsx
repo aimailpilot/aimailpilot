@@ -457,7 +457,12 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
-          body: JSON.stringify({ scheduledAt: dt.toISOString(), delayBetweenEmails: autopilot.delayBetween * (autopilot.delayUnit === 'minutes' ? 60000 : 1000) }),
+          body: JSON.stringify({
+            scheduledAt: dt.toISOString(),
+            delayBetweenEmails: autopilot.delayBetween * (autopilot.delayUnit === 'minutes' ? 60000 : 1000),
+            autopilot: autopilot.enabled ? autopilot : null,
+            timezoneOffset: new Date().getTimezoneOffset(),
+          }),
         });
         setSendResult({ scheduled: true, campaignId: campaign.id });
       } else {
@@ -465,7 +470,11 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
-          body: JSON.stringify({ delayBetweenEmails: autopilot.delayBetween * (autopilot.delayUnit === 'minutes' ? 60000 : 1000) }),
+          body: JSON.stringify({
+            delayBetweenEmails: autopilot.delayBetween * (autopilot.delayUnit === 'minutes' ? 60000 : 1000),
+            autopilot: autopilot.enabled ? autopilot : null,
+            timezoneOffset: new Date().getTimezoneOffset(),
+          }),
         });
         setSendResult({ campaignId: campaign.id });
       }

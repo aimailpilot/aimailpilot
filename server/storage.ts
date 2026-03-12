@@ -63,7 +63,7 @@ function hydrateContact(r: any) {
 }
 function hydrateCampaign(r: any) {
   if (!r) return null;
-  return { ...r, contactIds: fromJson(r.contactIds) || [] };
+  return { ...r, contactIds: fromJson(r.contactIds) || [], sendingConfig: fromJson(r.sendingConfig) || null };
 }
 function hydrateTemplate(r: any) {
   if (!r) return null;
@@ -536,6 +536,12 @@ try { db.exec(`ALTER TABLE followup_steps ADD COLUMN delayMinutes INTEGER DEFAUL
 // ========== Unified Inbox migrations ==========
 try { db.exec(`ALTER TABLE unified_inbox ADD COLUMN replyContent TEXT`); } catch (e) { /* already exists */ }
 try { db.exec(`ALTER TABLE unified_inbox ADD COLUMN repliedBy TEXT`); } catch (e) { /* already exists */ }
+
+// Campaign sending config (throttle, schedule, time windows)
+try { db.exec(`ALTER TABLE campaigns ADD COLUMN sendingConfig TEXT`); } catch (e) { /* already exists */ }
+// Campaign includeUnsubscribe and trackOpens flags
+try { db.exec(`ALTER TABLE campaigns ADD COLUMN includeUnsubscribe INTEGER DEFAULT 0`); } catch (e) { /* already exists */ }
+try { db.exec(`ALTER TABLE campaigns ADD COLUMN trackOpens INTEGER DEFAULT 1`); } catch (e) { /* already exists */ }
 
 // ========== SEED DATA (only on first run) ==========
 const ORG_ID = '550e8400-e29b-41d4-a716-446655440001';
@@ -1089,9 +1095,9 @@ export class DatabaseStorage {
       }
     }
     const m = { ...existing, ...cleanData };
-    db.prepare(`UPDATE campaigns SET name=?, description=?, status=?, totalRecipients=?, sentCount=?, openedCount=?, clickedCount=?, repliedCount=?, bouncedCount=?, unsubscribedCount=?, subject=?, content=?, emailAccountId=?, templateId=?, contactIds=?, segmentId=?, scheduledAt=?, updatedAt=? WHERE id=?`).run(
+    db.prepare(`UPDATE campaigns SET name=?, description=?, status=?, totalRecipients=?, sentCount=?, openedCount=?, clickedCount=?, repliedCount=?, bouncedCount=?, unsubscribedCount=?, subject=?, content=?, emailAccountId=?, templateId=?, contactIds=?, segmentId=?, scheduledAt=?, sendingConfig=?, updatedAt=? WHERE id=?`).run(
       m.name, m.description, m.status, m.totalRecipients, m.sentCount, m.openedCount, m.clickedCount, m.repliedCount, m.bouncedCount, m.unsubscribedCount,
-      m.subject, m.content, m.emailAccountId || null, m.templateId || null, toJson(m.contactIds), m.segmentId || null, toSqlDate(m.scheduledAt), now(), id
+      m.subject, m.content, m.emailAccountId || null, m.templateId || null, toJson(m.contactIds), m.segmentId || null, toSqlDate(m.scheduledAt), toJson(m.sendingConfig), now(), id
     );
     return this.getCampaign(id);
   }
