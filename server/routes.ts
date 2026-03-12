@@ -409,6 +409,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Step 2: Handle Google OAuth callback
+  // This handles BOTH the login flow AND the gmail-connect (add sender) flow.
+  // The 'purpose' field in the OAuth state differentiates them.
   app.get('/api/auth/google/callback', async (req: any, res) => {
     try {
       const { code, state, error: oauthError } = req.query;
@@ -422,12 +424,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.redirect('/?error=no_code');
       }
 
-      // Parse state to get the redirect URI used during initiation
+      // Parse state to get the redirect URI and purpose
       let redirectUri = `${getBaseUrlFromRequest(req)}/api/auth/google/callback`;
+      let purpose = 'login'; // default
+      let stateOrgId = '';
+      let returnTo = '';
       try {
         if (state) {
           const parsed = JSON.parse(state as string);
           if (parsed.redirectUri) redirectUri = parsed.redirectUri;
+          if (parsed.purpose) purpose = parsed.purpose;
+          if (parsed.orgId) stateOrgId = parsed.orgId;
+          if (parsed.returnTo) returnTo = parsed.returnTo;
         }
       } catch (e) { /* use default */ }
 
@@ -457,6 +465,74 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const firstName = googleUser.given_name || name.split(' ')[0] || '';
       const lastName = googleUser.family_name || name.split(' ').slice(1).join(' ') || '';
 
+      // ===== GMAIL-CONNECT (ADD SENDER) FLOW =====
+      // If purpose is 'add_sender', this came from /api/auth/gmail-connect
+      // Handle it like the old gmail-connect/callback: store per-sender tokens, create account, redirect
+      if (purpose === 'add_sender') {
+        console.log('[Auth] Gmail-connect flow for:', email);
+        const orgId = stateOrgId || (req.session as any)?.user?.organizationId || '';
+        
+        // Fallback: get first org if orgId not in state
+        let effectiveOrgId = orgId;
+        if (!effectiveOrgId) {
+          const orgIds = await storage.getAllOrganizationIds();
+          effectiveOrgId = orgIds[0] || '';
+        }
+
+        // Store per-sender tokens
+        if (tokens.access_token) {
+          await storage.setApiSetting(effectiveOrgId, `gmail_sender_${email}_access_token`, tokens.access_token);
+        }
+        if (tokens.refresh_token) {
+          await storage.setApiSetting(effectiveOrgId, `gmail_sender_${email}_refresh_token`, tokens.refresh_token);
+        }
+        if (tokens.expiry_date) {
+          await storage.setApiSetting(effectiveOrgId, `gmail_sender_${email}_token_expiry`, String(tokens.expiry_date));
+        }
+
+        // Also update primary gmail tokens if this is the primary account
+        const primaryEmail = (await storage.getApiSettings(effectiveOrgId)).gmail_user_email;
+        if (email === primaryEmail || !primaryEmail) {
+          await storage.setApiSetting(effectiveOrgId, 'gmail_access_token', tokens.access_token!);
+          if (tokens.refresh_token) await storage.setApiSetting(effectiveOrgId, 'gmail_refresh_token', tokens.refresh_token);
+          if (tokens.expiry_date) await storage.setApiSetting(effectiveOrgId, 'gmail_token_expiry', String(tokens.expiry_date));
+          if (!primaryEmail) await storage.setApiSetting(effectiveOrgId, 'gmail_user_email', email);
+        }
+
+        // Create or update email account
+        const existingAccounts = await storage.getEmailAccounts(effectiveOrgId);
+        const existingAccount = existingAccounts.find((a: any) => a.email === email);
+        if (!existingAccount) {
+          const currentUserId = (req.session as any)?.userId || req.cookies?.user_id || null;
+          await storage.createEmailAccount({
+            organizationId: effectiveOrgId,
+            userId: currentUserId,
+            provider: 'gmail',
+            email,
+            displayName: name,
+            smtpConfig: {
+              host: 'smtp.gmail.com', port: 587, secure: false,
+              auth: { user: email, pass: 'OAUTH_TOKEN' },
+              fromName: name, fromEmail: email, replyTo: '',
+              provider: 'gmail',
+            },
+            dailyLimit: getProviderDailyLimit('gmail'),
+            isActive: true,
+          });
+          console.log(`[Auth] New Gmail sender added via OAuth: ${email}`);
+        } else {
+          console.log(`[Auth] Gmail sender already exists: ${email}, tokens updated`);
+        }
+
+        // Redirect back to the page that initiated the flow
+        if (returnTo === 'contacts') {
+          return res.redirect('/?view=contacts&gmail_connected=' + encodeURIComponent(email));
+        } else {
+          return res.redirect('/?view=setup&gmail_connected=' + encodeURIComponent(email));
+        }
+      }
+
+      // ===== NORMAL LOGIN FLOW =====
       console.log('[Auth] Google OAuth success for:', email);
 
       // Upsert user in database
@@ -584,10 +660,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // ===== ADD GMAIL ACCOUNT VIA OAUTH (separate from login) =====
   // Initiates Google OAuth specifically to add a new Gmail sender account
+  // IMPORTANT: Uses the SAME redirect URI as the main login flow (/api/auth/google/callback)
+  // to avoid redirect_uri_mismatch errors. The 'purpose' field in state differentiates flows.
   app.get('/api/auth/gmail-connect', requireAuth, async (req: any, res) => {
     try {
       const baseUrl = getBaseUrlFromRequest(req);
-      const redirectUri = `${baseUrl}/api/auth/gmail-connect/callback`;
+      // Use the SAME callback as the main Google OAuth flow (registered in Google Cloud Console)
+      const redirectUri = `${baseUrl}/api/auth/google/callback`;
       const orgId = req.user.organizationId;
 
       // Look for Google OAuth credentials: user's org first, then superadmin's org, then all orgs, then env vars
@@ -655,135 +734,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Callback for adding Gmail sender account
+  // Legacy callback - kept for backward compatibility but /api/auth/google/callback now handles both flows
   app.get('/api/auth/gmail-connect/callback', async (req: any, res) => {
-    try {
-      const { code, state, error: oauthError } = req.query;
-      if (oauthError || !code) {
-        return res.redirect('/?view=setup&error=gmail_connect_denied');
-      }
-
-      let redirectUri = `${getBaseUrlFromRequest(req)}/api/auth/gmail-connect/callback`;
-      let orgId = '';
-      try {
-        if (state) {
-          const parsed = JSON.parse(state as string);
-          if (parsed.redirectUri) redirectUri = parsed.redirectUri;
-          if (parsed.orgId) orgId = parsed.orgId;
-        }
-      } catch (e) { /* use defaults */ }
-      
-      // Fallback: get first org if orgId not in state
-      if (!orgId) {
-        const orgIds = await storage.getAllOrganizationIds();
-        orgId = orgIds[0] || '';
-      }
-
-      let clientId = '';
-      let clientSecret = '';
-      try {
-        const settings = await storage.getApiSettings(orgId);
-        if (settings.google_oauth_client_id) {
-          clientId = settings.google_oauth_client_id;
-          clientSecret = settings.google_oauth_client_secret || '';
-        }
-      } catch (e) { /* ignore */ }
-
-      // Fallback: try superadmin's org, then all orgs, then env vars
-      if (!clientId || !clientSecret) {
-        try {
-          const superAdminOrgId = await storage.getSuperAdminOrgId();
-          if (superAdminOrgId && superAdminOrgId !== orgId) {
-            const superSettings = await storage.getApiSettings(superAdminOrgId);
-            if (superSettings.google_oauth_client_id) {
-              clientId = superSettings.google_oauth_client_id;
-              clientSecret = superSettings.google_oauth_client_secret || '';
-            }
-          }
-        } catch (e) { /* ignore */ }
-      }
-      if (!clientId || !clientSecret) {
-        const creds = await getStoredOAuthCredentials('google');
-        clientId = creds.clientId;
-        clientSecret = creds.clientSecret;
-      }
-
-      const oauth2Client = createOAuth2Client({ clientId, clientSecret, redirectUri });
-      const { tokens } = await oauth2Client.getToken(code as string);
-      oauth2Client.setCredentials(tokens);
-
-      // Get the email of the authorized account
-      const userInfoResp = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
-        headers: { Authorization: `Bearer ${tokens.access_token}` },
-      });
-      if (!userInfoResp.ok) {
-        return res.redirect('/?view=setup&error=gmail_userinfo_failed');
-      }
-      const googleUser = await userInfoResp.json() as any;
-      const gmailEmail = googleUser.email;
-      const displayName = googleUser.name || gmailEmail.split('@')[0];
-
-      // Store tokens for this specific email
-      await storage.setApiSetting(orgId, `gmail_sender_${gmailEmail}_access_token`, tokens.access_token!);
-      if (tokens.refresh_token) {
-        await storage.setApiSetting(orgId, `gmail_sender_${gmailEmail}_refresh_token`, tokens.refresh_token);
-      }
-      if (tokens.expiry_date) {
-        await storage.setApiSetting(orgId, `gmail_sender_${gmailEmail}_token_expiry`, String(tokens.expiry_date));
-      }
-
-      // Also update the primary gmail tokens if this is the primary account
-      const primaryEmail = (await storage.getApiSettings(orgId)).gmail_user_email;
-      if (gmailEmail === primaryEmail || !primaryEmail) {
-        await storage.setApiSetting(orgId, 'gmail_access_token', tokens.access_token!);
-        if (tokens.refresh_token) await storage.setApiSetting(orgId, 'gmail_refresh_token', tokens.refresh_token);
-        if (tokens.expiry_date) await storage.setApiSetting(orgId, 'gmail_token_expiry', String(tokens.expiry_date));
-        if (!primaryEmail) await storage.setApiSetting(orgId, 'gmail_user_email', gmailEmail);
-      }
-
-      // Check if account already exists
-      const existing = (await storage.getEmailAccounts(orgId)).find((a: any) => a.email === gmailEmail);
-      if (!existing) {
-        // Get the authenticated user's ID from session/cookies
-        const currentUserId = (req.session as any)?.userId || req.cookies?.user_id || null;
-        // Create email account
-        await storage.createEmailAccount({
-          organizationId: orgId,
-          userId: currentUserId,
-          provider: 'gmail',
-          email: gmailEmail,
-          displayName,
-          smtpConfig: {
-            host: 'smtp.gmail.com', port: 587, secure: false,
-            auth: { user: gmailEmail, pass: 'OAUTH_TOKEN' },
-            fromName: displayName, fromEmail: gmailEmail, replyTo: '',
-            provider: 'gmail',
-          },
-          dailyLimit: getProviderDailyLimit('gmail'),
-          isActive: true,
-        });
-        console.log(`[Auth] New Gmail sender added via OAuth: ${gmailEmail}`);
-      } else {
-        console.log(`[Auth] Gmail sender already exists: ${gmailEmail}, tokens updated`);
-      }
-
-      // Redirect back to the page that initiated the flow, or default to setup
-      let returnTo = '';
-      try {
-        if (state) {
-          const parsed = JSON.parse(state as string);
-          if (parsed.returnTo) returnTo = parsed.returnTo;
-        }
-      } catch (e) { /* ignore */ }
-
-      if (returnTo === 'contacts') {
-        res.redirect('/?view=contacts&gmail_connected=' + encodeURIComponent(gmailEmail));
-      } else {
-        res.redirect('/?view=setup&gmail_connected=' + encodeURIComponent(gmailEmail));
-      }
-    } catch (error) {
-      console.error('[Auth] Gmail connect callback error:', error);
-      res.redirect('/?view=setup&error=gmail_connect_callback_failed');
-    }
+    // Redirect to the main Google callback with the same query params
+    const queryString = Object.entries(req.query).map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`).join('&');
+    res.redirect(`/api/auth/google/callback?${queryString}`);
   });
 
   // ===== REAL MICROSOFT / OUTLOOK OAUTH 2.0 =====
