@@ -221,6 +221,19 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
     } catch (e) { /* ignore */ }
   };
 
+  const handleResetBounces = async () => {
+    setShowActions(false);
+    if (!confirm('This will remove false bounces caused by sending errors (OAuth/authentication issues) and restore affected contacts. Continue?')) return;
+    try {
+      const res = await fetch(`/api/campaigns/${campaignId}/reset-bounces`, { method: 'POST', credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        alert(`Reset complete: ${data.deletedMessages} false bounces removed, ${data.restoredContacts} contacts restored. Actual sent: ${data.actualSent}, actual bounces: ${data.actualBounces}`);
+        fetchDetail();
+      }
+    } catch (e) { /* ignore */ }
+  };
+
   const handleStop = async () => {
     setShowActions(false);
     if (!confirm('Are you sure you want to cancel this campaign?')) return;
@@ -473,6 +486,9 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
                   <ActionItem icon={<Pause className="h-3.5 w-3.5" />} label="Pause sending" disabled />
                 )}
                 <ActionItem icon={<Copy className="h-3.5 w-3.5" />} label="Duplicate" onClick={handleDuplicate} />
+                {(campaign.bouncedCount > 0) && (
+                  <ActionItem icon={<RefreshCw className="h-3.5 w-3.5" />} label="Reset false bounces" onClick={handleResetBounces} />
+                )}
                 <div className="border-t border-gray-100 my-1" />
                 {(isActive || isPaused) ? (
                   <ActionItem icon={<Ban className="h-3.5 w-3.5" />} label="Cancel" onClick={handleStop} destructive />

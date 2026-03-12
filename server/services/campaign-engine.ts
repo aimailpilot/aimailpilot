@@ -101,8 +101,24 @@ async function refreshGmailToken(orgId: string, senderEmail?: string): Promise<s
     return accessToken;
   }
   if (!refreshToken) return accessToken || null;
-  const clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID;
-  const clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET;
+  let clientId = settings.google_oauth_client_id || '';
+  let clientSecret = settings.google_oauth_client_secret || '';
+  
+  // Fallback: try superadmin's org for OAuth credentials
+  if (!clientId || !clientSecret) {
+    try {
+      const superAdminOrgId = await storage.getSuperAdminOrgId();
+      if (superAdminOrgId && superAdminOrgId !== orgId) {
+        const superSettings = await storage.getApiSettings(superAdminOrgId);
+        if (superSettings.google_oauth_client_id) {
+          clientId = superSettings.google_oauth_client_id;
+          clientSecret = superSettings.google_oauth_client_secret || '';
+        }
+      }
+    } catch (e) { /* ignore */ }
+  }
+  if (!clientId) clientId = process.env.GOOGLE_CLIENT_ID || '';
+  if (!clientSecret) clientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
   if (!clientId || !clientSecret) return accessToken || null;
 
   try {
@@ -147,8 +163,24 @@ async function refreshMicrosoftToken(orgId: string, senderEmail?: string): Promi
     return accessToken;
   }
   if (!refreshToken) return accessToken || null;
-  const clientId = settings.microsoft_oauth_client_id || process.env.MICROSOFT_CLIENT_ID;
-  const clientSecret = settings.microsoft_oauth_client_secret || process.env.MICROSOFT_CLIENT_SECRET;
+  let clientId = settings.microsoft_oauth_client_id || '';
+  let clientSecret = settings.microsoft_oauth_client_secret || '';
+
+  // Fallback: try superadmin's org for OAuth credentials
+  if (!clientId || !clientSecret) {
+    try {
+      const superAdminOrgId = await storage.getSuperAdminOrgId();
+      if (superAdminOrgId && superAdminOrgId !== orgId) {
+        const superSettings = await storage.getApiSettings(superAdminOrgId);
+        if (superSettings.microsoft_oauth_client_id) {
+          clientId = superSettings.microsoft_oauth_client_id;
+          clientSecret = superSettings.microsoft_oauth_client_secret || '';
+        }
+      }
+    } catch (e) { /* ignore */ }
+  }
+  if (!clientId) clientId = process.env.MICROSOFT_CLIENT_ID || '';
+  if (!clientSecret) clientSecret = process.env.MICROSOFT_CLIENT_SECRET || '';
   if (!clientId || !clientSecret) return accessToken || null;
 
   try {
@@ -286,6 +318,38 @@ export class CampaignEngine {
       contacts = contacts.filter(c => c.status !== 'unsubscribed' && c.status !== 'bounced');
 
       if (contacts.length === 0) return { success: false, error: 'No contacts to send to' };
+
+      // ===== CRITICAL FIX: Skip contacts that already have messages for this campaign/step =====
+      // This prevents duplicate sends when resuming a paused campaign
+      try {
+        const existingMessages = await storage.getCampaignMessages(campaignId, 100000, 0) as any[];
+        if (existingMessages && existingMessages.length > 0) {
+          // Build set of contactIds that already have a message for this step (sent, failed, or sending)
+          const alreadyProcessedContactIds = new Set(
+            existingMessages
+              .filter((m: any) => (m.stepNumber || 0) === stepNumber)
+              .map((m: any) => m.contactId)
+          );
+          
+          if (alreadyProcessedContactIds.size > 0) {
+            const beforeCount = contacts.length;
+            contacts = contacts.filter(c => !alreadyProcessedContactIds.has(c.id));
+            const skipped = beforeCount - contacts.length;
+            if (skipped > 0) {
+              console.log(`[CampaignEngine] Resuming campaign ${campaignId}: skipped ${skipped} already-processed contacts, ${contacts.length} remaining`);
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[CampaignEngine] Error checking existing messages, proceeding with all contacts:', e);
+      }
+
+      if (contacts.length === 0) {
+        // All contacts already processed — mark campaign as completed
+        console.log(`[CampaignEngine] All contacts already processed for campaign ${campaignId}, marking completed`);
+        await storage.updateCampaign(campaignId, { status: 'completed' });
+        return { success: true };
+      }
 
       // Get template if specified
       let subject = campaign.subject || '';
@@ -571,21 +635,54 @@ export class CampaignEngine {
             errorMessage: result.error,
           });
           
-          localBouncedCount++;
+          // Determine if this is a real bounce vs a sending infrastructure failure
+          // OAuth errors, token issues, API errors are NOT bounces — the email never left
+          const errorStr = (result.error || '').toLowerCase();
+          const isInfrastructureError = errorStr.includes('oauth') || errorStr.includes('token') ||
+            errorStr.includes('re-authenticate') || errorStr.includes('401') || errorStr.includes('403') ||
+            errorStr.includes('smtp') && errorStr.includes('auth') || errorStr.includes('credentials') ||
+            errorStr.includes('api error') || errorStr.includes('connection refused') ||
+            errorStr.includes('getaddrinfo') || errorStr.includes('timeout');
+          
+          if (isInfrastructureError) {
+            // Infrastructure/auth failure — do NOT count as bounce, do NOT mark contact as bounced
+            console.warn(`[CampaignEngine] Infrastructure error for ${contact.email}: ${result.error?.slice(0, 100)}`);
+            
+            // If ALL contacts are failing due to the same auth issue, pause the campaign to prevent mass failures
+            localBouncedCount++;
+            
+            // After 3 consecutive infrastructure failures, auto-pause the campaign
+            if (localBouncedCount >= 3 && localSentCount === 0) {
+              console.error(`[CampaignEngine] Auto-pausing campaign ${campaignId}: ${localBouncedCount} consecutive infrastructure failures. Error: ${result.error?.slice(0, 200)}`);
+              // Flush counts before pausing
+              const pauseCampaign = await storage.getCampaign(campaignId);
+              if (pauseCampaign) {
+                await storage.updateCampaign(campaignId, {
+                  status: 'paused',
+                  bouncedCount: (pauseCampaign.bouncedCount || 0) + localBouncedCount,
+                });
+              }
+              this.activeCampaigns.delete(campaignId);
+              return; // Stop sending
+            }
+          } else {
+            // Real bounce (invalid email, mailbox full, etc.) — count as bounce
+            localBouncedCount++;
 
-          // Create 'bounce' tracking event
-          await storage.createTrackingEvent({
-            type: 'bounce',
-            campaignId,
-            messageId: messageRecord.id,
-            contactId: contact.id,
-            trackingId,
-            stepNumber,
-            metadata: { error: result.error },
-          });
+            // Create 'bounce' tracking event
+            await storage.createTrackingEvent({
+              type: 'bounce',
+              campaignId,
+              messageId: messageRecord.id,
+              contactId: contact.id,
+              trackingId,
+              stepNumber,
+              metadata: { error: result.error },
+            });
 
-          // Tag the contact as bounced so they're excluded from future campaigns
-          try { await storage.updateContact(contact.id, { status: 'bounced' }); } catch (e) {}
+            // Only mark contact as bounced for real delivery failures
+            try { await storage.updateContact(contact.id, { status: 'bounced' }); } catch (e) {}
+          }
         }
         
         // Periodically flush campaign stats to DB (every FLUSH_INTERVAL emails)

@@ -2041,11 +2041,23 @@ Which account should I use and why? If I need to split across accounts, provide 
   });
 
   app.post('/api/campaigns/:id/resume', async (req: any, res) => {
+    // Set public base URL for tracking links (same as /send endpoint)
+    const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+    const host = req.headers['x-forwarded-host'] || req.headers['host'];
+    if (host && !host.includes('localhost')) {
+      campaignEngine.setPublicBaseUrl(`${proto}://${host}`);
+    }
+
     const success = campaignEngine.resumeCampaign(req.params.id);
     if (!success) {
-      // Re-start the campaign
-      const result = await campaignEngine.startCampaign({ campaignId: req.params.id });
-      return res.json(result);
+      // Campaign not in memory (e.g. server restarted while paused).
+      // Re-start the campaign — startCampaign now skips already-sent contacts.
+      try {
+        const result = await campaignEngine.startCampaign({ campaignId: req.params.id });
+        return res.json(result);
+      } catch (e) {
+        return res.status(500).json({ success: false, error: 'Failed to resume campaign' });
+      }
     }
     res.json({ success: true });
   });
@@ -2054,6 +2066,68 @@ Which account should I use and why? If I need to split across accounts, provide 
     campaignEngine.stopCampaign(req.params.id);
     await storage.updateCampaign(req.params.id, { status: 'paused' });
     res.json({ success: true });
+  });
+
+  // Reset campaign: clear failed messages and bounce counts (for campaigns with false bounces)
+  app.post('/api/campaigns/:id/reset-bounces', async (req: any, res) => {
+    try {
+      const campaign = await storage.getCampaign(req.params.id);
+      if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+
+      // Get all messages for this campaign
+      const messages = await storage.getCampaignMessages(req.params.id, 100000, 0) as any[];
+      
+      // Delete failed messages (these were never actually sent)
+      let deletedCount = 0;
+      let restoredContacts = 0;
+      for (const msg of messages) {
+        if (msg.status === 'failed') {
+          // Check if the failure was an infrastructure error (not a real bounce)
+          const errorStr = (msg.errorMessage || '').toLowerCase();
+          const isInfraError = errorStr.includes('oauth') || errorStr.includes('token') ||
+            errorStr.includes('re-authenticate') || errorStr.includes('401') || errorStr.includes('403') ||
+            errorStr.includes('api error') || errorStr.includes('connection refused');
+          
+          if (isInfraError) {
+            // Delete the failed message record
+            try { await storage.deleteCampaignMessage(msg.id); } catch (e) {}
+            deletedCount++;
+            
+            // Restore contact status from 'bounced' to 'active' if it was falsely bounced
+            if (msg.contactId) {
+              try {
+                const contact = await storage.getContact(msg.contactId);
+                if (contact && (contact as any).status === 'bounced') {
+                  await storage.updateContact(msg.contactId, { status: 'active' });
+                  restoredContacts++;
+                }
+              } catch (e) {}
+            }
+          }
+        }
+      }
+      
+      // Recalculate bounce count from remaining failed messages
+      const remainingMessages = await storage.getCampaignMessages(req.params.id, 100000, 0) as any[];
+      const actualBounces = remainingMessages.filter((m: any) => m.status === 'failed').length;
+      const actualSent = remainingMessages.filter((m: any) => m.status === 'sent').length;
+      
+      await storage.updateCampaign(req.params.id, {
+        bouncedCount: actualBounces,
+        sentCount: actualSent,
+      });
+      
+      res.json({
+        success: true,
+        deletedMessages: deletedCount,
+        restoredContacts,
+        actualBounces,
+        actualSent,
+      });
+    } catch (error) {
+      console.error('[Campaign] Reset bounces error:', error);
+      res.status(500).json({ error: 'Failed to reset bounces' });
+    }
   });
 
   app.post('/api/campaigns/:id/schedule', async (req: any, res) => {

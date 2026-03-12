@@ -1081,7 +1081,14 @@ export class DatabaseStorage {
   async updateCampaign(id: string, data: any) {
     const existing = await this.getCampaign(id);
     if (!existing) throw new Error('Campaign not found');
-    const m = { ...existing, ...data };
+    // Filter out undefined values to avoid overwriting existing fields with null/undefined
+    const cleanData: Record<string, any> = {};
+    for (const [key, value] of Object.entries(data)) {
+      if (value !== undefined) {
+        cleanData[key] = value;
+      }
+    }
+    const m = { ...existing, ...cleanData };
     db.prepare(`UPDATE campaigns SET name=?, description=?, status=?, totalRecipients=?, sentCount=?, openedCount=?, clickedCount=?, repliedCount=?, bouncedCount=?, unsubscribedCount=?, subject=?, content=?, emailAccountId=?, templateId=?, contactIds=?, segmentId=?, scheduledAt=?, updatedAt=? WHERE id=?`).run(
       m.name, m.description, m.status, m.totalRecipients, m.sentCount, m.openedCount, m.clickedCount, m.repliedCount, m.bouncedCount, m.unsubscribedCount,
       m.subject, m.content, m.emailAccountId || null, m.templateId || null, toJson(m.contactIds), m.segmentId || null, toSqlDate(m.scheduledAt), now(), id
@@ -1158,6 +1165,10 @@ export class DatabaseStorage {
       m.status, toSqlDate(m.sentAt), toSqlDate(m.openedAt), toSqlDate(m.clickedAt), toSqlDate(m.repliedAt), m.errorMessage || null, m.providerMessageId || null, id
     );
     return this.getCampaignMessage(id);
+  }
+  async deleteCampaignMessage(id: string) {
+    db.prepare('DELETE FROM messages WHERE id = ?').run(id);
+    return true;
   }
 
   // ========== Tracking Events ==========
