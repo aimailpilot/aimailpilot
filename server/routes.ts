@@ -1262,17 +1262,39 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
       const allAccounts = await storage.getEmailAccounts(req.user.organizationId);
       
-      // ALL org members can see ALL email accounts (shared resources for campaigns)
-      // The 'canManage' flag indicates if the user can edit/delete the account
-      // Don't return passwords in the response, but expose authMethod for OAuth detection
-      const safe = allAccounts.map((a: any) => {
+      // Members: only see their OWN accounts (ones they added/connected)
+      // Admins: see ALL accounts with owner info for management
+      const filtered = isAdmin 
+        ? allAccounts 
+        : allAccounts.filter((a: any) => 
+            a.userId === req.user.id || 
+            (a.email && req.user.email && a.email.toLowerCase() === req.user.email.toLowerCase())
+          );
+      
+      // For admin view, look up who added each account
+      let memberLookup: Record<string, any> = {};
+      if (isAdmin) {
+        try {
+          const members = await storage.getOrgMembers(req.user.organizationId);
+          for (const m of members as any[]) {
+            memberLookup[m.userId] = { name: m.firstName || m.email?.split('@')[0] || 'Unknown', email: m.email, role: m.role };
+          }
+        } catch (e) { /* ignore */ }
+      }
+      
+      const safe = filtered.map((a: any) => {
         const isOAuth = a.smtpConfig?.auth?.pass === 'OAUTH_TOKEN';
         const canManage = isAdmin || a.userId === req.user.id || 
           (a.email && req.user.email && a.email.toLowerCase() === req.user.email.toLowerCase());
+        const ownerInfo = isAdmin && a.userId ? memberLookup[a.userId] : null;
         return {
           ...a,
           authMethod: isOAuth ? 'oauth' : 'smtp',
           canManage,
+          // Admin-only: show who added this account
+          addedByName: ownerInfo?.name || null,
+          addedByEmail: ownerInfo?.email || null,
+          addedByRole: ownerInfo?.role || null,
           smtpConfig: a.smtpConfig ? {
             ...a.smtpConfig,
             auth: { user: a.smtpConfig.auth?.user, pass: isOAuth ? 'OAUTH_TOKEN' : '••••••••' }
@@ -1765,8 +1787,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get('/api/email-accounts/quota-summary', async (req: any, res) => {
     try {
-      // All org members can see quota summary (email accounts are shared resources)
-      const accounts = await storage.getEmailAccounts(req.user.organizationId);
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      const allAccounts = await storage.getEmailAccounts(req.user.organizationId);
+      
+      // Members only see quota for their own accounts; admins see all
+      const accounts = isAdmin 
+        ? allAccounts 
+        : allAccounts.filter((a: any) => 
+            a.userId === req.user.id || 
+            (a.email && req.user.email && a.email.toLowerCase() === req.user.email.toLowerCase())
+          );
+      
       const accountQuotas = accounts.map((a: any) => {
         const quota = smtpEmailService.getDailyQuota(a.id, a.provider);
         return {
@@ -1847,7 +1878,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post('/api/email-accounts/recommend', async (req: any, res) => {
     try {
       const { recipientCount, campaignType, campaignName } = req.body;
-      const accounts = await storage.getEmailAccounts(req.user.organizationId);
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      const allAccounts = await storage.getEmailAccounts(req.user.organizationId);
+      
+      // Members only see recommendations for their own accounts
+      const accounts = isAdmin 
+        ? allAccounts 
+        : allAccounts.filter((a: any) => 
+            a.userId === req.user.id || 
+            (a.email && req.user.email && a.email.toLowerCase() === req.user.email.toLowerCase())
+          );
 
       const accountQuotas = accounts.map((a: any) => {
         const quota = smtpEmailService.getDailyQuota(a.id, a.provider);

@@ -712,7 +712,7 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                     onChange={e => { setEmailAccountId(e.target.value); setAiRecBanner(null); }}
                     className="flex-1 text-sm font-medium text-gray-900 bg-transparent border-0 outline-none cursor-pointer appearance-none"
                   >
-                    {emailAccounts.length === 0 && <option value="">No accounts -- add one in Accounts</option>}
+                    {emailAccounts.length === 0 && <option value="">No email accounts — go to Tools → Email Accounts to add one</option>}
                     {emailAccounts.map(a => {
                       const q = accountQuotas[a.id];
                       return (

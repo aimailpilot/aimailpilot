@@ -558,16 +558,13 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
                       </div>
                       <div className="text-xs text-gray-400 mb-2">
                         {account.email}
-                        {account.userId && (() => {
-                          const owner = teamMembers.find((m: any) => m.userId === account.userId);
-                          if (owner) return (
-                            <span className="ml-2 inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 bg-indigo-50 text-indigo-600 rounded-full font-medium">
-                              <User className="h-2.5 w-2.5" />
-                              {owner.firstName || owner.email?.split('@')[0]}
-                            </span>
-                          );
-                          return null;
-                        })()}
+                        {account.addedByName && (
+                          <span className="ml-2 inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 bg-indigo-50 text-indigo-600 rounded-full font-medium">
+                            <User className="h-2.5 w-2.5" />
+                            {account.addedByName}
+                            {account.addedByRole && <span className="text-indigo-400">({account.addedByRole})</span>}
+                          </span>
+                        )}
                       </div>
 
                       {/* SMTP & Quota Info */}
