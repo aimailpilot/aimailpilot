@@ -10,7 +10,7 @@ import { gmailReplyTracker } from "./services/gmail-reply-tracker";
 import { outlookReplyTracker } from "./services/outlook-reply-tracker";
 import { calculateContactRating, batchRecalculateRatings } from "./services/email-rating-engine";
 import { OAuth2Client } from 'google-auth-library';
-// Sales agent removed to prevent Azure container crash from LLM package imports
+
 
 // In-memory user store for simplified authentication
 const loggedInUsers = new Set<string>();
@@ -1126,7 +1126,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.use('/api/campaigns', requireAuth);
   app.use('/api/dashboard', requireAuth);
   app.use('/api/contacts', requireAuth);
-  // app.use('/api/sales', requireAuth); // Sales agent removed
   app.use('/api/templates', requireAuth);
   app.use('/api/analytics', requireAuth);
   app.use('/api/email-accounts', requireAuth);
@@ -3313,15 +3312,7 @@ Example response:
     }
   });
 
-  // ========== SALES AGENT / LEADS (temporarily removed) ==========
-  // Removed to fix Azure ContainerTimeout crash. LLM packages cause startup failure.
-  // Routes return 503 to gracefully handle any frontend requests.
-  app.get('/api/sales/leads', (req: any, res) => {
-    res.status(503).json({ message: 'Sales agent is temporarily unavailable', leads: [], limit: 0 });
-  });
-  app.post('/api/sales/leads/:contactId/draft-email', (req: any, res) => {
-    res.status(503).json({ message: 'Sales agent is temporarily unavailable' });
-  });
+
 
   // ========== CONTACT SEGMENTS ==========
 

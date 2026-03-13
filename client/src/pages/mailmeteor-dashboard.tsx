@@ -35,9 +35,8 @@ import AccountSettings from "./account-settings";
 import UnifiedInbox from "./unified-inbox";
 import TeamManagement from "./team-management";
 import SuperAdminDashboard from "./superadmin-dashboard";
-import SalesLeadsPage from "./sales-leads";
 
-type ViewType = 'campaigns' | 'templates' | 'contacts' | 'leads' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings' | 'team' | 'superadmin';
+type ViewType = 'campaigns' | 'templates' | 'contacts' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings' | 'team' | 'superadmin';
 
 // Live Tracking Feed component - fetches real tracking events
 function LiveTrackingFeed({ dashStats }: { dashStats: any }) {
@@ -339,7 +338,6 @@ export default function MailMeteorDashboard() {
     { key: 'inbox' as ViewType, label: 'Inbox', icon: Inbox, count: inboxUnread },
     { key: 'templates' as ViewType, label: 'Templates', icon: FileText },
     { key: 'contacts' as ViewType, label: 'Contacts', icon: Users },
-    { key: 'leads' as ViewType, label: 'Leads (AI)', icon: Target },
   ];
 
   const insightsSubItems = [
@@ -899,8 +897,6 @@ export default function MailMeteorDashboard() {
           {/* Contacts */}
           {viewMode === 'dashboard' && currentView === 'contacts' && <ContactsManager />}
 
-          {/* Sales Leads (AI agent) */}
-          {viewMode === 'dashboard' && currentView === 'leads' && <SalesLeadsPage />}
 
           {/* Follow-ups */}
           {viewMode === 'dashboard' && currentView === 'followups' && <FollowupSequenceBuilder />}
