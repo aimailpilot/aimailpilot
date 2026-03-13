@@ -1738,15 +1738,31 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                   <div>
                     <Label className="text-sm text-gray-600 mb-1.5 block">Select a list</Label>
                     <select className="w-full h-10 border border-gray-200 rounded-md px-3 text-sm"
-                      value={contactListFilter} onChange={e => {
+                      value={contactListFilter} onChange={async (e) => {
                         setContactListFilter(e.target.value);
                         if (e.target.value === 'all') {
                           const validContacts = contacts.filter((c: any) => c.status !== 'unsubscribed');
                           setSelectedContacts(validContacts.map((c: any) => c.id));
                         } else if (e.target.value && e.target.value !== '') {
-                          // Filter contacts by listId
-                          const listContacts = contacts.filter((c: any) => c.listId === e.target.value && c.status !== 'unsubscribed');
-                          setSelectedContacts(listContacts.map((c: any) => c.id));
+                          // Fetch contacts for this specific list (ensures members can see list data)
+                          try {
+                            const listRes = await fetch(`/api/contacts?listId=${e.target.value}&limit=100000`, { credentials: 'include' });
+                            if (listRes.ok) {
+                              const listData = await listRes.json();
+                              const listContacts = (listData.contacts || listData || []).filter((c: any) => c.status !== 'unsubscribed');
+                              // Merge fetched list contacts into main contacts array (avoid duplicates)
+                              setContacts(prev => {
+                                const existingIds = new Set(prev.map((c: any) => c.id));
+                                const newContacts = listContacts.filter((c: any) => !existingIds.has(c.id));
+                                return [...prev, ...newContacts];
+                              });
+                              setSelectedContacts(listContacts.map((c: any) => c.id));
+                            }
+                          } catch (err) {
+                            // Fallback to filtering existing contacts
+                            const listContacts = contacts.filter((c: any) => c.listId === e.target.value && c.status !== 'unsubscribed');
+                            setSelectedContacts(listContacts.map((c: any) => c.id));
+                          }
                         } else { setSelectedContacts([]); }
                       }}>
                       <option value="">Select a list</option>

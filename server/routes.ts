@@ -136,12 +136,31 @@ const requireAuth = async (req: any, res: any, next: any) => {
     return res.status(400).json({ error: 'No organization found. Please create or join an organization.' });
   }
   
+  // Get user email/name reliably - from session, or fallback to DB
+  let userEmail = sessionUser?.email;
+  let userName = sessionUser?.name;
+  let userFirstName = '';
+  let userLastName = '';
+  if (!userEmail || userEmail === 'unknown') {
+    try {
+      const dbUser = await storage.getUser(userId) as any;
+      if (dbUser) {
+        userEmail = dbUser.email || 'unknown';
+        userName = dbUser.name || dbUser.email || 'Unknown';
+        userFirstName = dbUser.firstName || '';
+        userLastName = dbUser.lastName || '';
+      }
+    } catch (e) { /* ignore */ }
+  }
+
   req.user = { 
     id: userId, 
     organizationId: orgId, 
     role: orgRole,
-    email: sessionUser?.email || 'unknown',
-    name: sessionUser?.name || 'Unknown',
+    email: userEmail || 'unknown',
+    name: userName || 'Unknown',
+    firstName: userFirstName,
+    lastName: userLastName,
     isSuperAdmin: false,
   };
   // Check superadmin status
@@ -1190,10 +1209,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
       const allAccounts = await storage.getEmailAccounts(req.user.organizationId);
       
-      // Non-admin members only see their OWN accounts; admins see all
+      // Non-admin members see accounts where:
+      // 1. userId matches (they created/connected it), OR
+      // 2. email matches their login email (their own Gmail connected by admin or OAuth)
+      // Admins see all accounts
       const accounts = isAdmin 
         ? allAccounts 
-        : allAccounts.filter((a: any) => a.userId === req.user.id);
+        : allAccounts.filter((a: any) => 
+            a.userId === req.user.id || 
+            (a.email && req.user.email && a.email.toLowerCase() === req.user.email.toLowerCase())
+          );
       
       // Don't return passwords in the response, but expose authMethod for OAuth detection
       const safe = accounts.map((a: any) => {
@@ -2696,10 +2721,15 @@ Which account should I use and why? If I need to split across accounts, provide 
       let contacts;
       let total;
 
-      // If admin is filtering by a specific member
+      // KEY RULE: When viewing a specific list (listId is set), ALL org members 
+      // can see ALL contacts in that list. The assignedTo filter only applies 
+      // when browsing "All" contacts without a list filter.
+      // This ensures members who upload a list can see their data,
+      // and members who get a list allocated can also see it.
+
+      // If admin is filtering by a specific member (assignment view)
       if (isAdmin && assignedTo) {
         if (assignedTo === 'unassigned') {
-          // Get unassigned contacts
           const allContacts = await storage.getContacts(req.user.organizationId, 100000, 0, filters);
           contacts = allContacts.filter((c: any) => !c.assignedTo);
           total = contacts.length;
@@ -2710,14 +2740,15 @@ Which account should I use and why? If I need to split across accounts, provide 
             : await storage.getContactsForUser(req.user.organizationId, assignedTo, limit, offset, filters);
           total = await storage.getContactsCountForUser(req.user.organizationId, assignedTo, filters);
         }
-      } else if (!isAdmin) {
-        // Members only see contacts assigned to them
+      } else if (!isAdmin && !listId) {
+        // Non-admin viewing "All" tab (no list filter) — only see assigned contacts
         contacts = search
           ? await storage.searchContactsForUser(req.user.organizationId, req.user.id, search, filters)
           : await storage.getContactsForUser(req.user.organizationId, req.user.id, limit, offset, filters);
         total = await storage.getContactsCountForUser(req.user.organizationId, req.user.id, filters);
       } else {
-        // Admin with no filter — see all org contacts
+        // Admin (no assignment filter) OR anyone viewing a specific list
+        // Show all contacts in scope
         contacts = search
           ? await storage.searchContacts(req.user.organizationId, search, filters)
           : await storage.getContacts(req.user.organizationId, limit, offset, filters);
