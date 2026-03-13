@@ -36,6 +36,10 @@ interface EmailAccount {
     replyTo: string;
   };
   createdAt: string;
+  canManage?: boolean;
+  addedByName?: string;
+  addedByEmail?: string;
+  addedByRole?: string;
 }
 
 interface SmtpPreset {
@@ -57,6 +61,9 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
   const [gmailUseSmtp, setGmailUseSmtp] = useState(false); // false = OAuth, true = SMTP manual
   const [userRole, setUserRole] = useState<string>('admin');
   const [teamMembers, setTeamMembers] = useState<any[]>([]);
+  const [assigningId, setAssigningId] = useState<string | null>(null);
+
+  const isAdminOrOwner = userRole === 'owner' || userRole === 'admin';
 
   const [formProvider, setFormProvider] = useState('gmail');
   const [formEmail, setFormEmail] = useState('');
@@ -332,6 +339,27 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
     } catch (e) { console.error('Delete failed:', e); }
   };
 
+  const handleAssignAccount = async (accountId: string, targetUserId: string) => {
+    setAssigningId(accountId);
+    try {
+      const res = await fetch(`/api/email-accounts/${accountId}/assign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ targetUserId }),
+      });
+      if (res.ok) {
+        await fetchAccounts();
+      } else {
+        const err = await res.json();
+        alert(err.message || 'Failed to assign account');
+      }
+    } catch (e) {
+      console.error('Assign failed:', e);
+    }
+    setAssigningId(null);
+  };
+
   const resetForm = () => {
     setFormProvider('gmail');
     setFormEmail('');
@@ -558,12 +586,34 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
                       </div>
                       <div className="text-xs text-gray-400 mb-2">
                         {account.email}
-                        {account.addedByName && (
+                        {isAdminOrOwner && account.addedByName && (
                           <span className="ml-2 inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 bg-indigo-50 text-indigo-600 rounded-full font-medium">
                             <User className="h-2.5 w-2.5" />
                             {account.addedByName}
                             {account.addedByRole && <span className="text-indigo-400">({account.addedByRole})</span>}
                           </span>
+                        )}
+                        {isAdminOrOwner && teamMembers.length > 0 && (
+                          <select
+                            className="ml-2 text-[10px] px-1.5 py-0.5 bg-gray-50 border border-gray-200 rounded text-gray-600 cursor-pointer hover:bg-gray-100"
+                            value={account.userId || ''}
+                            disabled={assigningId === account.id}
+                            onChange={(e) => {
+                              if (e.target.value && e.target.value !== account.userId) {
+                                const targetMember = teamMembers.find((m: any) => m.userId === e.target.value);
+                                if (confirm(`Assign ${account.email} to ${targetMember?.email || 'this member'}? They will see this account in their Email Accounts page.`)) {
+                                  handleAssignAccount(account.id, e.target.value);
+                                }
+                              }
+                            }}
+                          >
+                            <option value="">Assign to member...</option>
+                            {teamMembers.map((m: any) => (
+                              <option key={m.userId} value={m.userId}>
+                                {m.firstName || m.email?.split('@')[0]} ({m.role})
+                              </option>
+                            ))}
+                          </select>
                         )}
                       </div>
 

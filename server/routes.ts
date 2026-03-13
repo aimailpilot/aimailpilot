@@ -1174,16 +1174,52 @@ export async function registerRoutes(app: Express): Promise<Server> {
         hasMicrosoftOAuth = !!mId;
       } catch (e) { /* ignore */ }
       
+      // Debug: show email account ownership data (no sensitive info)
+      let emailAccountDebug: any[] = [];
+      try {
+        for (const orgId of orgIds) {
+          const accounts = await storage.getEmailAccounts(orgId);
+          for (const a of accounts as any[]) {
+            emailAccountDebug.push({
+              id: a.id,
+              email: a.email,
+              userId: a.userId || null,
+              provider: a.provider,
+              orgId: a.organizationId,
+            });
+          }
+        }
+      } catch (e) { /* ignore */ }
+      
+      // Debug: show org members (no sensitive info)
+      let memberDebug: any[] = [];
+      try {
+        for (const orgId of orgIds) {
+          const members = await storage.getOrgMembers(orgId);
+          for (const m of members as any[]) {
+            memberDebug.push({
+              userId: m.userId,
+              email: m.email,
+              role: m.role,
+              orgId: m.organizationId,
+            });
+          }
+        }
+      } catch (e) { /* ignore */ }
+      
       res.json({
         timestamp: new Date().toISOString(),
         environment: process.env.WEBSITE_SITE_NAME ? 'azure' : 'local',
         azureSiteName: process.env.WEBSITE_SITE_NAME || null,
         nodeVersion: process.version,
+        codeVersion: 'v2-strict-member-filter',
         dbStats: {
           totalUsers: stats.totalUsers,
           totalOrgs: orgIds.length,
           superAdmins: stats.superAdmins,
         },
+        emailAccounts: emailAccountDebug,
+        members: memberDebug,
         oauth: {
           googleConfigured: hasGoogleOAuth,
           microsoftConfigured: hasMicrosoftOAuth,
@@ -1262,14 +1298,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
       const allAccounts = await storage.getEmailAccounts(req.user.organizationId);
       
-      // Members: only see their OWN accounts (ones they added/connected)
-      // Admins: see ALL accounts with owner info for management
-      const filtered = isAdmin 
-        ? allAccounts 
-        : allAccounts.filter((a: any) => 
-            a.userId === req.user.id || 
-            (a.email && req.user.email && a.email.toLowerCase() === req.user.email.toLowerCase())
-          );
+      console.log(`[EmailAccounts] User: ${req.user.email} (id=${req.user.id}, role=${req.user.role}), total accounts: ${allAccounts.length}`);
+      
+      // STRICT MEMBER FILTERING:
+      // Members can ONLY see accounts they personally added (matched by userId)
+      // The email-match fallback is REMOVED to prevent members seeing admin-added accounts
+      // Admins/Owners see ALL accounts with owner info for management
+      let filtered: any[];
+      if (isAdmin) {
+        filtered = allAccounts;
+      } else {
+        // Strict: only accounts where userId matches the logged-in member's id
+        filtered = allAccounts.filter((a: any) => a.userId === req.user.id);
+        console.log(`[EmailAccounts] Member ${req.user.email}: showing ${filtered.length}/${allAccounts.length} accounts (strict userId match)`);
+      }
       
       // For admin view, look up who added each account
       let memberLookup: Record<string, any> = {};
@@ -1284,8 +1326,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       const safe = filtered.map((a: any) => {
         const isOAuth = a.smtpConfig?.auth?.pass === 'OAUTH_TOKEN';
-        const canManage = isAdmin || a.userId === req.user.id || 
-          (a.email && req.user.email && a.email.toLowerCase() === req.user.email.toLowerCase());
+        // canManage: admins manage all, members manage only their own
+        const canManage = isAdmin || a.userId === req.user.id;
         const ownerInfo = isAdmin && a.userId ? memberLookup[a.userId] : null;
         return {
           ...a,
@@ -1303,6 +1345,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
       res.json(safe);
     } catch (error) {
+      console.error('[EmailAccounts] Error:', error);
       res.status(500).json({ message: 'Failed to fetch email accounts' });
     }
   });
@@ -1703,10 +1746,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const existing = await storage.getEmailAccount(req.params.id);
       if (!existing) return res.status(404).json({ message: 'Not found' });
 
-      // Permission check: admins can edit any, members can only edit their own
+      // Permission check: admins can edit any, members can only edit their own (strict userId)
       const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
-      const isOwner = existing.userId === req.user.id || 
-        (existing.email && req.user.email && existing.email.toLowerCase() === req.user.email.toLowerCase());
+      const isOwner = existing.userId === req.user.id;
       if (!isAdmin && !isOwner) {
         return res.status(403).json({ message: 'You can only edit your own email accounts' });
       }
@@ -1746,10 +1788,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const account = await storage.getEmailAccount(req.params.id);
       if (!account) return res.status(404).json({ message: 'Email account not found' });
       
-      // Permission check: admins can delete any, members can only delete their own
+      // Permission check: admins can delete any, members can only delete their own (strict userId)
       const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
-      const isOwner = account.userId === req.user.id || 
-        (account.email && req.user.email && account.email.toLowerCase() === req.user.email.toLowerCase());
+      const isOwner = account.userId === req.user.id;
       if (!isAdmin && !isOwner) {
         return res.status(403).json({ message: 'You can only delete your own email accounts' });
       }
@@ -1790,13 +1831,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
       const allAccounts = await storage.getEmailAccounts(req.user.organizationId);
       
-      // Members only see quota for their own accounts; admins see all
+      // STRICT: Members only see quota for their own accounts (userId match only)
       const accounts = isAdmin 
         ? allAccounts 
-        : allAccounts.filter((a: any) => 
-            a.userId === req.user.id || 
-            (a.email && req.user.email && a.email.toLowerCase() === req.user.email.toLowerCase())
-          );
+        : allAccounts.filter((a: any) => a.userId === req.user.id);
       
       const accountQuotas = accounts.map((a: any) => {
         const quota = smtpEmailService.getDailyQuota(a.id, a.provider);
@@ -1875,19 +1913,48 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Admin endpoint: assign/reassign an email account to a specific member
+  app.post('/api/email-accounts/:id/assign', async (req: any, res) => {
+    try {
+      const role = req.user.role;
+      if (role !== 'owner' && role !== 'admin') {
+        return res.status(403).json({ message: 'Admin access required' });
+      }
+      const { targetUserId } = req.body;
+      if (!targetUserId) {
+        return res.status(400).json({ message: 'targetUserId is required' });
+      }
+      const account = await storage.getEmailAccount(req.params.id);
+      if (!account) return res.status(404).json({ message: 'Email account not found' });
+      
+      // Verify target user is in the same org
+      const members = await storage.getOrgMembers(req.user.organizationId);
+      const targetMember = (members as any[]).find((m: any) => m.userId === targetUserId);
+      if (!targetMember) {
+        return res.status(400).json({ message: 'Target user not found in this organization' });
+      }
+      
+      // Update userId using dedicated storage method
+      await storage.assignEmailAccountToUser(req.params.id, targetUserId);
+      
+      console.log(`[Admin] Email account ${account.email} (${req.params.id}) reassigned to user ${targetMember.email} (${targetUserId}) by ${req.user.email}`);
+      res.json({ success: true, message: `Account ${account.email} assigned to ${targetMember.email}` });
+    } catch (error) {
+      console.error('[Admin] Failed to assign email account:', error);
+      res.status(500).json({ message: 'Failed to assign email account' });
+    }
+  });
+
   app.post('/api/email-accounts/recommend', async (req: any, res) => {
     try {
       const { recipientCount, campaignType, campaignName } = req.body;
       const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
       const allAccounts = await storage.getEmailAccounts(req.user.organizationId);
       
-      // Members only see recommendations for their own accounts
+      // STRICT: Members only see recommendations for their own accounts (userId match only)
       const accounts = isAdmin 
         ? allAccounts 
-        : allAccounts.filter((a: any) => 
-            a.userId === req.user.id || 
-            (a.email && req.user.email && a.email.toLowerCase() === req.user.email.toLowerCase())
-          );
+        : allAccounts.filter((a: any) => a.userId === req.user.id);
 
       const accountQuotas = accounts.map((a: any) => {
         const quota = smtpEmailService.getDailyQuota(a.id, a.provider);

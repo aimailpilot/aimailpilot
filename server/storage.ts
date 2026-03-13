@@ -498,20 +498,9 @@ try {
 // ========== Email account ownership migration: add userId ==========
 try { db.exec(`ALTER TABLE email_accounts ADD COLUMN userId TEXT`); } catch (e) { /* already exists */ }
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_email_accounts_user ON email_accounts(userId)`); } catch (e) {}
-// Backfill: assign existing email accounts to the org owner/admin if userId is null
-try {
-  const unowned = db.prepare(`SELECT ea.id, ea.organizationId FROM email_accounts ea WHERE ea.userId IS NULL`).all() as any[];
-  if (unowned.length > 0) {
-    for (const acct of unowned) {
-      // Find the org owner or first admin
-      const owner = db.prepare(`SELECT userId FROM org_members WHERE organizationId = ? AND role IN ('owner','admin') ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END LIMIT 1`).get(acct.organizationId) as any;
-      if (owner) {
-        db.prepare('UPDATE email_accounts SET userId = ? WHERE id = ?').run(owner.userId, acct.id);
-      }
-    }
-    console.log(`[Migration] Assigned userId to ${unowned.length} email account(s)`);
-  }
-} catch (e) { /* ignore */ }
+// NOTE: We do NOT auto-assign unowned accounts to the admin anymore.
+// Admins can reassign accounts via the /api/email-accounts/:id/assign endpoint.
+// Accounts with NULL userId are only visible to admins for reassignment.
 
 // ========== Critical indexes for high-volume (10-20K emails/day) ==========
 // Messages: needed for follow-up engine (getCampaignMessages filter by contactId+stepNumber)
@@ -756,7 +745,12 @@ export class DatabaseStorage {
     );
     return this.getEmailAccount(id);
   }
+
   async deleteEmailAccount(id: string) { db.prepare('DELETE FROM email_accounts WHERE id = ?').run(id); return true; }
+  async assignEmailAccountToUser(id: string, userId: string) {
+    db.prepare('UPDATE email_accounts SET userId = ?, updatedAt = ? WHERE id = ?').run(userId, now(), id);
+    return this.getEmailAccount(id);
+  }
   
   // Daily send limit helpers
   async incrementDailySent(id: string, count: number = 1) {
