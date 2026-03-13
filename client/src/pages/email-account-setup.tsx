@@ -351,12 +351,10 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
       if (res.ok) {
         await fetchAccounts();
       } else {
-        const err = await res.json();
-        alert(err.message || 'Failed to assign account');
+        const data = await res.json();
+        alert(data.message || 'Failed to assign account');
       }
-    } catch (e) {
-      console.error('Assign failed:', e);
-    }
+    } catch (e) { console.error('Assign failed:', e); }
     setAssigningId(null);
   };
 
