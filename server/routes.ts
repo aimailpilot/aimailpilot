@@ -230,7 +230,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
           if (settings.microsoft_oauth_client_id) { clientId = settings.microsoft_oauth_client_id; clientSecret = settings.microsoft_oauth_client_secret || ''; break; }
         }
       }
-    } catch (e) { /* ignore */ }
+    } catch (e) {
+      console.error(`[OAuth] Failed to load ${provider} credentials from DB:`, e instanceof Error ? e.message : e);
+    }
     
     if (provider === 'google') {
       return { clientId: clientId || process.env.GOOGLE_CLIENT_ID || '', clientSecret: clientSecret || process.env.GOOGLE_CLIENT_SECRET || '' };
@@ -326,26 +328,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const stats = await storage.getPlatformStats();
       const hasUsers = stats.totalUsers > 0;
       const hasSuperAdmin = stats.superAdmins > 0;
+      
+      // CRITICAL: If users exist in the DB, the system was already set up.
+      // Don't show setup wizard even if OAuth credentials can't be found
+      // (they may have been lost due to Azure container restart with ephemeral storage).
+      // Instead, redirect to login page and let admin re-configure OAuth in settings.
+      const needsSetup = !hasOAuth && !hasUsers;
+      
       res.json({
-        needsSetup: !hasOAuth,
+        needsSetup,
         hasUsers,
         hasSuperAdmin,
         googleConfigured: !!googleId,
         microsoftConfigured: !!msId,
       });
     } catch (error) {
+      console.error('[Setup] Status check failed:', error instanceof Error ? error.message : error);
       res.json({ needsSetup: true, hasUsers: false, hasSuperAdmin: false, googleConfigured: false, microsoftConfigured: false });
     }
   });
 
-  // Initial setup: Save OAuth credentials (only when no OAuth is configured yet)
+  // Initial setup: Save OAuth credentials (only when no OAuth is configured AND no users exist)
   app.post('/api/setup/oauth', async (req, res) => {
     try {
-      // Check if OAuth is already configured - if so, block this endpoint
+      // Check if system is already set up (OAuth configured OR users exist)
       const { clientId: existingGoogle } = await getStoredOAuthCredentials('google');
       const { clientId: existingMs } = await getStoredOAuthCredentials('microsoft');
+      const stats = await storage.getPlatformStats();
+      const hasUsers = stats.totalUsers > 0;
+      
       if (existingGoogle || existingMs) {
         return res.status(403).json({ error: 'OAuth is already configured. Use the admin settings page to modify.' });
+      }
+      if (hasUsers) {
+        return res.status(403).json({ error: 'System already has users. OAuth can only be reconfigured from admin settings.' });
       }
 
       const { provider, clientId, clientSecret } = req.body;
@@ -1142,6 +1158,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get('/api/test', (req, res) => {
     res.json({ message: 'AImailPilot server is running!', timestamp: new Date().toISOString() });
+  });
+
+  // Diagnostic endpoint for debugging Azure deployment issues
+  app.get('/api/diagnostics', async (_req, res) => {
+    try {
+      const stats = await storage.getPlatformStats();
+      const orgIds = await storage.getAllOrganizationIds();
+      let hasGoogleOAuth = false;
+      let hasMicrosoftOAuth = false;
+      try {
+        const { clientId: gId } = await getStoredOAuthCredentials('google');
+        const { clientId: mId } = await getStoredOAuthCredentials('microsoft');
+        hasGoogleOAuth = !!gId;
+        hasMicrosoftOAuth = !!mId;
+      } catch (e) { /* ignore */ }
+      
+      res.json({
+        timestamp: new Date().toISOString(),
+        environment: process.env.WEBSITE_SITE_NAME ? 'azure' : 'local',
+        azureSiteName: process.env.WEBSITE_SITE_NAME || null,
+        nodeVersion: process.version,
+        dbStats: {
+          totalUsers: stats.totalUsers,
+          totalOrgs: orgIds.length,
+          superAdmins: stats.superAdmins,
+        },
+        oauth: {
+          googleConfigured: hasGoogleOAuth,
+          microsoftConfigured: hasMicrosoftOAuth,
+        },
+      });
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+    }
   });
 
   // Apply auth middleware

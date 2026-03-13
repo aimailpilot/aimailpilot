@@ -11,13 +11,19 @@ const __dirname = path.dirname(__filename);
 // On Azure App Service, use /home/data for persistent storage
 // Locally, use ./data relative to project root
 function getDbPath(): string {
-  // Check if running on Azure (WEBSITE_SITE_NAME env var is set by Azure)
-  if (process.env.WEBSITE_SITE_NAME) {
+  // Check if running on Azure (multiple env vars possible)
+  const isAzure = process.env.WEBSITE_SITE_NAME || process.env.AZURE_WEBAPP_NAME || 
+                  process.env.APPSETTING_WEBSITE_SITE_NAME || fs.existsSync('/home/site/wwwroot');
+  
+  if (isAzure) {
     const azureDataDir = '/home/data';
     if (!fs.existsSync(azureDataDir)) {
       fs.mkdirSync(azureDataDir, { recursive: true });
     }
-    return path.join(azureDataDir, 'aimailpilot.db');
+    const dbPath = path.join(azureDataDir, 'aimailpilot.db');
+    const dbExists = fs.existsSync(dbPath);
+    console.log(`[DB] Azure detected (WEBSITE_SITE_NAME=${process.env.WEBSITE_SITE_NAME || 'unset'}), DB path: ${dbPath}, exists: ${dbExists}`);
+    return dbPath;
   }
   // Local development
   const localPath = path.resolve(__dirname, '..', 'data', 'aimailpilot.db');
