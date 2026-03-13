@@ -72,6 +72,8 @@ interface ContactList {
   source: string;
   headers: string[];
   contactCount: number;
+  uploadedBy?: string;
+  uploadedByName?: string;
   createdAt: string;
 }
 
@@ -134,6 +136,11 @@ export default function ContactsManager() {
   const [userRole, setUserRole] = useState('admin');
   const [assignFilterUserId, setAssignFilterUserId] = useState('');
   const [assignmentStats, setAssignmentStats] = useState<any>(null);
+  
+  // Assign list to member dialog state
+  const [showAssignListDialog, setShowAssignListDialog] = useState(false);
+  const [assignListId, setAssignListId] = useState('');
+  const [assignListTargetUserId, setAssignListTargetUserId] = useState('');
 
   // Create list dialog state
   const [showCreateListDialog, setShowCreateListDialog] = useState(false);
@@ -309,6 +316,27 @@ export default function ContactsManager() {
     } catch (e) { console.error('Failed to auto-assign:', e); }
   };
 
+  const handleAssignListToMember = async () => {
+    if (!assignListId || !assignListTargetUserId) return;
+    try {
+      const res = await fetch(`/api/contact-lists/${assignListId}/assign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ userId: assignListTargetUserId }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        alert(`Successfully assigned ${data.assigned} contacts to team member.`);
+        setShowAssignListDialog(false);
+        setAssignListId('');
+        setAssignListTargetUserId('');
+        await fetchContacts();
+        await fetchTeamMembers();
+      }
+    } catch (e) { console.error('Failed to assign list:', e); }
+  };
+
   const handleAddContact = async () => {
     setFormError('');
     if (!formEmail) { setFormError('Email is required'); return; }
@@ -389,10 +417,11 @@ export default function ContactsManager() {
 
 
   const handleDeleteList = async (listId: string) => {
-    if (!confirm('Delete this list? Contacts will remain but lose their list association.')) return;
-    await fetch(`/api/contact-lists/${listId}`, { method: 'DELETE', credentials: 'include' });
+    const deleteContacts = confirm('Delete this list AND all its contacts?\n\nClick OK to delete list + contacts (allows re-import).\nClick Cancel to keep contacts.');
+    await fetch(`/api/contact-lists/${listId}?deleteContacts=${deleteContacts}`, { method: 'DELETE', credentials: 'include' });
     if (activeListId === listId) setActiveListId(null);
     await fetchContactLists();
+    if (deleteContacts) await fetchContacts();
   };
 
   const handleRenameList = async () => {
@@ -1058,9 +1087,10 @@ export default function ContactsManager() {
             ) : (
               <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden">
                 {/* List table header */}
-                <div className="grid grid-cols-[1fr_120px_120px_120px_48px] gap-4 px-5 py-3 border-b border-gray-100 bg-gray-50/60">
+                <div className="grid grid-cols-[1fr_100px_100px_100px_100px_48px] gap-4 px-5 py-3 border-b border-gray-100 bg-gray-50/60">
                   <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">List Name</div>
                   <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Source</div>
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Uploaded By</div>
                   <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 text-center">Contacts</div>
                   <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Created</div>
                   <div></div>
@@ -1070,7 +1100,7 @@ export default function ContactsManager() {
                   .map(list => (
                   <div
                     key={list.id}
-                    className="grid grid-cols-[1fr_120px_120px_120px_48px] gap-4 px-5 py-3.5 border-b border-gray-50 items-center hover:bg-blue-50/30 cursor-pointer transition-all group"
+                    className="grid grid-cols-[1fr_100px_100px_100px_100px_48px] gap-4 px-5 py-3.5 border-b border-gray-50 items-center hover:bg-blue-50/30 cursor-pointer transition-all group"
                     onClick={() => setActiveListId(list.id)}
                   >
                     <div className="flex items-center gap-3 min-w-0">
@@ -1095,6 +1125,9 @@ export default function ContactsManager() {
                         {list.source === 'google_sheets' ? 'Google Sheets' : list.source === 'csv' ? 'CSV' : list.source || 'Manual'}
                       </Badge>
                     </div>
+                    <div className="text-xs text-gray-500 truncate">
+                      {list.uploadedByName || <span className="text-gray-300">-</span>}
+                    </div>
                     <div className="text-center">
                       <span className="text-sm font-bold text-gray-900">{list.contactCount}</span>
                     </div>
@@ -1106,13 +1139,21 @@ export default function ContactsManager() {
                             <MoreHorizontal className="h-3.5 w-3.5" />
                           </Button>
                         </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end" className="w-40">
+                        <DropdownMenuContent align="end" className="w-48">
                           <DropdownMenuItem onClick={() => setActiveListId(list.id)}>
                             <Eye className="h-3.5 w-3.5 mr-2" /> View Contacts
                           </DropdownMenuItem>
                           <DropdownMenuItem onClick={() => { setRenameListId(list.id); setRenameListValue(list.name); setShowRenameListDialog(true); }}>
                             <Pencil className="h-3.5 w-3.5 mr-2" /> Rename
                           </DropdownMenuItem>
+                          {isAdmin && teamMembers.length > 0 && (
+                            <>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem onClick={() => { setAssignListId(list.id); setAssignListTargetUserId(''); setShowAssignListDialog(true); }}>
+                                <UserPlus className="h-3.5 w-3.5 mr-2" /> Allocate to Member
+                              </DropdownMenuItem>
+                            </>
+                          )}
                           <DropdownMenuSeparator />
                           <DropdownMenuItem onClick={() => handleDeleteList(list.id)} className="text-red-600">
                             <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete
@@ -2005,6 +2046,69 @@ export default function ContactsManager() {
             >
               <UserPlus className="h-4 w-4 mr-1.5" />
               Assign {selectedIds.length} Contact{selectedIds.length !== 1 ? 's' : ''}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ==================== ASSIGN LIST TO MEMBER DIALOG ==================== */}
+      <Dialog open={showAssignListDialog} onOpenChange={setShowAssignListDialog}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <div className="bg-green-50 p-2 rounded-lg"><UserPlus className="h-4 w-4 text-green-600" /></div>
+              Allocate Entire List to Member
+            </DialogTitle>
+            <DialogDescription className="text-sm text-gray-500">
+              All contacts in "{contactLists.find(l => l.id === assignListId)?.name}" will be assigned to the selected team member.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div>
+              <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2 block">Select Team Member</Label>
+              <div className="space-y-2 max-h-[300px] overflow-y-auto">
+                {teamMembers.filter((m: any) => m.role !== 'viewer').map((member: any) => (
+                  <button
+                    key={member.userId}
+                    onClick={() => setAssignListTargetUserId(member.userId)}
+                    className={`w-full flex items-center gap-3 p-3 rounded-lg border transition-all text-left ${
+                      assignListTargetUserId === member.userId
+                        ? 'border-green-300 bg-green-50 ring-1 ring-green-200'
+                        : 'border-gray-200 hover:bg-gray-50'
+                    }`}
+                  >
+                    <Avatar className="h-9 w-9">
+                      <AvatarFallback className={`bg-gradient-to-br ${getAvatarColor(member.email)} text-white text-xs font-semibold`}>
+                        {(member.firstName || member.email?.charAt(0) || '?').charAt(0).toUpperCase()}
+                        {(member.lastName || '').charAt(0).toUpperCase()}
+                      </AvatarFallback>
+                    </Avatar>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium text-gray-900">
+                        {member.firstName || member.email?.split('@')[0]} {member.lastName || ''}
+                      </div>
+                      <div className="text-xs text-gray-400 truncate">{member.email}</div>
+                    </div>
+                    <Badge variant="secondary" className="text-[10px] capitalize">
+                      {member.role}
+                    </Badge>
+                    {assignListTargetUserId === member.userId && (
+                      <CheckCircle className="h-4 w-4 text-green-600 flex-shrink-0" />
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setShowAssignListDialog(false); setAssignListTargetUserId(''); }}>Cancel</Button>
+            <Button
+              onClick={handleAssignListToMember}
+              disabled={!assignListTargetUserId}
+              className="bg-green-600 hover:bg-green-700"
+            >
+              <UserPlus className="h-4 w-4 mr-1.5" />
+              Allocate Entire List
             </Button>
           </DialogFooter>
         </DialogContent>

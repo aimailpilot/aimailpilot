@@ -2644,12 +2644,15 @@ Which account should I use and why? If I need to split across accounts, provide 
     try {
       const { name } = req.body;
       if (!name || !name.trim()) return res.status(400).json({ message: 'Name is required' });
+      const uploaderName = [req.user.firstName, req.user.lastName].filter(Boolean).join(' ') || req.user.email?.split('@')[0] || 'Unknown';
       const list = await storage.createContactList({
         organizationId: req.user.organizationId,
         name: name.trim(),
         source: 'manual',
         headers: [],
         contactCount: 0,
+        uploadedBy: req.user.id,
+        uploadedByName: uploaderName,
       });
       res.status(201).json(list);
     } catch (error) {
@@ -2669,7 +2672,8 @@ Which account should I use and why? If I need to split across accounts, provide 
 
   app.delete('/api/contact-lists/:id', async (req: any, res) => {
     try {
-      await storage.deleteContactList(req.params.id);
+      const deleteContacts = req.query.deleteContacts === 'true';
+      await storage.deleteContactList(req.params.id, deleteContacts);
       res.json({ success: true });
     } catch (error) {
       res.status(500).json({ message: 'Failed to delete contact list' });
@@ -2761,6 +2765,9 @@ Which account should I use and why? If I need to split across accounts, provide 
         return res.status(400).json({ message: 'contacts array is required' });
       }
 
+      const uploaderName = [req.user.firstName, req.user.lastName].filter(Boolean).join(' ') || req.user.email?.split('@')[0] || 'Unknown';
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+
       // Determine which list to use: existing or create new
       let contactListRecord: any = null;
       let targetListId: string | null = null;
@@ -2777,6 +2784,8 @@ Which account should I use and why? If I need to split across accounts, provide 
           source: source || 'csv',
           headers: headers || [],
           contactCount: 0, // Will update after import
+          uploadedBy: req.user.id,
+          uploadedByName: uploaderName,
         });
         targetListId = contactListRecord?.id || null;
       }
@@ -2893,6 +2902,14 @@ Which account should I use and why? If I need to split across accounts, provide 
       const results = await storage.createContactsBulk(contactsToCreate, targetListId);
       const imported = results.filter((r: any) => !r._skipped).length;
       const skipped = results.filter((r: any) => r._skipped).length;
+
+      // Auto-assign imported contacts to the uploader (members get their own data)
+      if (imported > 0 && !isAdmin) {
+        const newContactIds = results.filter((r: any) => !r._skipped && r.id).map((r: any) => r.id);
+        if (newContactIds.length > 0) {
+          await storage.assignContactsToUser(newContactIds, req.user.id, req.user.organizationId);
+        }
+      }
 
       // Update the contact list count
       if (contactListRecord && targetListId) {
@@ -3188,6 +3205,26 @@ Example response:
   });
 
   // ========== LEAD ALLOCATION (CRM) ==========
+
+  // Assign entire contact list to a team member (admin/owner only)
+  app.post('/api/contact-lists/:id/assign', async (req: any, res) => {
+    try {
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      if (!isAdmin) return res.status(403).json({ message: 'Only admins can assign leads' });
+      
+      const { userId } = req.body;
+      if (!userId) return res.status(400).json({ message: 'userId is required' });
+      
+      // Verify the target user is a member of this org
+      const membership = await storage.getOrgMember(req.user.organizationId, userId);
+      if (!membership) return res.status(400).json({ message: 'Target user is not a member of this organization' });
+      
+      const count = await storage.assignContactsByList(req.params.id, userId, req.user.organizationId);
+      res.json({ success: true, assigned: count });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to assign list contacts' });
+    }
+  });
   
   // Assign contacts to a team member (admin/owner only)
   app.post('/api/contacts/assign', async (req: any, res) => {

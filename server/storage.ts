@@ -450,6 +450,10 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_city ON contacts(city)`);
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_seniority ON contacts(seniority)`); } catch (e) {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_email_rating ON contacts(emailRating)`); } catch (e) {}
 
+// ========== Contact Lists migration: add uploadedBy columns ==========
+try { db.exec(`ALTER TABLE contact_lists ADD COLUMN uploadedBy TEXT`); } catch (e) { /* already exists */ }
+try { db.exec(`ALTER TABLE contact_lists ADD COLUMN uploadedByName TEXT`); } catch (e) { /* already exists */ }
+
 // ========== Multitenancy migration: ensure all users have org_member records ==========
 try {
   const usersWithoutMembership = db.prepare(`
@@ -789,8 +793,8 @@ export class DatabaseStorage {
   async getContactList(id: string) { return hydrateList(db.prepare('SELECT * FROM contact_lists WHERE id = ?').get(id)); }
   async createContactList(list: any) {
     const id = genId(); const ts2 = now();
-    db.prepare('INSERT INTO contact_lists (id, organizationId, name, source, headers, contactCount, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
-      id, list.organizationId, list.name, list.source || 'csv', toJson(list.headers || []), list.contactCount || 0, ts2, ts2
+    db.prepare('INSERT INTO contact_lists (id, organizationId, name, source, headers, contactCount, uploadedBy, uploadedByName, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, list.organizationId, list.name, list.source || 'csv', toJson(list.headers || []), list.contactCount || 0, list.uploadedBy || null, list.uploadedByName || null, ts2, ts2
     );
     return this.getContactList(id);
   }
@@ -801,7 +805,13 @@ export class DatabaseStorage {
     db.prepare('UPDATE contact_lists SET name=?, contactCount=?, updatedAt=? WHERE id=?').run(m.name, m.contactCount, now(), id);
     return this.getContactList(id);
   }
-  async deleteContactList(id: string) { db.prepare('DELETE FROM contact_lists WHERE id = ?').run(id); return true; }
+  async deleteContactList(id: string, deleteContacts = false) {
+    if (deleteContacts) {
+      db.prepare('DELETE FROM contacts WHERE listId = ?').run(id);
+    }
+    db.prepare('DELETE FROM contact_lists WHERE id = ?').run(id);
+    return true;
+  }
 
   // ========== Contacts ==========
   async getContacts(organizationId: string, limit = 50, offset = 0, filters?: { listId?: string }) {
@@ -1041,6 +1051,11 @@ export class DatabaseStorage {
     });
     transaction();
     return contactIds.length;
+  }
+  async assignContactsByList(listId: string, userId: string, organizationId: string) {
+    const ts = now();
+    const result = db.prepare('UPDATE contacts SET assignedTo = ?, updatedAt = ? WHERE listId = ? AND organizationId = ?').run(userId, ts, listId, organizationId);
+    return result.changes;
   }
   async getContactsForUser(organizationId: string, userId: string, limit = 50, offset = 0, filters?: { listId?: string }) {
     if (filters?.listId) {
