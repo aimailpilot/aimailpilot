@@ -402,12 +402,8 @@ export class CampaignEngine {
    */
   async startCampaign(options: CampaignSendOptions): Promise<{ success: boolean; error?: string }> {
     const { campaignId, delayBetweenEmails = 2000, batchSize = 10, stepNumber = 0, sendingConfig: optSendingConfig } = options;
-
-    // SAFETY: Enforce minimum delay of 2 seconds to prevent runaway sending
-    const MIN_DELAY_MS = 2000;
-    const safeDelay = Math.max(delayBetweenEmails, MIN_DELAY_MS);
     
-    console.log(`[CampaignEngine] startCampaign called: campaignId=${campaignId}, requestedDelay=${delayBetweenEmails}ms, safeDelay=${safeDelay}ms, batchSize=${batchSize}`);
+    console.log(`[CampaignEngine] startCampaign called: campaignId=${campaignId}, delayBetweenEmails=${delayBetweenEmails}ms, batchSize=${batchSize}, hasSendingConfig=${!!optSendingConfig}`);
 
     try {
       const campaign = await storage.getCampaign(campaignId);
@@ -501,13 +497,25 @@ export class CampaignEngine {
 
       // Load sendingConfig: prefer what was passed in options, then from the campaign DB record
       const savedConfig: SendingConfig | null = campaign.sendingConfig || null;
-      const activeSendingConfig: SendingConfig = optSendingConfig || savedConfig || { delayBetweenEmails: safeDelay };
+      const activeSendingConfig: SendingConfig = optSendingConfig || savedConfig || { delayBetweenEmails };
       
-      // Use the configured delay from sendingConfig if available, otherwise use the parameter
-      // SAFETY: Always enforce minimum delay
-      const effectiveDelay = Math.max(activeSendingConfig.delayBetweenEmails || safeDelay, MIN_DELAY_MS);
+      // Use the configured delay from sendingConfig — this is the user's chosen delay (e.g. 2 minutes = 120000ms)
+      // Fallback chain: sendingConfig.delayBetweenEmails > options.delayBetweenEmails > 2000ms default
+      const effectiveDelay = activeSendingConfig.delayBetweenEmails || delayBetweenEmails;
       
-      console.log(`[CampaignEngine] Starting campaign ${campaignId} with delay=${effectiveDelay}ms (from config: ${activeSendingConfig.delayBetweenEmails}ms), autopilot=${activeSendingConfig.autopilot?.enabled ? 'ON' : 'OFF'}, maxPerDay=${activeSendingConfig.autopilot?.maxPerDay || 'unlimited'}, contacts=${contacts.length}`);
+      const ap = activeSendingConfig.autopilot;
+      console.log(`[CampaignEngine] ===== CAMPAIGN START =====`);
+      console.log(`[CampaignEngine] Campaign: ${campaignId}, Contacts: ${contacts.length}`);
+      console.log(`[CampaignEngine] Delay between emails: ${effectiveDelay}ms (${(effectiveDelay / 1000).toFixed(0)}s)`);
+      console.log(`[CampaignEngine] Autopilot: ${ap?.enabled ? 'ON' : 'OFF'}`);
+      if (ap?.enabled) {
+        console.log(`[CampaignEngine]   Max per day: ${ap.maxPerDay || 'unlimited'}`);
+        console.log(`[CampaignEngine]   Delay config: ${ap.delayBetween} ${ap.delayUnit}`);
+        console.log(`[CampaignEngine]   Timezone offset: ${activeSendingConfig.timezoneOffset ?? 'not set'}`);
+        const enabledDays = Object.entries(ap.days || {}).filter(([_, d]) => d.enabled).map(([name, d]) => `${name}(${d.startTime}-${d.endTime})`);
+        console.log(`[CampaignEngine]   Send days: ${enabledDays.join(', ')}`);
+      }
+      console.log(`[CampaignEngine] ==========================`);
 
       // Send emails in batches with throttling
       this.sendBatched(campaignId, contacts, emailAccount, subject, content, effectiveDelay, batchSize, stepNumber, activeSendingConfig);
@@ -553,7 +561,10 @@ export class CampaignEngine {
 
     // Track daily sends for autopilot maxPerDay enforcement (separate from account daily limit)
     let autopilotDailySent = 0;
-    const autopilotMaxPerDay = sendingConfig?.autopilot?.enabled ? (sendingConfig.autopilot.maxPerDay || 500) : Infinity;
+    const autopilotMaxPerDay = sendingConfig?.autopilot?.enabled ? (sendingConfig.autopilot.maxPerDay || Infinity) : Infinity;
+    
+    console.log(`[CampaignEngine] Campaign ${campaignId} send loop starting: delay=${delay}ms, accountDailyLimit=${accountDailyLimit}, autopilotMaxPerDay=${autopilotMaxPerDay === Infinity ? 'unlimited' : autopilotMaxPerDay}, autopilotEnabled=${sendingConfig?.autopilot?.enabled || false}`);
+    console.log(`[CampaignEngine] Campaign ${campaignId} sendingConfig: ${JSON.stringify(sendingConfig)?.slice(0, 500)}`);
 
     for (let i = 0; i < contacts.length; i++) {
       // Check if paused or stopped
@@ -943,13 +954,14 @@ export class CampaignEngine {
         tracker.progress = i + 1;
       }
 
-      // Throttle between emails — enforce minimum delay
+      // Throttle between emails using the configured delay
       if (i < contacts.length - 1) {
-        const actualDelay = Math.max(delay, 2000); // Minimum 2 seconds between emails
-        if (i === 0 || i % 50 === 0) {
-          console.log(`[CampaignEngine] Campaign ${campaignId}: Throttling ${actualDelay}ms between email ${i + 1} and ${i + 2} of ${contacts.length}`);
+        if (i === 0) {
+          console.log(`[CampaignEngine] Campaign ${campaignId}: First email sent. Waiting ${delay}ms (${(delay / 1000).toFixed(0)}s) before next email.`);
+        } else if (i % 25 === 0) {
+          console.log(`[CampaignEngine] Campaign ${campaignId}: Progress ${i + 1}/${contacts.length}. Delay=${delay}ms between emails.`);
         }
-        await new Promise(resolve => setTimeout(resolve, actualDelay));
+        await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
 

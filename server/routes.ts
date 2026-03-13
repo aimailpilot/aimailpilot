@@ -1988,8 +1988,12 @@ Which account should I use and why? If I need to split across accounts, provide 
         batchSize: req.body.batchSize || 10,
         autopilot: req.body.autopilot || null,
         // Store the user's timezone offset so we can calculate their local time
-        timezoneOffset: req.body.timezoneOffset || null,
+        timezoneOffset: req.body.timezoneOffset ?? null,
       };
+      
+      console.log(`[Campaign] SEND ${req.params.id}: delay=${delayBetweenEmails}ms, autopilot=${sendingConfig.autopilot?.enabled ? 'ON' : 'OFF'}, maxPerDay=${sendingConfig.autopilot?.maxPerDay || 'N/A'}, tz=${sendingConfig.timezoneOffset}`);
+      console.log(`[Campaign] Full sendingConfig: ${JSON.stringify(sendingConfig).slice(0, 500)}`);
+      
       await storage.updateCampaign(req.params.id, { sendingConfig });
 
       const result = await campaignEngine.startCampaign({
@@ -2024,19 +2028,30 @@ Which account should I use and why? If I need to split across accounts, provide 
     if (!success) {
       // Campaign not in memory (e.g. server restarted while paused).
       // Re-start — startCampaign skips already-sent contacts.
-      // Read saved sending config to restore delay/throttle/time-window settings.
+      // Read saved sending config to restore ALL settings: delay, time windows, maxPerDay.
       try {
         const campaign = await storage.getCampaign(req.params.id);
-        const savedConfig = campaign?.sendingConfig || {};
-        const delayBetweenEmails = savedConfig.delayBetweenEmails || 2000;
+        if (!campaign) return res.status(404).json({ success: false, error: 'Campaign not found' });
+        
+        const savedConfig = campaign.sendingConfig;
+        if (!savedConfig || !savedConfig.delayBetweenEmails) {
+          console.warn(`[Campaign] WARNING: No sendingConfig found for campaign ${req.params.id}. Using defaults.`);
+        }
+        
+        const delayBetweenEmails = savedConfig?.delayBetweenEmails || 2000;
 
-        console.log(`[Campaign] Resuming ${req.params.id} with saved config: delay=${delayBetweenEmails}ms, autopilot=${savedConfig.autopilot?.enabled ? 'ON' : 'OFF'}, maxPerDay=${savedConfig.autopilot?.maxPerDay || 'unlimited'}`);
+        console.log(`[Campaign] Resuming ${req.params.id} from DB config:`);
+        console.log(`[Campaign]   delay=${delayBetweenEmails}ms (${(delayBetweenEmails/1000).toFixed(0)}s)`);
+        console.log(`[Campaign]   autopilot=${savedConfig?.autopilot?.enabled ? 'ON' : 'OFF'}`);
+        console.log(`[Campaign]   maxPerDay=${savedConfig?.autopilot?.maxPerDay || 'unlimited'}`);
+        console.log(`[Campaign]   timezoneOffset=${savedConfig?.timezoneOffset ?? 'not set'}`);
+        console.log(`[Campaign]   Full sendingConfig: ${JSON.stringify(savedConfig)?.slice(0, 500)}`);
 
         const result = await campaignEngine.startCampaign({
           campaignId: req.params.id,
           delayBetweenEmails,
-          batchSize: savedConfig.batchSize || 10,
-          sendingConfig: savedConfig,
+          batchSize: savedConfig?.batchSize || 10,
+          sendingConfig: savedConfig || undefined,
         });
         return res.json(result);
       } catch (e) {
