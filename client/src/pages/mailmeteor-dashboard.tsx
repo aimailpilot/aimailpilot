@@ -345,10 +345,10 @@ export default function MailMeteorDashboard() {
     { key: 'tracking' as ViewType, label: 'Live Feed', icon: Activity },
   ];
 
-  const toolsSubItems = isAdminOrOwner ? [
-    { key: 'followups' as ViewType, label: 'Automations', icon: Zap },
+  const toolsSubItems = [
+    ...(isAdminOrOwner ? [{ key: 'followups' as ViewType, label: 'Automations', icon: Zap }] : []),
     { key: 'setup' as ViewType, label: 'Email Accounts', icon: Inbox },
-  ] : [];
+  ];
 
   const sidebarBottomItems = [
     ...(isSuperAdmin ? [{ key: 'superadmin' as ViewType, label: 'SuperAdmin', icon: Shield }] : []),
