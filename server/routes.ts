@@ -10,20 +10,7 @@ import { gmailReplyTracker } from "./services/gmail-reply-tracker";
 import { outlookReplyTracker } from "./services/outlook-reply-tracker";
 import { calculateContactRating, batchRecalculateRatings } from "./services/email-rating-engine";
 import { OAuth2Client } from 'google-auth-library';
-// Lazy import for sales-agent to avoid crashing if LLM packages are missing
-let _salesAgentService: any = null;
-function getSalesAgentService() {
-  if (!_salesAgentService) {
-    try {
-      const { salesAgentService } = require("./services/sales-agent");
-      _salesAgentService = salesAgentService;
-    } catch (e) {
-      console.warn('[SalesAgent] Failed to load sales agent service:', (e as Error).message);
-      return null;
-    }
-  }
-  return _salesAgentService;
-}
+// Sales agent removed to prevent Azure container crash from LLM package imports
 
 // In-memory user store for simplified authentication
 const loggedInUsers = new Set<string>();
@@ -499,6 +486,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
         if (tokens.refresh_token) {
           await storage.setApiSetting(effectiveOrgId, `gmail_sender_${email}_refresh_token`, tokens.refresh_token);
+        } else {
+          console.warn('[Auth] No refresh_token returned on re-auth for', email, '- Google may not have issued one. prompt:consent should force this.');
         }
         if (tokens.expiry_date) {
           await storage.setApiSetting(effectiveOrgId, `gmail_sender_${email}_token_expiry`, String(tokens.expiry_date));
@@ -506,6 +495,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         // ALWAYS update org-level tokens on re-auth so Google Sheets API etc. use the freshest token
         // (which includes all requested scopes like spreadsheets.readonly)
+        console.log('[Auth] Updating org-level tokens. access_token:', tokens.access_token ? 'yes' : 'no', 'refresh_token:', tokens.refresh_token ? 'yes' : 'no', 'expiry:', tokens.expiry_date);
         await storage.setApiSetting(effectiveOrgId, 'gmail_access_token', tokens.access_token!);
         if (tokens.refresh_token) await storage.setApiSetting(effectiveOrgId, 'gmail_refresh_token', tokens.refresh_token);
         if (tokens.expiry_date) await storage.setApiSetting(effectiveOrgId, 'gmail_token_expiry', String(tokens.expiry_date));
@@ -1136,7 +1126,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.use('/api/campaigns', requireAuth);
   app.use('/api/dashboard', requireAuth);
   app.use('/api/contacts', requireAuth);
-  app.use('/api/sales', requireAuth);
+  // app.use('/api/sales', requireAuth); // Sales agent removed
   app.use('/api/templates', requireAuth);
   app.use('/api/analytics', requireAuth);
   app.use('/api/email-accounts', requireAuth);
@@ -3308,64 +3298,14 @@ Example response:
     }
   });
 
-  // ========== SALES AGENT / LEADS (non-breaking, additive) ==========
-  // Uses existing contacts + LLM to provide a simple AI sales helper.
-  // All routes are scoped by organization via requireAuth.
-
-  // Get prioritized leads for the current organization
-  app.get('/api/sales/leads', async (req: any, res) => {
-    try {
-      const svc = getSalesAgentService();
-      if (!svc) {
-        return res.status(503).json({ message: 'Sales agent service is not available. LLM packages may not be configured.' });
-      }
-      const limit = req.query.limit ? parseInt(req.query.limit, 10) : 100;
-      const status = (req.query.status as string) || 'all';
-      const minScore = req.query.minScore ? parseInt(req.query.minScore as string, 10) : undefined;
-
-      const leads = await svc.getPrioritizedLeads(req.user.organizationId, {
-        limit,
-        status,
-        minScore,
-      });
-
-      res.json({ leads, limit });
-    } catch (error) {
-      console.error('[SalesAgent] Failed to get leads:', error);
-      res.status(500).json({ message: 'Failed to fetch leads' });
-    }
+  // ========== SALES AGENT / LEADS (temporarily removed) ==========
+  // Removed to fix Azure ContainerTimeout crash. LLM packages cause startup failure.
+  // Routes return 503 to gracefully handle any frontend requests.
+  app.get('/api/sales/leads', (req: any, res) => {
+    res.status(503).json({ message: 'Sales agent is temporarily unavailable', leads: [], limit: 0 });
   });
-
-  // Draft an AI email for a specific lead/contact
-  app.post('/api/sales/leads/:contactId/draft-email', async (req: any, res) => {
-    try {
-      const svc = getSalesAgentService();
-      if (!svc) {
-        return res.status(503).json({ message: 'Sales agent service is not available. LLM packages may not be configured.' });
-      }
-      const contactId = req.params.contactId as string;
-      const { productDescription, tone, callToAction, templateContent } = req.body || {};
-
-      if (!productDescription || typeof productDescription !== 'string') {
-        return res.status(400).json({ message: 'productDescription is required' });
-      }
-
-      const result = await svc.draftEmailForLead(
-        req.user.organizationId,
-        contactId,
-        {
-          productDescription,
-          tone,
-          callToAction,
-          templateContent,
-        }
-      );
-
-      res.json(result);
-    } catch (error) {
-      console.error('[SalesAgent] Failed to draft email:', error);
-      res.status(500).json({ message: 'Failed to draft email for lead' });
-    }
+  app.post('/api/sales/leads/:contactId/draft-email', (req: any, res) => {
+    res.status(503).json({ message: 'Sales agent is temporarily unavailable' });
   });
 
   // ========== CONTACT SEGMENTS ==========
@@ -4472,6 +4412,32 @@ Example response:
     }
   }
 
+  // Diagnostic endpoint: check what scopes the current Google token has
+  app.get('/api/debug/google-token', requireAuth, async (req: any, res) => {
+    try {
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      const accessToken = await getGoogleAccessToken(req.user.organizationId);
+      if (!accessToken) {
+        return res.json({ error: 'No access token available', hasRefresh: !!settings.gmail_refresh_token });
+      }
+      // Check token info using Google's tokeninfo endpoint
+      const tokenInfoRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${accessToken}`);
+      const tokenInfo = await tokenInfoRes.json() as any;
+      return res.json({
+        scope: tokenInfo.scope || 'unknown',
+        email: tokenInfo.email || 'unknown',
+        expires_in: tokenInfo.expires_in,
+        hasSpreadsheetScope: (tokenInfo.scope || '').includes('spreadsheets'),
+        hasGmailSendScope: (tokenInfo.scope || '').includes('gmail.send'),
+        orgLevelToken: !!settings.gmail_access_token,
+        orgLevelRefresh: !!settings.gmail_refresh_token,
+        orgLevelExpiry: settings.gmail_token_expiry ? new Date(parseInt(settings.gmail_token_expiry)).toISOString() : null,
+      });
+    } catch (e) {
+      return res.status(500).json({ error: (e as Error).message });
+    }
+  });
+
   // Fetch spreadsheet info (sheet names) using Google Sheets API v4 with OAuth, fallback to public CSV export
   // NOTE: Wrapped with .then().catch() for Express 4 async safety
   app.post('/api/sheets/fetch-info', (req: any, res, next) => {
@@ -4493,8 +4459,27 @@ Example response:
 
       // Strategy 1: Try Google Sheets API v4 with user's OAuth token
       const accessToken = await getGoogleAccessToken(req.user.organizationId);
+      console.log('[sheets/fetch-info] Got access token:', accessToken ? 'yes (length=' + accessToken.length + ')' : 'no');
       if (accessToken) {
         try {
+          // First verify the token has spreadsheet scope
+          const tokenInfoRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${accessToken}`);
+          const tokenInfo = await tokenInfoRes.json() as any;
+          const hasSheetScope = (tokenInfo.scope || '').includes('spreadsheets');
+          console.log('[sheets/fetch-info] Token scopes:', tokenInfo.scope || 'unknown', '| has spreadsheet scope:', hasSheetScope);
+          
+          if (!hasSheetScope) {
+            console.log('[sheets/fetch-info] Token lacks spreadsheet scope. Need re-auth with consent.');
+            // Clear the stale tokens so user is forced to re-auth properly
+            await storage.setApiSetting(req.user.organizationId, 'gmail_access_token', '');
+            await storage.setApiSetting(req.user.organizationId, 'gmail_token_expiry', '0');
+            return res.json({ 
+              valid: false, 
+              error: 'Google Sheets permission not granted. Please go to Email Accounts > Connect Gmail to re-authenticate with Google (this will grant Sheets access).',
+              needsReauth: true 
+            });
+          }
+
           const apiUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=spreadsheetId,properties.title,sheets.properties`;
           const apiRes = await fetch(apiUrl, {
             headers: { 'Authorization': `Bearer ${accessToken}` },
