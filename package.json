@@ -10,8 +10,6 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.78.0",
-    "@google/generative-ai": "^0.24.1",
     "@hookform/resolvers": "^3.10.0",
     "@radix-ui/react-accordion": "^1.2.4",
     "@radix-ui/react-alert-dialog": "^1.1.7",
@@ -59,7 +57,6 @@
     "memorystore": "^1.6.7",
     "nanoid": "^5.0.7",
     "nodemailer": "^8.0.1",
-    "openai": "^6.27.0",
     "react": "^18.3.1",
     "react-day-picker": "^8.10.1",
     "react-dom": "^18.3.1",
@@ -91,5 +88,8 @@
     "tsx": "^4.19.1",
     "typescript": "5.6.3",
     "vite": "^5.4.19"
+  },
+  "engines": {
+    "node": ">=20.0.0"
   }
 }
