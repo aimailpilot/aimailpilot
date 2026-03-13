@@ -449,6 +449,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       let purpose = 'login'; // default
       let stateOrgId = '';
       let returnTo = '';
+      let stateUserId = '';
       try {
         if (state) {
           const parsed = JSON.parse(state as string);
@@ -456,6 +457,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           if (parsed.purpose) purpose = parsed.purpose;
           if (parsed.orgId) stateOrgId = parsed.orgId;
           if (parsed.returnTo) returnTo = parsed.returnTo;
+          if (parsed.userId) stateUserId = parsed.userId;
         }
       } catch (e) { /* use default */ }
 
@@ -525,7 +527,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const existingAccounts = await storage.getEmailAccounts(effectiveOrgId);
         const existingAccount = existingAccounts.find((a: any) => a.email === email);
         if (!existingAccount) {
-          const currentUserId = (req.session as any)?.userId || req.cookies?.user_id || null;
+          // Use userId from OAuth state (set by /api/auth/gmail-connect) for reliable member attribution
+          const currentUserId = stateUserId || (req.session as any)?.userId || req.cookies?.user_id || null;
           await storage.createEmailAccount({
             organizationId: effectiveOrgId,
             userId: currentUserId,
@@ -743,7 +746,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           'https://www.googleapis.com/auth/userinfo.profile',
           'https://www.googleapis.com/auth/spreadsheets.readonly',
         ],
-        state: JSON.stringify({ redirectUri, purpose: 'add_sender', orgId, returnTo }),
+        state: JSON.stringify({ redirectUri, purpose: 'add_sender', orgId, userId: req.user.id, returnTo }),
         ...(loginHint ? { login_hint: loginHint } : {}),
       });
 
@@ -1209,23 +1212,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
       const allAccounts = await storage.getEmailAccounts(req.user.organizationId);
       
-      // Non-admin members see accounts where:
-      // 1. userId matches (they created/connected it), OR
-      // 2. email matches their login email (their own Gmail connected by admin or OAuth)
-      // Admins see all accounts
-      const accounts = isAdmin 
-        ? allAccounts 
-        : allAccounts.filter((a: any) => 
-            a.userId === req.user.id || 
-            (a.email && req.user.email && a.email.toLowerCase() === req.user.email.toLowerCase())
-          );
-      
+      // ALL org members can see ALL email accounts (shared resources for campaigns)
+      // The 'canManage' flag indicates if the user can edit/delete the account
       // Don't return passwords in the response, but expose authMethod for OAuth detection
-      const safe = accounts.map((a: any) => {
+      const safe = allAccounts.map((a: any) => {
         const isOAuth = a.smtpConfig?.auth?.pass === 'OAUTH_TOKEN';
+        const canManage = isAdmin || a.userId === req.user.id || 
+          (a.email && req.user.email && a.email.toLowerCase() === req.user.email.toLowerCase());
         return {
           ...a,
           authMethod: isOAuth ? 'oauth' : 'smtp',
+          canManage,
           smtpConfig: a.smtpConfig ? {
             ...a.smtpConfig,
             auth: { user: a.smtpConfig.auth?.user, pass: isOAuth ? 'OAUTH_TOKEN' : '••••••••' }
@@ -1634,6 +1631,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const existing = await storage.getEmailAccount(req.params.id);
       if (!existing) return res.status(404).json({ message: 'Not found' });
 
+      // Permission check: admins can edit any, members can only edit their own
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      const isOwner = existing.userId === req.user.id || 
+        (existing.email && req.user.email && existing.email.toLowerCase() === req.user.email.toLowerCase());
+      if (!isAdmin && !isOwner) {
+        return res.status(403).json({ message: 'You can only edit your own email accounts' });
+      }
+
       const { displayName, smtpHost, smtpPort, smtpSecure, smtpUser, smtpPass, replyTo } = req.body;
       const updates: any = {};
       
@@ -1666,6 +1671,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.delete('/api/email-accounts/:id', async (req: any, res) => {
     try {
+      const account = await storage.getEmailAccount(req.params.id);
+      if (!account) return res.status(404).json({ message: 'Email account not found' });
+      
+      // Permission check: admins can delete any, members can only delete their own
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      const isOwner = account.userId === req.user.id || 
+        (account.email && req.user.email && account.email.toLowerCase() === req.user.email.toLowerCase());
+      if (!isAdmin && !isOwner) {
+        return res.status(403).json({ message: 'You can only delete your own email accounts' });
+      }
+      
       smtpEmailService.removeTransporter(req.params.id);
       await storage.deleteEmailAccount(req.params.id);
       res.json({ success: true });
