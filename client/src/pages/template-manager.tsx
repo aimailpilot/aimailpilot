@@ -116,6 +116,9 @@ export default function TemplateManager() {
     setLoading(false);
   };
 
+  // Store pending content for the editor to pick up after dialog opens
+  const pendingContentRef = useRef<string>('');
+
   const openEditor = (template?: Template) => {
     if (template) {
       setEditTemplate(template);
@@ -123,21 +126,41 @@ export default function TemplateManager() {
       setFormCategory(template.category);
       setFormSubject(template.subject);
       setFormContent(template.content);
+      pendingContentRef.current = template.content || '';
     } else {
       setEditTemplate(null);
       setFormName('');
       setFormCategory('general');
       setFormSubject('');
       setFormContent('');
+      pendingContentRef.current = '';
     }
     setEditorMode('visual');
     setShowEditor(true);
   };
 
-  // When editor dialog opens, populate content editable
+  // When editor dialog opens or mode switches, populate content editable
+  // Use pendingContentRef to avoid dependency on formContent (which causes stale reads)
   useEffect(() => {
-    if (showEditor && editorMode === 'visual' && editorRef.current) {
-      editorRef.current.innerHTML = formContent || '';
+    if (showEditor && editorMode === 'visual') {
+      // Wait for the DOM to render the contentEditable div
+      const timer = setTimeout(() => {
+        if (editorRef.current) {
+          const content = pendingContentRef.current || formContent || '';
+          editorRef.current.innerHTML = content;
+        }
+      }, 50);
+      // Also set after a longer delay in case the dialog animation hasn't completed
+      const timer2 = setTimeout(() => {
+        if (editorRef.current) {
+          const content = pendingContentRef.current || formContent || '';
+          // Only set if editor is still empty (don't overwrite user typing)
+          if (!editorRef.current.innerHTML || editorRef.current.innerHTML === '<br>') {
+            editorRef.current.innerHTML = content;
+          }
+        }
+      }, 300);
+      return () => { clearTimeout(timer); clearTimeout(timer2); };
     }
   }, [showEditor, editorMode]);
 
@@ -258,6 +281,7 @@ export default function TemplateManager() {
       setEditorMode('html');
     } else {
       setEditorMode('visual');
+      pendingContentRef.current = formContent || '';
       setTimeout(() => {
         if (editorRef.current) editorRef.current.innerHTML = formContent || '';
       }, 50);
@@ -539,6 +563,7 @@ export default function TemplateManager() {
                           setFormCategory(template.category);
                           setFormSubject(template.subject);
                           setFormContent(template.content);
+                          pendingContentRef.current = template.content || '';
                           setEditorMode('visual');
                           setShowEditor(true);
                         }}>
@@ -584,71 +609,70 @@ export default function TemplateManager() {
 
       {/* Template Editor Dialog - Full featured with HTML mode */}
       <Dialog open={showEditor} onOpenChange={setShowEditor}>
-        <DialogContent className="max-w-3xl max-h-[92vh] overflow-y-auto p-0">
+        <DialogContent className="max-w-4xl max-h-[95vh] overflow-hidden p-0 gap-0">
           {/* Editor Header */}
-          <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+          <div className="flex items-center justify-between px-6 py-3.5 border-b border-gray-100 bg-gradient-to-r from-white to-gray-50/80">
             <div className="flex items-center gap-3">
-              <div className="bg-blue-50 p-2 rounded-lg">
-                <Code className="h-4 w-4 text-blue-600" />
+              <div className="bg-gradient-to-br from-blue-500 to-indigo-600 p-2 rounded-xl shadow-sm shadow-blue-200">
+                {editTemplate ? <Edit className="h-4 w-4 text-white" /> : <Plus className="h-4 w-4 text-white" />}
               </div>
               <div>
-                <h2 className="text-lg font-bold text-gray-900">
-                  {editTemplate ? 'Edit Template' : 'New template'}
+                <h2 className="text-base font-bold text-gray-900">
+                  {editTemplate ? 'Edit Template' : 'Create Template'}
                 </h2>
-                <p className="text-xs text-gray-400">Build a reusable email template with HTML and personalization variables</p>
+                <p className="text-[11px] text-gray-400">Design reusable email templates with personalization</p>
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" onClick={handlePreviewForm} disabled={!formContent}>
-                <Eye className="h-3.5 w-3.5 mr-1.5" /> Preview
-              </Button>
-              <Button size="sm" onClick={handleSave} disabled={formLoading || !formName || !formSubject}
-                className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700">
-                {formLoading && <Loader2 className="h-4 w-4 animate-spin mr-1.5" />}
-                {editTemplate ? 'Save' : 'Save'}
+              <Button variant="ghost" size="sm" onClick={() => setShowEditor(false)} className="text-gray-400 hover:text-gray-600">
+                <X className="h-4 w-4" />
               </Button>
             </div>
           </div>
 
-          <div className="px-6 py-4 space-y-4">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Template Name *</Label>
-                <Input value={formName} onChange={(e) => setFormName(e.target.value)} placeholder="e.g., Welcome Email" className="mt-1.5" />
-              </div>
-              <div>
-                <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Category</Label>
-                <Select value={formCategory} onValueChange={setFormCategory}>
-                  <SelectTrigger className="mt-1.5"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {categories.map(c => (
-                      <SelectItem key={c} value={c}>
-                        <span className="flex items-center gap-1.5"><span>{getCategoryConfig(c).icon}</span>{c.charAt(0).toUpperCase() + c.slice(1)}</span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-
-            {/* Subject Line */}
-            <div>
-              <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Subject Line *</Label>
-              <Input value={formSubject} onChange={(e) => setFormSubject(e.target.value)} placeholder="e.g., Hi {{firstName}}, welcome!" className="mt-1.5" />
-            </div>
-
-            {/* Developer mode toggle + Editor */}
-            <div>
-              <div className="flex items-center justify-between mb-1.5">
-                <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Email Content</Label>
-                <div className="flex items-center gap-2">
-                  <button onClick={() => setShowAiSection(!showAiSection)}
-                    className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-all font-medium ${
-                      showAiSection ? 'bg-purple-100 text-purple-700 border border-purple-300 shadow-sm' : 'bg-gray-100 text-gray-600 hover:bg-purple-50 hover:text-purple-600 border border-gray-200'
-                    }`}>
-                    <Sparkles className="h-3 w-3" /> AI Write
-                  </button>
+          <div className="overflow-y-auto max-h-[calc(95vh-130px)]">
+            <div className="px-6 py-5 space-y-5">
+              {/* Template Metadata - Compact row */}
+              <div className="grid grid-cols-[1fr_1fr_160px] gap-3">
+                <div>
+                  <Label className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5 block">Template Name *</Label>
+                  <Input value={formName} onChange={(e) => setFormName(e.target.value)} placeholder="e.g., Welcome Email" className="h-9 text-sm border-gray-200 focus:border-blue-400 focus:ring-blue-100" />
                 </div>
+                <div>
+                  <Label className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5 block">Subject Line *</Label>
+                  <Input value={formSubject} onChange={(e) => setFormSubject(e.target.value)} placeholder="e.g., Hi {{firstName}}, welcome!" className="h-9 text-sm border-gray-200 focus:border-blue-400 focus:ring-blue-100" />
+                </div>
+                <div>
+                  <Label className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5 block">Category</Label>
+                  <Select value={formCategory} onValueChange={setFormCategory}>
+                    <SelectTrigger className="h-9 text-sm"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {categories.map(c => (
+                        <SelectItem key={c} value={c}>
+                          <span className="flex items-center gap-1.5"><span>{getCategoryConfig(c).icon}</span>{c.charAt(0).toUpperCase() + c.slice(1)}</span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              {/* AI Write + Variables Row */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <button onClick={() => setShowAiSection(!showAiSection)}
+                  className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-all font-medium ${
+                    showAiSection ? 'bg-purple-100 text-purple-700 border border-purple-300 shadow-sm' : 'bg-gray-50 text-gray-500 hover:bg-purple-50 hover:text-purple-600 border border-gray-200'
+                  }`}>
+                  <Sparkles className="h-3 w-3" /> AI Write
+                </button>
+                <div className="h-4 w-px bg-gray-200" />
+                <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wider">Variables:</span>
+                {personalizationVars.map((v) => (
+                  <button key={v.name} onClick={() => insertVariable(v.name)}
+                    className="text-[11px] px-2 py-1 bg-blue-50/80 text-blue-600 rounded-md hover:bg-blue-100 border border-blue-100/80 transition-colors font-medium">
+                    {`{{${v.name}}}`}
+                  </button>
+                ))}
               </div>
 
               {/* AI Generation Section */}
@@ -796,60 +820,41 @@ export default function TemplateManager() {
                 </div>
               )}
 
-              {/* Personalization Variables */}
-              <div className="bg-gradient-to-r from-blue-50/50 to-indigo-50/50 rounded-xl p-3 border border-blue-100/50 mb-3">
-                <div className="flex items-center gap-1.5 mb-2">
-                  <Sparkles className="h-3.5 w-3.5 text-blue-600" />
-                  <Label className="text-xs font-semibold text-blue-700">Personalization Variables</Label>
-                </div>
-                <div className="flex flex-wrap gap-1.5">
-                  {personalizationVars.map((v) => (
-                    <button key={v.name} onClick={() => insertVariable(v.name)}
-                      className="text-xs px-2.5 py-1 bg-white text-blue-700 rounded-lg hover:bg-blue-100 border border-blue-200/70 transition-colors font-medium shadow-sm">
-                      {`{{${v.name}}}`}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
               {/* Editor with toolbar */}
-              <div className="border border-gray-200 rounded-xl overflow-hidden shadow-sm">
+              <div className="border border-gray-200 rounded-xl overflow-hidden shadow-sm bg-white">
                 {/* Toolbar / Developer mode */}
-                <div className="flex items-center justify-between px-3 py-1.5 border-b border-gray-100 bg-gray-50/80">
+                <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-gray-100 bg-gray-50/50">
                   {editorMode === 'visual' ? (
                     <div className="flex items-center gap-0.5 flex-wrap flex-1">
                       <TbBtn icon={<Bold className="h-3.5 w-3.5" />} onClick={() => execCmd('bold')} title="Bold" />
                       <TbBtn icon={<Italic className="h-3.5 w-3.5" />} onClick={() => execCmd('italic')} title="Italic" />
                       <TbBtn icon={<Underline className="h-3.5 w-3.5" />} onClick={() => execCmd('underline')} title="Underline" />
                       <TbBtn icon={<Strikethrough className="h-3.5 w-3.5" />} onClick={() => execCmd('strikeThrough')} title="Strikethrough" />
-                      <div className="w-px h-4 bg-gray-200 mx-1" />
+                      <div className="w-px h-4 bg-gray-200 mx-0.5" />
                       <TbBtn icon={<Link className="h-3.5 w-3.5" />} onClick={() => { const url = prompt('Enter URL:'); if (url) execCmd('createLink', url); }} title="Link" />
                       <TbBtn icon={<Image className="h-3.5 w-3.5" />} onClick={() => { const url = prompt('Image URL:'); if (url) execCmd('insertImage', url); }} title="Image" />
-                      <div className="w-px h-4 bg-gray-200 mx-1" />
+                      <div className="w-px h-4 bg-gray-200 mx-0.5" />
                       <TbBtn icon={<ListOrdered className="h-3.5 w-3.5" />} onClick={() => execCmd('insertOrderedList')} title="Numbered list" />
                       <TbBtn icon={<List className="h-3.5 w-3.5" />} onClick={() => execCmd('insertUnorderedList')} title="Bullet list" />
                       <TbBtn icon={<AlignLeft className="h-3.5 w-3.5" />} onClick={() => execCmd('justifyLeft')} title="Align left" />
                       <TbBtn icon={<AlignCenter className="h-3.5 w-3.5" />} onClick={() => execCmd('justifyCenter')} title="Center" />
-                      <div className="w-px h-4 bg-gray-200 mx-1" />
+                      <div className="w-px h-4 bg-gray-200 mx-0.5" />
                       <TbBtn icon={<Type className="h-3.5 w-3.5" />} onClick={() => execCmd('removeFormat')} title="Clear formatting" />
                     </div>
                   ) : (
-                    <span className="text-xs text-gray-500 font-medium">HTML Source Editor</span>
+                    <span className="text-xs text-gray-500 font-medium flex items-center gap-1.5">
+                      <Code className="h-3.5 w-3.5" /> HTML Source
+                    </span>
                   )}
 
                   <button onClick={toggleEditorMode}
-                    className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium transition-all ${
+                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all ${
                       editorMode === 'html'
-                        ? 'bg-gray-800 text-white'
-                        : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-100'
+                        ? 'bg-gray-800 text-white shadow-sm'
+                        : 'bg-white border border-gray-200 text-gray-500 hover:bg-gray-100 hover:text-gray-700'
                     }`}>
-                    <Code className="h-3.5 w-3.5" />
-                    Developer mode {'</>'}
-                    {editorMode === 'html' && (
-                      <span onClick={(e) => { e.stopPropagation(); toggleEditorMode(); }} className="ml-1 p-0.5 rounded hover:bg-gray-700 cursor-pointer">
-                        <X className="h-3 w-3" />
-                      </span>
-                    )}
+                    <Code className="h-3 w-3" />
+                    {editorMode === 'html' ? 'Visual' : 'HTML'}
                   </button>
                 </div>
 
@@ -858,17 +863,17 @@ export default function TemplateManager() {
                   <div
                     ref={editorRef}
                     contentEditable
-                    onInput={() => { if (editorRef.current) setFormContent(editorRef.current.innerHTML); }}
-                    className="min-h-[280px] max-h-[400px] overflow-y-auto p-5 text-sm text-gray-900 outline-none [&:empty]:before:content-[attr(data-placeholder)] [&:empty]:before:text-gray-300"
-                    data-placeholder="Compose your email template..."
+                    onInput={() => { if (editorRef.current) { setFormContent(editorRef.current.innerHTML); pendingContentRef.current = editorRef.current.innerHTML; } }}
+                    className="min-h-[320px] max-h-[450px] overflow-y-auto p-5 text-sm text-gray-800 outline-none leading-relaxed [&:empty]:before:content-[attr(data-placeholder)] [&:empty]:before:text-gray-300 [&:empty]:before:italic [&_a]:text-blue-600 [&_a]:underline [&_img]:max-w-full [&_img]:rounded"
+                    data-placeholder="Start composing your email template here... Use the toolbar above or type HTML directly."
                     suppressContentEditableWarning
                   />
                 ) : (
                   <textarea
                     value={formContent}
-                    onChange={(e) => setFormContent(e.target.value)}
-                    className="w-full min-h-[280px] max-h-[400px] p-5 text-sm font-mono bg-gray-900 text-gray-100 outline-none resize-y border-0"
-                    placeholder="<p>Hi {{firstName}},</p>&#10;<p>Your HTML email content here...</p>"
+                    onChange={(e) => { setFormContent(e.target.value); pendingContentRef.current = e.target.value; }}
+                    className="w-full min-h-[320px] max-h-[450px] p-5 text-[13px] font-mono leading-relaxed bg-[#1e1e2e] text-[#cdd6f4] outline-none resize-y border-0 selection:bg-blue-800/50"
+                    placeholder="<p>Hi {{firstName}},</p>&#10;&#10;<p>Your HTML email content here...</p>"
                     spellCheck={false}
                   />
                 )}
@@ -876,15 +881,26 @@ export default function TemplateManager() {
             </div>
           </div>
 
-          {/* Footer */}
-          <div className="flex items-center justify-between px-6 py-3 border-t border-gray-100 bg-gray-50/50">
-            <Button variant="outline" onClick={() => setShowEditor(false)}>Cancel</Button>
+          {/* Sticky Footer */}
+          <div className="flex items-center justify-between px-6 py-3 border-t border-gray-100 bg-gray-50/80">
+            <div className="flex items-center gap-3 text-xs text-gray-400">
+              {formContent && (
+                <span>{formContent.length} chars</span>
+              )}
+              {(formContent + formSubject).match(/\{\{(\w+)\}\}/g) && (
+                <span className="flex items-center gap-1">
+                  <Tag className="h-3 w-3" />
+                  {[...new Set((formContent + formSubject).match(/\{\{(\w+)\}\}/g)?.map(v => v.replace(/[{}]/g, '')))].length} variables
+                </span>
+              )}
+            </div>
             <div className="flex items-center gap-2">
-              <Button variant="outline" onClick={handlePreviewForm} disabled={!formContent}>
-                <Eye className="h-4 w-4 mr-1.5" /> Preview
+              <Button variant="ghost" size="sm" onClick={() => setShowEditor(false)} className="text-gray-500">Cancel</Button>
+              <Button variant="outline" size="sm" onClick={handlePreviewForm} disabled={!formContent}>
+                <Eye className="h-3.5 w-3.5 mr-1.5" /> Preview
               </Button>
-              <Button onClick={handleSave} disabled={formLoading || !formName || !formSubject}
-                className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700">
+              <Button size="sm" onClick={handleSave} disabled={formLoading || !formName || !formSubject}
+                className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 shadow-sm shadow-blue-200/50 px-5">
                 {formLoading && <Loader2 className="h-4 w-4 animate-spin mr-1.5" />}
                 {editTemplate ? 'Save Changes' : 'Create Template'}
               </Button>

@@ -1276,8 +1276,9 @@ export class DatabaseStorage {
   // Increased limit to support 10-20K email/day volume
   async getUnrepliedCampaignMessages(orgId: string) {
     return db.prepare(`
-      SELECT m.* FROM messages m
+      SELECT m.*, ct.email as contactEmail, c.name as campaignName FROM messages m
       INNER JOIN campaigns c ON m.campaignId = c.id
+      LEFT JOIN contacts ct ON m.contactId = ct.id
       WHERE c.organizationId = ?
       AND m.status = 'sent'
       AND m.repliedAt IS NULL

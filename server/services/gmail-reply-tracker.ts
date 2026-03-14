@@ -188,15 +188,22 @@ export class GmailReplyTracker {
       result.checked = listData.messages.length;
 
       // Pre-load unreplied campaign messages for thread-based matching
-      // Build a map of Gmail providerMessageId -> message for direct matching
-      // Also build a contactId+campaignId -> messages map for finding the correct step
+      // Build maps for matching: providerMessageId, contactEmail, contactId+campaignId
       const unrepliedMessages = await storage.getUnrepliedCampaignMessages(orgId);
       const providerIdToMessage = new Map<string, any>();
+      const contactEmailToMessages = new Map<string, any[]>();
       const contactCampaignToMessages = new Map<string, any[]>();
       
       for (const um of unrepliedMessages) {
         if (um.providerMessageId) {
           providerIdToMessage.set(um.providerMessageId, um);
+        }
+        // Build email -> messages map for bounce matching
+        if (um.contactEmail) {
+          const emailLower = um.contactEmail.toLowerCase();
+          const emailMsgs = contactEmailToMessages.get(emailLower) || [];
+          emailMsgs.push(um);
+          contactEmailToMessages.set(emailLower, emailMsgs);
         }
         // Group by contactId_campaignId for step attribution
         const key = `${um.contactId}_${um.campaignId}`;
@@ -290,20 +297,8 @@ export class GmailReplyTracker {
               let bouncedContact: any = null;
               let bouncedMessage: any = null;
               
-              // Method 1: Match via thread ID to find the original sent message
-              if (msgRef.threadId) {
-                const threadMatch = providerIdToMessage.get(msgRef.threadId);
-                if (threadMatch) {
-                  bouncedMessage = threadMatch;
-                  try {
-                    const contact = await storage.getContact(threadMatch.contactId);
-                    if (contact) bouncedContact = contact;
-                  } catch (e) {}
-                }
-              }
-              
-              // Method 2: Match via tracking IDs in references
-              if (!bouncedContact && trackingIds.length > 0) {
+              // Method 1: Match via tracking IDs in In-Reply-To/References headers
+              if (trackingIds.length > 0) {
                 for (const tid of trackingIds) {
                   const match = providerIdToMessage.get(tid);
                   if (match) {
@@ -317,26 +312,43 @@ export class GmailReplyTracker {
                 }
               }
               
-              // Method 3: Match bounced email from body against campaign contacts
+              // Method 2: Match bounced email from body/snippet against campaign contacts
+              // This is the most reliable method - extract email from bounce notification body
               if (!bouncedContact && foundEmails.length > 0) {
                 for (const email of foundEmails) {
                   const emailLower = email.toLowerCase();
-                  // Skip our own email addresses and common system addresses
-                  if (emailLower.includes('mailer-daemon') || emailLower.includes('postmaster')) continue;
+                  // Skip system addresses
+                  if (emailLower.includes('mailer-daemon') || emailLower.includes('postmaster') || emailLower.includes('noreply')) continue;
                   
-                  // Search unreplied messages for a contact with this email
-                  for (const [, msgs] of contactCampaignToMessages) {
-                    for (const m of msgs) {
-                      if (m.contactEmail && m.contactEmail.toLowerCase() === emailLower) {
-                        bouncedMessage = m;
-                        try {
-                          const contact = await storage.getContact(m.contactId);
-                          if (contact) bouncedContact = contact;
-                        } catch (e) {}
-                        break;
+                  // Use the contactEmail map (built from JOIN with contacts table)
+                  const matchedMsgs = contactEmailToMessages.get(emailLower);
+                  if (matchedMsgs && matchedMsgs.length > 0) {
+                    bouncedMessage = matchedMsgs[0];
+                    try {
+                      const contact = await storage.getContact(bouncedMessage.contactId);
+                      if (contact) bouncedContact = contact;
+                    } catch (e) {}
+                    break;
+                  }
+                  
+                  // Fallback: search ALL org contacts (not just unreplied messages)
+                  if (!bouncedContact) {
+                    try {
+                      const contact = await storage.getContactByEmail(orgId, emailLower);
+                      if (contact) {
+                        bouncedContact = contact;
+                        // Try to find associated campaign message
+                        for (const [, msgs] of contactCampaignToMessages) {
+                          for (const m of msgs) {
+                            if (m.contactId === (contact as any).id) {
+                              bouncedMessage = m;
+                              break;
+                            }
+                          }
+                          if (bouncedMessage) break;
+                        }
                       }
-                    }
-                    if (bouncedContact) break;
+                    } catch (e) {}
                   }
                   if (bouncedContact) break;
                 }

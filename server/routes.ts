@@ -1212,7 +1212,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         environment: process.env.WEBSITE_SITE_NAME ? 'azure' : 'local',
         azureSiteName: process.env.WEBSITE_SITE_NAME || null,
         nodeVersion: process.version,
-        codeVersion: 'v2-strict-member-filter',
+        codeVersion: 'v3-bounce-tracking-fix',
         dbStats: {
           totalUsers: stats.totalUsers,
           totalOrgs: orgIds.length,
@@ -2689,8 +2689,10 @@ Which account should I use and why? If I need to split across accounts, provide 
   // Check for replies via Gmail API (manual trigger)
   app.post('/api/reply-tracking/check', requireAuth, async (req: any, res) => {
     try {
-      const lookbackMinutes = parseInt(req.body.lookbackMinutes) || 120;
+      const lookbackMinutes = parseInt(req.body.lookbackMinutes) || 1440; // Default 24h for better bounce detection
+      console.log(`[ReplyTracking] Manual check triggered with lookback ${lookbackMinutes} minutes`);
       const result = await gmailReplyTracker.checkForReplies(req.user.organizationId, lookbackMinutes);
+      console.log(`[ReplyTracking] Check complete: ${result.checked} checked, ${result.newReplies} new events, ${result.errors.length} errors`);
       res.json(result);
     } catch (error) {
       console.error('Reply check error:', error);

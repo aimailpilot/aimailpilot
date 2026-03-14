@@ -173,14 +173,29 @@ export class OutlookReplyTracker {
               
               // Try matching via email addresses in body
               if (!bouncedMsg && foundEmails.length > 0) {
-                const orgContacts = await storage.getContacts(orgId, 100000, 0);
                 for (const email of foundEmails) {
-                  if (email.includes('mailer-daemon') || email.includes('postmaster')) continue;
-                  const contact = orgContacts.find((c: any) => c.email?.toLowerCase() === email.toLowerCase());
-                  if (contact && (contact as any).status !== 'bounced') {
-                    await storage.updateContact(contact.id, { status: 'bounced' });
-                    console.log(`[OutlookReplyTracker] BOUNCE DETECTED: ${email} (subject: ${msg.subject})`);
+                  const emailLower = email.toLowerCase();
+                  if (emailLower.includes('mailer-daemon') || emailLower.includes('postmaster') || emailLower.includes('noreply')) continue;
+                  
+                  try {
+                    const contact = await storage.getContactByEmail(orgId, emailLower);
+                    if (contact && (contact as any).status !== 'bounced') {
+                      await storage.updateContact((contact as any).id, { status: 'bounced' });
+                      console.log(`[OutlookReplyTracker] BOUNCE DETECTED: ${email} (subject: ${msg.subject})`);
+                      
+                      // Also try to find an associated campaign message to update bounce count
+                      try {
+                        const unreplied = await storage.getUnrepliedCampaignMessages(orgId);
+                        const contactMsg = unreplied.find((m: any) => m.contactId === (contact as any).id);
+                        if (contactMsg) {
+                          bouncedMsg = contactMsg;
+                        }
+                      } catch (e) {}
+                    }
+                  } catch (e) {
+                    console.error(`[OutlookReplyTracker] Error looking up contact ${email}:`, e);
                   }
+                  if (bouncedMsg) break;
                 }
               }
               
