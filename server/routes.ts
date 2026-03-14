@@ -1207,12 +1207,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       } catch (e) { /* ignore */ }
       
+      // Debug: inbox stats
+      let inboxDebug: any = {};
+      try {
+        for (const orgId of orgIds) {
+          const total = await storage.getInboxMessageCount(orgId, {});
+          const unread = await storage.getInboxUnreadCount(orgId);
+          const allMsgs = await storage.getInboxMessages(orgId, {}, 100, 0);
+          const nullAccountCount = (allMsgs as any[]).filter((m: any) => !m.emailAccountId).length;
+          inboxDebug[orgId] = { total, unread, sampleSize: allMsgs.length, nullEmailAccountId: nullAccountCount };
+        }
+      } catch (e) { /* ignore */ }
+      
       res.json({
         timestamp: new Date().toISOString(),
         environment: process.env.WEBSITE_SITE_NAME ? 'azure' : 'local',
         azureSiteName: process.env.WEBSITE_SITE_NAME || null,
         nodeVersion: process.version,
-        codeVersion: 'v3-bounce-tracking-fix',
+        codeVersion: 'v4-inbox-bounce-fix',
         dbStats: {
           totalUsers: stats.totalUsers,
           totalOrgs: orgIds.length,
@@ -1220,6 +1232,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         },
         emailAccounts: emailAccountDebug,
         members: memberDebug,
+        inboxStats: inboxDebug,
         oauth: {
           googleConfigured: hasGoogleOAuth,
           microsoftConfigured: hasMicrosoftOAuth,
@@ -5160,7 +5173,7 @@ Example response:
 
       if (isAdmin) {
         messages = await storage.getInboxMessages(req.user.organizationId, filters, parsedLimit, parsedOffset);
-        total = await storage.getInboxMessageCount(req.user.organizationId, { status });
+        total = await storage.getInboxMessageCount(req.user.organizationId, { status, emailAccountId });
         unread = await storage.getInboxUnreadCount(req.user.organizationId);
       } else {
         messages = await storage.getInboxMessagesForUser(req.user.organizationId, req.user.id, filters, parsedLimit, parsedOffset);
@@ -5176,7 +5189,7 @@ Example response:
         }
         // Try to find contact by email if not linked
         if (!contact && m.fromEmail) {
-          contact = await storage.getContactByEmail(m.fromEmail, req.user.organizationId);
+          contact = await storage.getContactByEmail(req.user.organizationId, m.fromEmail);
         }
         // Add account owner info for admin view
         let accountOwner = null;
@@ -5277,6 +5290,61 @@ Example response:
     }
   });
 
+  // Backfill emailAccountId on existing inbox messages that have null
+  // This repairs data from before the fix where emailAccountId wasn't set
+  // MUST be before /:id routes
+  app.post('/api/inbox/backfill-accounts', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      // Get all inbox messages for this org
+      const allMessages = await storage.getInboxMessages(orgId, {}, 10000, 0);
+      const emailAccounts = await storage.getEmailAccounts(orgId);
+      
+      // Build email -> accountId lookup
+      const emailToAccountId = new Map<string, string>();
+      for (const ea of emailAccounts as any[]) {
+        if (ea.email) emailToAccountId.set(ea.email.toLowerCase(), ea.id);
+      }
+      
+      let fixed = 0;
+      let total = 0;
+      for (const inboxMsg of allMessages as any[]) {
+        if (inboxMsg.emailAccountId) continue; // Already has account
+        total++;
+        
+        let emailAccountId: string | null = null;
+        
+        // Try to get emailAccountId from the linked campaign message
+        if (inboxMsg.messageId) {
+          try {
+            const campaignMsg = await storage.getCampaignMessage(inboxMsg.messageId);
+            if (campaignMsg && (campaignMsg as any).emailAccountId) {
+              emailAccountId = (campaignMsg as any).emailAccountId;
+            }
+          } catch (e) {}
+        }
+        
+        // Fallback: match toEmail against email_accounts
+        if (!emailAccountId && inboxMsg.toEmail) {
+          const toEmail = inboxMsg.toEmail.toLowerCase().replace(/<.*?>/, '').replace(/.*</, '').replace(/>.*/, '').trim();
+          const matchedId = emailToAccountId.get(toEmail);
+          if (matchedId) emailAccountId = matchedId;
+        }
+        
+        if (emailAccountId) {
+          await storage.backfillInboxEmailAccountId(inboxMsg.id, emailAccountId);
+          fixed++;
+        }
+      }
+      
+      console.log(`[Inbox Backfill] Fixed ${fixed}/${total} messages with null emailAccountId`);
+      res.json({ success: true, needsFix: total, fixed });
+    } catch (error) {
+      console.error('Inbox backfill error:', error);
+      res.status(500).json({ message: 'Failed to backfill inbox accounts' });
+    }
+  });
+
   // Get single inbox message
   app.get('/api/inbox/:id', requireAuth, async (req: any, res) => {
     try {
@@ -5286,7 +5354,7 @@ Example response:
       // Enrich with contact
       let contact = null;
       if ((msg as any).contactId) contact = await storage.getContact((msg as any).contactId);
-      if (!contact && (msg as any).fromEmail) contact = await storage.getContactByEmail((msg as any).fromEmail, req.user.organizationId);
+      if (!contact && (msg as any).fromEmail) contact = await storage.getContactByEmail(req.user.organizationId, (msg as any).fromEmail);
 
       // Enrich with campaign info
       let campaign = null;
@@ -5495,7 +5563,7 @@ Example response:
       // Get contact info for context
       let contact = null;
       if (msg.contactId) contact = await storage.getContact(msg.contactId);
-      if (!contact && msg.fromEmail) contact = await storage.getContactByEmail(msg.fromEmail, req.user.organizationId);
+      if (!contact && msg.fromEmail) contact = await storage.getContactByEmail(req.user.organizationId, msg.fromEmail);
 
       // ========== BUILD FULL CONVERSATION TRAIL ==========
       // Collect the entire email thread for AI context

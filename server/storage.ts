@@ -842,7 +842,8 @@ export class DatabaseStorage {
     return results;
   }
   async getContactByEmail(organizationId: string, email: string) {
-    return hydrateContact(db.prepare('SELECT * FROM contacts WHERE organizationId = ? AND email = ?').get(organizationId, email));
+    // Case-insensitive email lookup
+    return hydrateContact(db.prepare('SELECT * FROM contacts WHERE organizationId = ? AND LOWER(email) = LOWER(?)').get(organizationId, email));
   }
   async createContact(contact: any) {
     const id = genId(); const ts2 = now();
@@ -1553,7 +1554,16 @@ export class DatabaseStorage {
     let sql = 'SELECT * FROM unified_inbox WHERE organizationId = ?';
     const params: any[] = [organizationId];
     if (filters?.status && filters.status !== 'all') { sql += ' AND status = ?'; params.push(filters.status); }
-    if (filters?.emailAccountId) { sql += ' AND emailAccountId = ?'; params.push(filters.emailAccountId); }
+    if (filters?.emailAccountId) {
+      // Support comma-separated emailAccountIds for filtering by member's accounts
+      const accountIds = filters.emailAccountId.split(',').map(id => id.trim()).filter(Boolean);
+      if (accountIds.length === 1) {
+        sql += ' AND emailAccountId = ?'; params.push(accountIds[0]);
+      } else if (accountIds.length > 1) {
+        sql += ` AND emailAccountId IN (${accountIds.map(() => '?').join(',')})`;
+        params.push(...accountIds);
+      }
+    }
     if (filters?.campaignId) { sql += ' AND campaignId = ?'; params.push(filters.campaignId); }
     sql += ' ORDER BY receivedAt DESC LIMIT ? OFFSET ?';
     params.push(limit, offset);
@@ -1574,10 +1584,19 @@ export class DatabaseStorage {
     return db.prepare(sql).all(...params);
   }
 
-  async getInboxMessageCount(organizationId: string, filters?: { status?: string }) {
+  async getInboxMessageCount(organizationId: string, filters?: { status?: string; emailAccountId?: string }) {
     let sql = 'SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ?';
     const params: any[] = [organizationId];
     if (filters?.status && filters.status !== 'all') { sql += ' AND status = ?'; params.push(filters.status); }
+    if (filters?.emailAccountId) {
+      const accountIds = filters.emailAccountId.split(',').map(id => id.trim()).filter(Boolean);
+      if (accountIds.length === 1) {
+        sql += ' AND emailAccountId = ?'; params.push(accountIds[0]);
+      } else if (accountIds.length > 1) {
+        sql += ` AND emailAccountId IN (${accountIds.map(() => '?').join(',')})`;
+        params.push(...accountIds);
+      }
+    }
     return (db.prepare(sql).get(...params) as any).c;
   }
 
@@ -1630,6 +1649,10 @@ export class DatabaseStorage {
   async deleteInboxMessage(id: string) {
     db.prepare('DELETE FROM unified_inbox WHERE id = ?').run(id);
     return true;
+  }
+
+  async backfillInboxEmailAccountId(id: string, emailAccountId: string) {
+    db.prepare('UPDATE unified_inbox SET emailAccountId = ? WHERE id = ?').run(emailAccountId, id);
   }
 
   async getInboxUnreadCount(organizationId: string) {

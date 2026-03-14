@@ -2,6 +2,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { startFollowupEngine } from "./services/followup-engine";
+import { campaignEngine } from "./services/campaign-engine";
 import { storage } from "./storage";
 
 // Global error handling to prevent silent crashes on Azure
@@ -69,6 +70,16 @@ app.use((req, res, next) => {
     log(`AImailPilot serving on port ${port}`);
     // Start the follow-up engine after server is ready
     startFollowupEngine();
+    
+    // Auto-resume active campaigns that were interrupted by server restart
+    // Delay by 10 seconds to let the server fully initialize (OAuth, DB, etc.)
+    setTimeout(async () => {
+      try {
+        await campaignEngine.resumeActiveCampaigns();
+      } catch (e) {
+        console.error('[Startup] Failed to resume active campaigns:', e);
+      }
+    }, 10000);
     
     // Daily reset of email account send counters (check every hour, reset at midnight UTC)
     let lastResetDay = new Date().getUTCDate();

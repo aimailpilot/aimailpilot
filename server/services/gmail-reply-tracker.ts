@@ -174,11 +174,13 @@ export class GmailReplyTracker {
       // Search for inbox messages from the last N minutes
       // We look for messages in INBOX that contain our tracking references
       const afterTimestamp = Math.floor((Date.now() - lookbackMinutes * 60 * 1000) / 1000);
-      const query = `in:inbox after:${afterTimestamp} -from:me`;
+      // Use broader search: include inbox messages AND bounce notifications (which may land in spam or categories)
+      // Search for both regular replies and bounce notifications from MAILER-DAEMON/postmaster
+      const query = `after:${afterTimestamp} -from:me (in:inbox OR from:mailer-daemon OR from:postmaster OR subject:"delivery status notification" OR subject:"undeliverable" OR subject:"mail delivery failed")`;
 
       const listData: GmailListResponse = await this.gmailFetch(
         accessToken,
-        `messages?q=${encodeURIComponent(query)}&maxResults=50`
+        `messages?q=${encodeURIComponent(query)}&maxResults=100`
       );
 
       if (!listData.messages || listData.messages.length === 0) {
@@ -186,6 +188,7 @@ export class GmailReplyTracker {
       }
 
       result.checked = listData.messages.length;
+      console.log(`[GmailReplyTracker] Found ${listData.messages.length} messages in inbox (lookback: ${lookbackMinutes}m)`);
 
       // Pre-load unreplied campaign messages for thread-based matching
       // Build maps for matching: providerMessageId, contactEmail, contactId+campaignId
@@ -193,6 +196,8 @@ export class GmailReplyTracker {
       const providerIdToMessage = new Map<string, any>();
       const contactEmailToMessages = new Map<string, any[]>();
       const contactCampaignToMessages = new Map<string, any[]>();
+      
+      console.log(`[GmailReplyTracker] Loaded ${unrepliedMessages.length} unreplied campaign messages for matching`);
       
       for (const um of unrepliedMessages) {
         if (um.providerMessageId) {
@@ -211,6 +216,8 @@ export class GmailReplyTracker {
         existing.push(um);
         contactCampaignToMessages.set(key, existing);
       }
+      
+      console.log(`[GmailReplyTracker] Maps built: ${providerIdToMessage.size} by providerId, ${contactEmailToMessages.size} by email, ${contactCampaignToMessages.size} by contact+campaign`);
 
       // Get all sent campaign messages that haven't been replied to yet
       // We'll use a batch approach - get message details and check headers
@@ -261,6 +268,7 @@ export class GmailReplyTracker {
           }
           
           if (isBounceNotification) {
+            console.log(`[GmailReplyTracker] Bounce notification detected: from="${from}", subject="${subject}", msgId=${msgRef.id}`);
             // Extract bounced email from the bounce notification
             // Bounces typically reference the original email in In-Reply-To / References headers
             // or contain the failed recipient email in the body/snippet
@@ -288,10 +296,12 @@ export class GmailReplyTracker {
               // Common patterns: "550 5.1.1 <user@example.com>", "user@example.com: No such user"
               const emailPattern = /([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/g;
               const foundEmails = bounceBody.match(emailPattern) || [];
+              console.log(`[GmailReplyTracker] Bounce body extracted ${foundEmails.length} emails: ${foundEmails.slice(0, 5).join(', ')}`);
               
               // Also check In-Reply-To/References for the original tracking ID
               const allRefs = `${inReplyTo} ${references}`;
               const trackingIds = this.extractTrackingIds(allRefs);
+              console.log(`[GmailReplyTracker] Bounce tracking IDs from headers: ${trackingIds.length > 0 ? trackingIds.join(', ') : 'none'}`);
               
               // Find the bounced contact
               let bouncedContact: any = null;
@@ -299,9 +309,11 @@ export class GmailReplyTracker {
               
               // Method 1: Match via tracking IDs in In-Reply-To/References headers
               if (trackingIds.length > 0) {
+                console.log(`[GmailReplyTracker] Bounce Method 1: Trying ${trackingIds.length} tracking IDs`);
                 for (const tid of trackingIds) {
                   const match = providerIdToMessage.get(tid);
                   if (match) {
+                    console.log(`[GmailReplyTracker] Bounce Method 1 HIT: trackingId=${tid}, contactId=${match.contactId}`);
                     bouncedMessage = match;
                     try {
                       const contact = await storage.getContact(match.contactId);
@@ -315,14 +327,17 @@ export class GmailReplyTracker {
               // Method 2: Match bounced email from body/snippet against campaign contacts
               // This is the most reliable method - extract email from bounce notification body
               if (!bouncedContact && foundEmails.length > 0) {
+                console.log(`[GmailReplyTracker] Bounce Method 2: Trying ${foundEmails.length} extracted emails`);
                 for (const email of foundEmails) {
                   const emailLower = email.toLowerCase();
                   // Skip system addresses
                   if (emailLower.includes('mailer-daemon') || emailLower.includes('postmaster') || emailLower.includes('noreply')) continue;
+                  console.log(`[GmailReplyTracker] Bounce Method 2: Checking email ${emailLower}`);
                   
                   // Use the contactEmail map (built from JOIN with contacts table)
                   const matchedMsgs = contactEmailToMessages.get(emailLower);
                   if (matchedMsgs && matchedMsgs.length > 0) {
+                    console.log(`[GmailReplyTracker] Bounce Method 2 HIT via contactEmailMap: ${emailLower} -> contactId=${matchedMsgs[0].contactId}`);
                     bouncedMessage = matchedMsgs[0];
                     try {
                       const contact = await storage.getContact(bouncedMessage.contactId);
@@ -336,6 +351,7 @@ export class GmailReplyTracker {
                     try {
                       const contact = await storage.getContactByEmail(orgId, emailLower);
                       if (contact) {
+                        console.log(`[GmailReplyTracker] Bounce Fallback HIT: Found contact ${(contact as any).email} (id=${(contact as any).id}) in org contacts`);
                         bouncedContact = contact;
                         // Try to find associated campaign message
                         for (const [, msgs] of contactCampaignToMessages) {
@@ -358,6 +374,7 @@ export class GmailReplyTracker {
               if (bouncedContact && (bouncedContact as any).status !== 'bounced') {
                 const contactEmail = (bouncedContact as any).email || 'unknown';
                 console.log(`[GmailReplyTracker] BOUNCE DETECTED: ${contactEmail} (from: ${from}, subject: ${subject})`);
+                console.log(`[GmailReplyTracker] Marking contact ${(bouncedContact as any).id} as bounced (was: ${(bouncedContact as any).status})`);
                 
                 // Mark contact as bounced
                 await storage.updateContact(bouncedContact.id, { status: 'bounced' });
@@ -402,6 +419,10 @@ export class GmailReplyTracker {
                   contactEmail,
                   receivedAt: date || new Date().toISOString(),
                 });
+              } else if (bouncedContact) {
+                console.log(`[GmailReplyTracker] Bounce skipped: contact ${(bouncedContact as any).email} already status=${(bouncedContact as any).status}`);
+              } else {
+                console.log(`[GmailReplyTracker] Bounce: No matching contact found for bounce notification (from: ${from}, subject: ${subject})`);
               }
             } catch (bounceError) {
               console.error('[GmailReplyTracker] Error processing bounce notification:', bounceError);
@@ -546,7 +567,7 @@ export class GmailReplyTracker {
               const settings = await storage.getApiSettings(orgId);
               await storage.createInboxMessage({
                 organizationId: orgId,
-                emailAccountId: null,
+                emailAccountId: campaignMessage.emailAccountId || null,
                 campaignId: campaignMessage.campaignId,
                 messageId: campaignMessage.id,
                 contactId: campaignMessage.contactId,

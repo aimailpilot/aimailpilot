@@ -224,6 +224,7 @@ export class OutlookReplyTracker {
           let campaignId: string | null = null;
           let messageId: string | null = null;
           let contactId: string | null = null;
+          let emailAccountId: string | null = null;
           let campaignName = '';
 
           for (const trackingId of trackingIds) {
@@ -232,6 +233,7 @@ export class OutlookReplyTracker {
               campaignId = campaignMessage.campaignId;
               messageId = campaignMessage.id;
               contactId = campaignMessage.contactId;
+              emailAccountId = campaignMessage.emailAccountId || null;
 
               // Update campaign message
               await storage.updateCampaignMessage(campaignMessage.id, {
@@ -287,7 +289,7 @@ export class OutlookReplyTracker {
           // Store in unified_inbox regardless of campaign match
           await storage.createInboxMessage({
             organizationId: orgId,
-            emailAccountId: null,
+            emailAccountId: emailAccountId,
             campaignId,
             messageId,
             contactId,

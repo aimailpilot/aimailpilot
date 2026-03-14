@@ -678,7 +678,7 @@ export class CampaignEngine {
       try {
         // Daily limit enforcement: check before each email
         if (accountDailySent + localSentCount >= accountDailyLimit) {
-          console.warn(`[CampaignEngine] Daily limit reached (${accountDailyLimit}) for account ${emailAccount.email}. Pausing campaign at ${i}/${contacts.length}.`);
+          console.warn(`[CampaignEngine] Daily limit reached (${accountDailyLimit}) for account ${emailAccount.email}. Pausing campaign at ${i}/${contacts.length} until daily reset.`);
           // Flush counts before pausing
           if (localSentCount > 0 || localBouncedCount > 0) {
             const updatedCampaign = await storage.getCampaign(campaignId);
@@ -692,9 +692,35 @@ export class CampaignEngine {
             localSentCount = 0;
             localBouncedCount = 0;
           }
+          
+          // Sleep until next day (check every 5 minutes for daily reset)
+          // Instead of permanently stopping, pause and wait for daily counter reset
           await storage.updateCampaign(campaignId, { status: 'paused' });
-          this.activeCampaigns.delete(campaignId);
-          return; // Stop sending
+          if (tracker) tracker.paused = true;
+          
+          console.log(`[CampaignEngine] Campaign ${campaignId} sleeping until daily limit resets...`);
+          
+          // Wait up to 24 hours, checking every 5 minutes if daily limit has been reset
+          const maxWait = Date.now() + 24 * 60 * 60 * 1000;
+          while (Date.now() < maxWait) {
+            if (!this.activeCampaigns.has(campaignId)) return; // Campaign was stopped
+            
+            await new Promise(resolve => setTimeout(resolve, 5 * 60 * 1000)); // 5 minutes
+            
+            // Re-check daily limit (counters reset at midnight)
+            const refreshedAccount = await storage.getEmailAccount(emailAccount.id) as any;
+            if (refreshedAccount) {
+              accountDailySent = refreshedAccount.dailySent || 0;
+              if (accountDailySent < accountDailyLimit) {
+                console.log(`[CampaignEngine] Campaign ${campaignId} daily limit reset (${accountDailySent}/${accountDailyLimit}), resuming.`);
+                break;
+              }
+            }
+          }
+          
+          if (!this.activeCampaigns.has(campaignId)) return;
+          if (tracker) tracker.paused = false;
+          await storage.updateCampaign(campaignId, { status: 'active' });
         }
         // Personalize
         const personalData: PersonalizationData = {
@@ -1093,6 +1119,49 @@ export class CampaignEngine {
     setTimeout(() => {
       this.startCampaign({ campaignId, ...options });
     }, delay);
+  }
+
+  /**
+   * Resume all active campaigns after server restart.
+   * Finds campaigns with status 'active' in DB and re-starts the send loop.
+   * The startCampaign method already skips contacts that were already sent to.
+   */
+  async resumeActiveCampaigns(): Promise<void> {
+    try {
+      const allOrgs = await storage.getAllOrganizationIds();
+      let resumedCount = 0;
+      
+      for (const orgId of allOrgs) {
+        const campaigns = await storage.getCampaigns(orgId) as any[];
+        for (const campaign of campaigns) {
+          if (campaign.status === 'active' && !this.activeCampaigns.has(campaign.id)) {
+            console.log(`[CampaignEngine] Auto-resuming active campaign "${campaign.name}" (${campaign.id}) for org ${orgId}`);
+            try {
+              const result = await this.startCampaign({
+                campaignId: campaign.id,
+                sendingConfig: campaign.sendingConfig || undefined,
+              });
+              if (result.success) {
+                resumedCount++;
+                console.log(`[CampaignEngine] Successfully resumed campaign ${campaign.id}`);
+              } else {
+                console.warn(`[CampaignEngine] Failed to resume campaign ${campaign.id}: ${result.error}`);
+              }
+            } catch (e) {
+              console.error(`[CampaignEngine] Error resuming campaign ${campaign.id}:`, e);
+            }
+          }
+        }
+      }
+      
+      if (resumedCount > 0) {
+        console.log(`[CampaignEngine] Auto-resumed ${resumedCount} active campaign(s) after server restart`);
+      } else {
+        console.log(`[CampaignEngine] No active campaigns to resume`);
+      }
+    } catch (error) {
+      console.error('[CampaignEngine] Error resuming active campaigns:', error);
+    }
   }
 }
 
