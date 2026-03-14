@@ -2118,6 +2118,35 @@ Which account should I use and why? If I need to split across accounts, provide 
       } else {
         campaigns = await storage.getCampaignsForUser(req.user.organizationId, req.user.id, limit, offset);
       }
+      
+      // Auto-fix stale sentCount for campaigns that have messages but sentCount=0
+      for (const c of campaigns as any[]) {
+        if ((c.sentCount || 0) === 0 && (c.status === 'active' || c.status === 'completed')) {
+          try {
+            const msgs = await storage.getCampaignMessagesEnriched(c.id, 10000, 0);
+            const actualSent = msgs.filter((m: any) => m.status === 'sent' || m.status === 'sending').length;
+            if (actualSent > 0) {
+              const actualBounced = msgs.filter((m: any) => m.status === 'failed' || m.status === 'bounced').length;
+              const actualOpened = msgs.filter((m: any) => m.openedAt || (m.openCount && m.openCount > 0)).length;
+              const actualClicked = msgs.filter((m: any) => m.clickedAt || (m.clickCount && m.clickCount > 0)).length;
+              const actualReplied = msgs.filter((m: any) => m.repliedAt || (m.replyCount && m.replyCount > 0)).length;
+              await storage.updateCampaign(c.id, {
+                sentCount: actualSent, bouncedCount: actualBounced,
+                openedCount: actualOpened, clickedCount: actualClicked, repliedCount: actualReplied,
+                totalRecipients: Math.max(c.totalRecipients || 0, actualSent + actualBounced),
+              });
+              c.sentCount = actualSent;
+              c.bouncedCount = actualBounced;
+              c.openedCount = actualOpened;
+              c.clickedCount = actualClicked;
+              c.repliedCount = actualReplied;
+              c.totalRecipients = Math.max(c.totalRecipients || 0, actualSent + actualBounced);
+              console.log(`[Campaigns] Auto-fixed stats for ${c.id}: sent=${actualSent}`);
+            }
+          } catch (e) { /* ignore per-campaign errors */ }
+        }
+      }
+      
       res.json(campaigns);
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch campaigns' });
@@ -2416,12 +2445,34 @@ Which account should I use and why? If I need to split across accounts, provide 
   // Campaign detail: full campaign info + analytics + enriched messages
   app.get('/api/campaigns/:id/detail', async (req: any, res) => {
     try {
-      const campaign = await storage.getCampaign(req.params.id);
+      let campaign = await storage.getCampaign(req.params.id);
       if (!campaign) return res.status(404).json({ message: 'Campaign not found' });
 
-      const analytics = await storage.getCampaignAnalytics(req.params.id);
       const messages = await storage.getCampaignMessagesEnriched(req.params.id, 200, 0);
       const totalMessages = await storage.getCampaignMessagesTotalCount(req.params.id);
+      
+      // Auto-recalculate stats from actual messages if sentCount appears stale
+      // (e.g. messages exist but sentCount is 0, or sentCount < actual sent messages)
+      const actualSent = messages.filter((m: any) => m.status === 'sent' || m.status === 'sending').length;
+      const actualBounced = messages.filter((m: any) => m.status === 'failed' || m.status === 'bounced').length;
+      const actualOpened = messages.filter((m: any) => m.openedAt || (m.openCount && m.openCount > 0)).length;
+      const actualClicked = messages.filter((m: any) => m.clickedAt || (m.clickCount && m.clickCount > 0)).length;
+      const actualReplied = messages.filter((m: any) => m.repliedAt || (m.replyCount && m.replyCount > 0)).length;
+      
+      if (actualSent > 0 && (campaign.sentCount || 0) < actualSent) {
+        console.log(`[Campaign] Auto-fixing stale stats for ${req.params.id}: DB sentCount=${campaign.sentCount}, actual=${actualSent}`);
+        await storage.updateCampaign(req.params.id, {
+          sentCount: actualSent,
+          bouncedCount: actualBounced,
+          openedCount: actualOpened,
+          clickedCount: actualClicked,
+          repliedCount: actualReplied,
+          totalRecipients: Math.max(campaign.totalRecipients || 0, actualSent + actualBounced),
+        });
+        campaign = await storage.getCampaign(req.params.id);
+      }
+
+      const analytics = await storage.getCampaignAnalytics(req.params.id);
       const trackingEvents = await storage.getTrackingEvents(req.params.id);
 
       // Step-by-step breakdown analytics

@@ -2813,6 +2813,18 @@ export default function ContactsManager() {
                         <DropdownMenuItem onClick={() => openEdit(contact)}>
                           <Edit className="h-3.5 w-3.5 mr-2" /> Edit
                         </DropdownMenuItem>
+                        {contact.status !== 'bounced' && (
+                          <DropdownMenuItem onClick={async () => {
+                            if (confirm(`Mark ${contact.email} as bounced? This will add them to the blocklist and exclude them from future campaigns.`)) {
+                              try {
+                                await fetch('/api/contacts/mark-bounced', { method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include', body: JSON.stringify({ contactId: contact.id }) });
+                                fetchContacts();
+                              } catch (e) { console.error(e); }
+                            }
+                          }} className="text-amber-600">
+                            <Ban className="h-3.5 w-3.5 mr-2" /> Mark as Bounced
+                          </DropdownMenuItem>
+                        )}
                         <DropdownMenuSeparator />
                         <DropdownMenuItem onClick={() => handleDelete(contact.id)} className="text-red-600">
                           <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete
