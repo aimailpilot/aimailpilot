@@ -190,16 +190,17 @@ export class GmailReplyTracker {
       result.checked = listData.messages.length;
       console.log(`[GmailReplyTracker] Found ${listData.messages.length} messages in inbox (lookback: ${lookbackMinutes}m)`);
 
-      // Pre-load unreplied campaign messages for thread-based matching
-      // Build maps for matching: providerMessageId, contactEmail, contactId+campaignId
-      const unrepliedMessages = await storage.getUnrepliedCampaignMessages(orgId);
+      // Pre-load campaign messages for matching
+      // Use ALL recent messages (including already-replied) for inbox context matching
+      // Use unreplied messages separately for new reply detection
+      const allCampaignMessages = await storage.getAllRecentCampaignMessages(orgId);
       const providerIdToMessage = new Map<string, any>();
       const contactEmailToMessages = new Map<string, any[]>();
       const contactCampaignToMessages = new Map<string, any[]>();
       
-      console.log(`[GmailReplyTracker] Loaded ${unrepliedMessages.length} unreplied campaign messages for matching`);
+      console.log(`[GmailReplyTracker] Loaded ${allCampaignMessages.length} campaign messages for matching`);
       
-      for (const um of unrepliedMessages) {
+      for (const um of allCampaignMessages) {
         if (um.providerMessageId) {
           providerIdToMessage.set(um.providerMessageId, um);
         }
@@ -441,28 +442,24 @@ export class GmailReplyTracker {
           // Method 2: Match via Gmail thread ID (if this message's threadId matches a sent campaign message)
           let threadMatchedMessage: any = null;
           if (trackingIds.length === 0 && msgRef.threadId) {
-            // Gmail threadId usually equals the first message's ID in the thread
-            // So it should match the step 0 message's providerMessageId
             const step0Match = providerIdToMessage.get(msgRef.threadId);
-            if (step0Match && !step0Match.repliedAt) {
+            if (step0Match) {
               // Found the step-0 message via thread ID
-              // CRITICAL FIX: Now find the MOST RECENT unreplied message for this contact+campaign
-              // This ensures replies are attributed to the correct step (e.g., if step 2 was the last sent, reply goes to step 2)
+              // Find the MOST RECENT message for this contact+campaign (prefer unreplied)
               const key = `${step0Match.contactId}_${step0Match.campaignId}`;
               const allContactMsgs = contactCampaignToMessages.get(key) || [step0Match];
               
-              // Sort by sentAt DESC to get most recent first
               const sorted = [...allContactMsgs].sort((a: any, b: any) => {
                 const aTime = new Date(a.sentAt || 0).getTime();
                 const bTime = new Date(b.sentAt || 0).getTime();
                 return bTime - aTime;
               });
               
-              // Pick the most recent unreplied message
-              threadMatchedMessage = sorted.find((m: any) => !m.repliedAt) || step0Match;
+              // Pick the most recent unreplied message, or fallback to most recent
+              threadMatchedMessage = sorted.find((m: any) => !m.repliedAt) || sorted[0] || step0Match;
               
               trackingIds.push(threadMatchedMessage.trackingId);
-              console.log(`[GmailReplyTracker] Thread-based reply match: threadId=${msgRef.threadId} -> step=${threadMatchedMessage.stepNumber || 0}, trackingId=${threadMatchedMessage.trackingId}`);
+              console.log(`[GmailReplyTracker] Thread-based match: threadId=${msgRef.threadId} -> step=${threadMatchedMessage.stepNumber || 0}, trackingId=${threadMatchedMessage.trackingId}, alreadyReplied=${!!threadMatchedMessage.repliedAt}`);
             }
           }
 
@@ -471,14 +468,18 @@ export class GmailReplyTracker {
           // we sent a campaign to AND the subject starts with "Re:" (indicating a reply)
           if (trackingIds.length === 0 && senderEmail && subject.toLowerCase().startsWith('re:')) {
             for (const [key, msgs] of contactCampaignToMessages.entries()) {
-              for (const um of msgs) {
-                if (um.repliedAt) continue;
-                // Match by contact email
+              // Sort by sentAt DESC - prefer unreplied but allow already-replied for context
+              const sorted = [...msgs].sort((a: any, b: any) => {
+                const aTime = new Date(a.sentAt || 0).getTime();
+                const bTime = new Date(b.sentAt || 0).getTime();
+                return bTime - aTime;
+              });
+              for (const um of sorted) {
                 const contact = um.contactId ? await storage.getContact(um.contactId) : null;
                 if (contact && contact.email?.toLowerCase() === senderEmail) {
                   threadMatchedMessage = um;
                   trackingIds.push(um.trackingId);
-                  console.log(`[GmailReplyTracker] Email-based reply match: ${senderEmail} -> campaign=${um.campaignId}, step=${um.stepNumber || 0}`);
+                  console.log(`[GmailReplyTracker] Email-based match: ${senderEmail} -> campaign=${um.campaignId}, step=${um.stepNumber || 0}, alreadyReplied=${!!um.repliedAt}`);
                   break;
                 }
               }
@@ -486,8 +487,71 @@ export class GmailReplyTracker {
             }
           }
 
+          // First: resolve the best matching campaign message (even if already replied)
+          let matchedCampaignMessage: any = null;
           for (const trackingId of trackingIds) {
-            // Look up the campaign message by tracking ID
+            matchedCampaignMessage = threadMatchedMessage || await storage.getCampaignMessageByTracking(trackingId);
+            if (matchedCampaignMessage) break;
+          }
+
+          // ALWAYS store in unified_inbox regardless of whether reply was already tracked
+          // This ensures the inbox shows all received messages
+          const existingInbox = await storage.getInboxMessageByGmailId(msg.id);
+          if (!existingInbox) {
+            let body = msg.snippet || '';
+            let bodyHtml = '';
+            try {
+              const fullMsg: GmailMessage = await this.gmailFetch(accessToken, `messages/${msg.id}?format=full`);
+              const parts = fullMsg.payload?.parts || [];
+              for (const part of parts) {
+                if (part.mimeType === 'text/html' && part.body?.data) {
+                  bodyHtml = Buffer.from(part.body.data, 'base64url').toString('utf-8');
+                } else if (part.mimeType === 'text/plain' && part.body?.data) {
+                  body = Buffer.from(part.body.data, 'base64url').toString('utf-8');
+                }
+              }
+              if (!bodyHtml && !body && fullMsg.payload?.body?.data) {
+                body = Buffer.from(fullMsg.payload.body.data, 'base64url').toString('utf-8');
+              }
+            } catch (e) { /* fallback to snippet */ }
+
+            // Determine emailAccountId from campaign message or by matching toEmail to email accounts
+            let emailAccountId = matchedCampaignMessage?.emailAccountId || null;
+            if (!emailAccountId) {
+              try {
+                const orgAccounts = await storage.getEmailAccounts(orgId);
+                const toHeader = (msg.payload?.headers || []).find((h: any) => h.name.toLowerCase() === 'to')?.value || '';
+                const toEmailAddr = (toHeader.match(/<([^>]+)>/) || [, toHeader.trim()])[1]?.toLowerCase() || '';
+                const matchedAccount = orgAccounts.find((a: any) => a.email?.toLowerCase() === toEmailAddr);
+                if (matchedAccount) emailAccountId = matchedAccount.id;
+              } catch (e) { /* ignore */ }
+            }
+
+            const settings = await storage.getApiSettings(orgId);
+            await storage.createInboxMessage({
+              organizationId: orgId,
+              emailAccountId,
+              campaignId: matchedCampaignMessage?.campaignId || null,
+              messageId: matchedCampaignMessage?.id || null,
+              contactId: matchedCampaignMessage?.contactId || null,
+              gmailMessageId: msg.id,
+              gmailThreadId: msg.threadId,
+              fromEmail: from,
+              fromName: from.replace(/<.*>/, '').trim(),
+              toEmail: settings.gmail_user_email || '',
+              subject,
+              snippet: msg.snippet || '',
+              body,
+              bodyHtml,
+              status: 'unread',
+              provider: 'gmail',
+              receivedAt: date ? new Date(date).toISOString() : new Date().toISOString(),
+            });
+            console.log(`[GmailReplyTracker] Stored message in unified inbox from ${from} (campaign match: ${!!matchedCampaignMessage})`);
+          }
+
+          // Now process as new reply only if not already tracked
+          for (const trackingId of trackingIds) {
             const campaignMessage = threadMatchedMessage || await storage.getCampaignMessageByTracking(trackingId);
             if (!campaignMessage) continue;
             if (campaignMessage.repliedAt) continue; // Already tracked
@@ -498,33 +562,26 @@ export class GmailReplyTracker {
               ? await storage.getContact(campaignMessage.contactId)
               : null;
 
-            // Update the message
             await storage.updateCampaignMessage(campaignMessage.id, {
               repliedAt: new Date(date || Date.now()).toISOString(),
             });
 
-            // Update campaign stats
             if (campaign) {
               await storage.updateCampaign(campaignMessage.campaignId, {
                 repliedCount: (campaign.repliedCount || 0) + 1,
               });
             }
 
-            // Update contact status
             if (campaignMessage.contactId) {
               try {
                 await storage.updateContact(campaignMessage.contactId, { status: 'replied' });
               } catch (e) { /* ignore */ }
-              
-              // CRITICAL FIX: Cancel all pending follow-ups for this contact in this campaign
-              // This prevents follow-ups from being sent after a reply is detected
               try {
                 await storage.cancelPendingFollowupsForContact(campaignMessage.contactId, campaignMessage.campaignId);
                 console.log(`[GmailReplyTracker] Cancelled pending follow-ups for contact ${campaignMessage.contactId} in campaign ${campaignMessage.campaignId}`);
               } catch (e) { /* ignore */ }
             }
 
-            // Create tracking event
             await storage.createTrackingEvent({
               type: 'reply',
               campaignId: campaignMessage.campaignId,
@@ -541,51 +598,6 @@ export class GmailReplyTracker {
                 detectedVia: 'gmail-api',
               },
             });
-
-            // Also store in unified_inbox for the Unified Inbox feature
-            const existingInbox = await storage.getInboxMessageByGmailId(msg.id);
-            if (!existingInbox) {
-              // Fetch full message body for unified inbox
-              let body = msg.snippet || '';
-              let bodyHtml = '';
-              try {
-                const fullMsg: GmailMessage = await this.gmailFetch(accessToken, `messages/${msg.id}?format=full`);
-                const parts = fullMsg.payload?.parts || [];
-                for (const part of parts) {
-                  if (part.mimeType === 'text/html' && part.body?.data) {
-                    bodyHtml = Buffer.from(part.body.data, 'base64url').toString('utf-8');
-                  } else if (part.mimeType === 'text/plain' && part.body?.data) {
-                    body = Buffer.from(part.body.data, 'base64url').toString('utf-8');
-                  }
-                }
-                // Single-part message
-                if (!bodyHtml && !body && fullMsg.payload?.body?.data) {
-                  body = Buffer.from(fullMsg.payload.body.data, 'base64url').toString('utf-8');
-                }
-              } catch (e) { /* fallback to snippet */ }
-
-              const settings = await storage.getApiSettings(orgId);
-              await storage.createInboxMessage({
-                organizationId: orgId,
-                emailAccountId: campaignMessage.emailAccountId || null,
-                campaignId: campaignMessage.campaignId,
-                messageId: campaignMessage.id,
-                contactId: campaignMessage.contactId,
-                gmailMessageId: msg.id,
-                gmailThreadId: msg.threadId,
-                fromEmail: from,
-                fromName: from.replace(/<.*>/, '').trim(),
-                toEmail: settings.gmail_user_email || '',
-                subject,
-                snippet: msg.snippet || '',
-                body,
-                bodyHtml,
-                status: 'unread',
-                provider: 'gmail',
-                receivedAt: date ? new Date(date).toISOString() : new Date().toISOString(),
-              });
-              console.log(`[GmailReplyTracker] Stored reply in unified inbox from ${from}`);
-            }
 
             result.newReplies++;
             result.replies.push({

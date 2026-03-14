@@ -1224,7 +1224,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         environment: process.env.WEBSITE_SITE_NAME ? 'azure' : 'local',
         azureSiteName: process.env.WEBSITE_SITE_NAME || null,
         nodeVersion: process.version,
-        codeVersion: 'v4-inbox-bounce-fix',
+        codeVersion: 'v5-inbox-bounce-sync-fix',
         dbStats: {
           totalUsers: stats.totalUsers,
           totalOrgs: orgIds.length,
@@ -3534,6 +3534,57 @@ Example response:
     }
   });
 
+  // Sync bounce status: find all campaign messages marked as failed/bounced
+  // and ensure the corresponding contacts are also marked as bounced
+  app.post('/api/contacts/sync-bounces', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const failedMessages = await storage.getBouncedMessagesWithContacts(orgId);
+      const bounceEvents = await storage.getBounceEventsWithContacts(orgId);
+
+      let fixed = 0;
+      const seen = new Set<string>();
+
+      for (const msg of failedMessages as any[]) {
+        if (!msg.contactId || seen.has(msg.contactId)) continue;
+        seen.add(msg.contactId);
+        if (msg.contactStatus && msg.contactStatus !== 'bounced') {
+          try {
+            await storage.updateContact(msg.contactId, { status: 'bounced' });
+            console.log(`[BounceSync] Fixed contact ${msg.contactEmail} (${msg.contactId}): ${msg.contactStatus} -> bounced`);
+            fixed++;
+          } catch (e) {
+            console.error(`[BounceSync] Failed to update contact ${msg.contactId}:`, e);
+          }
+        }
+      }
+
+      for (const evt of bounceEvents as any[]) {
+        if (!evt.contactId || seen.has(evt.contactId)) continue;
+        seen.add(evt.contactId);
+        if (evt.contactStatus && evt.contactStatus !== 'bounced') {
+          try {
+            await storage.updateContact(evt.contactId, { status: 'bounced' });
+            console.log(`[BounceSync] Fixed contact ${evt.contactEmail} (${evt.contactId}) from tracking event`);
+            fixed++;
+          } catch (e) {
+            console.error(`[BounceSync] Failed to update contact ${evt.contactId}:`, e);
+          }
+        }
+      }
+
+      res.json({
+        success: true,
+        totalFailed: (failedMessages as any[]).length,
+        totalBounceEvents: (bounceEvents as any[]).length,
+        contactsFixed: fixed,
+      });
+    } catch (error) {
+      console.error('[Contacts] Sync bounces error:', error);
+      res.status(500).json({ message: 'Failed to sync bounce status' });
+    }
+  });
+
   app.delete('/api/contacts/:id', async (req: any, res) => {
     try {
       await storage.deleteContact(req.params.id);
@@ -5256,6 +5307,30 @@ Example response:
       }
       if (settings.microsoft_access_token || settings.microsoft_refresh_token) {
         results.outlook = await outlookReplyTracker.checkForReplies(orgId, lookbackMinutes);
+      }
+
+      // Auto-sync bounce status to contacts after every inbox sync
+      try {
+        const failedMessages = await storage.getBouncedMessagesWithContacts(orgId);
+        const bounceEvents = await storage.getBounceEventsWithContacts(orgId);
+        let bouncesSynced = 0;
+        const seen = new Set<string>();
+        for (const msg of [...(failedMessages as any[]), ...(bounceEvents as any[])]) {
+          if (!msg.contactId || seen.has(msg.contactId)) continue;
+          seen.add(msg.contactId);
+          if (msg.contactStatus && msg.contactStatus !== 'bounced') {
+            try {
+              await storage.updateContact(msg.contactId, { status: 'bounced' });
+              bouncesSynced++;
+            } catch (e) { /* ignore */ }
+          }
+        }
+        if (bouncesSynced > 0) {
+          console.log(`[InboxSync] Auto-synced ${bouncesSynced} bounced contacts`);
+        }
+        results.bouncesSynced = bouncesSynced;
+      } catch (e) {
+        console.error('[InboxSync] Bounce sync error:', e);
       }
 
       const totalNew = (results.gmail?.newReplies || 0) + (results.outlook?.newReplies || 0);

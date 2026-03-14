@@ -949,7 +949,12 @@ export class CampaignEngine {
             });
 
             // Only mark contact as bounced for real delivery failures
-            try { await storage.updateContact(contact.id, { status: 'bounced' }); } catch (e) {}
+            try {
+              await storage.updateContact(contact.id, { status: 'bounced' });
+              console.log(`[CampaignEngine] Contact ${contact.email} (${contact.id}) marked as bounced`);
+            } catch (e) {
+              console.error(`[CampaignEngine] Failed to mark contact ${contact.email} (${contact.id}) as bounced:`, e);
+            }
           }
         }
         

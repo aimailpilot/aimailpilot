@@ -226,88 +226,103 @@ export class OutlookReplyTracker {
           let contactId: string | null = null;
           let emailAccountId: string | null = null;
           let campaignName = '';
+          let isNewReply = false;
 
+          // First pass: find the best matching campaign message (even if already replied)
           for (const trackingId of trackingIds) {
             const campaignMessage = await storage.getCampaignMessageByTracking(trackingId);
-            if (campaignMessage && !campaignMessage.repliedAt) {
+            if (campaignMessage) {
               campaignId = campaignMessage.campaignId;
               messageId = campaignMessage.id;
               contactId = campaignMessage.contactId;
               emailAccountId = campaignMessage.emailAccountId || null;
-
-              // Update campaign message
-              await storage.updateCampaignMessage(campaignMessage.id, {
-                repliedAt: new Date(msg.receivedDateTime).toISOString(),
-              });
-
-              // Update campaign stats
               const campaign = await storage.getCampaign(campaignMessage.campaignId);
-              if (campaign) {
-                await storage.updateCampaign(campaignMessage.campaignId, {
-                  repliedCount: (campaign.repliedCount || 0) + 1,
+              if (campaign) campaignName = campaign.name || '';
+
+              // Process as new reply only if not already tracked
+              if (!campaignMessage.repliedAt) {
+                isNewReply = true;
+                await storage.updateCampaignMessage(campaignMessage.id, {
+                  repliedAt: new Date(msg.receivedDateTime).toISOString(),
                 });
-                campaignName = campaign.name || '';
+
+                if (campaign) {
+                  await storage.updateCampaign(campaignMessage.campaignId, {
+                    repliedCount: (campaign.repliedCount || 0) + 1,
+                  });
+                }
+
+                if (campaignMessage.contactId) {
+                  try {
+                    await storage.updateContact(campaignMessage.contactId, { status: 'replied' });
+                  } catch (e) { /* ignore */ }
+                  try {
+                    await storage.cancelPendingFollowupsForContact(campaignMessage.contactId, campaignMessage.campaignId);
+                    console.log(`[OutlookReplyTracker] Cancelled pending follow-ups for contact ${campaignMessage.contactId}`);
+                  } catch (e) { /* ignore */ }
+                }
+
+                await storage.createTrackingEvent({
+                  type: 'reply',
+                  campaignId: campaignMessage.campaignId,
+                  messageId: campaignMessage.id,
+                  contactId: campaignMessage.contactId,
+                  trackingId,
+                  stepNumber: campaignMessage.stepNumber || 0,
+                  metadata: {
+                    outlookMessageId: msg.id,
+                    outlookConversationId: msg.conversationId,
+                    fromEmail: msg.from?.emailAddress?.address,
+                    subject: msg.subject,
+                    snippet: msg.bodyPreview,
+                    detectedVia: 'outlook-api',
+                  },
+                });
               }
-
-              // Update contact status
-              if (campaignMessage.contactId) {
-                try {
-                  await storage.updateContact(campaignMessage.contactId, { status: 'replied' });
-                } catch (e) { /* ignore */ }
-                
-                // Cancel pending follow-ups for this contact
-                try {
-                  await storage.cancelPendingFollowupsForContact(campaignMessage.contactId, campaignMessage.campaignId);
-                  console.log(`[OutlookReplyTracker] Cancelled pending follow-ups for contact ${campaignMessage.contactId}`);
-                } catch (e) { /* ignore */ }
-              }
-
-              // Create tracking event
-              await storage.createTrackingEvent({
-                type: 'reply',
-                campaignId: campaignMessage.campaignId,
-                messageId: campaignMessage.id,
-                contactId: campaignMessage.contactId,
-                trackingId,
-                stepNumber: campaignMessage.stepNumber || 0,
-                metadata: {
-                  outlookMessageId: msg.id,
-                  outlookConversationId: msg.conversationId,
-                  fromEmail: msg.from?.emailAddress?.address,
-                  subject: msg.subject,
-                  snippet: msg.bodyPreview,
-                  detectedVia: 'outlook-api',
-                },
-              });
-
-              break; // matched one is enough
+              break;
             }
+          }
+
+          // Resolve emailAccountId by matching toEmail if not found from campaign
+          if (!emailAccountId) {
+            try {
+              const orgAccounts = await storage.getEmailAccounts(orgId);
+              const toAddr = msg.toRecipients?.[0]?.emailAddress?.address?.toLowerCase() || '';
+              const matchedAccount = orgAccounts.find((a: any) => a.email?.toLowerCase() === toAddr);
+              if (matchedAccount) emailAccountId = matchedAccount.id;
+            } catch (e) { /* ignore */ }
           }
 
           const settings = await storage.getApiSettings(orgId);
 
-          // Store in unified_inbox regardless of campaign match
-          await storage.createInboxMessage({
-            organizationId: orgId,
-            emailAccountId: emailAccountId,
-            campaignId,
-            messageId,
-            contactId,
-            outlookMessageId: msg.id,
-            outlookConversationId: msg.conversationId,
-            fromEmail: msg.from?.emailAddress?.address || '',
-            fromName: msg.from?.emailAddress?.name || '',
-            toEmail: settings.microsoft_user_email || msg.toRecipients?.[0]?.emailAddress?.address || '',
-            subject: msg.subject || '',
-            snippet: msg.bodyPreview || '',
-            body: msg.body?.contentType === 'text' ? msg.body.content : msg.bodyPreview || '',
-            bodyHtml: msg.body?.contentType === 'html' ? msg.body.content : '',
-            status: 'unread',
-            provider: 'outlook',
-            receivedAt: msg.receivedDateTime,
-          });
+          // ALWAYS store in unified_inbox - check for existing first
+          const existingOutlookInbox = await storage.getInboxMessageByOutlookId(msg.id);
+          if (!existingOutlookInbox) {
+            await storage.createInboxMessage({
+              organizationId: orgId,
+              emailAccountId,
+              campaignId,
+              messageId,
+              contactId,
+              outlookMessageId: msg.id,
+              outlookConversationId: msg.conversationId,
+              fromEmail: msg.from?.emailAddress?.address || '',
+              fromName: msg.from?.emailAddress?.name || '',
+              toEmail: settings.microsoft_user_email || msg.toRecipients?.[0]?.emailAddress?.address || '',
+              subject: msg.subject || '',
+              snippet: msg.bodyPreview || '',
+              body: msg.body?.contentType === 'text' ? msg.body.content : msg.bodyPreview || '',
+              bodyHtml: msg.body?.contentType === 'html' ? msg.body.content : '',
+              status: 'unread',
+              provider: 'outlook',
+              receivedAt: msg.receivedDateTime,
+            });
+            console.log(`[OutlookReplyTracker] Stored message in unified inbox from ${msg.from?.emailAddress?.address} (campaign match: ${!!campaignId})`);
+          }
 
-          result.newReplies++;
+          if (isNewReply) {
+            result.newReplies++;
+          }
           result.replies.push({
             from: `${msg.from?.emailAddress?.name} <${msg.from?.emailAddress?.address}>`,
             subject: msg.subject,

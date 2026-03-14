@@ -1289,6 +1289,22 @@ export class DatabaseStorage {
     `).all(orgId);
   }
 
+  // Get ALL recent campaign messages (including already-replied) for inbox matching
+  // This allows us to match incoming Gmail/Outlook messages to campaign context
+  // even if the reply was already tracked
+  async getAllRecentCampaignMessages(orgId: string) {
+    return db.prepare(`
+      SELECT m.*, ct.email as contactEmail, c.name as campaignName FROM messages m
+      INNER JOIN campaigns c ON m.campaignId = c.id
+      LEFT JOIN contacts ct ON m.contactId = ct.id
+      WHERE c.organizationId = ?
+      AND m.status IN ('sent', 'failed')
+      AND m.providerMessageId IS NOT NULL
+      ORDER BY m.sentAt DESC
+      LIMIT 5000
+    `).all(orgId);
+  }
+
   // ========== Unsubscribes ==========
   async addUnsubscribe(data: any) {
     const id = genId();
@@ -2064,6 +2080,31 @@ export class DatabaseStorage {
     const emailAccounts = ((db.prepare('SELECT COUNT(*) as c FROM email_accounts WHERE organizationId = ?').get(orgId)) as any).c;
     const emailsSent = ((db.prepare("SELECT COUNT(*) as c FROM messages m JOIN campaigns c ON c.id = m.campaignId WHERE c.organizationId = ? AND m.status = 'sent'").get(orgId)) as any).c;
     return { ...org, members, stats: { campaigns, contacts, emailAccounts, emailsSent } };
+  }
+  // Get failed/bounced campaign messages with contact status for bounce sync
+  async getBouncedMessagesWithContacts(orgId: string) {
+    return db.prepare(`
+      SELECT m.contactId, m.status as messageStatus, m.errorMessage, ct.email as contactEmail, ct.status as contactStatus
+      FROM messages m
+      INNER JOIN campaigns c ON m.campaignId = c.id
+      LEFT JOIN contacts ct ON m.contactId = ct.id
+      WHERE c.organizationId = ?
+      AND (m.status = 'failed' OR m.status = 'bounced')
+      AND m.contactId IS NOT NULL
+    `).all(orgId);
+  }
+
+  // Get bounce tracking events with contact status
+  async getBounceEventsWithContacts(orgId: string) {
+    return db.prepare(`
+      SELECT te.contactId, ct.email as contactEmail, ct.status as contactStatus
+      FROM tracking_events te
+      INNER JOIN campaigns c ON te.campaignId = c.id
+      LEFT JOIN contacts ct ON te.contactId = ct.id
+      WHERE te.type = 'bounce'
+      AND c.organizationId = ?
+      AND te.contactId IS NOT NULL
+    `).all(orgId);
   }
 }
 
