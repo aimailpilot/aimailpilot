@@ -142,6 +142,68 @@ export class OutlookReplyTracker {
           const references = getHeader('References');
           const allRefs = `${inReplyTo} ${references}`;
 
+          // ===== BOUNCE DETECTION for Outlook =====
+          const senderAddr = (msg.from?.emailAddress?.address || '').toLowerCase();
+          const subjectLower = (msg.subject || '').toLowerCase();
+          const isBounce = (
+            senderAddr.includes('mailer-daemon') ||
+            senderAddr.includes('postmaster') ||
+            subjectLower.includes('undeliverable') ||
+            subjectLower.includes('delivery has failed') ||
+            subjectLower.includes('delivery status notification') ||
+            subjectLower.includes('failure notice') ||
+            subjectLower.includes('mail delivery failed')
+          );
+          
+          if (isBounce) {
+            try {
+              // Extract bounced email from body
+              const bodyText = msg.body?.content || msg.bodyPreview || '';
+              const emailPattern = /([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/g;
+              const foundEmails = bodyText.match(emailPattern) || [];
+              
+              // Try matching via tracking IDs first
+              const trackingIds = this.extractTrackingIds(allRefs);
+              let bouncedMsg: any = null;
+              
+              for (const tid of trackingIds) {
+                const cm = await storage.getCampaignMessageByTracking(tid);
+                if (cm) { bouncedMsg = cm; break; }
+              }
+              
+              // Try matching via email addresses in body
+              if (!bouncedMsg && foundEmails.length > 0) {
+                const orgContacts = await storage.getContacts(orgId, 100000, 0);
+                for (const email of foundEmails) {
+                  if (email.includes('mailer-daemon') || email.includes('postmaster')) continue;
+                  const contact = orgContacts.find((c: any) => c.email?.toLowerCase() === email.toLowerCase());
+                  if (contact && (contact as any).status !== 'bounced') {
+                    await storage.updateContact(contact.id, { status: 'bounced' });
+                    console.log(`[OutlookReplyTracker] BOUNCE DETECTED: ${email} (subject: ${msg.subject})`);
+                  }
+                }
+              }
+              
+              if (bouncedMsg) {
+                await storage.updateCampaignMessage(bouncedMsg.id, { status: 'failed', errorMessage: `Bounce: ${msg.subject}` });
+                const contact = await storage.getContact(bouncedMsg.contactId);
+                if (contact && (contact as any).status !== 'bounced') {
+                  await storage.updateContact(bouncedMsg.contactId, { status: 'bounced' });
+                  console.log(`[OutlookReplyTracker] BOUNCE DETECTED via tracking: ${(contact as any).email} (subject: ${msg.subject})`);
+                }
+                const campaign = await storage.getCampaign(bouncedMsg.campaignId);
+                if (campaign) {
+                  await storage.updateCampaign(bouncedMsg.campaignId, {
+                    bouncedCount: (campaign.bouncedCount || 0) + 1,
+                  });
+                }
+              }
+            } catch (e) {
+              console.error('[OutlookReplyTracker] Bounce processing error:', e);
+            }
+            continue; // Don't process as reply
+          }
+
           // Try to match to a campaign message
           const trackingIds = this.extractTrackingIds(allRefs);
           let campaignId: string | null = null;

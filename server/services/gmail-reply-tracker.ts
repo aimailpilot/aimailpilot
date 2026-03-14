@@ -223,19 +223,178 @@ export class GmailReplyTracker {
           const subject = getHeader('Subject');
           const date = getHeader('Date');
 
-          // Skip bounce/delivery notifications - these are not real replies
+          // ===== BOUNCE DETECTION =====
+          // Detect bounce/delivery failure notifications and mark contacts as bounced
           const fromLower = from.toLowerCase();
-          if (fromLower.includes('mailer-daemon') || 
-              fromLower.includes('postmaster') ||
-              fromLower.includes('mail delivery') ||
-              fromLower.includes('noreply') ||
-              fromLower.includes('no-reply') ||
-              subject.toLowerCase().includes('delivery status notification') ||
-              subject.toLowerCase().includes('undeliverable') ||
-              subject.toLowerCase().includes('mail delivery failed') ||
-              subject.toLowerCase().includes('out of office') ||
-              subject.toLowerCase().includes('automatic reply')) {
+          const subjectLower = subject.toLowerCase();
+          const isBounceNotification = (
+            fromLower.includes('mailer-daemon') || 
+            fromLower.includes('postmaster') ||
+            fromLower.includes('mail delivery') ||
+            subjectLower.includes('delivery status notification') ||
+            subjectLower.includes('undeliverable') ||
+            subjectLower.includes('mail delivery failed') ||
+            subjectLower.includes('returned mail') ||
+            subjectLower.includes('failure notice') ||
+            subjectLower.includes('delivery failure')
+          );
+          
+          // Skip auto-replies (out of office, etc.) - these are NOT bounces
+          const isAutoReply = (
+            subjectLower.includes('out of office') ||
+            subjectLower.includes('automatic reply') ||
+            subjectLower.includes('auto-reply') ||
+            subjectLower.includes('autoreply') ||
+            (fromLower.includes('noreply') && !isBounceNotification) ||
+            (fromLower.includes('no-reply') && !isBounceNotification)
+          );
+          
+          if (isAutoReply) {
             continue;
+          }
+          
+          if (isBounceNotification) {
+            // Extract bounced email from the bounce notification
+            // Bounces typically reference the original email in In-Reply-To / References headers
+            // or contain the failed recipient email in the body/snippet
+            try {
+              // Try to get the full message body for bounce details
+              let bounceBody = msg.snippet || '';
+              try {
+                const fullMsg = await this.gmailFetch(accessToken, `messages/${msgRef.id}?format=full`);
+                const bodyData = fullMsg.payload?.body?.data || '';
+                const parts = fullMsg.payload?.parts || [];
+                if (bodyData) {
+                  bounceBody = Buffer.from(bodyData, 'base64').toString('utf-8');
+                } else if (parts.length > 0) {
+                  for (const part of parts) {
+                    if (part.body?.data && (part.mimeType === 'text/plain' || part.mimeType === 'text/html')) {
+                      bounceBody += Buffer.from(part.body.data, 'base64').toString('utf-8');
+                    }
+                  }
+                }
+              } catch (e) {
+                // Fall back to snippet
+              }
+              
+              // Extract bounced email address from body
+              // Common patterns: "550 5.1.1 <user@example.com>", "user@example.com: No such user"
+              const emailPattern = /([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/g;
+              const foundEmails = bounceBody.match(emailPattern) || [];
+              
+              // Also check In-Reply-To/References for the original tracking ID
+              const allRefs = `${inReplyTo} ${references}`;
+              const trackingIds = this.extractTrackingIds(allRefs);
+              
+              // Find the bounced contact
+              let bouncedContact: any = null;
+              let bouncedMessage: any = null;
+              
+              // Method 1: Match via thread ID to find the original sent message
+              if (msgRef.threadId) {
+                const threadMatch = providerIdToMessage.get(msgRef.threadId);
+                if (threadMatch) {
+                  bouncedMessage = threadMatch;
+                  try {
+                    const contact = await storage.getContact(threadMatch.contactId);
+                    if (contact) bouncedContact = contact;
+                  } catch (e) {}
+                }
+              }
+              
+              // Method 2: Match via tracking IDs in references
+              if (!bouncedContact && trackingIds.length > 0) {
+                for (const tid of trackingIds) {
+                  const match = providerIdToMessage.get(tid);
+                  if (match) {
+                    bouncedMessage = match;
+                    try {
+                      const contact = await storage.getContact(match.contactId);
+                      if (contact) bouncedContact = contact;
+                    } catch (e) {}
+                    break;
+                  }
+                }
+              }
+              
+              // Method 3: Match bounced email from body against campaign contacts
+              if (!bouncedContact && foundEmails.length > 0) {
+                for (const email of foundEmails) {
+                  const emailLower = email.toLowerCase();
+                  // Skip our own email addresses and common system addresses
+                  if (emailLower.includes('mailer-daemon') || emailLower.includes('postmaster')) continue;
+                  
+                  // Search unreplied messages for a contact with this email
+                  for (const [, msgs] of contactCampaignToMessages) {
+                    for (const m of msgs) {
+                      if (m.contactEmail && m.contactEmail.toLowerCase() === emailLower) {
+                        bouncedMessage = m;
+                        try {
+                          const contact = await storage.getContact(m.contactId);
+                          if (contact) bouncedContact = contact;
+                        } catch (e) {}
+                        break;
+                      }
+                    }
+                    if (bouncedContact) break;
+                  }
+                  if (bouncedContact) break;
+                }
+              }
+              
+              // Process the bounce
+              if (bouncedContact && (bouncedContact as any).status !== 'bounced') {
+                const contactEmail = (bouncedContact as any).email || 'unknown';
+                console.log(`[GmailReplyTracker] BOUNCE DETECTED: ${contactEmail} (from: ${from}, subject: ${subject})`);
+                
+                // Mark contact as bounced
+                await storage.updateContact(bouncedContact.id, { status: 'bounced' });
+                
+                // Update campaign message status to failed/bounced
+                if (bouncedMessage) {
+                  await storage.updateCampaignMessage(bouncedMessage.id, {
+                    status: 'failed',
+                    errorMessage: `Bounce detected: ${subject}`,
+                  });
+                  
+                  // Create bounce tracking event
+                  try {
+                    await storage.createTrackingEvent({
+                      type: 'bounce',
+                      campaignId: bouncedMessage.campaignId,
+                      messageId: bouncedMessage.id,
+                      contactId: bouncedContact.id,
+                      trackingId: bouncedMessage.trackingId || `bounce-${bouncedContact.id}`,
+                      metadata: JSON.stringify({ reason: subject, from, detectedAt: new Date().toISOString() }),
+                    });
+                  } catch (e) {}
+                  
+                  // Update campaign bounce count
+                  try {
+                    const campaign = await storage.getCampaign(bouncedMessage.campaignId);
+                    if (campaign) {
+                      await storage.updateCampaign(bouncedMessage.campaignId, {
+                        bouncedCount: (campaign.bouncedCount || 0) + 1,
+                        sentCount: Math.max(0, (campaign.sentCount || 0) - 1),
+                      });
+                    }
+                  } catch (e) {}
+                }
+                
+                result.newReplies++; // Count as an event detected
+                result.replies.push({
+                  from,
+                  subject,
+                  snippet: `BOUNCE: ${contactEmail} - ${msg.snippet?.slice(0, 100) || subject}`,
+                  campaignName: bouncedMessage?.campaignName || 'Unknown',
+                  contactEmail,
+                  receivedAt: date || new Date().toISOString(),
+                });
+              }
+            } catch (bounceError) {
+              console.error('[GmailReplyTracker] Error processing bounce notification:', bounceError);
+            }
+            continue; // Don't process bounce as a reply
           }
 
           // Extract sender email from "Name <email>" format
