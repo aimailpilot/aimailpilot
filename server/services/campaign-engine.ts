@@ -965,7 +965,27 @@ export class CampaignEngine {
       }
     }
 
-    // Campaign completed
+    // Campaign completed — final flush of any remaining counts
+    if (localSentCount > 0 || localBouncedCount > 0) {
+      try {
+        const flushCampaign = await storage.getCampaign(campaignId);
+        if (flushCampaign) {
+          await storage.updateCampaign(campaignId, {
+            sentCount: (flushCampaign.sentCount || 0) + localSentCount,
+            bouncedCount: (flushCampaign.bouncedCount || 0) + localBouncedCount,
+          });
+        }
+        if (localSentCount > 0) {
+          await storage.incrementDailySent(emailAccount.id, localSentCount);
+        }
+        console.log(`[CampaignEngine] Final flush: +${localSentCount} sent, +${localBouncedCount} bounced for campaign ${campaignId}`);
+        localSentCount = 0;
+        localBouncedCount = 0;
+      } catch (e) {
+        console.error(`[CampaignEngine] Final flush error for campaign ${campaignId}:`, e);
+      }
+    }
+
     const finalCampaign = await storage.getCampaign(campaignId);
     if (finalCampaign && finalCampaign.status === 'active') {
       await storage.updateCampaign(campaignId, { status: 'completed' });

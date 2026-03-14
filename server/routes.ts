@@ -2264,6 +2264,39 @@ Which account should I use and why? If I need to split across accounts, provide 
     res.json({ success: true });
   });
 
+  // Recalculate campaign stats from actual messages (fixes campaigns with wrong sentCount)
+  app.post('/api/campaigns/:id/recalculate', async (req: any, res) => {
+    try {
+      const campaign = await storage.getCampaign(req.params.id);
+      if (!campaign) return res.status(404).json({ message: 'Campaign not found' });
+      
+      const messages = await storage.getCampaignMessagesEnriched(req.params.id, 100000, 0);
+      const sentCount = messages.filter((m: any) => m.status === 'sent' || m.status === 'sending').length;
+      const bouncedCount = messages.filter((m: any) => m.status === 'failed' || m.status === 'bounced').length;
+      const openedCount = messages.filter((m: any) => m.openedAt || (m.openCount && m.openCount > 0)).length;
+      const clickedCount = messages.filter((m: any) => m.clickedAt || (m.clickCount && m.clickCount > 0)).length;
+      const repliedCount = messages.filter((m: any) => m.repliedAt || (m.replyCount && m.replyCount > 0)).length;
+      
+      await storage.updateCampaign(req.params.id, {
+        sentCount,
+        bouncedCount,
+        openedCount,
+        clickedCount,
+        repliedCount,
+        totalRecipients: campaign.totalRecipients || sentCount + bouncedCount,
+      });
+      
+      console.log(`[Campaign] Recalculated stats for ${req.params.id}: sent=${sentCount}, bounced=${bouncedCount}, opened=${openedCount}, clicked=${clickedCount}, replied=${repliedCount}`);
+      res.json({ 
+        success: true, 
+        stats: { sentCount, bouncedCount, openedCount, clickedCount, repliedCount, totalRecipients: campaign.totalRecipients || sentCount + bouncedCount }
+      });
+    } catch (error) {
+      console.error('[Campaign] Recalculate error:', error);
+      res.status(500).json({ message: 'Failed to recalculate stats' });
+    }
+  });
+
   // Reset campaign: clear failed messages and bounce counts (for campaigns with false bounces)
   app.post('/api/campaigns/:id/reset-bounces', async (req: any, res) => {
     try {
@@ -2928,8 +2961,27 @@ Which account should I use and why? If I need to split across accounts, provide 
         total = await storage.getContactsCount(req.user.organizationId, filters);
       }
 
+      // Status filter (bounced, unsubscribed, active)
+      // When filtering by status, we need to get ALL contacts first to filter correctly
+      // then apply pagination on the filtered result
       if (status && status !== 'all') {
-        contacts = contacts.filter((c: any) => c.status === status);
+        // Get all contacts in scope for this status (no pagination)
+        let allContacts;
+        if (isAdmin && assignedTo) {
+          if (assignedTo === 'unassigned') {
+            allContacts = await storage.getContacts(req.user.organizationId, 100000, 0, filters);
+            allContacts = allContacts.filter((c: any) => !c.assignedTo);
+          } else {
+            allContacts = await storage.getContactsForUser(req.user.organizationId, assignedTo, 100000, 0, filters);
+          }
+        } else if (!isAdmin && !listId) {
+          allContacts = await storage.getContactsForUser(req.user.organizationId, req.user.id, 100000, 0, filters);
+        } else {
+          allContacts = await storage.getContacts(req.user.organizationId, 100000, 0, filters);
+        }
+        const statusFiltered = allContacts.filter((c: any) => c.status === status);
+        total = statusFiltered.length;
+        contacts = statusFiltered.slice(offset, offset + limit);
       }
 
       res.json({ contacts, total, limit, offset });
@@ -3385,6 +3437,34 @@ Example response:
       res.json(updated);
     } catch (error) {
       res.status(500).json({ message: 'Failed to update contact' });
+    }
+  });
+
+  // Mark a contact as bounced (adds to blocklist)
+  app.post('/api/contacts/mark-bounced', async (req: any, res) => {
+    try {
+      const { email, contactId, reason } = req.body;
+      
+      if (contactId) {
+        // Mark specific contact as bounced
+        await storage.updateContact(contactId, { status: 'bounced' });
+        res.json({ success: true, message: `Contact marked as bounced` });
+      } else if (email) {
+        // Find contact by email and mark as bounced
+        const contacts = await storage.getContacts(req.user.organizationId, 100000, 0);
+        const match = contacts.find((c: any) => c.email && c.email.toLowerCase() === email.toLowerCase());
+        if (match) {
+          await storage.updateContact(match.id, { status: 'bounced' });
+          res.json({ success: true, message: `Contact ${email} marked as bounced`, contactId: match.id });
+        } else {
+          res.status(404).json({ success: false, message: `Contact with email ${email} not found` });
+        }
+      } else {
+        res.status(400).json({ success: false, message: 'Provide either contactId or email' });
+      }
+    } catch (error) {
+      console.error('[Contacts] Mark bounced error:', error);
+      res.status(500).json({ message: 'Failed to mark contact as bounced' });
     }
   });
 

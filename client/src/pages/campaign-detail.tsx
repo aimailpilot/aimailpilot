@@ -54,9 +54,13 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
   // Reply tracking status
   const [replyTrackingStatus, setReplyTrackingStatus] = useState<any>(null);
 
-  const fetchDetail = async () => {
+  const fetchDetail = async (recalculate = false) => {
     setLoading(true);
     try {
+      // Optionally recalculate stats from actual messages first
+      if (recalculate) {
+        await fetch(`/api/campaigns/${campaignId}/recalculate`, { method: 'POST', credentials: 'include' });
+      }
       const res = await fetch(`/api/campaigns/${campaignId}/detail`, { credentials: 'include' });
       if (!res.ok) throw new Error('Failed to load campaign');
       const data = await res.json();
@@ -529,7 +533,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
               <TooltipContent><p className="text-xs">Campaign performance metrics</p></TooltipContent>
             </Tooltip>
           </h2>
-          <button onClick={fetchDetail} className="text-xs text-blue-600 hover:text-blue-700 font-semibold flex items-center gap-1 transition-colors">
+          <button onClick={() => fetchDetail(true)} className="text-xs text-blue-600 hover:text-blue-700 font-semibold flex items-center gap-1 transition-colors">
             <RefreshCw className="h-3 w-3" /> Refresh
           </button>
         </div>
