@@ -302,8 +302,10 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
     return configs[status] || configs.draft;
   };
 
-  // Show "Following Up" for completed campaigns that have active follow-up sequences
-  const effectiveStatus = (campaign.status === 'completed' && hasActiveFollowups) ? 'following_up' : campaign.status;
+  // Show "Following Up" for campaigns with active follow-up sequences
+  const effectiveStatus = campaign.status === 'following_up' ? 'following_up'
+    : (campaign.status === 'completed' && hasActiveFollowups) ? 'following_up'
+    : campaign.status;
   const statusConfig = getStatusConfig(effectiveStatus);
 
   const formatDateTime = (dateStr: string) => {
@@ -380,9 +382,9 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
     })
     .slice(0, 30);
 
-  const isActive = campaign.status === 'active';
+  const isActive = campaign.status === 'active' || campaign.status === 'following_up';
   const isPaused = campaign.status === 'paused';
-  const isFollowingUp = campaign.status === 'completed' && hasActiveFollowups;
+  const isFollowingUp = campaign.status === 'following_up' || (campaign.status === 'completed' && hasActiveFollowups);
   const isEnded = (campaign.status === 'completed' || campaign.status === 'archived') && !isFollowingUp;
 
   // Progress

@@ -1224,7 +1224,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         environment: process.env.WEBSITE_SITE_NAME ? 'azure' : 'local',
         azureSiteName: process.env.WEBSITE_SITE_NAME || null,
         nodeVersion: process.version,
-        codeVersion: 'v5-inbox-bounce-sync-fix',
+        codeVersion: 'v6-followup-sending-window-fix',
         dbStats: {
           totalUsers: stats.totalUsers,
           totalOrgs: orgIds.length,
@@ -2266,12 +2266,24 @@ Which account should I use and why? If I need to split across accounts, provide 
     const success = campaignEngine.resumeCampaign(req.params.id);
     if (!success) {
       // Campaign not in memory (e.g. server restarted while paused).
-      // Re-start — startCampaign skips already-sent contacts.
-      // Read saved sending config to restore ALL settings: delay, time windows, maxPerDay.
       try {
         const campaign = await storage.getCampaign(req.params.id);
         if (!campaign) return res.status(404).json({ success: false, error: 'Campaign not found' });
         
+        // If the campaign was in 'following_up' state before being paused,
+        // just restore it to 'following_up' — the follow-up engine will handle sending.
+        // No need to re-run the campaign engine for Step 1.
+        const hasFollowups = await storage.hasActiveFollowupSteps(req.params.id);
+        const allStep1Sent = (campaign as any).sentCount > 0; // Step 1 already sent
+        
+        if (hasFollowups && allStep1Sent) {
+          await storage.updateCampaign(req.params.id, { status: 'following_up' });
+          console.log(`[Campaign] Resumed ${req.params.id} to 'following_up' — follow-up engine will handle pending steps`);
+          return res.json({ success: true, status: 'following_up' });
+        }
+
+        // Otherwise re-start Step 1 — startCampaign skips already-sent contacts.
+        // Read saved sending config to restore ALL settings: delay, time windows, maxPerDay.
         const savedConfig = campaign.sendingConfig;
         if (!savedConfig || !savedConfig.delayBetweenEmails) {
           console.warn(`[Campaign] WARNING: No sendingConfig found for campaign ${req.params.id}. Using defaults.`);

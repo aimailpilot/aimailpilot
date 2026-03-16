@@ -1384,6 +1384,13 @@ export class DatabaseStorage {
   // ========== Campaign Follow-ups ==========
   async getCampaignFollowups(campaignId: string) { return db.prepare('SELECT * FROM campaign_followups WHERE campaignId = ? AND isActive = 1').all(campaignId); }
   async getActiveCampaignFollowups() { return db.prepare('SELECT * FROM campaign_followups WHERE isActive = 1').all(); }
+  
+  // Check if a campaign has active follow-up steps (used to decide 'following_up' vs 'completed')
+  async hasActiveFollowupSteps(campaignId: string): Promise<boolean> {
+    const followup = db.prepare('SELECT cf.id FROM campaign_followups cf INNER JOIN followup_steps fs ON fs.sequenceId = cf.sequenceId WHERE cf.campaignId = ? AND cf.isActive = 1 LIMIT 1').get(campaignId);
+    return !!followup;
+  }
+
   async createCampaignFollowup(followup: any) {
     const id = genId();
     db.prepare('INSERT INTO campaign_followups (id, campaignId, sequenceId, isActive, createdAt) VALUES (?, ?, ?, 1, ?)').run(id, followup.campaignId, followup.sequenceId || null, now());

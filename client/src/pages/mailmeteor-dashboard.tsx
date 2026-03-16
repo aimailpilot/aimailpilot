@@ -290,12 +290,14 @@ export default function MailMeteorDashboard() {
   const getStatusBadge = (status: string) => {
     const styles: Record<string, string> = {
       active: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+      following_up: 'bg-indigo-50 text-indigo-700 border-indigo-200',
       completed: 'bg-gray-50 text-gray-600 border-gray-200',
       draft: 'bg-slate-50 text-slate-500 border-slate-200',
       scheduled: 'bg-blue-50 text-blue-700 border-blue-200',
       paused: 'bg-amber-50 text-amber-700 border-amber-200',
     };
-    return <Badge variant="outline" className={`font-medium text-xs capitalize ${styles[status] || styles.draft}`}>{status}</Badge>;
+    const label = status === 'following_up' ? 'Following Up' : status;
+    return <Badge variant="outline" className={`font-medium text-xs capitalize ${styles[status] || styles.draft}`}>{label}</Badge>;
   };
 
   const filters = ["All", "Active", "Scheduled", "Drafts", "Completed", "Paused"];
@@ -303,7 +305,7 @@ export default function MailMeteorDashboard() {
   const filteredCampaigns = campaigns?.filter((campaign: Campaign) => {
     const matchesSearch = campaign.name.toLowerCase().includes(searchQuery.toLowerCase());
     const matchesFilter = activeFilter === "All" || 
-                         (activeFilter === "Active" && campaign.status === "active") ||
+                         (activeFilter === "Active" && (campaign.status === "active" || campaign.status === "following_up")) ||
                          (activeFilter === "Scheduled" && campaign.status === "scheduled") ||
                          (activeFilter === "Drafts" && campaign.status === "draft") ||
                          (activeFilter === "Completed" && campaign.status === "completed") ||
@@ -863,7 +865,7 @@ export default function MailMeteorDashboard() {
                               </Button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="end">
-                              {campaign.status === 'active' && (
+                              {(campaign.status === 'active' || campaign.status === 'following_up') && (
                                 <DropdownMenuItem onClick={() => handlePause(campaign.id)}>
                                   <Pause className="h-3.5 w-3.5 mr-2" /> Pause
                                 </DropdownMenuItem>

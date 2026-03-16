@@ -464,9 +464,15 @@ export class CampaignEngine {
       }
 
       if (contacts.length === 0) {
-        // All contacts already processed — mark campaign as completed
-        console.log(`[CampaignEngine] All contacts already processed for campaign ${campaignId}, marking completed`);
-        await storage.updateCampaign(campaignId, { status: 'completed' });
+        // All contacts already processed — check if follow-ups exist before marking completed
+        const hasFollowups = await storage.hasActiveFollowupSteps(campaignId);
+        if (hasFollowups) {
+          console.log(`[CampaignEngine] All Step 1 contacts processed for campaign ${campaignId}. Follow-ups pending — status set to 'following_up'`);
+          await storage.updateCampaign(campaignId, { status: 'following_up' });
+        } else {
+          console.log(`[CampaignEngine] All contacts already processed for campaign ${campaignId}, marking completed`);
+          await storage.updateCampaign(campaignId, { status: 'completed' });
+        }
         return { success: true };
       }
 
@@ -1019,7 +1025,16 @@ export class CampaignEngine {
 
     const finalCampaign = await storage.getCampaign(campaignId);
     if (finalCampaign && finalCampaign.status === 'active') {
-      await storage.updateCampaign(campaignId, { status: 'completed' });
+      // Check if this campaign has active follow-up steps pending
+      // If so, mark as 'following_up' instead of 'completed' so follow-ups can proceed
+      const hasFollowups = await storage.hasActiveFollowupSteps(campaignId);
+      if (hasFollowups) {
+        await storage.updateCampaign(campaignId, { status: 'following_up' });
+        console.log(`[CampaignEngine] Campaign ${campaignId} Step 1 complete. Follow-up steps pending — status set to 'following_up'`);
+      } else {
+        await storage.updateCampaign(campaignId, { status: 'completed' });
+        console.log(`[CampaignEngine] Campaign ${campaignId} completed (no follow-up steps)`);
+      }
     }
     this.activeCampaigns.delete(campaignId);
   }

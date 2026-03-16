@@ -195,15 +195,108 @@ export class FollowupEngine {
       
       // Process time-based triggers (pending executions)
       await this.processScheduledFollowups();
+
+      // Check if any 'following_up' campaigns are fully complete
+      // (all follow-up executions are sent/skipped/failed, none pending)
+      await this.checkFollowupCompletion(activeCampaignFollowups);
     } catch (error) {
       console.error("[Followup] Error processing follow-up triggers:", error);
     }
   }
 
   /**
+   * Check if campaigns in 'following_up' status have completed all follow-up steps
+   * and mark them as 'completed' when done.
+   */
+  private async checkFollowupCompletion(activeCampaignFollowups: any[]): Promise<void> {
+    const checkedCampaigns = new Set<string>();
+    
+    for (const cf of activeCampaignFollowups) {
+      const campaignId = cf.campaignId;
+      if (checkedCampaigns.has(campaignId)) continue;
+      checkedCampaigns.add(campaignId);
+
+      const campaign = await storage.getCampaign(campaignId);
+      if (!campaign || campaign.status !== 'following_up') continue;
+
+      // Count total original messages (step 0) and total follow-up steps
+      const campaignMessages = await storage.getCampaignMessages(campaignId, 50000, 0);
+      const step0Messages = campaignMessages.filter((m: any) => (m.stepNumber || 0) === 0);
+      const followupSteps = await storage.getFollowupSteps(cf.sequenceId);
+
+      if (step0Messages.length === 0 || followupSteps.length === 0) continue;
+
+      // Count how many executions exist vs how many should exist
+      const executions = await storage.getFollowupExecutionsByCampaign(campaignId);
+      const totalExpected = step0Messages.length * followupSteps.length;
+      const totalDone = executions.filter((e: any) =>
+        e.status === 'sent' || e.status === 'skipped' || e.status === 'failed'
+      ).length;
+      const totalPending = executions.filter((e: any) => e.status === 'pending').length;
+
+      if (totalDone >= totalExpected && totalPending === 0) {
+        await storage.updateCampaign(campaignId, { status: 'completed' });
+        console.log(`[Followup] Campaign ${campaignId} (${campaign.name}): All ${totalDone} follow-up executions complete. Marking campaign as completed.`);
+      }
+    }
+  }
+
+  /**
+   * Check if current time is within the campaign's allowed sending window.
+   * Returns { canSend: true } or { canSend: false, reason: string }
+   */
+  private checkSendingWindow(sendingConfig: any): { canSend: boolean; reason?: string } {
+    if (!sendingConfig?.autopilot?.enabled) return { canSend: true };
+
+    const autopilot = sendingConfig.autopilot;
+    const now = new Date();
+    const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
+    // timezoneOffset is browser's getTimezoneOffset() (minutes behind UTC, e.g. IST = -330)
+    const userLocalMs = utcMs - (sendingConfig.timezoneOffset || 0) * 60000;
+    const userLocal = new Date(userLocalMs);
+
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const dayName = dayNames[userLocal.getDay()];
+    const dayConfig = autopilot.days?.[dayName];
+
+    if (!dayConfig || !dayConfig.enabled) {
+      return { canSend: false, reason: `Sending disabled on ${dayName}` };
+    }
+
+    const currentHH = String(userLocal.getHours()).padStart(2, '0');
+    const currentMM = String(userLocal.getMinutes()).padStart(2, '0');
+    const currentTime = `${currentHH}:${currentMM}`;
+
+    if (dayConfig.startTime && currentTime < dayConfig.startTime) {
+      return { canSend: false, reason: `Before sending hours (starts at ${dayConfig.startTime}), current local time: ${currentTime}` };
+    }
+
+    if (dayConfig.endTime && currentTime >= dayConfig.endTime) {
+      return { canSend: false, reason: `After sending hours (ended at ${dayConfig.endTime}), current local time: ${currentTime}` };
+    }
+
+    return { canSend: true };
+  }
+
+  /**
    * Process follow-ups for a specific campaign
    */
   private async processCampaignFollowups(campaignId: string, sequenceId: string): Promise<void> {
+    // Load campaign to check sending window
+    const campaign = await storage.getCampaign(campaignId);
+    if (!campaign) return;
+
+    // Respect campaign's sending window — defer follow-ups until within allowed hours
+    const sendingConfig = (campaign as any).sendingConfig;
+    const windowCheck = this.checkSendingWindow(sendingConfig);
+    if (!windowCheck.canSend) {
+      // Log only occasionally to avoid spam
+      if (this._checkCount % 60 === 1) {
+        console.log(`[Followup] Campaign ${campaignId}: Deferring follow-ups — ${windowCheck.reason}`);
+      }
+      return;
+    }
+
     const campaignMessages = await storage.getCampaignMessages(campaignId, 50000, 0);
     const followupSteps = await storage.getFollowupSteps(sequenceId);
     
@@ -421,6 +514,22 @@ export class FollowupEngine {
     }
     
     for (const [campaignId, executions] of byCampaign) {
+      // Check sending window for this campaign before sending any follow-ups
+      if (campaignId) {
+        const campaign = await storage.getCampaign(campaignId);
+        if (campaign) {
+          const sendingConfig = (campaign as any).sendingConfig;
+          const windowCheck = this.checkSendingWindow(sendingConfig);
+          if (!windowCheck.canSend) {
+            // Defer — don't send yet, will be picked up next time the window is open
+            if (this._checkCount % 60 === 1) {
+              console.log(`[Followup] Deferring ${executions.length} pending follow-ups for campaign ${campaignId}: ${windowCheck.reason}`);
+            }
+            continue;
+          }
+        }
+      }
+
       // Batch-load all campaign messages ONCE for this campaign
       let campaignMsgs: any[] = [];
       if (campaignId) {
