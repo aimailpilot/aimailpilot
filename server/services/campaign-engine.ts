@@ -91,10 +91,13 @@ async function refreshGmailToken(orgId: string, senderEmail?: string): Promise<s
   let refreshToken = senderEmail ? settings[`${senderPrefix}refresh_token`] : null;
   let tokenExpiry = senderEmail ? settings[`${senderPrefix}token_expiry`] : null;
   
-  // Fall back to org-level tokens
-  if (!accessToken) accessToken = settings.gmail_access_token;
-  if (!refreshToken) refreshToken = settings.gmail_refresh_token;
-  if (!tokenExpiry) tokenExpiry = settings.gmail_token_expiry;
+  // Fall back to org-level tokens ONLY if no per-sender tokens exist at all
+  // CRITICAL: Don't mix refresh tokens from different accounts!
+  if (!accessToken && !refreshToken) {
+    accessToken = settings.gmail_access_token;
+    refreshToken = settings.gmail_refresh_token;
+    tokenExpiry = settings.gmail_token_expiry;
+  }
   
   const expiry = parseInt(tokenExpiry || '0');
   if (accessToken && Date.now() < expiry - 300000) {
@@ -131,10 +134,12 @@ async function refreshGmailToken(orgId: string, senderEmail?: string): Promise<s
       if (senderEmail) {
         await storage.setApiSetting(orgId, `${senderPrefix}access_token`, credentials.access_token);
         if (credentials.expiry_date) await storage.setApiSetting(orgId, `${senderPrefix}token_expiry`, String(credentials.expiry_date));
+      } else {
+        // Only update org-level tokens when NOT refreshing a per-sender token
+        // CRITICAL: Don't overwrite org-level tokens with a secondary account's tokens!
+        await storage.setApiSetting(orgId, 'gmail_access_token', credentials.access_token);
+        if (credentials.expiry_date) await storage.setApiSetting(orgId, 'gmail_token_expiry', String(credentials.expiry_date));
       }
-      // Also update org-level tokens
-      await storage.setApiSetting(orgId, 'gmail_access_token', credentials.access_token);
-      if (credentials.expiry_date) await storage.setApiSetting(orgId, 'gmail_token_expiry', String(credentials.expiry_date));
       return credentials.access_token;
     }
   } catch (e) { console.error('[CampaignEngine] Gmail token refresh failed:', e); }
@@ -152,11 +157,16 @@ async function refreshMicrosoftToken(orgId: string, senderEmail?: string): Promi
   let accessToken = senderEmail ? settings[`${senderPrefix}access_token`] : null;
   let refreshToken = senderEmail ? settings[`${senderPrefix}refresh_token`] : null;
   let tokenExpiry = senderEmail ? settings[`${senderPrefix}token_expiry`] : null;
+  let isPerSender = !!(accessToken || refreshToken);
   
-  // Fall back to org-level tokens
-  if (!accessToken) accessToken = settings.microsoft_access_token;
-  if (!refreshToken) refreshToken = settings.microsoft_refresh_token;
-  if (!tokenExpiry) tokenExpiry = settings.microsoft_token_expiry;
+  // Fall back to org-level tokens ONLY if no per-sender tokens exist at all
+  // CRITICAL: Don't mix refresh tokens from different accounts!
+  if (!accessToken && !refreshToken) {
+    accessToken = settings.microsoft_access_token;
+    refreshToken = settings.microsoft_refresh_token;
+    tokenExpiry = settings.microsoft_token_expiry;
+    isPerSender = false;
+  }
   
   const expiry = parseInt(tokenExpiry || '0');
   if (accessToken && Date.now() < expiry - 300000) {
@@ -188,7 +198,7 @@ async function refreshMicrosoftToken(orgId: string, senderEmail?: string): Promi
       client_id: clientId, client_secret: clientSecret,
       refresh_token: refreshToken,
       grant_type: 'refresh_token',
-      scope: 'openid profile email offline_access User.Read Mail.Read Mail.Send',
+      scope: 'openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/SMTP.Send',
     });
     const resp = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
       method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString(),
@@ -202,12 +212,14 @@ async function refreshMicrosoftToken(orgId: string, senderEmail?: string): Promi
           if (tokens.refresh_token) await storage.setApiSetting(orgId, `${senderPrefix}refresh_token`, tokens.refresh_token);
           const exp = Date.now() + (tokens.expires_in || 3600) * 1000;
           await storage.setApiSetting(orgId, `${senderPrefix}token_expiry`, String(exp));
+        } else {
+          // Only update org-level tokens when NOT refreshing a per-sender token
+          // CRITICAL: Don't overwrite org-level tokens with a secondary account's tokens!
+          await storage.setApiSetting(orgId, 'microsoft_access_token', tokens.access_token);
+          if (tokens.refresh_token) await storage.setApiSetting(orgId, 'microsoft_refresh_token', tokens.refresh_token);
+          const exp = Date.now() + (tokens.expires_in || 3600) * 1000;
+          await storage.setApiSetting(orgId, 'microsoft_token_expiry', String(exp));
         }
-        // Also update org-level tokens
-        await storage.setApiSetting(orgId, 'microsoft_access_token', tokens.access_token);
-        if (tokens.refresh_token) await storage.setApiSetting(orgId, 'microsoft_refresh_token', tokens.refresh_token);
-        const exp = Date.now() + (tokens.expires_in || 3600) * 1000;
-        await storage.setApiSetting(orgId, 'microsoft_token_expiry', String(exp));
         return tokens.access_token;
       }
     }

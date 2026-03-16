@@ -105,26 +105,33 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
     })();
   }, []);
 
-  // Handle redirect from Gmail OAuth connect flow
+  // Handle redirect from Gmail/Outlook OAuth connect flow
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const connectedEmail = params.get('gmail_connected');
+    const gmailConnectedEmail = params.get('gmail_connected');
+    const outlookConnectedEmail = params.get('outlook_connected');
     const error = params.get('error');
-    if (connectedEmail) {
-      setGmailConnectSuccess(`Gmail account ${connectedEmail} connected successfully via OAuth!`);
+    if (gmailConnectedEmail) {
+      setGmailConnectSuccess(`Gmail account ${gmailConnectedEmail} connected successfully via OAuth!`);
       fetchAccounts();
       fetchGmailOAuthStatus();
-      // Clean the URL
+      window.history.replaceState({}, '', window.location.pathname);
+      setTimeout(() => setGmailConnectSuccess(''), 8000);
+    }
+    if (outlookConnectedEmail) {
+      setGmailConnectSuccess(`Outlook account ${outlookConnectedEmail} connected successfully via OAuth!`);
+      fetchAccounts();
       window.history.replaceState({}, '', window.location.pathname);
       setTimeout(() => setGmailConnectSuccess(''), 8000);
     }
     if (error) {
       const errorMessages: Record<string, string> = {
-        'oauth_not_configured': 'Google OAuth is not configured. Set up Client ID and Secret in Advanced Settings.',
+        'oauth_not_configured': 'OAuth is not configured. Set up Client ID and Secret in Advanced Settings.',
         'gmail_connect_failed': 'Failed to start Gmail connection. Please try again.',
         'gmail_connect_denied': 'Gmail connection was cancelled.',
         'gmail_userinfo_failed': 'Could not retrieve Gmail account info. Please try again.',
         'gmail_connect_callback_failed': 'Gmail connection failed during callback. Please try again.',
+        'outlook_connect_failed': 'Failed to start Outlook connection. Please try again.',
       };
       setGmailConnectError(errorMessages[error] || `Connection error: ${error}`);
       window.history.replaceState({}, '', window.location.pathname);
@@ -505,6 +512,15 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
             <svg className="h-3.5 w-3.5 mr-1.5" viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
             Connect Gmail
           </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => { window.location.href = '/api/auth/outlook-connect'; }}
+            className="border-blue-200 text-blue-700 hover:bg-blue-50"
+          >
+            <Mail className="h-3.5 w-3.5 mr-1.5 text-blue-600" />
+            Connect Outlook
+          </Button>
           <Button 
             className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 shadow-sm shadow-blue-200/50" 
             size="sm"
@@ -530,7 +546,7 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
           </div>
           <h3 className="text-lg font-semibold text-gray-900 mb-1.5">No email accounts configured</h3>
           <p className="text-sm text-gray-400 mb-6 max-w-md text-center">
-            Connect your Gmail via Google OAuth (easy) or add any email via SMTP
+            Connect your Gmail or Outlook via OAuth (easy) or add any email via SMTP
           </p>
           <div className="flex items-center gap-3">
             <Button
@@ -538,7 +554,13 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
               onClick={() => { window.location.href = '/api/auth/gmail-connect'; }}
             >
               <svg className="h-4 w-4 mr-2" viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
-              Connect Gmail via OAuth
+              Connect Gmail
+            </Button>
+            <Button
+              className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 shadow-sm"
+              onClick={() => { window.location.href = '/api/auth/outlook-connect'; }}
+            >
+              <Mail className="h-4 w-4 mr-2" /> Connect Outlook
             </Button>
             <Button 
               variant="outline"
@@ -648,7 +670,7 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
                           size="sm"
                           onClick={() => {
                             if (account.provider === 'outlook' || account.provider === 'microsoft') {
-                              window.location.href = '/api/auth/microsoft?email=' + encodeURIComponent(account.email);
+                              window.location.href = '/api/auth/outlook-connect?email=' + encodeURIComponent(account.email);
                             } else {
                               window.location.href = '/api/auth/gmail-connect?email=' + encodeURIComponent(account.email);
                             }
@@ -895,12 +917,54 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
               </div>
             )}
             {(formProvider === 'outlook' || formProvider === 'office365') && (
-              <Alert className="border-blue-200 bg-blue-50/50">
-                <AlertCircle className="h-4 w-4 text-blue-600" />
-                <AlertDescription className="text-sm text-blue-800">
-                  <strong>Enable SMTP auth</strong> in Outlook settings: Settings &gt; Mail &gt; Sync email &gt; enable POP/IMAP/SMTP.
-                </AlertDescription>
-              </Alert>
+              <div className="space-y-3">
+                {/* Outlook OAuth Connect Option */}
+                <div className="bg-gradient-to-r from-blue-50/80 to-indigo-50/50 rounded-xl border border-blue-100 p-4">
+                  <div className="flex items-center gap-3">
+                    <div className="bg-white p-2 rounded-lg shadow-sm border border-blue-100 flex-shrink-0">
+                      <Mail className="h-6 w-6 text-blue-600" />
+                    </div>
+                    <div className="flex-1">
+                      <h4 className="text-sm font-semibold text-gray-900">Connect with Microsoft</h4>
+                      <p className="text-xs text-gray-500">Sign in with Microsoft to connect your Outlook. No app password needed.</p>
+                    </div>
+                    <Button
+                      size="sm"
+                      className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 flex-shrink-0"
+                      onClick={() => {
+                        window.location.href = '/api/auth/outlook-connect';
+                      }}
+                    >
+                      <Zap className="h-3.5 w-3.5 mr-1.5" /> Connect Outlook
+                    </Button>
+                  </div>
+                  <div className="flex items-center gap-2 mt-2.5">
+                    <Badge variant="outline" className="text-[10px] bg-blue-50 text-blue-700 border-blue-200">
+                      <Shield className="h-3 w-3 mr-0.5" /> OAuth 2.0
+                    </Badge>
+                    <Badge variant="outline" className="text-[10px] bg-blue-50 text-blue-700 border-blue-200">
+                      <Zap className="h-3 w-3 mr-0.5" /> 300 emails/day
+                    </Badge>
+                    <Badge variant="outline" className="text-[10px] bg-blue-50 text-blue-700 border-blue-200">
+                      No password required
+                    </Badge>
+                  </div>
+                </div>
+
+                {/* Divider */}
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 h-px bg-gray-200" />
+                  <span className="text-[11px] text-gray-400 font-medium">Or use SMTP</span>
+                  <div className="flex-1 h-px bg-gray-200" />
+                </div>
+
+                <Alert className="border-blue-200 bg-blue-50/50">
+                  <AlertCircle className="h-4 w-4 text-blue-600" />
+                  <AlertDescription className="text-sm text-blue-800">
+                    <strong>Enable SMTP auth</strong> in Outlook settings: Settings &gt; Mail &gt; Sync email &gt; enable POP/IMAP/SMTP.
+                  </AlertDescription>
+                </Alert>
+              </div>
             )}
             {formProvider === 'elasticemail' && (
               <Alert className="border-orange-200 bg-orange-50/50">

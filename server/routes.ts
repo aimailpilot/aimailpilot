@@ -430,6 +430,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           'https://www.googleapis.com/auth/userinfo.profile',
           'https://www.googleapis.com/auth/gmail.readonly',
           'https://www.googleapis.com/auth/gmail.send',
+          'https://www.googleapis.com/auth/gmail.modify',
           'https://www.googleapis.com/auth/spreadsheets.readonly',
           'openid',
         ],
@@ -766,6 +767,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         scope: [
           'https://www.googleapis.com/auth/gmail.send',
           'https://www.googleapis.com/auth/gmail.readonly',
+          'https://www.googleapis.com/auth/gmail.modify',
           'https://www.googleapis.com/auth/userinfo.email',
           'https://www.googleapis.com/auth/userinfo.profile',
           'https://www.googleapis.com/auth/spreadsheets.readonly',
@@ -813,7 +815,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         'offline_access',
         'https://graph.microsoft.com/User.Read',
         'https://graph.microsoft.com/Mail.Read',
+        'https://graph.microsoft.com/Mail.ReadWrite',
         'https://graph.microsoft.com/Mail.Send',
+        'https://graph.microsoft.com/SMTP.Send',
       ];
 
       const authUrl = new URL('https://login.microsoftonline.com/common/oauth2/v2.0/authorize');
@@ -869,7 +873,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           code: code as string,
           redirect_uri: redirectUri,
           grant_type: 'authorization_code',
-          scope: 'openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.Send',
+          scope: 'openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/SMTP.Send',
         }).toString(),
       });
 
@@ -898,7 +902,84 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const firstName = msUser.givenName || name.split(' ')[0] || '';
       const lastName = msUser.surname || name.split(' ').slice(1).join(' ') || '';
 
-      console.log('[Auth] Microsoft OAuth success for:', email);
+      // Parse state for purpose (add_sender vs login)
+      let purpose = '';
+      let stateOrgId = '';
+      let stateUserId = '';
+      try {
+        if (state) {
+          const parsed = JSON.parse(state as string);
+          purpose = parsed.purpose || '';
+          stateOrgId = parsed.orgId || '';
+          stateUserId = parsed.userId || '';
+        }
+      } catch (e) { /* use defaults */ }
+
+      // ===== OUTLOOK-CONNECT (ADD SENDER) FLOW =====
+      if (purpose === 'add_sender') {
+        console.log('[Auth] Outlook-connect flow for:', email);
+        let effectiveOrgId = stateOrgId || (req.session as any)?.user?.organizationId || '';
+        if (!effectiveOrgId) {
+          const orgIds = await storage.getAllOrganizationIds();
+          effectiveOrgId = orgIds[0] || '';
+        }
+
+        // Store per-sender tokens
+        if (tokens.access_token) {
+          await storage.setApiSetting(effectiveOrgId, `outlook_sender_${email}_access_token`, tokens.access_token);
+        }
+        if (tokens.refresh_token) {
+          await storage.setApiSetting(effectiveOrgId, `outlook_sender_${email}_refresh_token`, tokens.refresh_token);
+        }
+        if (tokens.expires_in) {
+          const expiryDate = Date.now() + (tokens.expires_in * 1000);
+          await storage.setApiSetting(effectiveOrgId, `outlook_sender_${email}_token_expiry`, String(expiryDate));
+        }
+
+        // Only update org-level tokens if this is the primary Outlook account or first account
+        const currentSettings = await storage.getApiSettings(effectiveOrgId);
+        const primaryMsEmail = currentSettings.microsoft_user_email;
+        const isPrimary = !primaryMsEmail || primaryMsEmail === email;
+        
+        if (isPrimary) {
+          await storage.setApiSetting(effectiveOrgId, 'microsoft_access_token', tokens.access_token);
+          if (tokens.refresh_token) await storage.setApiSetting(effectiveOrgId, 'microsoft_refresh_token', tokens.refresh_token);
+          if (tokens.expires_in) await storage.setApiSetting(effectiveOrgId, 'microsoft_token_expiry', String(Date.now() + tokens.expires_in * 1000));
+          if (!primaryMsEmail) await storage.setApiSetting(effectiveOrgId, 'microsoft_user_email', email);
+        }
+
+        // Create or update email account
+        const existingAccounts = await storage.getEmailAccounts(effectiveOrgId);
+        const existingAccount = existingAccounts.find((a: any) => a.email === email);
+        if (!existingAccount) {
+          const currentUserId = stateUserId || (req.session as any)?.userId || req.cookies?.user_id || null;
+          await storage.createEmailAccount({
+            organizationId: effectiveOrgId,
+            userId: currentUserId,
+            provider: 'outlook',
+            email,
+            displayName: name,
+            smtpConfig: {
+              host: 'smtp-mail.outlook.com', port: 587, secure: false,
+              auth: { user: email, pass: 'OAUTH_TOKEN' },
+              fromName: name, fromEmail: email, replyTo: '',
+              provider: 'outlook',
+            },
+            dailyLimit: getProviderDailyLimit('outlook'),
+            isActive: true,
+          });
+          console.log(`[Auth] New Outlook sender added via OAuth: ${email}`);
+        } else {
+          console.log(`[Auth] Outlook sender already exists: ${email}, tokens updated`);
+        }
+
+        // Start Outlook reply tracking
+        outlookReplyTracker.startAutoCheck(effectiveOrgId, 5);
+
+        return res.redirect('/?view=setup&outlook_connected=' + encodeURIComponent(email));
+      }
+
+      // ===== NORMAL LOGIN FLOW =====
 
       // Upsert user in database
       let dbUser = await storage.getUserByEmail(email) as any;
@@ -1017,6 +1098,59 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error('[Auth] Microsoft OAuth callback error:', error);
       res.redirect('/?error=ms_oauth_failed');
+    }
+  });
+
+  // ===== OUTLOOK CONNECT (Add Sender) =====
+  // Similar to /api/auth/gmail-connect — adds an Outlook account to the current org
+  // without changing the logged-in user's session
+  app.get('/api/auth/outlook-connect', requireAuth, async (req: any, res) => {
+    try {
+      const baseUrl = getBaseUrlFromRequest(req);
+      const redirectUri = `${baseUrl}/api/auth/microsoft/callback`;
+      const orgId = req.user.organizationId;
+
+      // Load credentials from api_settings first, then env vars
+      const { clientId, clientSecret } = await getStoredOAuthCredentials('microsoft');
+
+      if (!clientId || !clientSecret) {
+        console.warn('[Auth] Microsoft OAuth not configured');
+        return res.redirect('/?view=setup&error=oauth_not_configured&provider=microsoft');
+      }
+
+      const scopes = [
+        'openid',
+        'profile',
+        'email',
+        'offline_access',
+        'https://graph.microsoft.com/User.Read',
+        'https://graph.microsoft.com/Mail.Read',
+        'https://graph.microsoft.com/Mail.ReadWrite',
+        'https://graph.microsoft.com/Mail.Send',
+        'https://graph.microsoft.com/SMTP.Send',
+      ];
+
+      const loginHint = req.query.email as string || '';
+      const authUrl = new URL('https://login.microsoftonline.com/common/oauth2/v2.0/authorize');
+      authUrl.searchParams.set('client_id', clientId);
+      authUrl.searchParams.set('response_type', 'code');
+      authUrl.searchParams.set('redirect_uri', redirectUri);
+      authUrl.searchParams.set('response_mode', 'query');
+      authUrl.searchParams.set('scope', scopes.join(' '));
+      authUrl.searchParams.set('prompt', 'consent');
+      authUrl.searchParams.set('state', JSON.stringify({ 
+        redirectUri, 
+        purpose: 'add_sender', 
+        orgId, 
+        userId: req.user.id 
+      }));
+      if (loginHint) authUrl.searchParams.set('login_hint', loginHint);
+
+      console.log('[Auth] Outlook connect redirect for org:', orgId, 'hint:', loginHint || 'none');
+      res.redirect(authUrl.toString());
+    } catch (error) {
+      console.error('[Auth] Outlook connect init error:', error);
+      res.redirect('/?view=setup&error=outlook_connect_failed');
     }
   });
 
@@ -1232,7 +1366,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         environment: process.env.WEBSITE_SITE_NAME ? 'azure' : 'local',
         azureSiteName: process.env.WEBSITE_SITE_NAME || null,
         nodeVersion: process.version,
-        codeVersion: 'v10-final-tracking-fix',
+        codeVersion: 'v11-outlook-oauth-per-sender-fix',
         dbStats: {
           totalUsers: stats.totalUsers,
           totalOrgs: orgIds.length,
