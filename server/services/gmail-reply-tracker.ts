@@ -49,7 +49,8 @@ interface ReplyCheckResult {
 }
 
 export class GmailReplyTracker {
-  private checkInterval: NodeJS.Timeout | null = null;
+  // Support multiple orgs — each org gets its own interval
+  private checkIntervals: Map<string, NodeJS.Timeout> = new Map();
   private isChecking = false;
 
   /**
@@ -85,14 +86,40 @@ export class GmailReplyTracker {
 
   /**
    * Get a valid access token (refresh if expired)
+   * Can get token for a specific sender email or the org-level default
    */
-  private async getValidAccessToken(orgId: string): Promise<string | null> {
+  private async getValidAccessToken(orgId: string, senderEmail?: string): Promise<string | null> {
     const settings = await storage.getApiSettings(orgId);
-    let accessToken = settings.gmail_access_token;
-    const refreshToken = settings.gmail_refresh_token;
-    const tokenExpiry = settings.gmail_token_expiry;
-    const clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID;
-    const clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET;
+    
+    // Try per-sender tokens first if senderEmail specified
+    const senderPrefix = senderEmail ? `gmail_sender_${senderEmail}_` : '';
+    let accessToken = senderEmail ? settings[`${senderPrefix}access_token`] : null;
+    let refreshToken = senderEmail ? settings[`${senderPrefix}refresh_token`] : null;
+    let tokenExpiry = senderEmail ? settings[`${senderPrefix}token_expiry`] : null;
+    
+    // Fall back to org-level tokens
+    if (!accessToken) accessToken = settings.gmail_access_token;
+    if (!refreshToken) refreshToken = settings.gmail_refresh_token;
+    if (!tokenExpiry) tokenExpiry = settings.gmail_token_expiry;
+
+    let clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID;
+    let clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET;
+
+    // Fallback: try superadmin's org for OAuth credentials
+    if (!clientId || !clientSecret) {
+      try {
+        const superAdminOrgId = await storage.getSuperAdminOrgId();
+        if (superAdminOrgId && superAdminOrgId !== orgId) {
+          const superSettings = await storage.getApiSettings(superAdminOrgId);
+          if (superSettings.google_oauth_client_id) {
+            clientId = superSettings.google_oauth_client_id;
+            clientSecret = superSettings.google_oauth_client_secret || '';
+          }
+        }
+      } catch (e) { /* ignore */ }
+    }
+    if (!clientId) clientId = process.env.GOOGLE_CLIENT_ID;
+    if (!clientSecret) clientSecret = process.env.GOOGLE_CLIENT_SECRET;
 
     if (!accessToken && !refreshToken) {
       return null;
@@ -104,12 +131,80 @@ export class GmailReplyTracker {
       if (Date.now() > expiryTime - 300000) {
         // Token is expired or about to expire, refresh it
         if (refreshToken && clientId && clientSecret) {
-          accessToken = await this.refreshAccessToken(refreshToken, clientId, clientSecret, orgId) || accessToken;
+          try {
+            const oauth2Client = new OAuth2Client(clientId, clientSecret);
+            oauth2Client.setCredentials({ refresh_token: refreshToken });
+            const { credentials } = await oauth2Client.refreshAccessToken();
+            if (credentials.access_token) {
+              // Store refreshed token
+              if (senderEmail) {
+                await storage.setApiSetting(orgId, `${senderPrefix}access_token`, credentials.access_token);
+                if (credentials.expiry_date) await storage.setApiSetting(orgId, `${senderPrefix}token_expiry`, String(credentials.expiry_date));
+              }
+              await storage.setApiSetting(orgId, 'gmail_access_token', credentials.access_token);
+              if (credentials.expiry_date) await storage.setApiSetting(orgId, 'gmail_token_expiry', String(credentials.expiry_date));
+              accessToken = credentials.access_token;
+            }
+          } catch (e) {
+            console.error(`[GmailReplyTracker] Token refresh failed for ${senderEmail || 'org-default'}:`, e);
+          }
         }
       }
     }
 
     return accessToken || null;
+  }
+
+  /**
+   * Get ALL Gmail accounts for an organization that have OAuth tokens.
+   * Returns array of { email, accessToken } for each connected account.
+   */
+  private async getAllGmailTokens(orgId: string): Promise<Array<{ email: string; accessToken: string }>> {
+    const tokens: Array<{ email: string; accessToken: string }> = [];
+    const settings = await storage.getApiSettings(orgId);
+    const seenEmails = new Set<string>();
+
+    // 1. Collect per-sender tokens from API settings
+    //    Keys like: gmail_sender_bharatai5@aegis.edu.in_access_token
+    for (const key of Object.keys(settings)) {
+      const match = key.match(/^gmail_sender_(.+?)_(?:access_token|refresh_token)$/);
+      if (match) {
+        const email = match[1];
+        if (seenEmails.has(email)) continue;
+        seenEmails.add(email);
+        const token = await this.getValidAccessToken(orgId, email);
+        if (token) {
+          tokens.push({ email, accessToken: token });
+        }
+      }
+    }
+
+    // 2. Add org-level default token (if not already found via per-sender)
+    const orgEmail = settings.gmail_user_email || '';
+    if (!seenEmails.has(orgEmail.toLowerCase())) {
+      const token = await this.getValidAccessToken(orgId);
+      if (token) {
+        tokens.push({ email: orgEmail || 'org-default', accessToken: token });
+        if (orgEmail) seenEmails.add(orgEmail.toLowerCase());
+      }
+    }
+
+    // 3. Check email_accounts table for additional Gmail accounts with OAuth
+    try {
+      const emailAccounts = await storage.getEmailAccounts(orgId);
+      for (const acct of emailAccounts as any[]) {
+        if (!acct.email || seenEmails.has(acct.email.toLowerCase())) continue;
+        if (acct.provider !== 'gmail' && acct.provider !== 'google') continue;
+        // Try to get a token for this sender
+        const token = await this.getValidAccessToken(orgId, acct.email);
+        if (token) {
+          tokens.push({ email: acct.email, accessToken: token });
+          seenEmails.add(acct.email.toLowerCase());
+        }
+      }
+    } catch (e) { /* ignore */ }
+
+    return tokens;
   }
 
   /**
@@ -165,11 +260,87 @@ export class GmailReplyTracker {
     const result: ReplyCheckResult = { checked: 0, newReplies: 0, errors: [], replies: [] };
 
     try {
-      const accessToken = await this.getValidAccessToken(orgId);
-      if (!accessToken) {
-        result.errors.push('No Gmail access token available. Please re-authenticate with Google.');
-        return result;
+      // Get ALL Gmail accounts for this org (multi-account support)
+      const allTokens = await this.getAllGmailTokens(orgId);
+      if (allTokens.length === 0) {
+        // Fallback to org-level token
+        const orgToken = await this.getValidAccessToken(orgId);
+        if (!orgToken) {
+          result.errors.push('No Gmail access token available. Please re-authenticate with Google.');
+          return result;
+        }
+        allTokens.push({ email: 'org-default', accessToken: orgToken });
       }
+
+      console.log(`[GmailReplyTracker] Checking ${allTokens.length} Gmail account(s): ${allTokens.map(t => t.email).join(', ')}`);
+
+      // Pre-load campaign messages ONCE for matching (shared across all accounts)
+      const allCampaignMessages = await storage.getAllRecentCampaignMessages(orgId);
+      const providerIdToMessage = new Map<string, any>();
+      const contactEmailToMessages = new Map<string, any[]>();
+      const contactCampaignToMessages = new Map<string, any[]>();
+      
+      console.log(`[GmailReplyTracker] Loaded ${allCampaignMessages.length} campaign messages for matching`);
+      
+      for (const um of allCampaignMessages) {
+        if (um.providerMessageId) {
+          providerIdToMessage.set(um.providerMessageId, um);
+        }
+        if (um.contactEmail) {
+          const emailLower = um.contactEmail.toLowerCase();
+          const emailMsgs = contactEmailToMessages.get(emailLower) || [];
+          emailMsgs.push(um);
+          contactEmailToMessages.set(emailLower, emailMsgs);
+        }
+        const key = `${um.contactId}_${um.campaignId}`;
+        const existing = contactCampaignToMessages.get(key) || [];
+        existing.push(um);
+        contactCampaignToMessages.set(key, existing);
+      }
+      
+      console.log(`[GmailReplyTracker] Maps built: ${providerIdToMessage.size} by providerId, ${contactEmailToMessages.size} by email, ${contactCampaignToMessages.size} by contact+campaign`);
+
+      // Track already-seen Gmail message IDs to avoid duplicate processing across accounts
+      const processedGmailIds = new Set<string>();
+
+      // Check EACH Gmail account
+      for (const { email: accountEmail, accessToken } of allTokens) {
+        try {
+          await this.checkAccountForReplies(
+            orgId, accountEmail, accessToken, lookbackMinutes,
+            providerIdToMessage, contactEmailToMessages, contactCampaignToMessages,
+            processedGmailIds, result
+          );
+        } catch (acctError) {
+          const msg = acctError instanceof Error ? acctError.message : String(acctError);
+          console.error(`[GmailReplyTracker] Error checking account ${accountEmail}:`, msg);
+          result.errors.push(`${accountEmail}: ${msg}`);
+        }
+      }
+
+      return result;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      result.errors.push(msg);
+      console.error('[GmailReplyTracker] Check failed:', msg);
+      return result;
+    }
+  }
+
+  /**
+   * Check a single Gmail account for replies and bounces
+   */
+  private async checkAccountForReplies(
+    orgId: string,
+    accountEmail: string,
+    accessToken: string,
+    lookbackMinutes: number,
+    providerIdToMessage: Map<string, any>,
+    contactEmailToMessages: Map<string, any[]>,
+    contactCampaignToMessages: Map<string, any[]>,
+    processedGmailIds: Set<string>,
+    result: ReplyCheckResult
+  ): Promise<void> {
 
       // Search for ALL received messages from the last N minutes
       // CRITICAL: Do NOT use "in:inbox" — it misses replies that have been:
@@ -187,45 +358,20 @@ export class GmailReplyTracker {
       );
 
       if (!listData.messages || listData.messages.length === 0) {
-        return result;
+        return;
       }
 
-      result.checked = listData.messages.length;
-      console.log(`[GmailReplyTracker] Found ${listData.messages.length} messages in inbox (lookback: ${lookbackMinutes}m)`);
+      result.checked += listData.messages.length;
+      console.log(`[GmailReplyTracker] [${accountEmail}] Found ${listData.messages.length} messages (lookback: ${lookbackMinutes}m)`);
 
-      // Pre-load campaign messages for matching
-      // Use ALL recent messages (including already-replied) for inbox context matching
-      // Use unreplied messages separately for new reply detection
-      const allCampaignMessages = await storage.getAllRecentCampaignMessages(orgId);
-      const providerIdToMessage = new Map<string, any>();
-      const contactEmailToMessages = new Map<string, any[]>();
-      const contactCampaignToMessages = new Map<string, any[]>();
-      
-      console.log(`[GmailReplyTracker] Loaded ${allCampaignMessages.length} campaign messages for matching`);
-      
-      for (const um of allCampaignMessages) {
-        if (um.providerMessageId) {
-          providerIdToMessage.set(um.providerMessageId, um);
-        }
-        // Build email -> messages map for bounce matching
-        if (um.contactEmail) {
-          const emailLower = um.contactEmail.toLowerCase();
-          const emailMsgs = contactEmailToMessages.get(emailLower) || [];
-          emailMsgs.push(um);
-          contactEmailToMessages.set(emailLower, emailMsgs);
-        }
-        // Group by contactId_campaignId for step attribution
-        const key = `${um.contactId}_${um.campaignId}`;
-        const existing = contactCampaignToMessages.get(key) || [];
-        existing.push(um);
-        contactCampaignToMessages.set(key, existing);
-      }
-      
-      console.log(`[GmailReplyTracker] Maps built: ${providerIdToMessage.size} by providerId, ${contactEmailToMessages.size} by email, ${contactCampaignToMessages.size} by contact+campaign`);
-
+      // Get all sent campaign messages that haven't been replied to yet
       // Get all sent campaign messages that haven't been replied to yet
       // We'll use a batch approach - get message details and check headers
       for (const msgRef of listData.messages) {
+        // Skip if already processed by another account
+        if (processedGmailIds.has(msgRef.id)) continue;
+        processedGmailIds.add(msgRef.id);
+
         try {
           const msg: GmailMessage = await this.gmailFetch(
             accessToken,
@@ -540,7 +686,6 @@ export class GmailReplyTracker {
               } catch (e) { /* ignore */ }
             }
 
-            const settings = await storage.getApiSettings(orgId);
             await storage.createInboxMessage({
               organizationId: orgId,
               emailAccountId,
@@ -551,7 +696,7 @@ export class GmailReplyTracker {
               gmailThreadId: msg.threadId,
               fromEmail: from,
               fromName: from.replace(/<.*>/, '').trim(),
-              toEmail: settings.gmail_user_email || '',
+              toEmail: accountEmail || '',
               subject,
               snippet: msg.snippet || '',
               body,
@@ -639,14 +784,6 @@ export class GmailReplyTracker {
           console.error('[GmailReplyTracker] Error processing message:', msgError);
         }
       }
-
-      return result;
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      result.errors.push(msg);
-      console.error('[GmailReplyTracker] Check failed:', msg);
-      return result;
-    }
   }
 
   /**
@@ -673,29 +810,42 @@ export class GmailReplyTracker {
    * Start automatic polling for replies
    */
   startAutoCheck(orgId: string, intervalMinutes: number = 5): void {
-    if (this.checkInterval) {
-      clearInterval(this.checkInterval);
+    // Clear existing interval for THIS org only (don't kill other orgs' timers)
+    const existingInterval = this.checkIntervals.get(orgId);
+    if (existingInterval) {
+      clearInterval(existingInterval);
     }
 
-    console.log(`[GmailReplyTracker] Starting auto-check every ${intervalMinutes} minutes`);
+    console.log(`[GmailReplyTracker] Starting auto-check for org ${orgId} every ${intervalMinutes} minutes (total orgs tracked: ${this.checkIntervals.size + 1})`);
 
     // Run immediately
     this.runCheck(orgId);
 
     // Then schedule periodic checks
-    this.checkInterval = setInterval(() => {
+    const interval = setInterval(() => {
       this.runCheck(orgId);
     }, intervalMinutes * 60 * 1000);
+    this.checkIntervals.set(orgId, interval);
   }
 
   /**
    * Stop automatic polling
    */
-  stopAutoCheck(): void {
-    if (this.checkInterval) {
-      clearInterval(this.checkInterval);
-      this.checkInterval = null;
-      console.log('[GmailReplyTracker] Auto-check stopped');
+  stopAutoCheck(orgId?: string): void {
+    if (orgId) {
+      const interval = this.checkIntervals.get(orgId);
+      if (interval) {
+        clearInterval(interval);
+        this.checkIntervals.delete(orgId);
+        console.log(`[GmailReplyTracker] Auto-check stopped for org ${orgId}`);
+      }
+    } else {
+      // Stop all
+      for (const [oid, interval] of this.checkIntervals) {
+        clearInterval(interval);
+        console.log(`[GmailReplyTracker] Auto-check stopped for org ${oid}`);
+      }
+      this.checkIntervals.clear();
     }
   }
 
@@ -737,8 +887,27 @@ export class GmailReplyTracker {
    */
   private async checkForOpensViaApi(orgId: string): Promise<void> {
     try {
-      const accessToken = await this.getValidAccessToken(orgId);
-      if (!accessToken) return;
+      // Get ALL Gmail accounts (multi-account) — needed to check threads across all sending accounts
+      const allTokens = await this.getAllGmailTokens(orgId);
+      if (allTokens.length === 0) return;
+
+      // Build a set of ALL our email addresses (to exclude our own messages from "external reply" check)
+      const ourEmails = new Set<string>();
+      for (const t of allTokens) {
+        if (t.email) ourEmails.add(t.email.toLowerCase());
+      }
+      // Also add from API settings
+      try {
+        const settings = await storage.getApiSettings(orgId);
+        if (settings.gmail_user_email) ourEmails.add(settings.gmail_user_email.toLowerCase());
+      } catch (e) {}
+      // Add all email accounts
+      try {
+        const emailAccounts = await storage.getEmailAccounts(orgId);
+        for (const acct of emailAccounts as any[]) {
+          if (acct.email) ourEmails.add(acct.email.toLowerCase());
+        }
+      } catch (e) {}
 
       // Find recent campaign messages (last 24h) that haven't been marked as opened
       const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -746,11 +915,30 @@ export class GmailReplyTracker {
       
       if (unopenedMessages.length === 0) return;
 
+      // Build token map by email for quick lookup
+      const tokenByEmail = new Map<string, string>();
+      for (const t of allTokens) {
+        tokenByEmail.set(t.email.toLowerCase(), t.accessToken);
+      }
+
       // For each unopened message, check the Gmail thread for reply activity
       let opensDetected = 0;
       for (const msg of unopenedMessages) {
         try {
           if (!msg.providerMessageId) continue;
+
+          // Try to find the right access token for the account that sent this message
+          let accessToken: string | null = null;
+          if (msg.emailAccountId) {
+            try {
+              const acct = await storage.getEmailAccount(msg.emailAccountId);
+              if (acct?.email) {
+                accessToken = tokenByEmail.get(acct.email.toLowerCase()) || null;
+              }
+            } catch (e) {}
+          }
+          // Fallback: use first available token
+          if (!accessToken) accessToken = allTokens[0].accessToken;
 
           // Get the thread for our sent message
           const thread = await this.gmailFetch(
@@ -760,15 +948,14 @@ export class GmailReplyTracker {
 
           if (!thread || !thread.messages) continue;
 
-          // Only count as opened if there's a reply from someone other than the sender
+          // Only count as opened if there's a reply from someone other than us
           // A thread with >1 message means someone replied - that counts as an open
           if (thread.messages.length > 1) {
-            // Verify at least one message is NOT from us (not just our own followup)
-            const settings = await storage.getApiSettings(orgId);
-            const ourEmail = (settings.gmail_user_email || '').toLowerCase();
+            // Verify at least one message is NOT from any of our accounts
             const hasExternalReply = thread.messages.some((m: any) => {
               const from = (m.payload?.headers || []).find((h: any) => h.name.toLowerCase() === 'from')?.value || '';
-              return !from.toLowerCase().includes(ourEmail);
+              const fromEmail = (from.match(/<([^>]+)>/) || [, from])[1]?.toLowerCase() || from.toLowerCase();
+              return !Array.from(ourEmails).some(our => fromEmail.includes(our));
             });
 
             if (hasExternalReply) {
@@ -812,10 +999,11 @@ export class GmailReplyTracker {
   /**
    * Get reply tracking status (is polling active, last check time, etc.)
    */
-  getStatus(): { active: boolean; checking: boolean } {
+  getStatus(): { active: boolean; checking: boolean; trackedOrgs: number } {
     return {
-      active: this.checkInterval !== null,
+      active: this.checkIntervals.size > 0,
       checking: this.isChecking,
+      trackedOrgs: this.checkIntervals.size,
     };
   }
 }

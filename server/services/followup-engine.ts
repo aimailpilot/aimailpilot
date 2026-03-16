@@ -1,5 +1,6 @@
 import { storage } from "../storage";
 import { smtpEmailService } from "./smtp-email-service";
+import { OAuth2Client } from 'google-auth-library';
 
 // Simple email interface since we need to integrate with existing email providers
 interface EmailMessage {
@@ -69,53 +70,102 @@ async function sendViaGmailAPI(
 }
 
 class EmailService {
-  async sendEmail(emailAccountId: string, message: EmailMessage, orgId?: string): Promise<EmailResult> {
-    try {
-      // Try Gmail API first if we have OAuth tokens
-      if (orgId) {
-        const settings = await storage.getApiSettings(orgId);
-        let accessToken = settings.gmail_access_token;
-        const refreshToken = settings.gmail_refresh_token;
-        const tokenExpiry = settings.gmail_token_expiry;
-        const clientId = settings.google_oauth_client_id;
-        const clientSecret = settings.google_oauth_client_secret;
+  /**
+   * Get a valid Gmail access token for a specific sender email.
+   * Tries per-sender token first, then falls back to org-level token.
+   * Refreshes expired tokens automatically.
+   * Public so executeFollowup can also use it for threading.
+   */
+  async getGmailAccessToken(orgId: string, senderEmail?: string): Promise<{ token: string; email: string } | null> {
+    const settings = await storage.getApiSettings(orgId);
+    
+    // Try per-sender token first (e.g., gmail_sender_bharatai5@aegis.edu.in_access_token)
+    const senderPrefix = senderEmail ? `gmail_sender_${senderEmail}_` : '';
+    let accessToken = senderEmail ? settings[`${senderPrefix}access_token`] : null;
+    let refreshToken = senderEmail ? settings[`${senderPrefix}refresh_token`] : null;
+    let tokenExpiry = senderEmail ? settings[`${senderPrefix}token_expiry`] : null;
+    let resolvedEmail = senderEmail || '';
+    
+    // Fall back to org-level tokens
+    if (!accessToken && !refreshToken) {
+      accessToken = settings.gmail_access_token;
+      refreshToken = settings.gmail_refresh_token;
+      tokenExpiry = settings.gmail_token_expiry;
+      resolvedEmail = settings.gmail_user_email || '';
+    }
+    
+    if (!accessToken && !refreshToken) return null;
 
-        // Refresh token if expired
-        if (accessToken && tokenExpiry && Date.now() > parseInt(tokenExpiry) - 300000) {
-          if (refreshToken && clientId && clientSecret) {
-            try {
-              const resp = await fetch('https://oauth2.googleapis.com/token', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: new URLSearchParams({
-                  grant_type: 'refresh_token',
-                  refresh_token: refreshToken,
-                  client_id: clientId,
-                  client_secret: clientSecret,
-                }),
-              });
-              if (resp.ok) {
-                const data = await resp.json() as any;
-                accessToken = data.access_token;
-                await storage.setApiSetting(orgId, 'gmail_access_token', accessToken);
-                await storage.setApiSetting(orgId, 'gmail_token_expiry', String(Date.now() + (data.expires_in || 3600) * 1000));
-              }
-            } catch (e) {
-              console.error('[Followup] Token refresh failed:', e);
-            }
+    // Get OAuth client credentials
+    let clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID;
+    let clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET;
+    
+    // Fallback to superadmin org for OAuth credentials
+    if (!clientId || !clientSecret) {
+      try {
+        const superAdminOrgId = await storage.getSuperAdminOrgId();
+        if (superAdminOrgId && superAdminOrgId !== orgId) {
+          const superSettings = await storage.getApiSettings(superAdminOrgId);
+          if (superSettings.google_oauth_client_id) {
+            clientId = superSettings.google_oauth_client_id;
+            clientSecret = superSettings.google_oauth_client_secret || '';
           }
         }
+      } catch (e) { /* ignore */ }
+    }
 
-        if (accessToken) {
-          const fromEmail = settings.gmail_user_email || message.from || '';
-          console.log(`[Followup] Sending follow-up via Gmail API to ${message.to}${message.threadId ? ' (thread: ' + message.threadId + ')' : ''}`);
+    // Refresh token if expired (5-minute buffer)
+    if (tokenExpiry && Date.now() > parseInt(tokenExpiry) - 300000) {
+      if (refreshToken && clientId && clientSecret) {
+        try {
+          const oauth2Client = new OAuth2Client(clientId, clientSecret);
+          oauth2Client.setCredentials({ refresh_token: refreshToken });
+          const { credentials } = await oauth2Client.refreshAccessToken();
+          if (credentials.access_token) {
+            accessToken = credentials.access_token;
+            // Store refreshed token back
+            if (senderEmail && settings[`${senderPrefix}refresh_token`]) {
+              await storage.setApiSetting(orgId, `${senderPrefix}access_token`, accessToken);
+              if (credentials.expiry_date) await storage.setApiSetting(orgId, `${senderPrefix}token_expiry`, String(credentials.expiry_date));
+            } else {
+              await storage.setApiSetting(orgId, 'gmail_access_token', accessToken);
+              if (credentials.expiry_date) await storage.setApiSetting(orgId, 'gmail_token_expiry', String(credentials.expiry_date));
+            }
+          }
+        } catch (e) {
+          console.error(`[Followup] Token refresh failed for ${senderEmail || 'org-default'}:`, e instanceof Error ? e.message : e);
+        }
+      }
+    }
+
+    return accessToken ? { token: accessToken, email: resolvedEmail } : null;
+  }
+
+  async sendEmail(emailAccountId: string, message: EmailMessage, orgId?: string): Promise<EmailResult> {
+    try {
+      // Determine the actual sending email address from the email account
+      let senderEmail: string | undefined;
+      try {
+        const emailAccount = await storage.getEmailAccount(emailAccountId);
+        if (emailAccount?.email) {
+          senderEmail = emailAccount.email;
+        }
+      } catch (e) { /* ignore */ }
+
+      // Try Gmail API first if we have OAuth tokens
+      if (orgId) {
+        const tokenResult = await this.getGmailAccessToken(orgId, senderEmail);
+        
+        if (tokenResult) {
+          const fromEmail = senderEmail || tokenResult.email || '';
+          console.log(`[Followup] Sending follow-up via Gmail API to ${message.to} from ${fromEmail}${message.threadId ? ' (thread: ' + message.threadId + ')' : ''}`);
           
           // Build threading headers for in-reply-to
           const headers: Record<string, string> = {};
           if (message.inReplyTo) headers['In-Reply-To'] = message.inReplyTo;
           if (message.references) headers['References'] = message.references;
           
-          const result = await sendViaGmailAPI(accessToken, {
+          const result = await sendViaGmailAPI(tokenResult.token, {
             from: fromEmail,
             to: message.to,
             subject: message.subject,
@@ -677,38 +727,18 @@ export class FollowupEngine {
       
       if (originalMessage.providerMessageId && campaign.organizationId) {
         try {
-          const settings = await storage.getApiSettings(campaign.organizationId);
-          let accessToken = settings.gmail_access_token;
-          const refreshToken = settings.gmail_refresh_token;
-          const tokenExpiry = settings.gmail_token_expiry;
-          const clientId = settings.google_oauth_client_id;
-          const clientSecret = settings.google_oauth_client_secret;
-          
-          // Refresh token if needed
-          if (accessToken && tokenExpiry && Date.now() > parseInt(tokenExpiry) - 300000) {
-            if (refreshToken && clientId && clientSecret) {
-              try {
-                const refreshResp = await fetch('https://oauth2.googleapis.com/token', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                  body: new URLSearchParams({
-                    grant_type: 'refresh_token',
-                    refresh_token: refreshToken,
-                    client_id: clientId,
-                    client_secret: clientSecret,
-                  }),
-                });
-                if (refreshResp.ok) {
-                  const data = await refreshResp.json() as any;
-                  accessToken = data.access_token;
-                  await storage.setApiSetting(campaign.organizationId, 'gmail_access_token', accessToken);
-                  await storage.setApiSetting(campaign.organizationId, 'gmail_token_expiry', String(Date.now() + (data.expires_in || 3600) * 1000));
-                }
-              } catch (e) {
-                console.error('[Followup] Token refresh for threading failed:', e);
-              }
-            }
+          // Use per-sender token resolution (same as EmailService)
+          // Resolve the correct Gmail account that sent the original email
+          let senderEmail: string | undefined;
+          if (campaign.emailAccountId) {
+            try {
+              const emailAccount = await storage.getEmailAccount(campaign.emailAccountId);
+              if (emailAccount?.email) senderEmail = emailAccount.email;
+            } catch (e) {}
           }
+          
+          const tokenResult = await this.emailService.getGmailAccessToken(campaign.organizationId, senderEmail);
+          let accessToken = tokenResult?.token || null;
           
           if (accessToken) {
             const msgResp = await fetch(

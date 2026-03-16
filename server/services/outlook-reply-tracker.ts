@@ -31,7 +31,7 @@ interface GraphListResponse {
 }
 
 export class OutlookReplyTracker {
-  private checkInterval: NodeJS.Timeout | null = null;
+  private checkIntervals: Map<string, NodeJS.Timeout> = new Map();
   private isChecking = false;
 
   /** Refresh Microsoft access token */
@@ -361,18 +361,29 @@ export class OutlookReplyTracker {
 
   /** Start automatic polling */
   startAutoCheck(orgId: string, intervalMinutes: number = 5): void {
-    if (this.checkInterval) clearInterval(this.checkInterval);
-    console.log(`[OutlookReplyTracker] Starting auto-check every ${intervalMinutes} minutes`);
+    const existing = this.checkIntervals.get(orgId);
+    if (existing) clearInterval(existing);
+    console.log(`[OutlookReplyTracker] Starting auto-check for org ${orgId} every ${intervalMinutes} minutes (total orgs: ${this.checkIntervals.size + 1})`);
     this.runCheck(orgId);
-    this.checkInterval = setInterval(() => this.runCheck(orgId), intervalMinutes * 60 * 1000);
+    const interval = setInterval(() => this.runCheck(orgId), intervalMinutes * 60 * 1000);
+    this.checkIntervals.set(orgId, interval);
   }
 
   /** Stop automatic polling */
-  stopAutoCheck(): void {
-    if (this.checkInterval) {
-      clearInterval(this.checkInterval);
-      this.checkInterval = null;
-      console.log('[OutlookReplyTracker] Auto-check stopped');
+  stopAutoCheck(orgId?: string): void {
+    if (orgId) {
+      const interval = this.checkIntervals.get(orgId);
+      if (interval) {
+        clearInterval(interval);
+        this.checkIntervals.delete(orgId);
+        console.log(`[OutlookReplyTracker] Auto-check stopped for org ${orgId}`);
+      }
+    } else {
+      for (const [oid, interval] of this.checkIntervals) {
+        clearInterval(interval);
+      }
+      this.checkIntervals.clear();
+      console.log('[OutlookReplyTracker] All auto-checks stopped');
     }
   }
 
@@ -391,8 +402,8 @@ export class OutlookReplyTracker {
     }
   }
 
-  getStatus(): { active: boolean; checking: boolean } {
-    return { active: this.checkInterval !== null, checking: this.isChecking };
+  getStatus(): { active: boolean; checking: boolean; trackedOrgs: number } {
+    return { active: this.checkIntervals.size > 0, checking: this.isChecking, trackedOrgs: this.checkIntervals.size };
   }
 }
 

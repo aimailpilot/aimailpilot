@@ -1292,16 +1292,18 @@ export class DatabaseStorage {
   // Get ALL recent campaign messages (including already-replied) for inbox matching
   // This allows us to match incoming Gmail/Outlook messages to campaign context
   // even if the reply was already tracked
+  // IMPORTANT: Include 'failed' status because bounced messages have status 'failed'
+  // and we need them in the map to detect duplicate bounces
   async getAllRecentCampaignMessages(orgId: string) {
     return db.prepare(`
       SELECT m.*, ct.email as contactEmail, c.name as campaignName FROM messages m
       INNER JOIN campaigns c ON m.campaignId = c.id
       LEFT JOIN contacts ct ON m.contactId = ct.id
       WHERE c.organizationId = ?
-      AND m.status IN ('sent', 'failed')
+      AND m.status IN ('sent', 'failed', 'sending')
       AND m.providerMessageId IS NOT NULL
       ORDER BY m.sentAt DESC
-      LIMIT 5000
+      LIMIT 50000
     `).all(orgId);
   }
 
