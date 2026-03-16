@@ -171,16 +171,19 @@ export class GmailReplyTracker {
         return result;
       }
 
-      // Search for inbox messages from the last N minutes
-      // We look for messages in INBOX that contain our tracking references
+      // Search for ALL received messages from the last N minutes
+      // CRITICAL: Do NOT use "in:inbox" — it misses replies that have been:
+      //   - Read and archived (removed from inbox)
+      //   - Moved to a label/folder
+      //   - In Gmail tabs (Promotions, Updates, Social) if auto-archived
+      // Instead use broad search: -from:me -in:sent -in:drafts -in:chats
+      // This catches replies anywhere: inbox, archive, categories, spam
       const afterTimestamp = Math.floor((Date.now() - lookbackMinutes * 60 * 1000) / 1000);
-      // Use broader search: include inbox messages AND bounce notifications (which may land in spam or categories)
-      // Search for both regular replies and bounce notifications from MAILER-DAEMON/postmaster
-      const query = `after:${afterTimestamp} -from:me (in:inbox OR from:mailer-daemon OR from:postmaster OR subject:"delivery status notification" OR subject:"undeliverable" OR subject:"mail delivery failed")`;
+      const query = `after:${afterTimestamp} -from:me -in:sent -in:drafts -in:chats`;
 
       const listData: GmailListResponse = await this.gmailFetch(
         accessToken,
-        `messages?q=${encodeURIComponent(query)}&maxResults=100`
+        `messages?q=${encodeURIComponent(query)}&maxResults=200`
       );
 
       if (!listData.messages || listData.messages.length === 0) {
@@ -434,15 +437,24 @@ export class GmailReplyTracker {
           // Extract sender email from "Name <email>" format
           const senderEmail = (from.match(/<([^>]+)>/) || [, from.split('@').length === 2 ? from.trim() : ''])[1]?.toLowerCase() || '';
 
+          // DEBUG: Log every non-bounce message for troubleshooting
+          console.log(`[GmailReplyTracker] Processing msg id=${msgRef.id} threadId=${msgRef.threadId} from="${senderEmail}" subject="${subject.slice(0, 60)}" inReplyTo="${inReplyTo.slice(0, 80)}" refs="${references.slice(0, 80)}"`);
+
           // Check if this is a reply to one of our campaign messages
           // Method 1: Match via In-Reply-To / References headers (Message-ID matching)
           const allRefs = `${inReplyTo} ${references}`;
           const trackingIds = this.extractTrackingIds(allRefs);
+          if (trackingIds.length > 0) {
+            console.log(`[GmailReplyTracker] Method 1 HIT: extracted trackingIds=${JSON.stringify(trackingIds)} from headers`);
+          }
 
           // Method 2: Match via Gmail thread ID (if this message's threadId matches a sent campaign message)
           let threadMatchedMessage: any = null;
           if (trackingIds.length === 0 && msgRef.threadId) {
             const step0Match = providerIdToMessage.get(msgRef.threadId);
+            if (!step0Match) {
+              console.log(`[GmailReplyTracker] Method 2 MISS: threadId=${msgRef.threadId} not found in providerIdToMessage map (${providerIdToMessage.size} entries)`);
+            }
             if (step0Match) {
               // Found the step-0 message via thread ID
               // Find the MOST RECENT message for this contact+campaign (prefer unreplied)
@@ -463,27 +475,28 @@ export class GmailReplyTracker {
             }
           }
 
-          // Method 3: Match by sender email address + "Re:" subject pattern
-          // If no header/thread match, check if the sender email matches any contact
-          // we sent a campaign to AND the subject starts with "Re:" (indicating a reply)
-          if (trackingIds.length === 0 && senderEmail && subject.toLowerCase().startsWith('re:')) {
-            for (const [key, msgs] of contactCampaignToMessages.entries()) {
-              // Sort by sentAt DESC - prefer unreplied but allow already-replied for context
-              const sorted = [...msgs].sort((a: any, b: any) => {
+          // Method 3: Match by sender email + subject pattern
+          // Also try matching ANY reply from a known contact (not just "Re:" prefix)
+          if (trackingIds.length === 0 && senderEmail) {
+            const isReply = subject.toLowerCase().startsWith('re:') || !!inReplyTo;
+            if (!isReply) {
+              console.log(`[GmailReplyTracker] Method 3 SKIP: from=${senderEmail} subject doesn't start with Re: and no In-Reply-To header`);
+            }
+            // Check if this sender email matches any contact we sent campaigns to
+            // First try contactEmailToMessages map (fast O(1) lookup)
+            const senderMsgs = contactEmailToMessages.get(senderEmail);
+            if (senderMsgs && senderMsgs.length > 0 && isReply) {
+              // Sort by sentAt DESC - prefer unreplied
+              const sorted = [...senderMsgs].sort((a: any, b: any) => {
                 const aTime = new Date(a.sentAt || 0).getTime();
                 const bTime = new Date(b.sentAt || 0).getTime();
                 return bTime - aTime;
               });
-              for (const um of sorted) {
-                const contact = um.contactId ? await storage.getContact(um.contactId) : null;
-                if (contact && contact.email?.toLowerCase() === senderEmail) {
-                  threadMatchedMessage = um;
-                  trackingIds.push(um.trackingId);
-                  console.log(`[GmailReplyTracker] Email-based match: ${senderEmail} -> campaign=${um.campaignId}, step=${um.stepNumber || 0}, alreadyReplied=${!!um.repliedAt}`);
-                  break;
-                }
-              }
-              if (trackingIds.length > 0) break;
+              threadMatchedMessage = sorted.find((m: any) => !m.repliedAt) || sorted[0];
+              trackingIds.push(threadMatchedMessage.trackingId);
+              console.log(`[GmailReplyTracker] Method 3 HIT (email-map): ${senderEmail} -> campaign=${threadMatchedMessage.campaignId}, step=${threadMatchedMessage.stepNumber || 0}, alreadyReplied=${!!threadMatchedMessage.repliedAt}`);
+            } else if (!senderMsgs) {
+              console.log(`[GmailReplyTracker] Method 3 MISS: ${senderEmail} not found in contactEmailToMessages map`);
             }
           }
 
@@ -550,11 +563,21 @@ export class GmailReplyTracker {
             console.log(`[GmailReplyTracker] Stored message in unified inbox from ${from} (campaign match: ${!!matchedCampaignMessage})`);
           }
 
+          if (trackingIds.length === 0) {
+            console.log(`[GmailReplyTracker] NO MATCH for msg id=${msgRef.id} from=${senderEmail} subject="${subject.slice(0, 60)}"`);
+          }
+
           // Now process as new reply only if not already tracked
           for (const trackingId of trackingIds) {
             const campaignMessage = threadMatchedMessage || await storage.getCampaignMessageByTracking(trackingId);
-            if (!campaignMessage) continue;
-            if (campaignMessage.repliedAt) continue; // Already tracked
+            if (!campaignMessage) {
+              console.log(`[GmailReplyTracker] WARNING: trackingId=${trackingId} found but no campaign message in DB`);
+              continue;
+            }
+            if (campaignMessage.repliedAt) {
+              console.log(`[GmailReplyTracker] Reply already tracked: trackingId=${trackingId}, repliedAt=${campaignMessage.repliedAt}`);
+              continue;
+            }
 
             // This is a new reply to a campaign message!
             const campaign = await storage.getCampaign(campaignMessage.campaignId);

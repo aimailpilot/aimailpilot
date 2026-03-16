@@ -185,8 +185,8 @@ export class OutlookReplyTracker {
                       
                       // Also try to find an associated campaign message to update bounce count
                       try {
-                        const unreplied = await storage.getUnrepliedCampaignMessages(orgId);
-                        const contactMsg = unreplied.find((m: any) => m.contactId === (contact as any).id);
+                        const allMsgs = await storage.getAllRecentCampaignMessages(orgId);
+                        const contactMsg = allMsgs.find((m: any) => m.contactId === (contact as any).id);
                         if (contactMsg) {
                           bouncedMsg = contactMsg;
                         }

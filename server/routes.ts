@@ -1224,7 +1224,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         environment: process.env.WEBSITE_SITE_NAME ? 'azure' : 'local',
         azureSiteName: process.env.WEBSITE_SITE_NAME || null,
         nodeVersion: process.version,
-        codeVersion: 'v6-followup-sending-window-fix',
+        codeVersion: 'v7-reply-detection-fix-in-anywhere',
         dbStats: {
           totalUsers: stats.totalUsers,
           totalOrgs: orgIds.length,
