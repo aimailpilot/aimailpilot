@@ -9,6 +9,7 @@ import { campaignEngine } from "./services/campaign-engine";
 import { gmailReplyTracker } from "./services/gmail-reply-tracker";
 import { outlookReplyTracker } from "./services/outlook-reply-tracker";
 import { calculateContactRating, batchRecalculateRatings } from "./services/email-rating-engine";
+import { classifyReply, classifyBounce } from "./services/reply-classifier";
 import { OAuth2Client } from 'google-auth-library';
 
 
@@ -1366,7 +1367,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         environment: process.env.WEBSITE_SITE_NAME ? 'azure' : 'local',
         azureSiteName: process.env.WEBSITE_SITE_NAME || null,
         nodeVersion: process.version,
-        codeVersion: 'v11-outlook-oauth-per-sender-fix',
+        codeVersion: 'v12-unified-inbox-contact-engine',
         dbStats: {
           totalUsers: stats.totalUsers,
           totalOrgs: orgIds.length,
@@ -5595,6 +5596,46 @@ Example response:
         console.error('[InboxSync] Campaign recalculation error:', e);
       }
 
+      // v12: Auto-classify new unclassified inbox messages
+      try {
+        const unclassified = await storage.getInboxMessagesEnhanced(orgId, { replyType: '' }, 100, 0) as any[];
+        let autoClassified = 0;
+        for (const msg of unclassified) {
+          if (msg.replyType && msg.replyType !== '') continue;
+          if (msg.sentByUs) continue; // Don't classify our own sent messages
+          const result = classifyReply(msg.subject || '', msg.body || msg.snippet || '', msg.fromEmail, msg.fromName);
+          await storage.classifyReply(msg.id, result.replyType);
+          if (result.bounceType) await storage.setBounceType(msg.id, result.bounceType);
+          // Auto-actions based on classification
+          if (msg.contactId) {
+            if (result.replyType === 'bounce' && result.bounceType) {
+              await storage.markContactBounced(msg.contactId, result.bounceType);
+            } else if (result.replyType === 'unsubscribe') {
+              await storage.markContactUnsubscribed(msg.contactId, msg.campaignId);
+            } else if (result.replyType === 'positive') {
+              await storage.updateContactLeadStatus(msg.contactId, 'interested');
+            }
+            // Create notification for positive replies
+            if (result.replyType === 'positive' || result.replyType === 'general') {
+              await storage.createNotification(orgId, {
+                type: 'reply',
+                title: `New ${result.replyType} reply from ${msg.fromName || msg.fromEmail}`,
+                message: msg.snippet?.substring(0, 150),
+                linkUrl: `/inbox?id=${msg.id}`,
+                metadata: { inboxMessageId: msg.id, replyType: result.replyType },
+              });
+            }
+          }
+          autoClassified++;
+        }
+        if (autoClassified > 0) {
+          console.log(`[InboxSync] Auto-classified ${autoClassified} inbox messages`);
+        }
+        results.autoClassified = autoClassified;
+      } catch (e) {
+        console.error('[InboxSync] Auto-classify error:', e);
+      }
+
       const totalNew = (results.gmail?.newReplies || 0) + (results.outlook?.newReplies || 0);
       res.json({ success: true, totalNew, results });
     } catch (error) {
@@ -6015,6 +6056,407 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     } catch (error) {
       console.error('AI draft error:', error);
       res.status(500).json({ message: 'Failed to generate AI draft' });
+    }
+  });
+
+  // ========== v12: ENHANCED INBOX API ==========
+
+  // Enhanced inbox with all new filters (replaces base inbox for frontend)
+  app.get('/api/inbox/enhanced', requireAuth, async (req: any, res) => {
+    try {
+      const { status, emailAccountId, campaignId, replyType, bounceType, leadStatus, assignedTo, isStarred, search, limit, offset, viewMode } = req.query;
+      const role = req.user.role;
+      const isAdmin = role === 'owner' || role === 'admin';
+      const parsedLimit = parseInt(limit as string) || 50;
+      const parsedOffset = parseInt(offset as string) || 0;
+
+      const filters: any = { status, emailAccountId, campaignId, replyType, bounceType, leadStatus, assignedTo, search, viewMode };
+      if (isStarred === 'true') filters.isStarred = true;
+
+      if (!isAdmin) {
+        const userAccounts = await storage.getEmailAccountsForUser(req.user.organizationId, req.user.id);
+        const userAccountIds = userAccounts.map((a: any) => a.id);
+        if (userAccountIds.length === 0) return res.json({ messages: [], total: 0, unread: 0, stats: {} });
+        if (!emailAccountId || emailAccountId === 'all') {
+          filters.emailAccountId = userAccountIds.join(',');
+        }
+      }
+
+      const messages = await storage.getInboxMessagesEnhanced(req.user.organizationId, filters, parsedLimit, parsedOffset);
+      const total = await storage.getInboxMessageCountEnhanced(req.user.organizationId, filters);
+      const stats = await storage.getInboxStats(req.user.organizationId);
+      const unread = stats.unread;
+
+      // Enrich messages
+      const enriched = await Promise.all(messages.map(async (m: any) => {
+        let contact = null;
+        if (m.contactId) contact = await storage.getContact(m.contactId);
+        if (!contact && m.fromEmail) contact = await storage.getContactByEmail(req.user.organizationId, m.fromEmail);
+        let accountOwner = null;
+        if (isAdmin && m.emailAccountId) {
+          const acct = await storage.getEmailAccount(m.emailAccountId);
+          if (acct && (acct as any).userId) {
+            const owner = await storage.getUser((acct as any).userId);
+            if (owner) accountOwner = { id: owner.id, email: owner.email, firstName: (owner as any).firstName, lastName: (owner as any).lastName };
+          }
+        }
+        let campaign = null;
+        if (m.campaignId) campaign = await storage.getCampaign(m.campaignId);
+        return {
+          ...m,
+          contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company, jobTitle: contact.jobTitle, status: contact.status, score: contact.score, leadStatus: (contact as any).leadStatus } : null,
+          campaign: campaign ? { id: campaign.id, name: campaign.name } : null,
+          accountOwner,
+        };
+      }));
+
+      res.json({ messages: enriched, total, unread, stats });
+    } catch (error) {
+      console.error('Enhanced inbox error:', error);
+      res.status(500).json({ message: 'Failed to fetch enhanced inbox' });
+    }
+  });
+
+  // Get inbox stats
+  app.get('/api/inbox/stats', requireAuth, async (req: any, res) => {
+    try {
+      const stats = await storage.getInboxStats(req.user.organizationId);
+      res.json(stats);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch inbox stats' });
+    }
+  });
+
+  // Classify a reply
+  app.post('/api/inbox/:id/classify', requireAuth, async (req: any, res) => {
+    try {
+      const msg: any = await storage.getInboxMessage(req.params.id);
+      if (!msg) return res.status(404).json({ message: 'Message not found' });
+      
+      // Manual override or auto-classify
+      const { replyType } = req.body;
+      if (replyType) {
+        await storage.classifyReply(req.params.id, replyType);
+        // Auto-update contact status based on reply type
+        if (msg.contactId) {
+          if (replyType === 'positive') {
+            await storage.updateContactLeadStatus(msg.contactId, 'interested');
+          } else if (replyType === 'negative') {
+            await storage.updateContactLeadStatus(msg.contactId, 'not_interested');
+          }
+          await storage.addContactActivity(req.user.organizationId, msg.contactId, 'reply_classified', `Reply classified as ${replyType}`, null, { messageId: msg.id, metadata: { replyType } });
+        }
+        return res.json({ success: true, replyType });
+      }
+      
+      // Auto-classify
+      const result = classifyReply(msg.subject || '', msg.body || msg.snippet || '', msg.fromEmail, msg.fromName);
+      await storage.classifyReply(req.params.id, result.replyType);
+      if (result.bounceType) await storage.setBounceType(req.params.id, result.bounceType);
+      
+      // Auto-update contact based on classification
+      if (msg.contactId) {
+        if (result.replyType === 'bounce' && result.bounceType) {
+          await storage.markContactBounced(msg.contactId, result.bounceType);
+        } else if (result.replyType === 'unsubscribe') {
+          await storage.markContactUnsubscribed(msg.contactId, msg.campaignId);
+        }
+      }
+      
+      res.json({ success: true, ...result });
+    } catch (error) {
+      console.error('Classify error:', error);
+      res.status(500).json({ message: 'Failed to classify reply' });
+    }
+  });
+
+  // Bulk auto-classify all unclassified inbox messages
+  app.post('/api/inbox/bulk-classify', requireAuth, async (req: any, res) => {
+    try {
+      const messages = await storage.getInboxMessagesEnhanced(req.user.organizationId, { replyType: '' }, 500, 0) as any[];
+      let classified = 0;
+      for (const msg of messages) {
+        if (msg.replyType && msg.replyType !== '') continue;
+        const result = classifyReply(msg.subject || '', msg.body || msg.snippet || '', msg.fromEmail, msg.fromName);
+        await storage.classifyReply(msg.id, result.replyType);
+        if (result.bounceType) await storage.setBounceType(msg.id, result.bounceType);
+        // Auto-update contact
+        if (msg.contactId) {
+          if (result.replyType === 'bounce' && result.bounceType) {
+            await storage.markContactBounced(msg.contactId, result.bounceType);
+          } else if (result.replyType === 'unsubscribe') {
+            await storage.markContactUnsubscribed(msg.contactId, msg.campaignId);
+          }
+        }
+        classified++;
+      }
+      res.json({ success: true, classified });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to bulk classify' });
+    }
+  });
+
+  // Assign inbox message to team member
+  app.post('/api/inbox/:id/assign', requireAuth, async (req: any, res) => {
+    try {
+      const { userId } = req.body;
+      await storage.assignInboxMessage(req.params.id, userId);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to assign message' });
+    }
+  });
+
+  // Update lead status on inbox message
+  app.post('/api/inbox/:id/lead-status', requireAuth, async (req: any, res) => {
+    try {
+      const { leadStatus } = req.body;
+      await storage.updateLeadStatus(req.params.id, leadStatus);
+      // Create activity log
+      const msg: any = await storage.getInboxMessage(req.params.id);
+      if (msg?.contactId) {
+        await storage.addContactActivity(req.user.organizationId, msg.contactId, 'lead_status_changed', `Lead status changed to ${leadStatus}`, null, { messageId: msg.id, metadata: { leadStatus } });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to update lead status' });
+    }
+  });
+
+  // Star/unstar inbox message
+  app.post('/api/inbox/:id/star', requireAuth, async (req: any, res) => {
+    try {
+      const { isStarred } = req.body;
+      await storage.starInboxMessage(req.params.id, !!isStarred);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to star message' });
+    }
+  });
+
+  // Get conversation thread
+  app.get('/api/inbox/thread/:threadId', requireAuth, async (req: any, res) => {
+    try {
+      const messages = await storage.getConversationThread(req.params.threadId);
+      res.json(messages);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch thread' });
+    }
+  });
+
+  // Get conversation by contact
+  app.get('/api/inbox/contact/:contactId', requireAuth, async (req: any, res) => {
+    try {
+      const messages = await storage.getConversationByContact(req.user.organizationId, req.params.contactId);
+      res.json(messages);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch contact conversation' });
+    }
+  });
+
+  // ========== v12: SUPPRESSION LIST ==========
+
+  app.get('/api/suppression-list', requireAuth, async (req: any, res) => {
+    try {
+      const { reason, limit, offset } = req.query;
+      const items = await storage.getSuppressionList(req.user.organizationId, { reason }, parseInt(limit) || 100, parseInt(offset) || 0);
+      const total = await storage.getSuppressionListCount(req.user.organizationId, { reason });
+      res.json({ items, total });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch suppression list' });
+    }
+  });
+
+  app.post('/api/suppression-list', requireAuth, async (req: any, res) => {
+    try {
+      const { email, reason, notes } = req.body;
+      if (!email) return res.status(400).json({ message: 'Email is required' });
+      const id = await storage.addToSuppressionList(req.user.organizationId, email, reason || 'manual', { notes, source: 'manual' });
+      res.json({ success: true, id });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to add to suppression list' });
+    }
+  });
+
+  app.delete('/api/suppression-list/:email', requireAuth, async (req: any, res) => {
+    try {
+      await storage.removeFromSuppressionList(req.user.organizationId, decodeURIComponent(req.params.email));
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to remove from suppression list' });
+    }
+  });
+
+  app.post('/api/suppression-list/check', requireAuth, async (req: any, res) => {
+    try {
+      const { emails } = req.body;
+      if (!Array.isArray(emails)) return res.status(400).json({ message: 'emails array required' });
+      const results: Record<string, boolean> = {};
+      for (const email of emails) {
+        results[email] = await storage.isEmailSuppressed(req.user.organizationId, email);
+      }
+      res.json(results);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to check suppression' });
+    }
+  });
+
+  // ========== v12: CONTACT STATUS ENGINE ==========
+
+  app.post('/api/contacts/:id/recalculate-status', requireAuth, async (req: any, res) => {
+    try {
+      await storage.recalculateContactStatus(req.params.id);
+      const contact = await storage.getContact(req.params.id);
+      res.json(contact);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to recalculate contact status' });
+    }
+  });
+
+  app.post('/api/contacts/:id/recalculate-score', requireAuth, async (req: any, res) => {
+    try {
+      const score = await storage.recalculateContactScore(req.params.id);
+      res.json({ score });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to recalculate score' });
+    }
+  });
+
+  app.post('/api/contacts/:id/lead-status', requireAuth, async (req: any, res) => {
+    try {
+      const { leadStatus } = req.body;
+      await storage.updateContactLeadStatus(req.params.id, leadStatus);
+      await storage.addContactActivity(req.user.organizationId, req.params.id, 'lead_status_changed', `Lead status set to ${leadStatus}`);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to update lead status' });
+    }
+  });
+
+  app.post('/api/contacts/:id/mark-unsubscribed', requireAuth, async (req: any, res) => {
+    try {
+      await storage.markContactUnsubscribed(req.params.id, req.body.campaignId);
+      await storage.addContactActivity(req.user.organizationId, req.params.id, 'unsubscribed', 'Contact marked as unsubscribed');
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to mark unsubscribed' });
+    }
+  });
+
+  // ========== v12: CONTACT ACTIVITY TIMELINE ==========
+
+  app.get('/api/contacts/:id/activity', requireAuth, async (req: any, res) => {
+    try {
+      const { limit, offset } = req.query;
+      const activities = await storage.getContactActivity(req.params.id, parseInt(limit as string) || 50, parseInt(offset as string) || 0);
+      res.json(activities);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch contact activity' });
+    }
+  });
+
+  app.get('/api/contacts/:id/conversations', requireAuth, async (req: any, res) => {
+    try {
+      const messages = await storage.getConversationByContact(req.user.organizationId, req.params.id);
+      res.json(messages);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch contact conversations' });
+    }
+  });
+
+  // ========== v12: WARMUP MONITORING ==========
+
+  app.get('/api/warmup', requireAuth, async (req: any, res) => {
+    try {
+      const accounts = await storage.getWarmupAccounts(req.user.organizationId);
+      res.json(accounts);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch warmup accounts' });
+    }
+  });
+
+  app.post('/api/warmup', requireAuth, async (req: any, res) => {
+    try {
+      const { emailAccountId, dailyTarget, settings } = req.body;
+      if (!emailAccountId) return res.status(400).json({ message: 'emailAccountId required' });
+      const account = await storage.createWarmupAccount({
+        organizationId: req.user.organizationId,
+        emailAccountId,
+        dailyTarget: dailyTarget || 5,
+        settings: settings || {},
+      });
+      res.json(account);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to create warmup account' });
+    }
+  });
+
+  app.put('/api/warmup/:id', requireAuth, async (req: any, res) => {
+    try {
+      const updated = await storage.updateWarmupAccount(req.params.id, req.body);
+      res.json(updated);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to update warmup account' });
+    }
+  });
+
+  app.delete('/api/warmup/:id', requireAuth, async (req: any, res) => {
+    try {
+      await storage.deleteWarmupAccount(req.params.id);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to delete warmup account' });
+    }
+  });
+
+  app.get('/api/warmup/:id/logs', requireAuth, async (req: any, res) => {
+    try {
+      const logs = await storage.getWarmupLogs(req.params.id);
+      res.json(logs);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch warmup logs' });
+    }
+  });
+
+  // ========== v12: NOTIFICATIONS ==========
+
+  app.get('/api/notifications', requireAuth, async (req: any, res) => {
+    try {
+      const notifications = await storage.getNotifications(req.user.organizationId, req.user.id);
+      const unreadCount = await storage.getUnreadNotificationCount(req.user.organizationId, req.user.id);
+      res.json({ notifications, unreadCount });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch notifications' });
+    }
+  });
+
+  app.post('/api/notifications/:id/read', requireAuth, async (req: any, res) => {
+    try {
+      await storage.markNotificationRead(req.params.id);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to mark notification read' });
+    }
+  });
+
+  app.post('/api/notifications/read-all', requireAuth, async (req: any, res) => {
+    try {
+      await storage.markAllNotificationsRead(req.user.organizationId, req.user.id);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to mark all read' });
+    }
+  });
+
+  // ========== v12: CAMPAIGN ANALYTICS (enhanced) ==========
+
+  app.get('/api/campaigns/:id/analytics', requireAuth, async (req: any, res) => {
+    try {
+      const analytics = await storage.getCampaignAnalytics(req.params.id);
+      if (!analytics) return res.status(404).json({ message: 'Campaign not found' });
+      res.json(analytics);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch campaign analytics' });
     }
   });
 

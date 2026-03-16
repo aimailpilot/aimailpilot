@@ -543,6 +543,138 @@ try { db.exec(`ALTER TABLE campaigns ADD COLUMN sendingConfig TEXT`); } catch (e
 try { db.exec(`ALTER TABLE campaigns ADD COLUMN includeUnsubscribe INTEGER DEFAULT 0`); } catch (e) { /* already exists */ }
 try { db.exec(`ALTER TABLE campaigns ADD COLUMN trackOpens INTEGER DEFAULT 1`); } catch (e) { /* already exists */ }
 
+// ========== v12 Unified Inbox & Contact Engine Migrations ==========
+
+// Unified Inbox: reply classification, bounce type, threading, assignment, lead status
+try { db.exec(`ALTER TABLE unified_inbox ADD COLUMN replyType TEXT DEFAULT ''`); } catch (e) {} // positive, negative, ooo, auto_reply, general, bounce, unsubscribe
+try { db.exec(`ALTER TABLE unified_inbox ADD COLUMN bounceType TEXT DEFAULT ''`); } catch (e) {} // hard, soft, blocked, mailbox_full
+try { db.exec(`ALTER TABLE unified_inbox ADD COLUMN threadId TEXT`); } catch (e) {} // conversation thread
+try { db.exec(`ALTER TABLE unified_inbox ADD COLUMN inReplyTo TEXT`); } catch (e) {} // references parent message
+try { db.exec(`ALTER TABLE unified_inbox ADD COLUMN assignedTo TEXT`); } catch (e) {} // team member userId
+try { db.exec(`ALTER TABLE unified_inbox ADD COLUMN leadStatus TEXT DEFAULT ''`); } catch (e) {} // interested, meeting_scheduled, follow_up, closed, not_interested
+try { db.exec(`ALTER TABLE unified_inbox ADD COLUMN isStarred INTEGER DEFAULT 0`); } catch (e) {}
+try { db.exec(`ALTER TABLE unified_inbox ADD COLUMN labels TEXT DEFAULT '[]'`); } catch (e) {} // JSON array of labels/tags
+try { db.exec(`ALTER TABLE unified_inbox ADD COLUMN sentByUs INTEGER DEFAULT 0`); } catch (e) {} // 1 if sent by us (outbound)
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_inbox_thread ON unified_inbox(threadId)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_inbox_assigned ON unified_inbox(assignedTo)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_inbox_reply_type ON unified_inbox(replyType)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_inbox_lead_status ON unified_inbox(leadStatus)`); } catch (e) {}
+
+// Contacts: lead status, unsubscribe flag, bounce info, campaign history
+try { db.exec(`ALTER TABLE contacts ADD COLUMN leadStatus TEXT DEFAULT ''`); } catch (e) {} // interested, meeting_scheduled, follow_up, closed, not_interested
+try { db.exec(`ALTER TABLE contacts ADD COLUMN unsubscribed INTEGER DEFAULT 0`); } catch (e) {}
+try { db.exec(`ALTER TABLE contacts ADD COLUMN unsubscribedAt TEXT`); } catch (e) {}
+try { db.exec(`ALTER TABLE contacts ADD COLUMN bounceType TEXT DEFAULT ''`); } catch (e) {} // hard, soft, blocked, mailbox_full
+try { db.exec(`ALTER TABLE contacts ADD COLUMN bouncedAt TEXT`); } catch (e) {}
+try { db.exec(`ALTER TABLE contacts ADD COLUMN campaignHistory TEXT DEFAULT '[]'`); } catch (e) {} // JSON array of campaign IDs
+try { db.exec(`ALTER TABLE contacts ADD COLUMN lastOpenedAt TEXT`); } catch (e) {}
+try { db.exec(`ALTER TABLE contacts ADD COLUMN lastClickedAt TEXT`); } catch (e) {}
+try { db.exec(`ALTER TABLE contacts ADD COLUMN lastRepliedAt TEXT`); } catch (e) {}
+try { db.exec(`ALTER TABLE contacts ADD COLUMN totalSent INTEGER DEFAULT 0`); } catch (e) {}
+try { db.exec(`ALTER TABLE contacts ADD COLUMN totalOpened INTEGER DEFAULT 0`); } catch (e) {}
+try { db.exec(`ALTER TABLE contacts ADD COLUMN totalClicked INTEGER DEFAULT 0`); } catch (e) {}
+try { db.exec(`ALTER TABLE contacts ADD COLUMN totalReplied INTEGER DEFAULT 0`); } catch (e) {}
+try { db.exec(`ALTER TABLE contacts ADD COLUMN totalBounced INTEGER DEFAULT 0`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_lead_status ON contacts(leadStatus)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_unsubscribed ON contacts(unsubscribed)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_bounce ON contacts(bounceType)`); } catch (e) {}
+
+// Global Suppression List table
+db.exec(`
+  CREATE TABLE IF NOT EXISTS suppression_list (
+    id TEXT PRIMARY KEY,
+    organizationId TEXT NOT NULL,
+    email TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT 'manual',
+    bounceType TEXT,
+    source TEXT,
+    campaignId TEXT,
+    notes TEXT,
+    createdAt TEXT NOT NULL,
+    UNIQUE(organizationId, email)
+  );
+  CREATE INDEX IF NOT EXISTS idx_suppression_org ON suppression_list(organizationId, email);
+  CREATE INDEX IF NOT EXISTS idx_suppression_reason ON suppression_list(organizationId, reason);
+`);
+
+// Email Warmup Monitoring table
+db.exec(`
+  CREATE TABLE IF NOT EXISTS warmup_accounts (
+    id TEXT PRIMARY KEY,
+    organizationId TEXT NOT NULL,
+    emailAccountId TEXT NOT NULL,
+    status TEXT DEFAULT 'active',
+    dailyTarget INTEGER DEFAULT 5,
+    currentDaily INTEGER DEFAULT 0,
+    totalSent INTEGER DEFAULT 0,
+    totalReceived INTEGER DEFAULT 0,
+    inboxRate REAL DEFAULT 0,
+    spamRate REAL DEFAULT 0,
+    reputationScore REAL DEFAULT 50,
+    startDate TEXT NOT NULL,
+    lastWarmupAt TEXT,
+    settings TEXT DEFAULT '{}',
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_warmup_org ON warmup_accounts(organizationId);
+  CREATE INDEX IF NOT EXISTS idx_warmup_email ON warmup_accounts(emailAccountId);
+`);
+
+// Warmup Log (daily stats)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS warmup_logs (
+    id TEXT PRIMARY KEY,
+    warmupAccountId TEXT NOT NULL,
+    date TEXT NOT NULL,
+    sent INTEGER DEFAULT 0,
+    received INTEGER DEFAULT 0,
+    inboxCount INTEGER DEFAULT 0,
+    spamCount INTEGER DEFAULT 0,
+    bounceCount INTEGER DEFAULT 0,
+    openCount INTEGER DEFAULT 0,
+    replyCount INTEGER DEFAULT 0,
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_warmup_logs_acct ON warmup_logs(warmupAccountId, date);
+`);
+
+// Contact Activity Timeline
+db.exec(`
+  CREATE TABLE IF NOT EXISTS contact_activity (
+    id TEXT PRIMARY KEY,
+    organizationId TEXT NOT NULL,
+    contactId TEXT NOT NULL,
+    type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    campaignId TEXT,
+    messageId TEXT,
+    metadata TEXT DEFAULT '{}',
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_contact_activity_contact ON contact_activity(contactId, createdAt);
+  CREATE INDEX IF NOT EXISTS idx_contact_activity_org ON contact_activity(organizationId);
+`);
+
+// Reply Notifications
+db.exec(`
+  CREATE TABLE IF NOT EXISTS notifications (
+    id TEXT PRIMARY KEY,
+    organizationId TEXT NOT NULL,
+    userId TEXT,
+    type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    message TEXT,
+    linkUrl TEXT,
+    isRead INTEGER DEFAULT 0,
+    metadata TEXT DEFAULT '{}',
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(userId, isRead, createdAt);
+  CREATE INDEX IF NOT EXISTS idx_notifications_org ON notifications(organizationId, createdAt);
+`);
+
 // Migrate existing email accounts to correct provider-based daily limits
 // Gmail=2000, Outlook=10000, ElasticEmail=unlimited, Custom=500
 try {
@@ -1459,6 +1591,29 @@ export class DatabaseStorage {
     const bounced = campaign.bouncedCount || 0;
     const unsub = campaign.unsubscribedCount || 0;
 
+    // v12: Enhanced analytics with reply/bounce breakdowns
+    const replyBreakdown = db.prepare(`
+      SELECT replyType, COUNT(*) as count FROM unified_inbox
+      WHERE campaignId = ? AND replyType != '' AND replyType IS NOT NULL
+      GROUP BY replyType
+    `).all(campaignId);
+    
+    const bounceBreakdown = db.prepare(`
+      SELECT bounceType, COUNT(*) as count FROM unified_inbox
+      WHERE campaignId = ? AND bounceType != '' AND bounceType IS NOT NULL
+      GROUP BY bounceType
+    `).all(campaignId);
+    
+    const dailyTimeline = db.prepare(`
+      SELECT DATE(createdAt) as date, type, COUNT(*) as count
+      FROM tracking_events
+      WHERE campaignId = ?
+      GROUP BY DATE(createdAt), type
+      ORDER BY date
+    `).all(campaignId);
+    
+    const positiveReplies = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE campaignId = ? AND replyType = 'positive'").get(campaignId) as any).c;
+
     return {
       campaignId,
       campaignName: campaign.name,
@@ -1469,6 +1624,10 @@ export class DatabaseStorage {
       bounceRate: totalSent > 0 ? ((bounced / totalSent) * 100).toFixed(1) : '0',
       unsubscribeRate: totalSent > 0 ? ((unsub / totalSent) * 100).toFixed(1) : '0',
       deliveryRate: totalSent > 0 ? (((totalSent - bounced) / totalSent) * 100).toFixed(1) : '0',
+      positiveReplies,
+      replyBreakdown,
+      bounceBreakdown,
+      dailyTimeline,
     };
   }
 
@@ -1652,12 +1811,14 @@ export class DatabaseStorage {
     db.prepare(`INSERT INTO unified_inbox (id, organizationId, emailAccountId, campaignId, messageId, contactId,
       gmailMessageId, gmailThreadId, outlookMessageId, outlookConversationId,
       fromEmail, fromName, toEmail, subject, snippet, body, bodyHtml,
-      status, provider, aiDraft, repliedAt, receivedAt, createdAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      status, provider, aiDraft, repliedAt, receivedAt, createdAt,
+      replyType, bounceType, threadId, inReplyTo, assignedTo, leadStatus, sentByUs)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       id, msg.organizationId, msg.emailAccountId || null, msg.campaignId || null, msg.messageId || null, msg.contactId || null,
       msg.gmailMessageId || null, msg.gmailThreadId || null, msg.outlookMessageId || null, msg.outlookConversationId || null,
       msg.fromEmail, msg.fromName || '', msg.toEmail || '', msg.subject || '', msg.snippet || '', msg.body || '', msg.bodyHtml || '',
-      msg.status || 'unread', msg.provider || '', msg.aiDraft || null, msg.repliedAt || null, msg.receivedAt || ts2, ts2
+      msg.status || 'unread', msg.provider || '', msg.aiDraft || null, msg.repliedAt || null, msg.receivedAt || ts2, ts2,
+      msg.replyType || '', msg.bounceType || '', msg.threadId || null, msg.inReplyTo || null, msg.assignedTo || null, msg.leadStatus || '', msg.sentByUs || 0
     );
     return this.getInboxMessage(id);
   }
@@ -1666,8 +1827,9 @@ export class DatabaseStorage {
     const existing = await this.getInboxMessage(id);
     if (!existing) throw new Error('Inbox message not found');
     const m = { ...existing, ...data } as any;
-    db.prepare('UPDATE unified_inbox SET status=?, aiDraft=?, repliedAt=?, replyContent=?, repliedBy=? WHERE id=?').run(
-      m.status, m.aiDraft || null, m.repliedAt || null, m.replyContent || null, m.repliedBy || null, id
+    db.prepare('UPDATE unified_inbox SET status=?, aiDraft=?, repliedAt=?, replyContent=?, repliedBy=?, replyType=?, bounceType=?, threadId=?, assignedTo=?, leadStatus=?, isStarred=? WHERE id=?').run(
+      m.status, m.aiDraft || null, m.repliedAt || null, m.replyContent || null, m.repliedBy || null,
+      m.replyType || '', m.bounceType || '', m.threadId || null, m.assignedTo || null, m.leadStatus || '', m.isStarred || 0, id
     );
     return this.getInboxMessage(id);
   }
@@ -2128,6 +2290,378 @@ export class DatabaseStorage {
       AND c.organizationId = ?
       AND te.contactId IS NOT NULL
     `).all(orgId);
+  }
+
+  // ========== v12: Reply Classification Engine ==========
+  
+  async classifyReply(inboxMessageId: string, replyType: string) {
+    db.prepare('UPDATE unified_inbox SET replyType = ? WHERE id = ?').run(replyType, inboxMessageId);
+  }
+
+  async setBounceType(inboxMessageId: string, bounceType: string) {
+    db.prepare('UPDATE unified_inbox SET bounceType = ? WHERE id = ?').run(bounceType, inboxMessageId);
+  }
+
+  // ========== v12: Conversation Threading ==========
+  
+  async getConversationThread(threadId: string) {
+    return db.prepare('SELECT * FROM unified_inbox WHERE threadId = ? ORDER BY receivedAt ASC').all(threadId);
+  }
+
+  async getConversationByContact(organizationId: string, contactId: string, limit = 50) {
+    return db.prepare('SELECT * FROM unified_inbox WHERE organizationId = ? AND contactId = ? ORDER BY receivedAt DESC LIMIT ?').all(organizationId, contactId, limit);
+  }
+
+  // ========== v12: Inbox Assignment ==========
+  
+  async assignInboxMessage(inboxMessageId: string, userId: string) {
+    db.prepare('UPDATE unified_inbox SET assignedTo = ? WHERE id = ?').run(userId, inboxMessageId);
+  }
+
+  async getInboxByAssignee(organizationId: string, userId: string, limit = 50, offset = 0) {
+    return db.prepare('SELECT * FROM unified_inbox WHERE organizationId = ? AND assignedTo = ? ORDER BY receivedAt DESC LIMIT ? OFFSET ?').all(organizationId, userId, limit, offset);
+  }
+
+  // ========== v12: Lead Status ==========
+  
+  async updateLeadStatus(inboxMessageId: string, leadStatus: string) {
+    db.prepare('UPDATE unified_inbox SET leadStatus = ? WHERE id = ?').run(leadStatus, inboxMessageId);
+    // Also update the linked contact's lead status
+    const msg = db.prepare('SELECT contactId FROM unified_inbox WHERE id = ?').get(inboxMessageId) as any;
+    if (msg?.contactId) {
+      db.prepare('UPDATE contacts SET leadStatus = ?, updatedAt = ? WHERE id = ?').run(leadStatus, now(), msg.contactId);
+    }
+  }
+
+  async updateContactLeadStatus(contactId: string, leadStatus: string) {
+    db.prepare('UPDATE contacts SET leadStatus = ?, updatedAt = ? WHERE id = ?').run(leadStatus, now(), contactId);
+  }
+
+  // ========== v12: Star messages ==========
+  
+  async starInboxMessage(id: string, isStarred: boolean) {
+    db.prepare('UPDATE unified_inbox SET isStarred = ? WHERE id = ?').run(isStarred ? 1 : 0, id);
+  }
+
+  // ========== v12: Global Suppression List ==========
+  
+  async addToSuppressionList(orgId: string, email: string, reason: string, extra?: { bounceType?: string; source?: string; campaignId?: string; notes?: string }) {
+    const id = genId();
+    try {
+      db.prepare('INSERT OR REPLACE INTO suppression_list (id, organizationId, email, reason, bounceType, source, campaignId, notes, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+        id, orgId, email.toLowerCase(), reason, extra?.bounceType || null, extra?.source || null, extra?.campaignId || null, extra?.notes || null, now()
+      );
+    } catch (e) { /* unique constraint - already exists */ }
+    return id;
+  }
+
+  async removeFromSuppressionList(orgId: string, email: string) {
+    db.prepare('DELETE FROM suppression_list WHERE organizationId = ? AND email = ?').run(orgId, email.toLowerCase());
+  }
+
+  async isEmailSuppressed(orgId: string, email: string): Promise<boolean> {
+    const row = db.prepare('SELECT id FROM suppression_list WHERE organizationId = ? AND email = ?').get(orgId, email.toLowerCase()) as any;
+    return !!row;
+  }
+
+  async getSuppressionList(orgId: string, filters?: { reason?: string }, limit = 100, offset = 0) {
+    let sql = 'SELECT * FROM suppression_list WHERE organizationId = ?';
+    const params: any[] = [orgId];
+    if (filters?.reason) { sql += ' AND reason = ?'; params.push(filters.reason); }
+    sql += ' ORDER BY createdAt DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+    return db.prepare(sql).all(...params);
+  }
+
+  async getSuppressionListCount(orgId: string, filters?: { reason?: string }): Promise<number> {
+    let sql = 'SELECT COUNT(*) as c FROM suppression_list WHERE organizationId = ?';
+    const params: any[] = [orgId];
+    if (filters?.reason) { sql += ' AND reason = ?'; params.push(filters.reason); }
+    return (db.prepare(sql).get(...params) as any).c;
+  }
+
+  // ========== v12: Unsubscribe Management ==========
+  
+  async markContactUnsubscribed(contactId: string, campaignId?: string) {
+    const ts = now();
+    db.prepare('UPDATE contacts SET unsubscribed = 1, unsubscribedAt = ?, status = ?, updatedAt = ? WHERE id = ?').run(ts, 'unsubscribed', ts, contactId);
+    const contact = await this.getContact(contactId);
+    if (contact) {
+      await this.addToSuppressionList(contact.organizationId, contact.email, 'unsubscribe', { campaignId, source: 'auto' });
+    }
+  }
+
+  async getUnsubscribedContacts(orgId: string, limit = 100, offset = 0) {
+    return db.prepare('SELECT * FROM contacts WHERE organizationId = ? AND unsubscribed = 1 ORDER BY unsubscribedAt DESC LIMIT ? OFFSET ?').all(orgId, limit, offset);
+  }
+
+  // ========== v12: Contact Status Engine (auto-calculate) ==========
+  
+  async recalculateContactStatus(contactId: string) {
+    const contact = await this.getContact(contactId);
+    if (!contact) return;
+    // Don't change status for bounced or unsubscribed contacts
+    if (contact.status === 'bounced' || contact.status === 'unsubscribed') return;
+    
+    const stats = await this.getContactEngagementStats(contactId);
+    let newStatus = 'cold';
+    let newScore = contact.score || 0;
+    
+    if (stats.totalReplied > 0) {
+      newStatus = 'replied';
+      newScore = Math.max(newScore, 80);
+    } else if (stats.totalClicked > 0) {
+      newStatus = 'hot';
+      newScore = Math.max(newScore, 60);
+    } else if (stats.totalOpened > 0) {
+      newStatus = 'warm';
+      newScore = Math.max(newScore, 40);
+    }
+    
+    db.prepare('UPDATE contacts SET status = ?, score = ?, totalSent = ?, totalOpened = ?, totalClicked = ?, totalReplied = ?, updatedAt = ? WHERE id = ?').run(
+      newStatus, newScore,
+      stats.totalSent || 0, stats.totalOpened || 0, stats.totalClicked || 0, stats.totalReplied || 0,
+      now(), contactId
+    );
+  }
+
+  async recalculateContactScore(contactId: string) {
+    const stats = await this.getContactEngagementStats(contactId);
+    // Scoring: +5 open, +10 click, +20 reply, -30 unsubscribe, -50 bounce
+    let score = 0;
+    score += (stats.totalOpened || 0) * 5;
+    score += (stats.totalClicked || 0) * 10;
+    score += (stats.totalReplied || 0) * 20;
+    
+    const contact = await this.getContact(contactId);
+    if (contact) {
+      if ((contact as any).unsubscribed) score -= 30;
+      if (contact.status === 'bounced') score -= 50;
+    }
+    score = Math.max(0, Math.min(100, score));
+    db.prepare('UPDATE contacts SET score = ?, updatedAt = ? WHERE id = ?').run(score, now(), contactId);
+    return score;
+  }
+
+  // ========== v12: Bounce Management ==========
+  
+  async markContactBounced(contactId: string, bounceType: string = 'hard') {
+    const ts = now();
+    db.prepare('UPDATE contacts SET status = ?, bounceType = ?, bouncedAt = ?, updatedAt = ? WHERE id = ?').run('bounced', bounceType, ts, ts, contactId);
+    const contact = await this.getContact(contactId);
+    if (contact) {
+      await this.addToSuppressionList(contact.organizationId, contact.email, 'bounce', { bounceType, source: 'auto' });
+      // Remove contact from active campaigns
+      const activeCampaigns = db.prepare(`
+        SELECT DISTINCT c.id FROM campaigns c
+        INNER JOIN messages m ON m.campaignId = c.id
+        WHERE m.contactId = ? AND c.status IN ('active', 'scheduled')
+      `).all(contactId) as any[];
+      for (const camp of activeCampaigns) {
+        // Cancel pending follow-ups
+        db.prepare("UPDATE followup_executions SET status = 'skipped' WHERE contactId = ? AND campaignId = ? AND status = 'pending'").run(contactId, camp.id);
+      }
+    }
+  }
+
+  // ========== v12: Contact Activity Timeline ==========
+  
+  async addContactActivity(orgId: string, contactId: string, type: string, title: string, description?: string, extra?: { campaignId?: string; messageId?: string; metadata?: any }) {
+    const id = genId();
+    db.prepare('INSERT INTO contact_activity (id, organizationId, contactId, type, title, description, campaignId, messageId, metadata, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, orgId, contactId, type, title, description || null, extra?.campaignId || null, extra?.messageId || null, toJson(extra?.metadata || {}), now()
+    );
+    return id;
+  }
+
+  async getContactActivity(contactId: string, limit = 50, offset = 0) {
+    return db.prepare('SELECT * FROM contact_activity WHERE contactId = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(contactId, limit, offset).map((r: any) => ({ ...r, metadata: fromJson(r.metadata) }));
+  }
+
+  // ========== v12: Warmup Monitoring ==========
+  
+  async createWarmupAccount(data: any) {
+    const id = genId(); const ts = now();
+    db.prepare('INSERT INTO warmup_accounts (id, organizationId, emailAccountId, status, dailyTarget, startDate, settings, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, data.organizationId, data.emailAccountId, data.status || 'active', data.dailyTarget || 5, data.startDate || ts, toJson(data.settings || {}), ts, ts
+    );
+    return this.getWarmupAccount(id);
+  }
+
+  async getWarmupAccount(id: string) {
+    const r = db.prepare('SELECT * FROM warmup_accounts WHERE id = ?').get(id) as any;
+    return r ? { ...r, settings: fromJson(r.settings) } : null;
+  }
+
+  async getWarmupAccounts(orgId: string) {
+    return db.prepare('SELECT wa.*, ea.email as accountEmail, ea.provider FROM warmup_accounts wa LEFT JOIN email_accounts ea ON ea.id = wa.emailAccountId WHERE wa.organizationId = ? ORDER BY wa.createdAt DESC').all(orgId).map((r: any) => ({ ...r, settings: fromJson(r.settings) }));
+  }
+
+  async updateWarmupAccount(id: string, data: any) {
+    const existing = await this.getWarmupAccount(id);
+    if (!existing) throw new Error('Warmup account not found');
+    const m = { ...existing, ...data };
+    db.prepare('UPDATE warmup_accounts SET status=?, dailyTarget=?, currentDaily=?, totalSent=?, totalReceived=?, inboxRate=?, spamRate=?, reputationScore=?, lastWarmupAt=?, settings=?, updatedAt=? WHERE id=?').run(
+      m.status, m.dailyTarget, m.currentDaily || 0, m.totalSent || 0, m.totalReceived || 0,
+      m.inboxRate || 0, m.spamRate || 0, m.reputationScore || 50,
+      m.lastWarmupAt || null, toJson(m.settings || {}), now(), id
+    );
+    return this.getWarmupAccount(id);
+  }
+
+  async deleteWarmupAccount(id: string) {
+    db.prepare('DELETE FROM warmup_logs WHERE warmupAccountId = ?').run(id);
+    db.prepare('DELETE FROM warmup_accounts WHERE id = ?').run(id);
+  }
+
+  async addWarmupLog(warmupAccountId: string, date: string, data: any) {
+    const id = genId();
+    db.prepare('INSERT INTO warmup_logs (id, warmupAccountId, date, sent, received, inboxCount, spamCount, bounceCount, openCount, replyCount, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, warmupAccountId, date, data.sent || 0, data.received || 0, data.inboxCount || 0,
+      data.spamCount || 0, data.bounceCount || 0, data.openCount || 0, data.replyCount || 0, now()
+    );
+    return id;
+  }
+
+  async getWarmupLogs(warmupAccountId: string, limit = 30) {
+    return db.prepare('SELECT * FROM warmup_logs WHERE warmupAccountId = ? ORDER BY date DESC LIMIT ?').all(warmupAccountId, limit);
+  }
+
+  // ========== v12: Notifications ==========
+  
+  async createNotification(orgId: string, data: { userId?: string; type: string; title: string; message?: string; linkUrl?: string; metadata?: any }) {
+    const id = genId();
+    db.prepare('INSERT INTO notifications (id, organizationId, userId, type, title, message, linkUrl, metadata, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, orgId, data.userId || null, data.type, data.title, data.message || null, data.linkUrl || null, toJson(data.metadata || {}), now()
+    );
+    return id;
+  }
+
+  async getNotifications(orgId: string, userId?: string, limit = 50) {
+    if (userId) {
+      return db.prepare('SELECT * FROM notifications WHERE organizationId = ? AND (userId = ? OR userId IS NULL) ORDER BY createdAt DESC LIMIT ?').all(orgId, userId, limit).map((r: any) => ({ ...r, metadata: fromJson(r.metadata) }));
+    }
+    return db.prepare('SELECT * FROM notifications WHERE organizationId = ? ORDER BY createdAt DESC LIMIT ?').all(orgId, limit).map((r: any) => ({ ...r, metadata: fromJson(r.metadata) }));
+  }
+
+  async getUnreadNotificationCount(orgId: string, userId?: string): Promise<number> {
+    if (userId) {
+      return (db.prepare('SELECT COUNT(*) as c FROM notifications WHERE organizationId = ? AND (userId = ? OR userId IS NULL) AND isRead = 0').get(orgId, userId) as any).c;
+    }
+    return (db.prepare('SELECT COUNT(*) as c FROM notifications WHERE organizationId = ? AND isRead = 0').get(orgId) as any).c;
+  }
+
+  async markNotificationRead(id: string) {
+    db.prepare('UPDATE notifications SET isRead = 1 WHERE id = ?').run(id);
+  }
+
+  async markAllNotificationsRead(orgId: string, userId?: string) {
+    if (userId) {
+      db.prepare('UPDATE notifications SET isRead = 1 WHERE organizationId = ? AND (userId = ? OR userId IS NULL)').run(orgId, userId);
+    } else {
+      db.prepare('UPDATE notifications SET isRead = 1 WHERE organizationId = ?').run(orgId);
+    }
+  }
+
+  // Enhanced inbox query with new filters
+  async getInboxMessagesEnhanced(organizationId: string, filters: {
+    status?: string;
+    emailAccountId?: string;
+    campaignId?: string;
+    replyType?: string;
+    bounceType?: string;
+    leadStatus?: string;
+    assignedTo?: string;
+    isStarred?: boolean;
+    search?: string;
+    viewMode?: string; // 'unified' | 'account' | 'campaign'
+  }, limit = 50, offset = 0) {
+    let sql = 'SELECT * FROM unified_inbox WHERE organizationId = ?';
+    const params: any[] = [organizationId];
+    
+    if (filters?.status === 'bounced') {
+      sql += " AND (status = 'bounced' OR bounceType != '')";
+    } else if (filters?.status === 'unsubscribed') {
+      sql += " AND replyType = 'unsubscribe'";
+    } else if (filters?.status && filters.status !== 'all') {
+      sql += ' AND status = ?'; params.push(filters.status);
+    }
+    if (filters?.emailAccountId) {
+      const accountIds = filters.emailAccountId.split(',').map(id => id.trim()).filter(Boolean);
+      if (accountIds.length === 1) {
+        sql += ' AND emailAccountId = ?'; params.push(accountIds[0]);
+      } else if (accountIds.length > 1) {
+        sql += ` AND emailAccountId IN (${accountIds.map(() => '?').join(',')})`;
+        params.push(...accountIds);
+      }
+    }
+    if (filters?.campaignId) { sql += ' AND campaignId = ?'; params.push(filters.campaignId); }
+    if (filters?.replyType) { sql += ' AND replyType = ?'; params.push(filters.replyType); }
+    if (filters?.bounceType) { sql += ' AND bounceType = ?'; params.push(filters.bounceType); }
+    if (filters?.leadStatus) { sql += ' AND leadStatus = ?'; params.push(filters.leadStatus); }
+    if (filters?.assignedTo) { sql += ' AND assignedTo = ?'; params.push(filters.assignedTo); }
+    if (filters?.isStarred) { sql += ' AND isStarred = 1'; }
+    if (filters?.search) {
+      sql += ' AND (subject LIKE ? OR fromEmail LIKE ? OR fromName LIKE ? OR snippet LIKE ?)';
+      const q = `%${filters.search}%`;
+      params.push(q, q, q, q);
+    }
+    
+    sql += ' ORDER BY receivedAt DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+    return db.prepare(sql).all(...params);
+  }
+
+  async getInboxMessageCountEnhanced(organizationId: string, filters: {
+    status?: string;
+    emailAccountId?: string;
+    campaignId?: string;
+    replyType?: string;
+    assignedTo?: string;
+    search?: string;
+  }): Promise<number> {
+    let sql = 'SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ?';
+    const params: any[] = [organizationId];
+    if (filters?.status === 'bounced') {
+      sql += " AND (status = 'bounced' OR bounceType != '')";
+    } else if (filters?.status === 'unsubscribed') {
+      sql += " AND replyType = 'unsubscribe'";
+    } else if (filters?.status && filters.status !== 'all') {
+      sql += ' AND status = ?'; params.push(filters.status);
+    }
+    if (filters?.emailAccountId) {
+      const accountIds = filters.emailAccountId.split(',').map(id => id.trim()).filter(Boolean);
+      if (accountIds.length === 1) {
+        sql += ' AND emailAccountId = ?'; params.push(accountIds[0]);
+      } else if (accountIds.length > 1) {
+        sql += ` AND emailAccountId IN (${accountIds.map(() => '?').join(',')})`;
+        params.push(...accountIds);
+      }
+    }
+    if (filters?.campaignId) { sql += ' AND campaignId = ?'; params.push(filters.campaignId); }
+    if (filters?.replyType) { sql += ' AND replyType = ?'; params.push(filters.replyType); }
+    if (filters?.assignedTo) { sql += ' AND assignedTo = ?'; params.push(filters.assignedTo); }
+    if (filters?.search) {
+      sql += ' AND (subject LIKE ? OR fromEmail LIKE ? OR fromName LIKE ? OR snippet LIKE ?)';
+      const q = `%${filters.search}%`;
+      params.push(q, q, q, q);
+    }
+    return (db.prepare(sql).get(...params) as any).c;
+  }
+
+  // Get inbox stats breakdown for dashboard
+  async getInboxStats(organizationId: string) {
+    const total = (db.prepare('SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ?').get(organizationId) as any).c;
+    const unread = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND status = 'unread'").get(organizationId) as any).c;
+    const replied = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND status = 'replied'").get(organizationId) as any).c;
+    const archived = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND status = 'archived'").get(organizationId) as any).c;
+    const positive = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND replyType = 'positive'").get(organizationId) as any).c;
+    const negative = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND replyType = 'negative'").get(organizationId) as any).c;
+    const ooo = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND replyType = 'ooo'").get(organizationId) as any).c;
+    const autoReply = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND replyType = 'auto_reply'").get(organizationId) as any).c;
+    const bounced = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND (bounceType != '' AND bounceType IS NOT NULL)").get(organizationId) as any).c;
+    const starred = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND isStarred = 1").get(organizationId) as any).c;
+    return { total, unread, replied, archived, positive, negative, ooo, autoReply, bounced, starred };
   }
 }
 

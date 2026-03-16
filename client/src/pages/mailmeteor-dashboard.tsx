@@ -12,7 +12,7 @@ import {
   Bell, Activity, Inbox, MoreHorizontal, Pause, Play, Trash2,
   ArrowUp, ArrowDown, Calendar, Sparkles, CreditCard, Lightbulb,
   Wrench, PieChart, Link2, Globe, RefreshCw, ExternalLink, XCircle,
-  AlertTriangle, Building2, Shield
+  AlertTriangle, Building2, Shield, Flame
 } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -35,8 +35,9 @@ import AccountSettings from "./account-settings";
 import UnifiedInbox from "./unified-inbox";
 import TeamManagement from "./team-management";
 import SuperAdminDashboard from "./superadmin-dashboard";
+import WarmupMonitoring from "./warmup-monitoring";
 
-type ViewType = 'campaigns' | 'templates' | 'contacts' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings' | 'team' | 'superadmin';
+type ViewType = 'campaigns' | 'templates' | 'contacts' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings' | 'team' | 'superadmin' | 'warmup';
 
 // Live Tracking Feed component - fetches real tracking events
 function LiveTrackingFeed({ dashStats }: { dashStats: any }) {
@@ -247,7 +248,7 @@ export default function MailMeteorDashboard() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const viewParam = params.get('view');
-    if (viewParam && ['campaigns', 'templates', 'contacts', 'inbox', 'setup', 'analytics', 'verification', 'tracking', 'account', 'billing', 'followups', 'insights', 'tools', 'advanced-settings', 'team', 'superadmin'].includes(viewParam)) {
+    if (viewParam && ['campaigns', 'templates', 'contacts', 'inbox', 'setup', 'analytics', 'verification', 'tracking', 'account', 'billing', 'followups', 'insights', 'tools', 'advanced-settings', 'team', 'superadmin', 'warmup'].includes(viewParam)) {
       setCurrentView(viewParam as ViewType);
     }
     // Clean URL params after processing (but keep gmail_connected/error for child components)
@@ -350,6 +351,7 @@ export default function MailMeteorDashboard() {
   const toolsSubItems = [
     ...(isAdminOrOwner ? [{ key: 'followups' as ViewType, label: 'Automations', icon: Zap }] : []),
     { key: 'setup' as ViewType, label: 'Email Accounts', icon: Inbox },
+    ...(isAdminOrOwner ? [{ key: 'warmup' as ViewType, label: 'Warmup', icon: Flame }] : []),
   ];
 
   const sidebarBottomItems = [
@@ -371,6 +373,7 @@ export default function MailMeteorDashboard() {
       'advanced-settings': 'Advanced Settings',
       team: 'Team Management',
       superadmin: 'SuperAdmin Console',
+      warmup: 'Warmup Monitoring',
     };
     return titles[currentView] || 'Dashboard';
   };
@@ -976,6 +979,11 @@ export default function MailMeteorDashboard() {
           {/* Advanced Settings */}
           {viewMode === 'dashboard' && currentView === 'advanced-settings' && (
             <AdvancedSettings />
+          )}
+
+          {/* Warmup Monitoring */}
+          {viewMode === 'dashboard' && currentView === 'warmup' && (
+            <WarmupMonitoring />
           )}
         </main>
       </div>
