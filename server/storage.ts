@@ -480,6 +480,7 @@ try {
 // ========== Messages table migrations ==========
 try { db.exec(`ALTER TABLE messages ADD COLUMN providerMessageId TEXT`); } catch (e) { /* already exists */ }
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_provider_id ON messages(providerMessageId)`); } catch (e) {}
+try { db.exec(`ALTER TABLE messages ADD COLUMN bouncedAt TEXT`); } catch (e) { /* already exists */ }
 
 // ========== SuperAdmin migration ==========
 try { db.exec(`ALTER TABLE users ADD COLUMN isSuperAdmin INTEGER DEFAULT 0`); } catch (e) { /* already exists */ }
@@ -1180,10 +1181,10 @@ export class DatabaseStorage {
   async getCampaignMessageByTracking(trackingId: string) { return db.prepare('SELECT * FROM messages WHERE trackingId = ?').get(trackingId) || null; }
   async createCampaignMessage(message: any) {
     const id = genId();
-    db.prepare('INSERT INTO messages (id, campaignId, contactId, subject, content, status, trackingId, emailAccountId, stepNumber, sentAt, openedAt, clickedAt, repliedAt, errorMessage, providerMessageId, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+    db.prepare('INSERT INTO messages (id, campaignId, contactId, subject, content, status, trackingId, emailAccountId, stepNumber, sentAt, openedAt, clickedAt, repliedAt, bouncedAt, errorMessage, providerMessageId, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
       id, message.campaignId, message.contactId || null, message.subject || '', message.content || '', message.status || 'sending',
       message.trackingId || null, message.emailAccountId || null, message.stepNumber || 0,
-      toSqlDate(message.sentAt), toSqlDate(message.openedAt), toSqlDate(message.clickedAt), toSqlDate(message.repliedAt), message.errorMessage || null, message.providerMessageId || null, now()
+      toSqlDate(message.sentAt), toSqlDate(message.openedAt), toSqlDate(message.clickedAt), toSqlDate(message.repliedAt), toSqlDate(message.bouncedAt), message.errorMessage || null, message.providerMessageId || null, now()
     );
     return this.getCampaignMessage(id);
   }
@@ -1191,8 +1192,8 @@ export class DatabaseStorage {
     const existing = await this.getCampaignMessage(id);
     if (!existing) throw new Error('Message not found');
     const m = { ...existing as any, ...data };
-    db.prepare('UPDATE messages SET status=?, sentAt=?, openedAt=?, clickedAt=?, repliedAt=?, errorMessage=?, providerMessageId=? WHERE id=?').run(
-      m.status, toSqlDate(m.sentAt), toSqlDate(m.openedAt), toSqlDate(m.clickedAt), toSqlDate(m.repliedAt), m.errorMessage || null, m.providerMessageId || null, id
+    db.prepare('UPDATE messages SET status=?, sentAt=?, openedAt=?, clickedAt=?, repliedAt=?, bouncedAt=?, errorMessage=?, providerMessageId=? WHERE id=?').run(
+      m.status, toSqlDate(m.sentAt), toSqlDate(m.openedAt), toSqlDate(m.clickedAt), toSqlDate(m.repliedAt), toSqlDate(m.bouncedAt), m.errorMessage || null, m.providerMessageId || null, id
     );
     return this.getCampaignMessage(id);
   }
@@ -1300,7 +1301,7 @@ export class DatabaseStorage {
       INNER JOIN campaigns c ON m.campaignId = c.id
       LEFT JOIN contacts ct ON m.contactId = ct.id
       WHERE c.organizationId = ?
-      AND m.status IN ('sent', 'failed', 'sending')
+      AND m.status IN ('sent', 'failed', 'sending', 'bounced')
       AND m.providerMessageId IS NOT NULL
       ORDER BY m.sentAt DESC
       LIMIT 50000
@@ -1680,7 +1681,20 @@ export class DatabaseStorage {
     db.prepare('UPDATE unified_inbox SET emailAccountId = ? WHERE id = ?').run(emailAccountId, id);
   }
 
-  async getInboxUnreadCount(organizationId: string) {
+  async getInboxMessagesWithNullAccount(organizationId: string, limit = 200) {
+    return db.prepare('SELECT * FROM unified_inbox WHERE organizationId = ? AND emailAccountId IS NULL ORDER BY receivedAt DESC LIMIT ?').all(organizationId, limit);
+  }
+
+  async getInboxUnreadCount(organizationId: string, emailAccountIds?: string) {
+    if (emailAccountIds) {
+      const ids = emailAccountIds.split(',').map(id => id.trim()).filter(Boolean);
+      if (ids.length === 1) {
+        return (db.prepare('SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND status = ? AND emailAccountId = ?').get(organizationId, 'unread', ids[0]) as any).c;
+      } else if (ids.length > 1) {
+        const placeholders = ids.map(() => '?').join(',');
+        return (db.prepare(`SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND status = ? AND emailAccountId IN (${placeholders})`).get(organizationId, 'unread', ...ids) as any).c;
+      }
+    }
     return (db.prepare('SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND status = ?').get(organizationId, 'unread') as any).c;
   }
 
@@ -2098,7 +2112,7 @@ export class DatabaseStorage {
       INNER JOIN campaigns c ON m.campaignId = c.id
       LEFT JOIN contacts ct ON m.contactId = ct.id
       WHERE c.organizationId = ?
-      AND (m.status = 'failed' OR m.status = 'bounced')
+      AND (m.status = 'bounced' OR (m.status = 'failed' AND m.errorMessage LIKE '%Bounce%'))
       AND m.contactId IS NOT NULL
     `).all(orgId);
   }

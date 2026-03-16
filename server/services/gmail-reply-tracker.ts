@@ -96,11 +96,16 @@ export class GmailReplyTracker {
     let accessToken = senderEmail ? settings[`${senderPrefix}access_token`] : null;
     let refreshToken = senderEmail ? settings[`${senderPrefix}refresh_token`] : null;
     let tokenExpiry = senderEmail ? settings[`${senderPrefix}token_expiry`] : null;
+    let isPerSender = !!(accessToken || refreshToken);
     
-    // Fall back to org-level tokens
-    if (!accessToken) accessToken = settings.gmail_access_token;
-    if (!refreshToken) refreshToken = settings.gmail_refresh_token;
-    if (!tokenExpiry) tokenExpiry = settings.gmail_token_expiry;
+    // Fall back to org-level tokens ONLY if no per-sender tokens exist at all
+    // CRITICAL: Don't mix refresh tokens from different accounts!
+    if (!accessToken && !refreshToken) {
+      accessToken = settings.gmail_access_token;
+      refreshToken = settings.gmail_refresh_token;
+      tokenExpiry = settings.gmail_token_expiry;
+      isPerSender = false;
+    }
 
     let clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID;
     let clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET;
@@ -136,13 +141,15 @@ export class GmailReplyTracker {
             oauth2Client.setCredentials({ refresh_token: refreshToken });
             const { credentials } = await oauth2Client.refreshAccessToken();
             if (credentials.access_token) {
-              // Store refreshed token
-              if (senderEmail) {
+              // Store refreshed token back to the CORRECT location
+              if (isPerSender && senderEmail) {
                 await storage.setApiSetting(orgId, `${senderPrefix}access_token`, credentials.access_token);
                 if (credentials.expiry_date) await storage.setApiSetting(orgId, `${senderPrefix}token_expiry`, String(credentials.expiry_date));
+              } else {
+                // Org-level token
+                await storage.setApiSetting(orgId, 'gmail_access_token', credentials.access_token);
+                if (credentials.expiry_date) await storage.setApiSetting(orgId, 'gmail_token_expiry', String(credentials.expiry_date));
               }
-              await storage.setApiSetting(orgId, 'gmail_access_token', credentials.access_token);
-              if (credentials.expiry_date) await storage.setApiSetting(orgId, 'gmail_token_expiry', String(credentials.expiry_date));
               accessToken = credentials.access_token;
             }
           } catch (e) {
@@ -386,11 +393,24 @@ export class GmailReplyTracker {
           const from = getHeader('From');
           const subject = getHeader('Subject');
           const date = getHeader('Date');
+          const fromLower = from.toLowerCase();
+          const subjectLower = subject.toLowerCase();
+
+          // ===== SKIP DMARC / Automated Reports =====
+          // These are NOT bounces or replies — they are aggregate reports from email providers
+          const isDMARCReport = (
+            fromLower.includes('dmarcreport') ||
+            fromLower.includes('dmarc_report') ||
+            fromLower.includes('dmark_feedback') ||
+            fromLower.includes('dmarc-report') ||
+            fromLower.includes('noreply-dmarc') ||
+            subjectLower.includes('report domain:') ||
+            subjectLower.includes('dmarc aggregate')
+          );
+          if (isDMARCReport) continue;
 
           // ===== BOUNCE DETECTION =====
           // Detect bounce/delivery failure notifications and mark contacts as bounced
-          const fromLower = from.toLowerCase();
-          const subjectLower = subject.toLowerCase();
           const isBounceNotification = (
             fromLower.includes('mailer-daemon') || 
             fromLower.includes('postmaster') ||
@@ -532,8 +552,9 @@ export class GmailReplyTracker {
                 // Update campaign message status to failed/bounced
                 if (bouncedMessage) {
                   await storage.updateCampaignMessage(bouncedMessage.id, {
-                    status: 'failed',
+                    status: 'bounced',
                     errorMessage: `Bounce detected: ${subject}`,
+                    bouncedAt: new Date().toISOString(),
                   });
                   
                   // Create bounce tracking event
@@ -674,9 +695,18 @@ export class GmailReplyTracker {
               }
             } catch (e) { /* fallback to snippet */ }
 
-            // Determine emailAccountId from campaign message or by matching toEmail to email accounts
+            // Determine emailAccountId from campaign message or by matching account email
             let emailAccountId = matchedCampaignMessage?.emailAccountId || null;
+            if (!emailAccountId && accountEmail) {
+              // We KNOW which Gmail account received this message — use it
+              try {
+                const orgAccounts = await storage.getEmailAccounts(orgId);
+                const matchedByAccountEmail = orgAccounts.find((a: any) => a.email?.toLowerCase() === accountEmail.toLowerCase());
+                if (matchedByAccountEmail) emailAccountId = matchedByAccountEmail.id;
+              } catch (e) { /* ignore */ }
+            }
             if (!emailAccountId) {
+              // Fallback: match To header
               try {
                 const orgAccounts = await storage.getEmailAccounts(orgId);
                 const toHeader = (msg.payload?.headers || []).find((h: any) => h.name.toLowerCase() === 'to')?.value || '';

@@ -530,14 +530,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
           await storage.setApiSetting(effectiveOrgId, `gmail_sender_${email}_token_expiry`, String(tokens.expiry_date));
         }
 
-        // ALWAYS update org-level tokens on re-auth so Google Sheets API etc. use the freshest token
-        // (which includes all requested scopes like spreadsheets.readonly)
-        console.log('[Auth] Updating org-level tokens. access_token:', tokens.access_token ? 'yes' : 'no', 'refresh_token:', tokens.refresh_token ? 'yes' : 'no', 'expiry:', tokens.expiry_date);
-        await storage.setApiSetting(effectiveOrgId, 'gmail_access_token', tokens.access_token!);
-        if (tokens.refresh_token) await storage.setApiSetting(effectiveOrgId, 'gmail_refresh_token', tokens.refresh_token);
-        if (tokens.expiry_date) await storage.setApiSetting(effectiveOrgId, 'gmail_token_expiry', String(tokens.expiry_date));
-        const primaryEmail = (await storage.getApiSettings(effectiveOrgId)).gmail_user_email;
-        if (!primaryEmail) await storage.setApiSetting(effectiveOrgId, 'gmail_user_email', email);
+        // ONLY update org-level tokens if this IS the primary account or no primary exists yet
+        // CRITICAL FIX: Do NOT overwrite org-level tokens with a secondary account's tokens!
+        // e.g., if primary is dev@aegis.edu.in, connecting bharatai5@aegis.edu.in should NOT overwrite org tokens
+        const currentSettings = await storage.getApiSettings(effectiveOrgId);
+        const primaryEmail = currentSettings.gmail_user_email;
+        const isPrimaryAccount = !primaryEmail || primaryEmail === email;
+        
+        if (isPrimaryAccount) {
+          console.log('[Auth] Updating org-level tokens (primary account or first account). email:', email);
+          await storage.setApiSetting(effectiveOrgId, 'gmail_access_token', tokens.access_token!);
+          if (tokens.refresh_token) await storage.setApiSetting(effectiveOrgId, 'gmail_refresh_token', tokens.refresh_token);
+          if (tokens.expiry_date) await storage.setApiSetting(effectiveOrgId, 'gmail_token_expiry', String(tokens.expiry_date));
+          if (!primaryEmail) await storage.setApiSetting(effectiveOrgId, 'gmail_user_email', email);
+        } else {
+          console.log(`[Auth] NOT overwriting org-level tokens: primary is ${primaryEmail}, this is ${email} (per-sender tokens stored above)`);
+        }
 
         // Create or update email account
         const existingAccounts = await storage.getEmailAccounts(effectiveOrgId);
@@ -1224,7 +1232,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         environment: process.env.WEBSITE_SITE_NAME ? 'azure' : 'local',
         azureSiteName: process.env.WEBSITE_SITE_NAME || null,
         nodeVersion: process.version,
-        codeVersion: 'v8-multi-account-tracking-fix',
+        codeVersion: 'v10-final-tracking-fix',
         dbStats: {
           totalUsers: stats.totalUsers,
           totalOrgs: orgIds.length,
@@ -2139,10 +2147,10 @@ Which account should I use and why? If I need to split across accounts, provide 
             const msgs = await storage.getCampaignMessagesEnriched(c.id, 10000, 0);
             const actualSent = msgs.filter((m: any) => m.status === 'sent' || m.status === 'sending').length;
             if (actualSent > 0) {
-              const actualBounced = msgs.filter((m: any) => m.status === 'failed' || m.status === 'bounced').length;
-              const actualOpened = msgs.filter((m: any) => m.openedAt || (m.openCount && m.openCount > 0)).length;
-              const actualClicked = msgs.filter((m: any) => m.clickedAt || (m.clickCount && m.clickCount > 0)).length;
-              const actualReplied = msgs.filter((m: any) => m.repliedAt || (m.replyCount && m.replyCount > 0)).length;
+              const actualBounced = msgs.filter((m: any) => m.status === 'bounced' || (m.status === 'failed' && m.errorMessage && m.errorMessage.toLowerCase().includes('bounce'))).length;
+              const actualOpened = msgs.filter((m: any) => m.openedAt).length;
+              const actualClicked = msgs.filter((m: any) => m.clickedAt).length;
+              const actualReplied = msgs.filter((m: any) => m.repliedAt).length;
               await storage.updateCampaign(c.id, {
                 sentCount: actualSent, bouncedCount: actualBounced,
                 openedCount: actualOpened, clickedCount: actualClicked, repliedCount: actualReplied,
@@ -2326,10 +2334,14 @@ Which account should I use and why? If I need to split across accounts, provide 
       
       const messages = await storage.getCampaignMessagesEnriched(req.params.id, 100000, 0);
       const sentCount = messages.filter((m: any) => m.status === 'sent' || m.status === 'sending').length;
-      const bouncedCount = messages.filter((m: any) => m.status === 'failed' || m.status === 'bounced').length;
-      const openedCount = messages.filter((m: any) => m.openedAt || (m.openCount && m.openCount > 0)).length;
-      const clickedCount = messages.filter((m: any) => m.clickedAt || (m.clickCount && m.clickCount > 0)).length;
-      const repliedCount = messages.filter((m: any) => m.repliedAt || (m.replyCount && m.replyCount > 0)).length;
+      // Count real bounces: status='bounced' OR status='failed' with bounce-related error
+      const bouncedCount = messages.filter((m: any) => 
+        m.status === 'bounced' || 
+        (m.status === 'failed' && m.errorMessage && m.errorMessage.toLowerCase().includes('bounce'))
+      ).length;
+      const openedCount = messages.filter((m: any) => m.openedAt).length;
+      const clickedCount = messages.filter((m: any) => m.clickedAt).length;
+      const repliedCount = messages.filter((m: any) => m.repliedAt).length;
       
       await storage.updateCampaign(req.params.id, {
         sentCount,
@@ -2479,7 +2491,7 @@ Which account should I use and why? If I need to split across accounts, provide 
       // Auto-recalculate stats from actual messages if sentCount appears stale
       // (e.g. messages exist but sentCount is 0, or sentCount < actual sent messages)
       const actualSent = messages.filter((m: any) => m.status === 'sent' || m.status === 'sending').length;
-      const actualBounced = messages.filter((m: any) => m.status === 'failed' || m.status === 'bounced').length;
+      const actualBounced = messages.filter((m: any) => m.status === 'bounced' || (m.status === 'failed' && m.errorMessage && m.errorMessage.toLowerCase().includes('bounce'))).length;
       const actualOpened = messages.filter((m: any) => m.openedAt || (m.openCount && m.openCount > 0)).length;
       const actualClicked = messages.filter((m: any) => m.clickedAt || (m.clickCount && m.clickCount > 0)).length;
       const actualReplied = messages.filter((m: any) => m.repliedAt || (m.replyCount && m.replyCount > 0)).length;
@@ -2508,7 +2520,7 @@ Which account should I use and why? If I need to split across accounts, provide 
         const opened = stepMsgs.filter((m: any) => m.openedAt || (m.openCount && m.openCount > 0)).length;
         const clicked = stepMsgs.filter((m: any) => m.clickedAt || (m.clickCount && m.clickCount > 0)).length;
         const replied = stepMsgs.filter((m: any) => m.repliedAt || (m.replyCount && m.replyCount > 0)).length;
-        const bounced = stepMsgs.filter((m: any) => m.status === 'failed' || m.status === 'bounced').length;
+        const bounced = stepMsgs.filter((m: any) => m.status === 'bounced' || (m.status === 'failed' && m.errorMessage && m.errorMessage.toLowerCase().includes('bounce'))).length;
         const unsub = 0; // tracked at campaign level
         return {
           stepNumber: stepNum,
@@ -5228,20 +5240,44 @@ Example response:
       const isAdmin = role === 'owner' || role === 'admin';
       const parsedLimit = parseInt(limit as string) || 50;
       const parsedOffset = parseInt(offset as string) || 0;
-      const filters = { status, emailAccountId, campaignId };
 
       let messages: any[];
       let total: number;
       let unread: number;
 
       if (isAdmin) {
+        // Admin sees all org messages; can filter by specific account
+        const filters = { status, emailAccountId, campaignId };
         messages = await storage.getInboxMessages(req.user.organizationId, filters, parsedLimit, parsedOffset);
         total = await storage.getInboxMessageCount(req.user.organizationId, { status, emailAccountId });
         unread = await storage.getInboxUnreadCount(req.user.organizationId);
       } else {
-        messages = await storage.getInboxMessagesForUser(req.user.organizationId, req.user.id, filters, parsedLimit, parsedOffset);
-        total = await storage.getInboxMessageCountForUser(req.user.organizationId, req.user.id, { status });
-        unread = await storage.getInboxUnreadCountForUser(req.user.organizationId, req.user.id);
+        // Member: get their linked email account IDs
+        const userAccounts = await storage.getEmailAccountsForUser(req.user.organizationId, req.user.id);
+        const userAccountIds = userAccounts.map((a: any) => a.id);
+        
+        if (userAccountIds.length === 0) {
+          // No linked accounts — return empty
+          return res.json({ messages: [], total: 0, unread: 0 });
+        }
+
+        // If member selected a specific account, use that; otherwise use all their accounts
+        let filterAccountIds: string;
+        if (emailAccountId && emailAccountId !== 'all') {
+          // Verify member owns this account
+          if (userAccountIds.includes(emailAccountId)) {
+            filterAccountIds = emailAccountId;
+          } else {
+            return res.json({ messages: [], total: 0, unread: 0 });
+          }
+        } else {
+          filterAccountIds = userAccountIds.join(',');
+        }
+
+        const filters = { status, emailAccountId: filterAccountIds, campaignId };
+        messages = await storage.getInboxMessages(req.user.organizationId, filters, parsedLimit, parsedOffset);
+        total = await storage.getInboxMessageCount(req.user.organizationId, { status, emailAccountId: filterAccountIds });
+        unread = await storage.getInboxUnreadCount(req.user.organizationId, filterAccountIds);
       }
 
       // Enrich messages with contact info
@@ -5296,9 +5332,17 @@ Example response:
     try {
       const role = req.user.role;
       const isAdmin = role === 'owner' || role === 'admin';
-      const count = isAdmin
-        ? await storage.getInboxUnreadCount(req.user.organizationId)
-        : await storage.getInboxUnreadCountForUser(req.user.organizationId, req.user.id);
+      let count: number;
+      if (isAdmin) {
+        count = await storage.getInboxUnreadCount(req.user.organizationId);
+      } else {
+        // Member: count unread only for their linked accounts
+        const userAccounts = await storage.getEmailAccountsForUser(req.user.organizationId, req.user.id);
+        const accountIds = userAccounts.map((a: any) => a.id);
+        count = accountIds.length > 0
+          ? await storage.getInboxUnreadCount(req.user.organizationId, accountIds.join(','))
+          : 0;
+      }
       res.json({ unread: count });
     } catch (error) {
       res.status(500).json({ message: 'Failed to get unread count' });
@@ -5343,6 +5387,78 @@ Example response:
         results.bouncesSynced = bouncesSynced;
       } catch (e) {
         console.error('[InboxSync] Bounce sync error:', e);
+      }
+
+      // Auto-backfill emailAccountId on messages that have null (for member inbox to work)
+      try {
+        const nullAccountMsgs = await storage.getInboxMessagesWithNullAccount(orgId, 200);
+        if (nullAccountMsgs.length > 0) {
+          const emailAccounts = await storage.getEmailAccounts(orgId);
+          const emailToAccountId = new Map<string, string>();
+          for (const ea of emailAccounts as any[]) {
+            if (ea.email) emailToAccountId.set(ea.email.toLowerCase(), ea.id);
+          }
+          let backfilled = 0;
+          for (const inboxMsg of nullAccountMsgs as any[]) {
+            let emailAccountId: string | null = null;
+            if (inboxMsg.messageId) {
+              try {
+                const campaignMsg = await storage.getCampaignMessage(inboxMsg.messageId);
+                if (campaignMsg && (campaignMsg as any).emailAccountId) emailAccountId = (campaignMsg as any).emailAccountId;
+              } catch (e) {}
+            }
+            if (!emailAccountId && inboxMsg.toEmail) {
+              const toEmail = inboxMsg.toEmail.toLowerCase().replace(/<.*?>/, '').replace(/.*</, '').replace(/>.*/, '').trim();
+              emailAccountId = emailToAccountId.get(toEmail) || null;
+            }
+            if (emailAccountId) {
+              await storage.backfillInboxEmailAccountId(inboxMsg.id, emailAccountId);
+              backfilled++;
+            }
+          }
+          if (backfilled > 0) {
+            console.log(`[InboxSync] Auto-backfilled emailAccountId on ${backfilled}/${nullAccountMsgs.length} inbox messages`);
+          }
+          results.backfilled = backfilled;
+        }
+      } catch (e) {
+        console.error('[InboxSync] Backfill error:', e);
+      }
+
+      // Auto-recalculate campaign stats for all active/completed campaigns in this org
+      // This ensures bounce counts, open counts, reply counts are always accurate
+      try {
+        const campaigns = await storage.getCampaigns(orgId, 1000, 0);
+        let recalculated = 0;
+        for (const c of campaigns as any[]) {
+          if (c.status === 'draft') continue; // Skip drafts
+          try {
+            const msgs = await storage.getCampaignMessagesEnriched(c.id, 100000, 0);
+            if (msgs.length === 0) continue;
+            const sentCount = msgs.filter((m: any) => m.status === 'sent' || m.status === 'sending').length;
+            const bouncedCount = msgs.filter((m: any) => m.status === 'bounced' || (m.status === 'failed' && m.errorMessage && m.errorMessage.toLowerCase().includes('bounce'))).length;
+            const openedCount = msgs.filter((m: any) => m.openedAt).length;
+            const clickedCount = msgs.filter((m: any) => m.clickedAt).length;
+            const repliedCount = msgs.filter((m: any) => m.repliedAt).length;
+            
+            // Only update if values changed
+            if (sentCount !== (c.sentCount || 0) || bouncedCount !== (c.bouncedCount || 0) ||
+                openedCount !== (c.openedCount || 0) || clickedCount !== (c.clickedCount || 0) ||
+                repliedCount !== (c.repliedCount || 0)) {
+              await storage.updateCampaign(c.id, {
+                sentCount, bouncedCount, openedCount, clickedCount, repliedCount,
+                totalRecipients: Math.max(c.totalRecipients || 0, sentCount + bouncedCount),
+              });
+              recalculated++;
+            }
+          } catch (e) { /* skip per-campaign errors */ }
+        }
+        if (recalculated > 0) {
+          console.log(`[InboxSync] Auto-recalculated stats for ${recalculated} campaigns`);
+        }
+        results.campaignsRecalculated = recalculated;
+      } catch (e) {
+        console.error('[InboxSync] Campaign recalculation error:', e);
       }
 
       const totalNew = (results.gmail?.newReplies || 0) + (results.outlook?.newReplies || 0);

@@ -878,17 +878,20 @@ export default function UnifiedInbox() {
             ))}
           </div>
 
-          {/* Admin: filter by account */}
-          {isAdmin && emailAccounts.length > 1 && (
+          {/* Filter by email account — visible to ALL users (members see their own accounts, admins see all) */}
+          {emailAccounts.length > 0 && (
             <Select value={accountFilter} onValueChange={v => { setAccountFilter(v); setPage(0); }}>
-              <SelectTrigger className="w-[140px] h-8 text-xs">
-                <SelectValue placeholder="All Accounts" />
+              <SelectTrigger className="w-[180px] h-8 text-xs">
+                <div className="flex items-center gap-1.5">
+                  <Mail className="h-3 w-3 text-gray-400" />
+                  <SelectValue placeholder="All Accounts" />
+                </div>
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">All Accounts</SelectItem>
+                <SelectItem value="all">All My Accounts</SelectItem>
                 {emailAccounts.map((a: any) => (
                   <SelectItem key={a.id} value={a.id}>
-                    <span className="truncate">{a.email?.split('@')[0]}</span>
+                    <span className="truncate">{a.email}</span>
                   </SelectItem>
                 ))}
               </SelectContent>
