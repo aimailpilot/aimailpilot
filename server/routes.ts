@@ -247,21 +247,52 @@ export async function registerRoutes(app: Express): Promise<Server> {
     next();
   });
 
-  // Helper: Get OAuth credentials from any org (for pre-auth flows)
-  // Searches all orgs for stored OAuth config, falls back to env vars
+  // Helper: Get OAuth credentials - SuperAdmin org first, then scan all orgs, then env vars
+  // OAuth credentials are platform-wide settings stored in the SuperAdmin's organization.
+  // SuperAdmin → Organization → Members → Email Accounts (credentials flow top-down)
   async function getStoredOAuthCredentials(provider: 'google' | 'microsoft') {
     let clientId = '';
     let clientSecret = '';
+    let foundInOrgId = '';
+    
+    const googleKey = 'google_oauth_client_id';
+    const googleSecretKey = 'google_oauth_client_secret';
+    const msKey = 'microsoft_oauth_client_id';
+    const msSecretKey = 'microsoft_oauth_client_secret';
+    const idKey = provider === 'google' ? googleKey : msKey;
+    const secretKey = provider === 'google' ? googleSecretKey : msSecretKey;
     
     try {
-      const orgIds = await storage.getAllOrganizationIds();
-      for (const orgId of orgIds) {
-        const settings = await storage.getApiSettings(orgId);
-        if (provider === 'google') {
-          if (settings.google_oauth_client_id) { clientId = settings.google_oauth_client_id; clientSecret = settings.google_oauth_client_secret || ''; break; }
-        } else {
-          if (settings.microsoft_oauth_client_id) { clientId = settings.microsoft_oauth_client_id; clientSecret = settings.microsoft_oauth_client_secret || ''; break; }
+      // PRIORITY 1: Check SuperAdmin's org first (this is where platform-wide settings live)
+      const superAdminOrgId = await storage.getSuperAdminOrgId();
+      if (superAdminOrgId) {
+        const superSettings = await storage.getApiSettings(superAdminOrgId);
+        if (superSettings[idKey] && superSettings[secretKey]) {
+          clientId = superSettings[idKey];
+          clientSecret = superSettings[secretKey];
+          foundInOrgId = superAdminOrgId;
+          console.log(`[OAuth] Found ${provider} credentials in SuperAdmin org ${superAdminOrgId}: clientId=${clientId.substring(0, 8)}..., secret len=${clientSecret.length}`);
         }
+      }
+      
+      // PRIORITY 2: If not in SuperAdmin org, scan all orgs
+      if (!clientId || !clientSecret) {
+        const orgIds = await storage.getAllOrganizationIds();
+        for (const orgId of orgIds) {
+          if (orgId === superAdminOrgId) continue; // Already checked
+          const settings = await storage.getApiSettings(orgId);
+          if (settings[idKey] && settings[secretKey]) {
+            clientId = settings[idKey];
+            clientSecret = settings[secretKey];
+            foundInOrgId = orgId;
+            console.log(`[OAuth] Found ${provider} credentials in org ${orgId}: clientId=${clientId.substring(0, 8)}..., secret len=${clientSecret.length}`);
+            break;
+          }
+        }
+      }
+      
+      if (!foundInOrgId) {
+        console.log(`[OAuth] No ${provider} credentials found in any org, falling back to env vars`);
       }
     } catch (e) {
       console.error(`[OAuth] Failed to load ${provider} credentials from DB:`, e instanceof Error ? e.message : e);
@@ -1375,18 +1406,39 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const dynamicBaseUrl = getBaseUrlFromRequest(req);
         const dynamicRedirectUri = `${dynamicBaseUrl}/api/auth/microsoft/callback`;
         const canonicalRedirectUri = getMicrosoftRedirectUri(req);
+        const superAdminOrgId = await storage.getSuperAdminOrgId();
         
-        // Check all orgs for Microsoft tokens
+        // Check all orgs for Microsoft OAuth credentials and tokens
         const orgIds = await storage.getAllOrganizationIds();
+        const oauthCredentialStatus: any[] = [];
         const tokenStatus: any[] = [];
         for (const orgId of orgIds) {
           const settings = await storage.getApiSettings(orgId);
           const org = await storage.getOrganization(orgId);
+          const orgName = (org as any)?.name || 'unknown';
+          const isSuperAdminOrg = orgId === superAdminOrgId;
+          
+          // Check OAuth credentials in this org
+          if (settings.microsoft_oauth_client_id) {
+            oauthCredentialStatus.push({
+              orgId,
+              orgName,
+              isSuperAdminOrg,
+              hasClientId: true,
+              clientIdPreview: settings.microsoft_oauth_client_id.substring(0, 8) + '...',
+              hasClientSecret: !!settings.microsoft_oauth_client_secret,
+              clientSecretLength: settings.microsoft_oauth_client_secret?.length || 0,
+              clientSecretPreview: settings.microsoft_oauth_client_secret ? settings.microsoft_oauth_client_secret.substring(0, 4) + '...' : 'EMPTY',
+            });
+          }
+          
+          // Check tokens in this org
           const msKeys = Object.keys(settings).filter(k => k.includes('outlook_sender_') || k.includes('microsoft_'));
           if (msKeys.length > 0) {
             tokenStatus.push({
               orgId,
-              orgName: (org as any)?.name || 'unknown',
+              orgName,
+              isSuperAdminOrg,
               keys: msKeys.map(k => ({ key: k, hasValue: !!settings[k], preview: k.includes('token') ? (settings[k] ? settings[k].substring(0, 10) + '...' : 'EMPTY') : settings[k] })),
             });
           }
@@ -1394,11 +1446,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         return res.json({
           diagnostics: true,
-          credentials: {
+          superAdminOrgId: superAdminOrgId || 'NOT FOUND',
+          credentialsUsed: {
             clientId: clientId ? clientId.substring(0, 8) + '...' + clientId.substring(clientId.length - 4) : 'MISSING',
             clientSecretPresent: !!clientSecret,
             clientSecretLength: clientSecret ? clientSecret.length : 0,
+            clientSecretPreview: clientSecret ? clientSecret.substring(0, 4) + '...' : 'EMPTY',
           },
+          oauthCredentialsByOrg: oauthCredentialStatus,
           canonicalRedirectUri,
           dynamicRedirectUri,
           note: canonicalRedirectUri === dynamicRedirectUri ? 'MATCH - canonical equals dynamic' : 'MISMATCH - canonical differs from dynamic! This was the bug.',
