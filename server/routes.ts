@@ -64,6 +64,22 @@ function getBaseUrlFromRequest(req: any): string {
   return `${proto}://${host}`;
 }
 
+// CRITICAL: Get the canonical Microsoft OAuth redirect URI.
+// For production, ALWAYS use the canonical domain to avoid www vs non-www mismatches.
+// Microsoft token exchange requires the redirect_uri to EXACTLY match what was sent
+// in the authorization request AND what's registered in Azure App Registration.
+function getMicrosoftRedirectUri(req: any): string {
+  const host = req.headers['x-forwarded-host'] || req.headers['x-original-host'] || req.headers['host'] || '';
+  // If this is a production request (any variant of aimailpilot.com),
+  // always use the canonical non-www version to avoid mismatches
+  if (host.includes(PRODUCTION_DOMAIN)) {
+    return `https://${PRODUCTION_DOMAIN}/api/auth/microsoft/callback`;
+  }
+  // For local development / sandbox, compute dynamically
+  const baseUrl = getBaseUrlFromRequest(req);
+  return `${baseUrl}/api/auth/microsoft/callback`;
+}
+
 // Simple auth middleware
 const requireAuth = async (req: any, res: any, next: any) => {
   const userId = req.cookies?.user_id || req.session?.userId;
@@ -861,8 +877,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Step 1: Redirect user to Microsoft's consent screen
   app.get('/api/auth/microsoft', async (req: any, res) => {
     try {
-      const baseUrl = getBaseUrlFromRequest(req);
-      const redirectUri = `${baseUrl}/api/auth/microsoft/callback`;
+      const redirectUri = getMicrosoftRedirectUri(req);
 
       // Load credentials from api_settings first, then env vars
       const { clientId, clientSecret } = await getStoredOAuthCredentials('microsoft');
@@ -909,91 +924,75 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       if (oauthError) {
         console.error('[Auth] Microsoft OAuth error:', oauthError, error_description);
-        return res.redirect('/?error=ms_oauth_denied');
+        return res.redirect('/?error=ms_oauth_denied&view=setup');
       }
 
       if (!code) {
-        return res.redirect('/?error=ms_no_code');
+        return res.redirect('/?error=ms_no_code&view=setup');
       }
 
       // Parse state to get the redirect URI used during initiation
-      const dynamicBaseUrl = getBaseUrlFromRequest(req);
-      let redirectUri = `${dynamicBaseUrl}/api/auth/microsoft/callback`;
-      let stateRedirectUri = '';
       let parsedState: any = {};
       try {
         if (state) {
           parsedState = JSON.parse(state as string);
-          if (parsedState.redirectUri) {
-            stateRedirectUri = parsedState.redirectUri;
-            redirectUri = stateRedirectUri;
-          }
         }
       } catch (e) {
         console.error('[Auth] Failed to parse OAuth state:', e);
       }
 
-      console.log('[Auth] Microsoft callback - redirectUri from state:', stateRedirectUri || 'NONE');
-      console.log('[Auth] Microsoft callback - dynamic redirectUri:', `${dynamicBaseUrl}/api/auth/microsoft/callback`);
-      console.log('[Auth] Microsoft callback - using redirectUri:', redirectUri);
+      // CRITICAL: Use the EXACT redirectUri from the state parameter.
+      // This is the same URI that was sent to Microsoft during authorization.
+      // It MUST match exactly for the token exchange to succeed.
+      // If state doesn't have it, use the canonical URI as fallback.
+      const canonicalRedirectUri = getMicrosoftRedirectUri(req);
+      const redirectUri = parsedState.redirectUri || canonicalRedirectUri;
+
+      console.log('[Auth] Microsoft callback - redirectUri from state:', parsedState.redirectUri || 'NONE (using canonical)');
+      console.log('[Auth] Microsoft callback - canonical redirectUri:', canonicalRedirectUri);
+      console.log('[Auth] Microsoft callback - FINAL redirectUri for token exchange:', redirectUri);
       console.log('[Auth] Microsoft callback - purpose:', parsedState.purpose || 'login');
-      console.log('[Auth] Microsoft callback - host header:', req.headers['host']);
-      console.log('[Auth] Microsoft callback - x-forwarded-host:', req.headers['x-forwarded-host'] || 'NONE');
+      console.log('[Auth] Microsoft callback - host:', req.headers['host'], 'x-fwd-host:', req.headers['x-forwarded-host'] || 'NONE', 'x-orig-host:', req.headers['x-original-host'] || 'NONE');
 
       // Load credentials
       const { clientId, clientSecret } = await getStoredOAuthCredentials('microsoft');
-      console.log('[Auth] Microsoft callback - credentials found: clientId=', clientId ? clientId.substring(0, 8) + '...' : 'MISSING', 'clientSecret=', clientSecret ? 'YES' : 'MISSING');
+      if (!clientId || !clientSecret) {
+        console.error('[Auth] Microsoft OAuth credentials not found');
+        return res.redirect('/?error=ms_no_credentials&view=setup');
+      }
 
       // Exchange authorization code for tokens
-      const tokenExchangeBody = {
-        client_id: clientId,
-        client_secret: clientSecret,
-        code: code as string,
-        redirect_uri: redirectUri,
-        grant_type: 'authorization_code',
-        scope: 'openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/SMTP.Send',
-      };
-
-      let tokenResponse = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+      // NOTE: Authorization codes are SINGLE USE. Do NOT retry with different redirect_uri.
+      const tokenResponse = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams(tokenExchangeBody).toString(),
+        body: new URLSearchParams({
+          client_id: clientId,
+          client_secret: clientSecret,
+          code: code as string,
+          redirect_uri: redirectUri,
+          grant_type: 'authorization_code',
+          scope: 'openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/SMTP.Send',
+        }).toString(),
       });
 
-      // If token exchange fails, try alternative redirect URIs
       if (!tokenResponse.ok) {
         const errBody = await tokenResponse.text();
-        console.error('[Auth] Microsoft token exchange FAILED with redirectUri:', redirectUri, 'status:', tokenResponse.status, 'error:', errBody);
-
-        // Try common alternative redirect URIs (www vs non-www, http vs https)
-        const alternativeUris = [
-          `https://www.aimailpilot.com/api/auth/microsoft/callback`,
-          `https://aimailpilot.com/api/auth/microsoft/callback`,
-          `${dynamicBaseUrl}/api/auth/microsoft/callback`,
-        ].filter(uri => uri !== redirectUri); // Don't retry the same URI
-
-        for (const altUri of alternativeUris) {
-          console.log('[Auth] Retrying token exchange with alternative redirectUri:', altUri);
-          tokenResponse = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: new URLSearchParams({ ...tokenExchangeBody, redirect_uri: altUri }).toString(),
-          });
-          if (tokenResponse.ok) {
-            console.log('[Auth] Token exchange SUCCEEDED with alternative redirectUri:', altUri);
-            redirectUri = altUri; // Update for logging
-            break;
-          } else {
-            const altErr = await tokenResponse.text();
-            console.error('[Auth] Alternative redirectUri also failed:', altUri, tokenResponse.status, altErr);
-          }
-        }
-
-        if (!tokenResponse.ok) {
-          console.error('[Auth] ALL redirect URI attempts failed for Microsoft token exchange');
-          // Include error details in the redirect for debugging
-          return res.redirect('/?error=ms_token_failed&view=setup');
-        }
+        console.error('[Auth] Microsoft token exchange FAILED:', tokenResponse.status, errBody);
+        console.error('[Auth] Used redirectUri:', redirectUri);
+        console.error('[Auth] Used clientId:', clientId.substring(0, 8) + '...');
+        
+        // Parse Microsoft error for user-friendly message
+        let msError = 'unknown';
+        let msErrorDesc = '';
+        try {
+          const errJson = JSON.parse(errBody);
+          msError = errJson.error || 'unknown';
+          msErrorDesc = errJson.error_description || '';
+          console.error('[Auth] Microsoft error code:', errJson.error, 'description:', errJson.error_description);
+        } catch (e) { /* not JSON */ }
+        
+        return res.redirect(`/?error=ms_token_failed&ms_error=${encodeURIComponent(msError)}&ms_desc=${encodeURIComponent(msErrorDesc.substring(0, 200))}&view=setup`);
       }
 
       const tokens = await tokenResponse.json() as any;
@@ -1265,8 +1264,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // without changing the logged-in user's session
   app.get('/api/auth/outlook-connect', requireAuth, async (req: any, res) => {
     try {
-      const baseUrl = getBaseUrlFromRequest(req);
-      const redirectUri = `${baseUrl}/api/auth/microsoft/callback`;
+      const redirectUri = getMicrosoftRedirectUri(req);
       let orgId = req.user.organizationId;
 
       // CRITICAL FIX: When re-authenticating an existing email account,
@@ -1321,7 +1319,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }));
       if (loginHint) authUrl.searchParams.set('login_hint', loginHint);
 
-      console.log('[Auth] Outlook connect redirect for org:', orgId, 'hint:', loginHint || 'none', 'user-org:', req.user.organizationId);
+      console.log('[Auth] Outlook connect redirect - org:', orgId, 'hint:', loginHint || 'none', 'user-org:', req.user.organizationId, 'redirectUri:', redirectUri);
       res.redirect(authUrl.toString());
     } catch (error) {
       console.error('[Auth] Outlook connect init error:', error);
@@ -1366,7 +1364,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       try {
         const { clientId, clientSecret } = await getStoredOAuthCredentials('microsoft');
         const dynamicBaseUrl = getBaseUrlFromRequest(req);
-        const redirectUri = `${dynamicBaseUrl}/api/auth/microsoft/callback`;
+        const dynamicRedirectUri = `${dynamicBaseUrl}/api/auth/microsoft/callback`;
+        const canonicalRedirectUri = getMicrosoftRedirectUri(req);
         
         // Check all orgs for Microsoft tokens
         const orgIds = await storage.getAllOrganizationIds();
@@ -1391,9 +1390,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
             clientSecretPresent: !!clientSecret,
             clientSecretLength: clientSecret ? clientSecret.length : 0,
           },
-          redirectUri,
+          canonicalRedirectUri,
+          dynamicRedirectUri,
+          note: canonicalRedirectUri === dynamicRedirectUri ? 'MATCH - canonical equals dynamic' : 'MISMATCH - canonical differs from dynamic! This was the bug.',
           hostHeader: req.headers['host'],
           xForwardedHost: req.headers['x-forwarded-host'] || 'NONE',
+          xOriginalHost: req.headers['x-original-host'] || 'NONE',
           xForwardedProto: req.headers['x-forwarded-proto'] || 'NONE',
           registeredRedirectUris: [
             'https://aimailpilot.com/api/auth/microsoft/callback',

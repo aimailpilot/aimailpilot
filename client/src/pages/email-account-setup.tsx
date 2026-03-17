@@ -125,6 +125,8 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
       setTimeout(() => setGmailConnectSuccess(''), 8000);
     }
     if (error) {
+      const msError = params.get('ms_error') || '';
+      const msDesc = params.get('ms_desc') || '';
       const errorMessages: Record<string, string> = {
         'oauth_not_configured': 'OAuth is not configured. Set up Client ID and Secret in Advanced Settings.',
         'gmail_connect_failed': 'Failed to start Gmail connection. Please try again.',
@@ -132,15 +134,16 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
         'gmail_userinfo_failed': 'Could not retrieve Gmail account info. Please try again.',
         'gmail_connect_callback_failed': 'Gmail connection failed during callback. Please try again.',
         'outlook_connect_failed': 'Failed to start Outlook connection. Please try again.',
-        'ms_token_failed': 'Microsoft token exchange failed. This usually means a redirect URI mismatch. Please check Azure App Registration redirect URIs match your domain.',
+        'ms_token_failed': `Microsoft token exchange failed (${msError || 'unknown'}). ${msDesc ? 'Details: ' + msDesc + '. ' : ''}Check: 1) Client Secret hasn't expired in Azure Portal 2) Redirect URIs in Azure App Registration include https://aimailpilot.com/api/auth/microsoft/callback`,
         'ms_oauth_denied': 'Microsoft OAuth was denied or cancelled.',
         'ms_oauth_failed': 'Microsoft OAuth callback failed. Please try again.',
         'ms_no_code': 'Microsoft OAuth did not return an authorization code.',
+        'ms_no_credentials': 'Microsoft OAuth Client ID/Secret not found. Configure in Advanced Settings.',
         'ms_user_info_failed': 'Could not retrieve Microsoft account info after authentication.',
       };
       setGmailConnectError(errorMessages[error] || `Connection error: ${error}`);
       window.history.replaceState({}, '', window.location.pathname);
-      setTimeout(() => setGmailConnectError(''), 10000);
+      setTimeout(() => setGmailConnectError(''), 15000);
     }
   }, []);
 
