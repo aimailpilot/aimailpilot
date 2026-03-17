@@ -435,7 +435,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
     } catch (error) {
       console.error('[Setup] Status check failed:', error instanceof Error ? error.message : error);
-      res.json({ needsSetup: true, hasUsers: false, hasSuperAdmin: false, googleConfigured: false, microsoftConfigured: false });
+      // CRITICAL: On error, do NOT default to needsSetup: true.
+      // This prevents the setup wizard from appearing on transient DB errors.
+      // If the DB is truly empty, the next request after recovery will handle it.
+      res.json({ needsSetup: false, hasUsers: true, hasSuperAdmin: false, googleConfigured: false, microsoftConfigured: false });
     }
   });
 
