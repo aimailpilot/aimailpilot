@@ -2876,6 +2876,32 @@ export class DatabaseStorage {
   isAzureEnvironment(): boolean {
     return isAzure;
   }
+
+  /** Force reset corrupted database - closes, deletes, recreates */
+  resetCorruptDatabase(): { success: boolean; message: string } {
+    try {
+      // Close current connection
+      try { db.close(); } catch (e) { /* ignore */ }
+      
+      // Delete corrupt DB and auxiliary files
+      for (const file of [DB_PATH, DB_PATH + '-wal', DB_PATH + '-shm', DB_PATH + '-journal']) {
+        try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch (e) { /* ignore */ }
+      }
+      
+      // Reopen fresh DB
+      (db as any) = new Database(DB_PATH);
+      db.pragma('journal_mode = DELETE');
+      db.pragma('foreign_keys = ON');
+      db.pragma('synchronous = FULL');
+      
+      // Recreate all tables
+      this.initializeTables();
+      
+      return { success: true, message: `Database reset at ${DB_PATH}` };
+    } catch (e: any) {
+      return { success: false, message: e.message };
+    }
+  }
 }
 
 export const storage = new DatabaseStorage();

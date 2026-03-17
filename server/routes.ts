@@ -8063,6 +8063,22 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     }
   });
 
+  // ========== EMERGENCY DB RESET (for corrupted databases) ==========
+  app.post('/api/db-reset', async (req: any, res) => {
+    try {
+      const restoreKey = req.headers['x-restore-key'] || req.body.restoreKey;
+      if (restoreKey !== 'aimailpilot-restore-2026') {
+        return res.status(403).json({ message: 'Invalid restore key' });
+      }
+      console.log('[DB Reset] Emergency database reset initiated');
+      const result = storage.resetCorruptDatabase();
+      console.log('[DB Reset] Result:', result);
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ message: 'Reset failed', error: String(error) });
+    }
+  });
+
   // ========== BOOTSTRAP DB RESTORE (emergency, works when DB is empty) ==========
   // This endpoint ONLY works when the database has NO users (i.e., after a DB wipe/corruption recovery).
   // Once users exist, it returns 403 and you must use the superadmin endpoint instead.
