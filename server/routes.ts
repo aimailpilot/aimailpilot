@@ -8264,7 +8264,23 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         fixes.push(`User ${targetEmail} not found`);
       }
       
-      // 4. Return summary
+      // 4. Update settings if provided
+      if (req.body.settings && typeof req.body.settings === 'object') {
+        const orgId = req.body.orgId || '550e8400-e29b-41d4-a716-446655440001';
+        for (const [key, value] of Object.entries(req.body.settings)) {
+          try {
+            storage.runDirectSQL(
+              `UPDATE api_settings SET settingValue = ?, updatedAt = ? WHERE settingKey = ? AND organizationId = ?`,
+              [value, new Date().toISOString(), key, orgId]
+            );
+            fixes.push(`Updated setting ${key} for org ${orgId}`);
+          } catch (e) {
+            fixes.push(`Failed to update setting ${key}: ${e}`);
+          }
+        }
+      }
+
+      // 5. Return summary
       const stats = await storage.getPlatformStats();
       res.json({
         success: true,
