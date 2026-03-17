@@ -7943,10 +7943,11 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       console.log(`[DB Export] SuperAdmin ${req.user.email} exporting database...`);
       
       const tables = [
-        'users', 'organizations', 'organization_members', 'api_settings',
+        'users', 'organizations', 'org_members', 'api_settings',
         'email_accounts', 'templates', 'campaigns', 'messages', 'contacts',
         'contact_lists', 'contact_list_members', 'tracking_events',
         'unified_inbox', 'followup_sequences', 'followup_steps', 'followup_messages',
+        'suppression_list', 'notifications', 'contact_activity',
       ];
       
       const exportData: Record<string, any[]> = {};
@@ -7996,17 +7997,20 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       
       // Import order matters due to foreign keys
       const importOrder = [
-        'organizations', 'users', 'organization_members', 'api_settings',
+        'organizations', 'users', 'org_members', 'api_settings',
         'email_accounts', 'contact_lists', 'contacts', 'contact_list_members',
         'templates', 'campaigns', 'messages', 'tracking_events',
         'unified_inbox', 'followup_sequences', 'followup_steps', 'followup_messages',
+        'suppression_list', 'notifications', 'contact_activity',
       ];
       
       let totalImported = 0;
       const results: Record<string, { imported: number; errors: number }> = {};
       
       for (const table of importOrder) {
-        const rows = importData.tables[table];
+        // Support both old and new table names
+        let rows = importData.tables[table];
+        if (!rows && table === 'org_members') rows = importData.tables['organization_members'];
         if (!rows || !Array.isArray(rows) || rows.length === 0) {
           results[table] = { imported: 0, errors: 0 };
           continue;
@@ -8146,6 +8150,86 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     } catch (error) {
       console.error('[DB Restore] Failed:', error);
       res.status(500).json({ message: 'Failed to restore database', error: String(error) });
+    }
+  });
+
+  // ========== ADMIN FIX: Restore org_members + superadmin (one-time repair) ==========
+  app.post('/api/admin-fix', async (req: any, res) => {
+    try {
+      const restoreKey = req.headers['x-restore-key'] || req.body.restoreKey;
+      if (restoreKey !== 'aimailpilot-restore-2026') {
+        return res.status(403).json({ message: 'Invalid restore key' });
+      }
+      
+      const fixes: string[] = [];
+      
+      // 1. Get all users and their orgs
+      const allUsers = storage.exportTable('users');
+      console.log(`[AdminFix] Found ${allUsers.length} users`);
+      
+      // 2. Restore org_members for each user
+      for (const user of allUsers) {
+        if (!user.organizationId) continue;
+        
+        // Check if org_members row exists
+        const existing = storage.exportTable('org_members').filter(
+          (m: any) => m.userId === user.id && m.organizationId === user.organizationId
+        );
+        
+        if (existing.length === 0) {
+          const memberId = `fix-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+          try {
+            storage.importTable('org_members', [{
+              id: memberId,
+              organizationId: user.organizationId,
+              userId: user.id,
+              role: user.role || 'admin',
+              isActive: 1,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            }]);
+            fixes.push(`Added org_member for ${user.email} in org ${user.organizationId}`);
+          } catch (e) {
+            fixes.push(`Failed to add org_member for ${user.email}: ${e}`);
+          }
+        } else {
+          fixes.push(`org_member already exists for ${user.email}`);
+        }
+      }
+      
+      // 3. Promote specified user to superadmin (or first admin)
+      const targetEmail = req.body.superadminEmail || 'dev@aegis.edu.in';
+      const targetUser = allUsers.find((u: any) => u.email === targetEmail);
+      if (targetUser) {
+        try {
+          storage.importTable('users', [{
+            ...targetUser,
+            isSuperAdmin: 1,
+            role: 'admin',
+          }]);
+          fixes.push(`Promoted ${targetEmail} to superadmin`);
+        } catch (e) {
+          fixes.push(`Failed to promote ${targetEmail}: ${e}`);
+        }
+      } else {
+        fixes.push(`User ${targetEmail} not found`);
+      }
+      
+      // 4. Return summary
+      const stats = await storage.getPlatformStats();
+      res.json({
+        success: true,
+        fixes,
+        currentStats: {
+          superAdmins: stats.superAdmins,
+          totalUsers: stats.totalUsers,
+          orgMembers: storage.exportTable('org_members').length,
+        },
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error('[AdminFix] Failed:', error);
+      res.status(500).json({ message: 'Admin fix failed', error: String(error) });
     }
   });
 
