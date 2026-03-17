@@ -569,6 +569,7 @@ export class CampaignEngine {
     // Track sent/bounced counts locally to avoid re-reading campaign for every email
     let localSentCount = 0;
     let localBouncedCount = 0;
+    let localFailedCount = 0; // Infrastructure failures (auth errors, etc.) — NOT real bounces
     // Batch size for DB count updates (flush every N emails)
     const FLUSH_INTERVAL = 25;
     
@@ -855,7 +856,7 @@ export class CampaignEngine {
           }
         } else if (provider === 'outlook' || provider === 'microsoft') {
           // Try Microsoft Graph API first
-          const accessToken = await refreshMicrosoftToken(orgId, fromEmail);
+          let accessToken = await refreshMicrosoftToken(orgId, fromEmail);
           if (accessToken) {
             console.log(`[CampaignEngine] Sending via Microsoft Graph to ${contact.email}`);
             result = await sendViaMicrosoftGraph(accessToken, {
@@ -865,16 +866,35 @@ export class CampaignEngine {
               html: clickTrackedContent,
               headers: emailHeaders,
             });
-            // If Graph fails with auth error, only fall back to SMTP if we have real SMTP credentials
-            if (!result.success && (result.error?.includes('401') || result.error?.includes('403'))) {
-              if (!isOAuthAccount) {
-                console.log(`[CampaignEngine] Graph API auth failed, falling back to SMTP for ${contact.email}`);
-                result = await smtpEmailService.sendEmail(emailAccount.id, smtpConfig, {
-                  to: contact.email, subject: personalizedSubject, html: clickTrackedContent, trackingId, headers: emailHeaders,
+            // If Graph fails with auth error, attempt a force token refresh and retry once
+            if (!result.success && (result.error?.includes('401') || result.error?.includes('403') || result.error?.includes('InvalidAuthenticationToken'))) {
+              console.log(`[CampaignEngine] Graph API auth failed for ${fromEmail}, forcing token refresh and retry...`);
+              // Force refresh by clearing cached expiry
+              try {
+                await storage.setApiSetting(orgId, `outlook_sender_${fromEmail}_token_expiry`, '0');
+              } catch (e) { /* ignore */ }
+              const retryToken = await refreshMicrosoftToken(orgId, fromEmail);
+              if (retryToken && retryToken !== accessToken) {
+                console.log(`[CampaignEngine] Token refreshed, retrying Graph API for ${contact.email}`);
+                result = await sendViaMicrosoftGraph(retryToken, {
+                  from: fromEmail,
+                  to: contact.email,
+                  subject: personalizedSubject,
+                  html: clickTrackedContent,
+                  headers: emailHeaders,
                 });
-              } else {
-                console.error(`[CampaignEngine] Microsoft Graph auth failed for OAuth account ${fromEmail}. No SMTP fallback available.`);
-                result = { success: false, error: `Microsoft OAuth token expired for ${fromEmail}. Please re-authenticate in Account Settings.` };
+              }
+              // If still failing after retry, fall back to SMTP if available
+              if (!result.success) {
+                if (!isOAuthAccount) {
+                  console.log(`[CampaignEngine] Graph API retry failed, falling back to SMTP for ${contact.email}`);
+                  result = await smtpEmailService.sendEmail(emailAccount.id, smtpConfig, {
+                    to: contact.email, subject: personalizedSubject, html: clickTrackedContent, trackingId, headers: emailHeaders,
+                  });
+                } else {
+                  console.error(`[CampaignEngine] Microsoft Graph auth failed for OAuth account ${fromEmail} after retry. No SMTP fallback available.`);
+                  result = { success: false, error: `Microsoft OAuth token expired for ${fromEmail}. Please re-authenticate in Account Settings.` };
+                }
               }
             }
           } else if (!isOAuthAccount) {
@@ -946,17 +966,17 @@ export class CampaignEngine {
             console.warn(`[CampaignEngine] Infrastructure error for ${contact.email}: ${result.error?.slice(0, 100)}`);
             
             // If ALL contacts are failing due to the same auth issue, pause the campaign to prevent mass failures
-            localBouncedCount++;
+            localFailedCount++;
             
             // After 3 consecutive infrastructure failures, auto-pause the campaign
-            if (localBouncedCount >= 3 && localSentCount === 0) {
-              console.error(`[CampaignEngine] Auto-pausing campaign ${campaignId}: ${localBouncedCount} consecutive infrastructure failures. Error: ${result.error?.slice(0, 200)}`);
+            if (localFailedCount >= 3 && localSentCount === 0) {
+              console.error(`[CampaignEngine] Auto-pausing campaign ${campaignId}: ${localFailedCount} consecutive infrastructure failures. Error: ${result.error?.slice(0, 200)}`);
               // Flush counts before pausing
               const pauseCampaign = await storage.getCampaign(campaignId);
               if (pauseCampaign) {
                 await storage.updateCampaign(campaignId, {
                   status: 'paused',
-                  bouncedCount: (pauseCampaign.bouncedCount || 0) + localBouncedCount,
+                  // Do NOT add infrastructure failures to bouncedCount — they're not real bounces
                 });
               }
               this.activeCampaigns.delete(campaignId);

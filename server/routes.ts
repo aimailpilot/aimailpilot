@@ -1879,24 +1879,108 @@ export async function registerRoutes(app: Express): Promise<Server> {
             return res.json({ success: false, error: 'Failed to test Gmail API connection', code: 'GMAIL_API_ERROR', authMethod: 'oauth' });
           }
         } else if (provider === 'outlook' || provider === 'microsoft') {
-          // Test Microsoft Graph connection
+          // Test Microsoft Graph connection with token refresh
           try {
             const settings = await storage.getApiSettings(orgId);
-            const accessToken = settings[`outlook_sender_${account.email}_access_token`] || settings.microsoft_access_token;
-            if (!accessToken) {
-              return res.json({ success: false, error: 'Microsoft OAuth tokens not found. Please re-authenticate.', code: 'OAUTH_NO_TOKENS', authMethod: 'oauth' });
+            let accessToken = settings[`outlook_sender_${account.email}_access_token`] || settings.microsoft_access_token;
+            const refreshToken = settings[`outlook_sender_${account.email}_refresh_token`] || settings.microsoft_refresh_token;
+            const tokenExpiry = settings[`outlook_sender_${account.email}_token_expiry`] || settings.microsoft_token_expiry;
+            
+            if (!accessToken && !refreshToken) {
+              return res.json({ success: false, error: 'Microsoft OAuth tokens not found. Please use "Connect Outlook" to authenticate this account.', code: 'OAUTH_NO_TOKENS', authMethod: 'oauth' });
             }
+
+            // Check if token is expired and try to refresh first
+            const expiry = parseInt(tokenExpiry || '0');
+            const isExpired = !accessToken || Date.now() > expiry - 300000; // 5 min buffer
+
+            if (isExpired && refreshToken) {
+              console.log(`[Test] Outlook token expired for ${account.email}, attempting refresh...`);
+              // Get OAuth client credentials
+              const { clientId, clientSecret } = await getStoredOAuthCredentials('microsoft');
+              if (clientId && clientSecret) {
+                try {
+                  const body = new URLSearchParams({
+                    client_id: clientId, client_secret: clientSecret,
+                    refresh_token: refreshToken,
+                    grant_type: 'refresh_token',
+                    scope: 'openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/SMTP.Send',
+                  });
+                  const refreshResp = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+                    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString(),
+                  });
+                  if (refreshResp.ok) {
+                    const newTokens = await refreshResp.json() as any;
+                    if (newTokens.access_token) {
+                      accessToken = newTokens.access_token;
+                      // Store refreshed tokens
+                      await storage.setApiSetting(orgId, `outlook_sender_${account.email}_access_token`, newTokens.access_token);
+                      if (newTokens.refresh_token) await storage.setApiSetting(orgId, `outlook_sender_${account.email}_refresh_token`, newTokens.refresh_token);
+                      const newExpiry = Date.now() + (newTokens.expires_in || 3600) * 1000;
+                      await storage.setApiSetting(orgId, `outlook_sender_${account.email}_token_expiry`, String(newExpiry));
+                      // Update org-level if primary
+                      const primaryMsEmail = settings.microsoft_user_email;
+                      if (!primaryMsEmail || primaryMsEmail === account.email) {
+                        await storage.setApiSetting(orgId, 'microsoft_access_token', newTokens.access_token);
+                        if (newTokens.refresh_token) await storage.setApiSetting(orgId, 'microsoft_refresh_token', newTokens.refresh_token);
+                        await storage.setApiSetting(orgId, 'microsoft_token_expiry', String(newExpiry));
+                      }
+                      console.log(`[Test] Outlook token refreshed successfully for ${account.email}`);
+                    }
+                  } else {
+                    const errText = await refreshResp.text();
+                    console.error(`[Test] Outlook token refresh failed for ${account.email}:`, errText);
+                  }
+                } catch (refreshErr) {
+                  console.error(`[Test] Outlook token refresh error for ${account.email}:`, refreshErr);
+                }
+              }
+            }
+
+            if (!accessToken) {
+              return res.json({ success: false, error: 'Microsoft OAuth token expired and refresh failed. Please use "Connect Outlook" to re-authenticate.', code: 'OAUTH_TOKEN_EXPIRED', authMethod: 'oauth' });
+            }
+
             const testResp = await fetch('https://graph.microsoft.com/v1.0/me', {
               headers: { Authorization: `Bearer ${accessToken}` },
             });
             if (testResp.ok) {
               const profile = await testResp.json() as any;
+              // Optionally send test email via Graph API
+              const testEmail = req.body.testEmail || account.email;
+              if (testEmail) {
+                try {
+                  const sendResp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      message: {
+                        subject: '✅ AImailPilot Test - Outlook Connection Successful!',
+                        body: { contentType: 'HTML', content: `<p>This is a test email from AImailPilot sent via Microsoft Graph API (OAuth).</p><p>Your Outlook account <strong>${profile.mail || profile.userPrincipalName}</strong> is working correctly!</p><p>Sent at: ${new Date().toLocaleString()}</p>` },
+                        toRecipients: [{ emailAddress: { address: testEmail } }],
+                      },
+                      saveToSentItems: true,
+                    }),
+                  });
+                  if (sendResp.ok) {
+                    return res.json({ success: true, message: `Test email sent to ${testEmail} via Microsoft Graph API`, authMethod: 'oauth', provider: 'outlook', email: profile.mail || profile.userPrincipalName });
+                  } else {
+                    const sendErr = await sendResp.text();
+                    return res.json({ success: false, error: `Graph API send failed: ${sendErr}`, code: 'MS_GRAPH_SEND_ERROR', authMethod: 'oauth' });
+                  }
+                } catch (sendErr) {
+                  return res.json({ success: false, error: 'Graph API send error: ' + (sendErr instanceof Error ? sendErr.message : String(sendErr)), code: 'MS_GRAPH_SEND_ERROR', authMethod: 'oauth' });
+                }
+              }
               return res.json({ success: true, message: `Microsoft Graph connected as ${profile.mail || profile.userPrincipalName}`, authMethod: 'oauth', provider: 'outlook', email: profile.mail || profile.userPrincipalName });
             } else {
-              return res.json({ success: false, error: 'Microsoft token expired. Please sign out and sign back in.', code: 'OAUTH_TOKEN_EXPIRED', authMethod: 'oauth' });
+              const errBody = await testResp.text();
+              console.error(`[Test] Graph API /me failed for ${account.email}:`, testResp.status, errBody);
+              return res.json({ success: false, error: `Microsoft Graph API failed (${testResp.status}). Token may be expired. Please use "Connect Outlook" to re-authenticate.`, code: 'OAUTH_TOKEN_EXPIRED', authMethod: 'oauth' });
             }
           } catch (msErr) {
-            return res.json({ success: false, error: 'Failed to test Microsoft Graph connection', code: 'MS_GRAPH_ERROR', authMethod: 'oauth' });
+            console.error(`[Test] Microsoft Graph test error for ${account.email}:`, msErr);
+            return res.json({ success: false, error: 'Failed to test Microsoft Graph connection: ' + (msErr instanceof Error ? msErr.message : String(msErr)), code: 'MS_GRAPH_ERROR', authMethod: 'oauth' });
           }
         }
       }
@@ -1957,8 +2041,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const hasToken = settings[`gmail_sender_${account.email}_access_token`] || settings.gmail_access_token;
           return res.json({ success: !!hasToken, authMethod: 'oauth', message: hasToken ? 'Gmail OAuth connected' : 'Gmail OAuth tokens missing' });
         } else if (provider === 'outlook' || provider === 'microsoft') {
-          const hasToken = settings[`outlook_sender_${account.email}_access_token`] || settings.microsoft_access_token;
-          return res.json({ success: !!hasToken, authMethod: 'oauth', message: hasToken ? 'Outlook OAuth connected' : 'Outlook OAuth tokens missing' });
+          const hasAccessToken = settings[`outlook_sender_${account.email}_access_token`] || settings.microsoft_access_token;
+          const hasRefreshToken = settings[`outlook_sender_${account.email}_refresh_token`] || settings.microsoft_refresh_token;
+          const hasAnyToken = hasAccessToken || hasRefreshToken;
+          return res.json({ success: !!hasAnyToken, authMethod: 'oauth', message: hasAnyToken ? 'Outlook OAuth connected' : 'Outlook OAuth tokens missing. Please use "Connect Outlook" to authenticate.' });
         }
       }
 
