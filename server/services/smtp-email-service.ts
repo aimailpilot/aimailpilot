@@ -222,6 +222,16 @@ export class SmtpEmailService {
   }
 
   /**
+   * Check if an SMTP error indicates that basic authentication is disabled (common for Outlook/Microsoft)
+   */
+  isBasicAuthDisabledError(error: string): boolean {
+    return error.includes('535') || error.includes('Authentication unsuccessful') || 
+      error.includes('SmtpClientAuthentication is disabled') ||
+      error.includes('AUTHENTICATE') || error.includes('Login denied') ||
+      error.includes('BasicAuthentication') || error.includes('Invalid credentials');
+  }
+
+  /**
    * Send a single email
    */
   async sendEmail(accountId: string, config: SmtpConfig, message: EmailMessage): Promise<SendResult> {

@@ -879,9 +879,20 @@ export class CampaignEngine {
             }
           } else if (!isOAuthAccount) {
             // No OAuth token but has real SMTP credentials — use SMTP
+            console.log(`[CampaignEngine] No OAuth token for Outlook ${fromEmail}, attempting SMTP with password`);
             result = await smtpEmailService.sendEmail(emailAccount.id, smtpConfig, {
               to: contact.email, subject: personalizedSubject, html: clickTrackedContent, trackingId, headers: emailHeaders,
             });
+            // If SMTP fails with auth error for Outlook, it likely means basic auth is disabled
+            if (!result.success && result.error) {
+              const isAuthError = result.error.includes('535') || result.error.includes('Authentication') || 
+                result.error.includes('auth') || result.error.includes('Login') ||
+                result.error.includes('AUTHENTICATE') || result.error.includes('credentials');
+              if (isAuthError) {
+                console.error(`[CampaignEngine] Outlook SMTP basic auth failed for ${fromEmail}. Microsoft has disabled basic authentication. Account must be re-connected via OAuth.`);
+                result = { success: false, error: `Outlook SMTP authentication failed for ${fromEmail}. Microsoft has disabled basic password authentication. Please remove this account and re-add it using "Connect Outlook" (OAuth) in Account Settings.` };
+              }
+            }
           } else {
             // OAuth account but no token available
             console.error(`[CampaignEngine] No Microsoft OAuth token for ${fromEmail}. User needs to re-authenticate.`);

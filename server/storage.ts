@@ -873,8 +873,8 @@ export class DatabaseStorage {
     const existing = await this.getEmailAccount(id);
     if (!existing) throw new Error('Email account not found');
     const merged = { ...existing, ...data };
-    db.prepare('UPDATE email_accounts SET displayName=?, smtpConfig=?, dailyLimit=?, dailySent=?, isActive=?, updatedAt=? WHERE id=?').run(
-      merged.displayName, toJson(merged.smtpConfig), merged.dailyLimit, merged.dailySent, merged.isActive ? 1 : 0, now(), id
+    db.prepare('UPDATE email_accounts SET displayName=?, smtpConfig=?, dailyLimit=?, dailySent=?, isActive=?, provider=?, updatedAt=? WHERE id=?').run(
+      merged.displayName, toJson(merged.smtpConfig), merged.dailyLimit, merged.dailySent, merged.isActive ? 1 : 0, merged.provider || existing.provider, now(), id
     );
     return this.getEmailAccount(id);
   }

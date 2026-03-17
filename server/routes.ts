@@ -572,7 +572,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
           });
           console.log(`[Auth] New Gmail sender added via OAuth: ${email}`);
         } else {
-          console.log(`[Auth] Gmail sender already exists: ${email}, tokens updated`);
+          // CRITICAL: Upgrade existing SMTP-password account to OAuth
+          // If account was previously added with a manual SMTP password, update it to use OAuth tokens
+          const needsOAuthUpgrade = existingAccount.smtpConfig?.auth?.pass && existingAccount.smtpConfig.auth.pass !== 'OAUTH_TOKEN';
+          if (needsOAuthUpgrade) {
+            await storage.updateEmailAccount(existingAccount.id, {
+              smtpConfig: {
+                ...existingAccount.smtpConfig,
+                auth: { user: email, pass: 'OAUTH_TOKEN' },
+                provider: 'gmail',
+              },
+              provider: 'gmail',
+              displayName: name || existingAccount.displayName,
+            });
+            console.log(`[Auth] Upgraded Gmail sender ${email} from SMTP password to OAuth`);
+          } else {
+            console.log(`[Auth] Gmail sender already exists: ${email}, tokens updated`);
+          }
         }
 
         // Redirect back to the page that initiated the flow
@@ -674,7 +690,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
             });
             console.log('[Auth] Auto-created Gmail sender account:', email);
           } else {
-            console.log('[Auth] Gmail sender account already exists:', email);
+            // Upgrade existing SMTP-password account to OAuth if needed
+            const needsUpgrade = alreadyExists.smtpConfig?.auth?.pass && alreadyExists.smtpConfig.auth.pass !== 'OAUTH_TOKEN';
+            if (needsUpgrade) {
+              await storage.updateEmailAccount(alreadyExists.id, {
+                smtpConfig: {
+                  ...alreadyExists.smtpConfig,
+                  auth: { user: email, pass: 'OAUTH_TOKEN' },
+                  provider: 'gmail',
+                },
+                provider: 'gmail',
+              });
+              console.log('[Auth] Upgraded Gmail sender from SMTP to OAuth:', email);
+            } else {
+              console.log('[Auth] Gmail sender account already exists:', email);
+            }
           }
         } catch (accountError) {
           console.error('[Auth] Failed to auto-create Gmail sender account:', accountError);
@@ -971,7 +1001,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
           });
           console.log(`[Auth] New Outlook sender added via OAuth: ${email}`);
         } else {
-          console.log(`[Auth] Outlook sender already exists: ${email}, tokens updated`);
+          // CRITICAL: Upgrade existing SMTP-password account to OAuth
+          // If account was previously added with a manual SMTP password, update it to use OAuth tokens
+          const needsOAuthUpgrade = existingAccount.smtpConfig?.auth?.pass && existingAccount.smtpConfig.auth.pass !== 'OAUTH_TOKEN';
+          if (needsOAuthUpgrade) {
+            await storage.updateEmailAccount(existingAccount.id, {
+              smtpConfig: {
+                ...existingAccount.smtpConfig,
+                auth: { user: email, pass: 'OAUTH_TOKEN' },
+                provider: 'outlook',
+              },
+              provider: 'outlook',
+              displayName: name || existingAccount.displayName,
+            });
+            console.log(`[Auth] Upgraded Outlook sender ${email} from SMTP password to OAuth`);
+          } else {
+            console.log(`[Auth] Outlook sender already exists: ${email}, tokens updated`);
+          }
         }
 
         // Start Outlook reply tracking
@@ -1068,7 +1114,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
             });
             console.log('[Auth] Auto-created Outlook sender account:', email);
           } else {
-            console.log('[Auth] Outlook sender account already exists:', email);
+            // Upgrade existing SMTP-password account to OAuth if needed
+            const needsUpgrade = alreadyExists.smtpConfig?.auth?.pass && alreadyExists.smtpConfig.auth.pass !== 'OAUTH_TOKEN';
+            if (needsUpgrade) {
+              await storage.updateEmailAccount(alreadyExists.id, {
+                smtpConfig: {
+                  ...alreadyExists.smtpConfig,
+                  auth: { user: email, pass: 'OAUTH_TOKEN' },
+                  provider: 'outlook',
+                },
+                provider: 'outlook',
+              });
+              console.log('[Auth] Upgraded Outlook sender from SMTP to OAuth:', email);
+            } else {
+              console.log('[Auth] Outlook sender account already exists:', email);
+            }
           }
         } catch (accountError) {
           console.error('[Auth] Failed to auto-create Outlook sender account:', accountError);
@@ -1848,6 +1908,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const verifyResult = await smtpEmailService.verifyConnection(account.smtpConfig);
       if (!verifyResult.success) {
+        // For Outlook accounts, detect if basic auth is disabled and suggest OAuth
+        const isOutlook = account.provider === 'outlook' || account.provider === 'microsoft' ||
+          account.smtpConfig.host?.includes('outlook') || account.smtpConfig.host?.includes('office365');
+        const isAuthError = smtpEmailService.isBasicAuthDisabledError(verifyResult.error || '');
+        
+        if (isOutlook && isAuthError) {
+          return res.json({ 
+            success: false, 
+            error: 'Microsoft has disabled basic SMTP authentication for this account. Please use "Connect Outlook" (OAuth) to re-authenticate this account.',
+            code: 'OUTLOOK_BASIC_AUTH_DISABLED',
+            provider: account.provider, host: account.smtpConfig.host, authMethod: 'smtp',
+            suggestion: 'oauth_upgrade',
+          });
+        }
+        
         return res.json({ 
           success: false, error: verifyResult.error, code: 'SMTP_VERIFY_FAILED',
           provider: account.provider, host: account.smtpConfig.host, authMethod: 'smtp',
