@@ -7936,6 +7936,133 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     });
   });
 
+  // ========== DATABASE EXPORT/IMPORT (SUPERADMIN ONLY) ==========
+  // Export entire database as JSON for backup/restore
+  app.get('/api/superadmin/db-export', async (req: any, res) => {
+    try {
+      console.log(`[DB Export] SuperAdmin ${req.user.email} exporting database...`);
+      
+      const tables = [
+        'users', 'organizations', 'organization_members', 'api_settings',
+        'email_accounts', 'templates', 'campaigns', 'messages', 'contacts',
+        'contact_lists', 'contact_list_members', 'tracking_events',
+        'unified_inbox', 'followup_sequences', 'followup_steps', 'followup_messages',
+      ];
+      
+      const exportData: Record<string, any[]> = {};
+      let totalRows = 0;
+      
+      for (const table of tables) {
+        try {
+          const rows = storage.exportTable(table);
+          exportData[table] = rows;
+          totalRows += rows.length;
+          console.log(`[DB Export] ${table}: ${rows.length} rows`);
+        } catch (e) {
+          console.warn(`[DB Export] Table ${table} not found or error:`, e);
+          exportData[table] = [];
+        }
+      }
+      
+      const exportPayload = {
+        version: 'aimailpilot-v18',
+        exportedAt: new Date().toISOString(),
+        exportedBy: req.user.email,
+        totalRows,
+        tables: exportData,
+      };
+      
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Content-Disposition', `attachment; filename=aimailpilot-backup-${new Date().toISOString().slice(0, 10)}.json`);
+      res.json(exportPayload);
+      console.log(`[DB Export] Complete: ${totalRows} total rows across ${tables.length} tables`);
+    } catch (error) {
+      console.error('[DB Export] Failed:', error);
+      res.status(500).json({ message: 'Failed to export database' });
+    }
+  });
+
+  // Import database from JSON backup (DESTRUCTIVE - replaces all data)
+  app.post('/api/superadmin/db-import', async (req: any, res) => {
+    try {
+      const importData = req.body;
+      
+      if (!importData || !importData.tables) {
+        return res.status(400).json({ message: 'Invalid import data. Expected JSON with "tables" object.' });
+      }
+      
+      console.log(`[DB Import] SuperAdmin ${req.user.email} importing database...`);
+      console.log(`[DB Import] Source: ${importData.version || 'unknown'}, exported: ${importData.exportedAt || 'unknown'}, totalRows: ${importData.totalRows || 'unknown'}`);
+      
+      // Import order matters due to foreign keys
+      const importOrder = [
+        'organizations', 'users', 'organization_members', 'api_settings',
+        'email_accounts', 'contact_lists', 'contacts', 'contact_list_members',
+        'templates', 'campaigns', 'messages', 'tracking_events',
+        'unified_inbox', 'followup_sequences', 'followup_steps', 'followup_messages',
+      ];
+      
+      let totalImported = 0;
+      const results: Record<string, { imported: number; errors: number }> = {};
+      
+      for (const table of importOrder) {
+        const rows = importData.tables[table];
+        if (!rows || !Array.isArray(rows) || rows.length === 0) {
+          results[table] = { imported: 0, errors: 0 };
+          continue;
+        }
+        
+        try {
+          const result = storage.importTable(table, rows);
+          results[table] = result;
+          totalImported += result.imported;
+          console.log(`[DB Import] ${table}: ${result.imported} imported, ${result.errors} errors`);
+        } catch (e) {
+          console.error(`[DB Import] Table ${table} import failed:`, e);
+          results[table] = { imported: 0, errors: rows.length };
+        }
+      }
+      
+      res.json({
+        success: true,
+        message: `Imported ${totalImported} rows`,
+        totalImported,
+        results,
+        importedAt: new Date().toISOString(),
+      });
+      console.log(`[DB Import] Complete: ${totalImported} total rows imported`);
+    } catch (error) {
+      console.error('[DB Import] Failed:', error);
+      res.status(500).json({ message: 'Failed to import database' });
+    }
+  });
+
+  // Quick DB status check (no auth required for debugging)
+  app.get('/api/db-status', async (_req, res) => {
+    try {
+      const stats = await storage.getPlatformStats();
+      const tables = ['users', 'organizations', 'campaigns', 'templates', 'contacts', 'messages', 'tracking_events', 'email_accounts', 'unified_inbox'];
+      const counts: Record<string, number> = {};
+      for (const table of tables) {
+        try {
+          const rows = storage.exportTable(table);
+          counts[table] = rows.length;
+        } catch (e) {
+          counts[table] = -1;
+        }
+      }
+      res.json({
+        dbPath: storage.getDbPath(),
+        isAzure: storage.isAzureEnvironment(),
+        stats,
+        tableCounts: counts,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to get DB status', error: String(error) });
+    }
+  });
+
   // Start Gmail/Outlook reply & bounce tracking auto-check for all organizations
   // CRITICAL: Check BOTH org-level AND per-sender tokens (outlook_sender_*, gmail_sender_*)
   // Previously only org-level tokens were checked, causing bounce tracking to not start

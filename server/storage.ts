@@ -9,11 +9,19 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // On Azure App Service, use /home/data for persistent storage
+// /home is an Azure persistent mount that survives deployments and container restarts
 // Locally, use ./data relative to project root
 function getDbPath(): string {
-  // Check if running on Azure (multiple env vars possible)
-  const isAzure = process.env.WEBSITE_SITE_NAME || process.env.AZURE_WEBAPP_NAME || 
-                  process.env.APPSETTING_WEBSITE_SITE_NAME || fs.existsSync('/home/site/wwwroot');
+  // MULTIPLE detection methods for Azure (belt + suspenders)
+  const azureEnvVars = process.env.WEBSITE_SITE_NAME || process.env.AZURE_WEBAPP_NAME || 
+                       process.env.APPSETTING_WEBSITE_SITE_NAME || process.env.WEBSITE_INSTANCE_ID ||
+                       process.env.WEBSITE_HOSTNAME || process.env.WEBSITE_RESOURCE_GROUP;
+  const azurePathExists = fs.existsSync('/home/site/wwwroot');
+  // ALSO check if /home/data already has our DB from a previous run (survives even if env vars change)
+  const azureDbExists = fs.existsSync('/home/data/aimailpilot.db');
+  const isAzure = !!(azureEnvVars || azurePathExists || azureDbExists);
+  
+  console.log(`[DB] Azure detection: envVars=${!!azureEnvVars}, pathExists=${azurePathExists}, dbExists=${azureDbExists}, isAzure=${isAzure}`);
   
   if (isAzure) {
     const azureDataDir = '/home/data';
@@ -21,8 +29,8 @@ function getDbPath(): string {
       fs.mkdirSync(azureDataDir, { recursive: true });
     }
     const dbPath = path.join(azureDataDir, 'aimailpilot.db');
-    const dbExists = fs.existsSync(dbPath);
-    console.log(`[DB] Azure detected (WEBSITE_SITE_NAME=${process.env.WEBSITE_SITE_NAME || 'unset'}), DB path: ${dbPath}, exists: ${dbExists}`);
+    const dbSize = fs.existsSync(dbPath) ? fs.statSync(dbPath).size : 0;
+    console.log(`[DB] Azure detected (WEBSITE_SITE_NAME=${process.env.WEBSITE_SITE_NAME || 'unset'}), DB path: ${dbPath}, exists: ${dbSize > 0}, size: ${(dbSize / 1024).toFixed(1)}KB`);
     return dbPath;
   }
   // Local development
@@ -35,7 +43,9 @@ function getDbPath(): string {
 }
 
 const isAzure = !!(process.env.WEBSITE_SITE_NAME || process.env.AZURE_WEBAPP_NAME || 
-                   process.env.APPSETTING_WEBSITE_SITE_NAME || fs.existsSync('/home/site/wwwroot'));
+                   process.env.APPSETTING_WEBSITE_SITE_NAME || process.env.WEBSITE_INSTANCE_ID ||
+                   process.env.WEBSITE_HOSTNAME || process.env.WEBSITE_RESOURCE_GROUP ||
+                   fs.existsSync('/home/site/wwwroot') || fs.existsSync('/home/data/aimailpilot.db'));
 
 const DB_PATH = getDbPath();
 console.log(`[DB] Using database at: ${DB_PATH}`);
@@ -2757,6 +2767,76 @@ export class DatabaseStorage {
     const bounced = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND (bounceType != '' AND bounceType IS NOT NULL)").get(organizationId) as any).c;
     const starred = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND isStarred = 1").get(organizationId) as any).c;
     return { total, unread, replied, archived, positive, negative, ooo, autoReply, bounced, starred };
+  }
+
+  // ========== DATABASE EXPORT/IMPORT ==========
+  
+  /** Export all rows from a table as JSON array */
+  exportTable(tableName: string): any[] {
+    // Sanitize table name to prevent SQL injection
+    const validTables = [
+      'users', 'organizations', 'organization_members', 'api_settings',
+      'email_accounts', 'templates', 'campaigns', 'messages', 'contacts',
+      'contact_lists', 'contact_list_members', 'tracking_events',
+      'unified_inbox', 'followup_sequences', 'followup_steps', 'followup_messages',
+    ];
+    if (!validTables.includes(tableName)) {
+      throw new Error(`Invalid table name: ${tableName}`);
+    }
+    try {
+      return db.prepare(`SELECT * FROM ${tableName}`).all();
+    } catch (e) {
+      console.warn(`[Storage] exportTable: table ${tableName} does not exist`);
+      return [];
+    }
+  }
+
+  /** Import rows into a table, skipping duplicates (INSERT OR IGNORE) */
+  importTable(tableName: string, rows: any[]): { imported: number; errors: number } {
+    const validTables = [
+      'users', 'organizations', 'organization_members', 'api_settings',
+      'email_accounts', 'templates', 'campaigns', 'messages', 'contacts',
+      'contact_lists', 'contact_list_members', 'tracking_events',
+      'unified_inbox', 'followup_sequences', 'followup_steps', 'followup_messages',
+    ];
+    if (!validTables.includes(tableName)) {
+      throw new Error(`Invalid table name: ${tableName}`);
+    }
+    
+    let imported = 0;
+    let errors = 0;
+    
+    // Use a transaction for performance and atomicity
+    const importTransaction = db.transaction((rowsToImport: any[]) => {
+      for (const row of rowsToImport) {
+        try {
+          const columns = Object.keys(row);
+          const values = Object.values(row);
+          const placeholders = columns.map(() => '?').join(', ');
+          const sql = `INSERT OR IGNORE INTO ${tableName} (${columns.join(', ')}) VALUES (${placeholders})`;
+          const result = db.prepare(sql).run(...values);
+          if (result.changes > 0) imported++;
+        } catch (e) {
+          errors++;
+          if (errors <= 3) {
+            console.warn(`[Storage] importTable ${tableName} row error:`, e);
+          }
+        }
+      }
+    });
+    
+    importTransaction(rows);
+    return { imported, errors };
+  }
+
+  /** Get the database file path */
+  getDbPath(): string {
+    return DB_PATH;
+  }
+
+  /** Check if running on Azure */
+  isAzureEnvironment(): boolean {
+    return isAzure;
   }
 }
 
