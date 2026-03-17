@@ -80,6 +80,17 @@ function getMicrosoftRedirectUri(req: any): string {
   return `${baseUrl}/api/auth/microsoft/callback`;
 }
 
+// CRITICAL: Get the canonical Google OAuth redirect URI.
+// Same www vs non-www issue as Microsoft. Google also requires exact match.
+function getGoogleRedirectUri(req: any): string {
+  const host = req.headers['x-forwarded-host'] || req.headers['x-original-host'] || req.headers['host'] || '';
+  if (host.includes(PRODUCTION_DOMAIN)) {
+    return `https://${PRODUCTION_DOMAIN}/api/auth/google/callback`;
+  }
+  const baseUrl = getBaseUrlFromRequest(req);
+  return `${baseUrl}/api/auth/google/callback`;
+}
+
 // Simple auth middleware
 const requireAuth = async (req: any, res: any, next: any) => {
   const userId = req.cookies?.user_id || req.session?.userId;
@@ -431,9 +442,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Step 1: Redirect user to Google's consent screen
   app.get('/api/auth/google', async (req: any, res) => {
     try {
-      // Determine redirect URI from the current request
-      const baseUrl = getBaseUrlFromRequest(req);
-      const redirectUri = `${baseUrl}/api/auth/google/callback`;
+      // Use canonical redirect URI to avoid www vs non-www mismatches
+      const redirectUri = getGoogleRedirectUri(req);
 
       // Try to load credentials from api_settings first, then env vars
       const { clientId, clientSecret } = await getStoredOAuthCredentials('google');
@@ -484,7 +494,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       // Parse state to get the redirect URI and purpose
-      let redirectUri = `${getBaseUrlFromRequest(req)}/api/auth/google/callback`;
+      let redirectUri = getGoogleRedirectUri(req);
       let purpose = 'login'; // default
       let stateOrgId = '';
       let returnTo = '';
@@ -782,9 +792,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // to avoid redirect_uri_mismatch errors. The 'purpose' field in state differentiates flows.
   app.get('/api/auth/gmail-connect', requireAuth, async (req: any, res) => {
     try {
-      const baseUrl = getBaseUrlFromRequest(req);
-      // Use the SAME callback as the main Google OAuth flow (registered in Google Cloud Console)
-      const redirectUri = `${baseUrl}/api/auth/google/callback`;
+      // Use canonical redirect URI (same as main login flow, registered in Google Cloud Console)
+      const redirectUri = getGoogleRedirectUri(req);
       let orgId = req.user.organizationId;
 
       // CRITICAL FIX: When re-authenticating an existing email account,
