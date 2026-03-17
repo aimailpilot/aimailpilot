@@ -366,8 +366,8 @@ export default function LandingPage({ onLogin, oauthError }: LandingPageProps) {
             <span className="text-xs ml-2">AI-powered email campaigns</span>
           </div>
           <div className="flex items-center gap-6">
-            <span className="hover:text-gray-600 cursor-pointer transition-colors">Terms</span>
-            <span className="hover:text-gray-600 cursor-pointer transition-colors">Privacy</span>
+            <a href="/termsofservice" className="hover:text-gray-600 cursor-pointer transition-colors">Terms of Service</a>
+            <a href="/privacystatement" className="hover:text-gray-600 cursor-pointer transition-colors">Privacy Statement</a>
             <span className="hover:text-gray-600 cursor-pointer transition-colors">Security</span>
             <span className="hover:text-gray-600 cursor-pointer transition-colors">Help</span>
           </div>

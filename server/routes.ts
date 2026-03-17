@@ -1616,6 +1616,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // ========== VERIFICATION FILES ==========
+  // Microsoft domain verification
+  app.get('/.well-known/microsoft-identity-association.json', (_req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.send(JSON.stringify({
+      "associatedApplications": [
+        {
+          "applicationId": "15b15ca5-83ac-4219-9cc1-d27496017352"
+        }
+      ]
+    }));
+  });
+
+  // Google site verification
+  app.get('/googledc2a820e33a8a478.html', (_req, res) => {
+    res.setHeader('Content-Type', 'text/html');
+    res.send('google-site-verification: googledc2a820e33a8a478.html');
+  });
+
   // ========== BRANDING / LEGAL PAGES ==========
   // These are server-rendered so Microsoft Azure App Registration can crawl them
 
