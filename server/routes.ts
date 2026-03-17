@@ -509,7 +509,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // If purpose is 'add_sender', this came from /api/auth/gmail-connect
       // Handle it like the old gmail-connect/callback: store per-sender tokens, create account, redirect
       if (purpose === 'add_sender') {
-        console.log('[Auth] Gmail-connect flow for:', email);
+        console.log('[Auth] Gmail-connect flow for:', email, 'stateOrgId:', stateOrgId, 'stateUserId:', stateUserId);
         const orgId = stateOrgId || (req.session as any)?.user?.organizationId || '';
         
         // Fallback: get first org if orgId not in state
@@ -518,6 +518,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const orgIds = await storage.getAllOrganizationIds();
           effectiveOrgId = orgIds[0] || '';
         }
+
+        // CRITICAL: Also check if the email account already exists in a DIFFERENT org
+        try {
+          const existingByEmail = await storage.findEmailAccountByEmail(email);
+          if (existingByEmail && (existingByEmail as any).organizationId) {
+            const accountOrgId = (existingByEmail as any).organizationId;
+            if (accountOrgId !== effectiveOrgId) {
+              console.log(`[Auth] IMPORTANT: Gmail account ${email} belongs to org ${accountOrgId}, but state has org ${effectiveOrgId}. Using ACCOUNT's org.`);
+              effectiveOrgId = accountOrgId;
+            }
+          }
+        } catch (e) {
+          console.warn('[Auth] Could not look up Gmail account org:', e);
+        }
+
+        console.log(`[Auth] Storing Gmail tokens for ${email} in org: ${effectiveOrgId}`);
 
         // Store per-sender tokens
         if (tokens.access_token) {
@@ -748,7 +764,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const baseUrl = getBaseUrlFromRequest(req);
       // Use the SAME callback as the main Google OAuth flow (registered in Google Cloud Console)
       const redirectUri = `${baseUrl}/api/auth/google/callback`;
-      const orgId = req.user.organizationId;
+      let orgId = req.user.organizationId;
+
+      // CRITICAL FIX: When re-authenticating an existing email account,
+      // use the ACCOUNT's organizationId (not the logged-in user's org).
+      const loginHint = req.query.email as string || '';
+      if (loginHint) {
+        try {
+          const existingAccount = await storage.findEmailAccountByEmail(loginHint);
+          if (existingAccount) {
+            orgId = (existingAccount as any).organizationId || orgId;
+            console.log(`[Auth] Gmail re-auth: using account's org ${orgId} for ${loginHint} (logged-in user org: ${req.user.organizationId})`);
+          }
+        } catch (e) {
+          console.warn('[Auth] Could not look up existing email account for org resolution:', e);
+        }
+      }
 
       // Look for Google OAuth credentials: user's org first, then superadmin's org, then all orgs, then env vars
       let clientId = '';
@@ -788,8 +819,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       const oauth2Client = createOAuth2Client({ clientId, clientSecret, redirectUri });
-      // Use login_hint if provided (for connecting specific account)
-      const loginHint = req.query.email as string || '';
       // Support returnTo parameter so we can redirect back to the page that initiated the flow
       const returnTo = req.query.returnTo as string || '';
       const authUrl = oauth2Client.generateAuthUrl({
@@ -807,7 +836,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         ...(loginHint ? { login_hint: loginHint } : {}),
       });
 
-      console.log('[Auth] Gmail connect redirect, hint:', loginHint || 'none');
+      console.log('[Auth] Gmail connect redirect for org:', orgId, 'hint:', loginHint || 'none', 'user-org:', req.user.organizationId);
       res.redirect(authUrl);
     } catch (error) {
       console.error('[Auth] Gmail connect init error:', error);
@@ -948,12 +977,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // ===== OUTLOOK-CONNECT (ADD SENDER) FLOW =====
       if (purpose === 'add_sender') {
-        console.log('[Auth] Outlook-connect flow for:', email);
+        console.log('[Auth] Outlook-connect flow for:', email, 'stateOrgId:', stateOrgId, 'stateUserId:', stateUserId);
         let effectiveOrgId = stateOrgId || (req.session as any)?.user?.organizationId || '';
         if (!effectiveOrgId) {
           const orgIds = await storage.getAllOrganizationIds();
           effectiveOrgId = orgIds[0] || '';
         }
+
+        // CRITICAL: Also check if the email account already exists in a DIFFERENT org
+        // (e.g., SuperAdmin from org-A re-authenticating an account in org-B)
+        let accountOrgId = effectiveOrgId;
+        try {
+          const existingByEmail = await storage.findEmailAccountByEmail(email);
+          if (existingByEmail && (existingByEmail as any).organizationId) {
+            accountOrgId = (existingByEmail as any).organizationId;
+            if (accountOrgId !== effectiveOrgId) {
+              console.log(`[Auth] IMPORTANT: Account ${email} belongs to org ${accountOrgId}, but state has org ${effectiveOrgId}. Storing tokens in ACCOUNT's org.`);
+              effectiveOrgId = accountOrgId; // Use the account's org for token storage
+            }
+          }
+        } catch (e) {
+          console.warn('[Auth] Could not look up account org for token storage:', e);
+        }
+
+        console.log(`[Auth] Storing Outlook tokens for ${email} in org: ${effectiveOrgId}`);
 
         // Store per-sender tokens
         if (tokens.access_token) {
@@ -966,6 +1013,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const expiryDate = Date.now() + (tokens.expires_in * 1000);
           await storage.setApiSetting(effectiveOrgId, `outlook_sender_${email}_token_expiry`, String(expiryDate));
         }
+
+        // Verify tokens were stored
+        const verifySettings = await storage.getApiSettings(effectiveOrgId);
+        const storedToken = verifySettings[`outlook_sender_${email}_access_token`];
+        console.log(`[Auth] Token storage verification for ${email}: token stored = ${!!storedToken}, org = ${effectiveOrgId}`);
 
         // Only update org-level tokens if this is the primary Outlook account or first account
         const currentSettings = await storage.getApiSettings(effectiveOrgId);
@@ -1169,7 +1221,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const baseUrl = getBaseUrlFromRequest(req);
       const redirectUri = `${baseUrl}/api/auth/microsoft/callback`;
-      const orgId = req.user.organizationId;
+      let orgId = req.user.organizationId;
+
+      // CRITICAL FIX: When re-authenticating an existing email account,
+      // use the ACCOUNT's organizationId (not the logged-in user's org).
+      // This handles the case where a SuperAdmin from org-A re-authenticates
+      // an account that belongs to org-B.
+      const loginHint = req.query.email as string || '';
+      if (loginHint) {
+        try {
+          const existingAccount = await storage.findEmailAccountByEmail(loginHint);
+          if (existingAccount) {
+            orgId = (existingAccount as any).organizationId || orgId;
+            console.log(`[Auth] Outlook re-auth: using account's org ${orgId} for ${loginHint} (logged-in user org: ${req.user.organizationId})`);
+          }
+        } catch (e) {
+          console.warn('[Auth] Could not look up existing email account for org resolution:', e);
+        }
+      }
 
       // Load credentials from api_settings first, then env vars
       const { clientId, clientSecret } = await getStoredOAuthCredentials('microsoft');
@@ -1191,7 +1260,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
         'https://graph.microsoft.com/SMTP.Send',
       ];
 
-      const loginHint = req.query.email as string || '';
       const authUrl = new URL('https://login.microsoftonline.com/common/oauth2/v2.0/authorize');
       authUrl.searchParams.set('client_id', clientId);
       authUrl.searchParams.set('response_type', 'code');
@@ -1207,7 +1275,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }));
       if (loginHint) authUrl.searchParams.set('login_hint', loginHint);
 
-      console.log('[Auth] Outlook connect redirect for org:', orgId, 'hint:', loginHint || 'none');
+      console.log('[Auth] Outlook connect redirect for org:', orgId, 'hint:', loginHint || 'none', 'user-org:', req.user.organizationId);
       res.redirect(authUrl.toString());
     } catch (error) {
       console.error('[Auth] Outlook connect init error:', error);
@@ -1881,10 +1949,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         } else if (provider === 'outlook' || provider === 'microsoft') {
           // Test Microsoft Graph connection with token refresh
           try {
+            console.log(`[Test] Testing Outlook account ${account.email}, orgId: ${orgId}, account.organizationId: ${account.organizationId}`);
             const settings = await storage.getApiSettings(orgId);
             let accessToken = settings[`outlook_sender_${account.email}_access_token`] || settings.microsoft_access_token;
             const refreshToken = settings[`outlook_sender_${account.email}_refresh_token`] || settings.microsoft_refresh_token;
             const tokenExpiry = settings[`outlook_sender_${account.email}_token_expiry`] || settings.microsoft_token_expiry;
+            console.log(`[Test] Outlook tokens for ${account.email}: accessToken=${!!accessToken}, refreshToken=${!!refreshToken}, expiry=${tokenExpiry || 'none'}, orgId=${orgId}`);
             
             if (!accessToken && !refreshToken) {
               return res.json({ success: false, error: 'Microsoft OAuth tokens not found. Please use "Connect Outlook" to authenticate this account.', code: 'OAUTH_NO_TOKENS', authMethod: 'oauth' });

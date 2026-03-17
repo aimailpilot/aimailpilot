@@ -862,6 +862,10 @@ export class DatabaseStorage {
   async getEmailAccountByEmail(organizationId: string, email: string) {
     return hydrateAccount(db.prepare('SELECT * FROM email_accounts WHERE organizationId = ? AND email = ?').get(organizationId, email));
   }
+  // Find email account by email only (across all orgs) - used for OAuth re-auth to find the correct org
+  async findEmailAccountByEmail(email: string) {
+    return hydrateAccount(db.prepare('SELECT * FROM email_accounts WHERE email = ? LIMIT 1').get(email));
+  }
   async createEmailAccount(account: any) {
     const id = genId(); const ts2 = now();
     db.prepare('INSERT INTO email_accounts (id, organizationId, userId, provider, email, displayName, smtpConfig, dailyLimit, dailySent, isActive, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
