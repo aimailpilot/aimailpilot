@@ -2877,7 +2877,7 @@ export class DatabaseStorage {
     return isAzure;
   }
 
-  /** Force reset corrupted database - closes, deletes, recreates */
+  /** Force reset corrupted database - closes, deletes file, process must restart */
   resetCorruptDatabase(): { success: boolean; message: string } {
     try {
       // Close current connection
@@ -2888,16 +2888,13 @@ export class DatabaseStorage {
         try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch (e) { /* ignore */ }
       }
       
-      // Reopen fresh DB
-      (db as any) = new Database(DB_PATH);
-      db.pragma('journal_mode = DELETE');
-      db.pragma('foreign_keys = ON');
-      db.pragma('synchronous = FULL');
+      console.log(`[DB] Corrupt database deleted: ${DB_PATH}`);
+      console.log(`[DB] Process will exit - PM2/Azure will restart with fresh DB`);
       
-      // Recreate all tables
-      this.initializeTables();
+      // Force process exit so PM2/Azure restarts with fresh DB and schema
+      setTimeout(() => process.exit(1), 500);
       
-      return { success: true, message: `Database reset at ${DB_PATH}` };
+      return { success: true, message: `Database deleted at ${DB_PATH}. Server restarting with fresh DB...` };
     } catch (e: any) {
       return { success: false, message: e.message };
     }
