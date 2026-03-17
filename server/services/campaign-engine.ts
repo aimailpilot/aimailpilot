@@ -52,15 +52,23 @@ async function sendViaMicrosoftGraph(
   opts: { from: string; to: string; subject: string; html: string; headers?: Record<string, string> }
 ): Promise<SendResult> {
   try {
-    const message = {
+    const message: any = {
       subject: opts.subject,
       body: { contentType: 'HTML', content: opts.html },
       toRecipients: [{ emailAddress: { address: opts.to } }],
-      from: { emailAddress: { address: opts.from } },
-      internetMessageHeaders: opts.headers
-        ? Object.entries(opts.headers).map(([name, value]) => ({ name, value }))
-        : undefined,
     };
+    
+    // Only set 'from' if explicitly provided and different from the auth user
+    // For personal Microsoft accounts, omitting 'from' lets Graph use the authenticated user
+    if (opts.from) {
+      message.from = { emailAddress: { address: opts.from } };
+    }
+    
+    // Add custom headers if provided (X- headers for tracking)
+    if (opts.headers && Object.keys(opts.headers).length > 0) {
+      message.internetMessageHeaders = Object.entries(opts.headers)
+        .map(([name, value]) => ({ name, value }));
+    }
 
     const resp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
       method: 'POST',
@@ -70,11 +78,47 @@ async function sendViaMicrosoftGraph(
 
     if (!resp.ok) {
       const errText = await resp.text();
+      console.error(`[MicrosoftGraph] Send failed to ${opts.to}: status=${resp.status}, error=${errText}`);
+      
+      // If the error is about custom headers, retry without them
+      if (resp.status === 400 && errText.includes('internetMessageHeaders')) {
+        console.log(`[MicrosoftGraph] Retrying without custom headers for ${opts.to}`);
+        delete message.internetMessageHeaders;
+        const retryResp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message, saveToSentItems: true }),
+        });
+        if (retryResp.ok) {
+          return { success: true, messageId: `graph-${Date.now()}-noheaders` };
+        }
+        const retryErr = await retryResp.text();
+        console.error(`[MicrosoftGraph] Retry without headers also failed: ${retryResp.status} ${retryErr}`);
+      }
+      
+      // If error is about 'from' field, retry without it
+      if (resp.status === 400 && (errText.includes('from') || errText.includes('From') || errText.includes('sender'))) {
+        console.log(`[MicrosoftGraph] Retrying without explicit 'from' for ${opts.to}`);
+        delete message.from;
+        delete message.internetMessageHeaders;
+        const retryResp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message, saveToSentItems: true }),
+        });
+        if (retryResp.ok) {
+          return { success: true, messageId: `graph-${Date.now()}-nofrom` };
+        }
+        const retryErr = await retryResp.text();
+        console.error(`[MicrosoftGraph] Retry without from also failed: ${retryResp.status} ${retryErr}`);
+      }
+      
       return { success: false, error: `Graph API error (${resp.status}): ${errText}` };
     }
 
     return { success: true, messageId: `graph-${Date.now()}` };
   } catch (err) {
+    console.error(`[MicrosoftGraph] Exception sending to ${opts.to}:`, err);
     return { success: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
@@ -856,9 +900,10 @@ export class CampaignEngine {
           }
         } else if (provider === 'outlook' || provider === 'microsoft') {
           // Try Microsoft Graph API first
+          console.log(`[CampaignEngine] Outlook send: orgId=${orgId}, fromEmail=${fromEmail}, isOAuth=${isOAuthAccount}, provider=${provider}`);
           let accessToken = await refreshMicrosoftToken(orgId, fromEmail);
           if (accessToken) {
-            console.log(`[CampaignEngine] Sending via Microsoft Graph to ${contact.email}`);
+            console.log(`[CampaignEngine] Sending via Microsoft Graph to ${contact.email} (token len=${accessToken.length})`);
             result = await sendViaMicrosoftGraph(accessToken, {
               from: fromEmail,
               to: contact.email,
@@ -957,9 +1002,11 @@ export class CampaignEngine {
           const errorStr = (result.error || '').toLowerCase();
           const isInfrastructureError = errorStr.includes('oauth') || errorStr.includes('token') ||
             errorStr.includes('re-authenticate') || errorStr.includes('401') || errorStr.includes('403') ||
-            errorStr.includes('smtp') && errorStr.includes('auth') || errorStr.includes('credentials') ||
-            errorStr.includes('api error') || errorStr.includes('connection refused') ||
-            errorStr.includes('getaddrinfo') || errorStr.includes('timeout');
+            (errorStr.includes('smtp') && errorStr.includes('auth')) || errorStr.includes('credentials') ||
+            errorStr.includes('graph api error') || errorStr.includes('api error') || 
+            errorStr.includes('connection refused') ||
+            errorStr.includes('getaddrinfo') || errorStr.includes('timeout') ||
+            errorStr.includes('invalidauthenticationtoken') || errorStr.includes('errormessage');
           
           if (isInfrastructureError) {
             // Infrastructure/auth failure — do NOT count as bounce, do NOT mark contact as bounced
