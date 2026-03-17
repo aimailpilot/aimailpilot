@@ -8063,6 +8063,76 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     }
   });
 
+  // ========== BOOTSTRAP DB RESTORE (emergency, works when DB is empty) ==========
+  // This endpoint ONLY works when the database has NO users (i.e., after a DB wipe/corruption recovery).
+  // Once users exist, it returns 403 and you must use the superadmin endpoint instead.
+  // Security: a simple secret key must be provided to prevent unauthorized restores.
+  app.post('/api/db-restore', async (req: any, res) => {
+    try {
+      // Security check: require a restore key
+      const restoreKey = req.headers['x-restore-key'] || req.body.restoreKey;
+      if (restoreKey !== 'aimailpilot-restore-2026') {
+        return res.status(403).json({ message: 'Invalid restore key' });
+      }
+      
+      // Safety check: only allow when DB is empty (no users)
+      const stats = await storage.getPlatformStats();
+      if (stats.totalUsers > 0) {
+        return res.status(403).json({ 
+          message: 'Database already has data. Use /api/superadmin/db-import instead.',
+          totalUsers: stats.totalUsers,
+        });
+      }
+      
+      const importData = req.body;
+      if (!importData || !importData.tables) {
+        return res.status(400).json({ message: 'Invalid import data. Expected JSON with "tables" object.' });
+      }
+      
+      console.log(`[DB Restore] Bootstrap restore initiated. Source: ${importData.version || 'unknown'}, rows: ${importData.totalRows || 'unknown'}`);
+      
+      const importOrder = [
+        'organizations', 'users', 'organization_members', 'api_settings',
+        'email_accounts', 'contact_lists', 'contacts', 'contact_list_members',
+        'templates', 'campaigns', 'messages', 'tracking_events',
+        'unified_inbox', 'followup_sequences', 'followup_steps', 'followup_messages',
+      ];
+      
+      let totalImported = 0;
+      const results: Record<string, { imported: number; errors: number }> = {};
+      
+      for (const table of importOrder) {
+        const rows = importData.tables[table];
+        if (!rows || !Array.isArray(rows) || rows.length === 0) {
+          results[table] = { imported: 0, errors: 0 };
+          continue;
+        }
+        
+        try {
+          const result = storage.importTable(table, rows);
+          results[table] = result;
+          totalImported += result.imported;
+          console.log(`[DB Restore] ${table}: ${result.imported} imported, ${result.errors} errors`);
+        } catch (e) {
+          console.error(`[DB Restore] Table ${table} import failed:`, e);
+          results[table] = { imported: 0, errors: rows.length };
+        }
+      }
+      
+      res.json({
+        success: true,
+        message: `Bootstrap restore complete: ${totalImported} rows imported`,
+        totalImported,
+        results,
+        restoredAt: new Date().toISOString(),
+      });
+      console.log(`[DB Restore] Complete: ${totalImported} total rows restored`);
+    } catch (error) {
+      console.error('[DB Restore] Failed:', error);
+      res.status(500).json({ message: 'Failed to restore database', error: String(error) });
+    }
+  });
+
   // Start Gmail/Outlook reply & bounce tracking auto-check for all organizations
   // CRITICAL: Check BOTH org-level AND per-sender tokens (outlook_sender_*, gmail_sender_*)
   // Previously only org-level tokens were checked, causing bounce tracking to not start

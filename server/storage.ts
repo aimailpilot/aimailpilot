@@ -49,7 +49,45 @@ const isAzure = !!(process.env.WEBSITE_SITE_NAME || process.env.AZURE_WEBAPP_NAM
 
 const DB_PATH = getDbPath();
 console.log(`[DB] Using database at: ${DB_PATH}`);
-const db = new Database(DB_PATH);
+
+// ===== CRITICAL: Handle corrupted database files =====
+// SQLite WAL mode on Azure CIFS can corrupt the DB. If the DB is malformed,
+// we rename the corrupt file as a backup and create a fresh database.
+let db: InstanceType<typeof Database>;
+try {
+  db = new Database(DB_PATH);
+  // Quick integrity check — if this fails, the DB is corrupt
+  db.pragma('integrity_check');
+  console.log(`[DB] Database opened successfully`);
+} catch (e: any) {
+  console.error(`[DB] CRITICAL: Database is corrupted or unreadable: ${e.message}`);
+  
+  // Rename the corrupt file so we don't lose it entirely
+  const corruptPath = `${DB_PATH}.corrupt.${Date.now()}`;
+  try {
+    if (fs.existsSync(DB_PATH)) {
+      fs.renameSync(DB_PATH, corruptPath);
+      console.log(`[DB] Corrupt database renamed to: ${corruptPath}`);
+    }
+    // Also clean up WAL/SHM files that may be causing issues
+    for (const ext of ['-wal', '-shm', '-journal']) {
+      const auxFile = DB_PATH + ext;
+      if (fs.existsSync(auxFile)) {
+        fs.unlinkSync(auxFile);
+        console.log(`[DB] Removed auxiliary file: ${auxFile}`);
+      }
+    }
+  } catch (renameErr) {
+    console.error(`[DB] Failed to rename corrupt database:`, renameErr);
+    // Force delete if rename fails
+    try { fs.unlinkSync(DB_PATH); } catch (e2) { /* ignore */ }
+  }
+  
+  // Create a fresh database
+  console.log(`[DB] Creating fresh database at: ${DB_PATH}`);
+  db = new Database(DB_PATH);
+  console.log(`[DB] Fresh database created. Data must be restored via /api/superadmin/db-import`);
+}
 
 // ===== CRITICAL: SQLite configuration for Azure vs Local =====
 // Azure App Service uses CIFS/SMB network share for /home mount.
