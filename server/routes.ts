@@ -51,7 +51,12 @@ function createOAuth2Client(config: { clientId: string; clientSecret: string; re
 // Detect public base URL from request headers
 function getBaseUrlFromRequest(req: any): string {
   let proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
-  const host = req.headers['x-forwarded-host'] || req.headers['host'];
+  // Azure may send multiple protocols comma-separated (e.g., "https,http")
+  if (typeof proto === 'string' && proto.includes(',')) {
+    proto = proto.split(',')[0].trim();
+  }
+  // Check multiple headers for the host (Azure uses different headers)
+  const host = req.headers['x-forwarded-host'] || req.headers['x-original-host'] || req.headers['host'];
   // Force HTTPS for non-localhost hosts (sandbox proxies, production domains)
   if (host && !host.startsWith('localhost') && !host.startsWith('127.0.0.1')) {
     proto = 'https';
@@ -186,7 +191,7 @@ const requireSuperAdmin = async (req: any, res: any, next: any) => {
 };
 
 export async function registerRoutes(app: Express): Promise<Server> {
-  app.set('trust proxy', 1);
+  app.set('trust proxy', true); // Trust all proxies (Azure App Service uses multiple proxy layers)
   app.use(cookieParser());
 
   // Load persisted tracking base URL from settings on startup
