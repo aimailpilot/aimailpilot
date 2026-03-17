@@ -8091,11 +8091,11 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         return res.status(403).json({ message: 'Invalid restore key' });
       }
       
-      // Safety check: only allow when DB is empty (no users)
+      // Safety check: only allow when DB has no REAL users (seed data has <=1 user)
       const stats = await storage.getPlatformStats();
-      if (stats.totalUsers > 0) {
+      if (stats.totalUsers > 1) {
         return res.status(403).json({ 
-          message: 'Database already has data. Use /api/superadmin/db-import instead.',
+          message: 'Database has real user data. Use /api/superadmin/db-import instead.',
           totalUsers: stats.totalUsers,
         });
       }
