@@ -102,7 +102,20 @@ export function serveStatic(app: Express) {
   });
 
   // SPA fallback: serve index.html for all other routes (client-side routing)
-  app.use("*", (_req, res) => {
+  // Skip routes that are handled by server-side Express routes
+  const serverRoutes = [
+    '/.well-known/',
+    '/googledc2a820e33a8a478.html',
+    '/termsofservice',
+    '/privacystatement',
+  ];
+  app.use("*", (req, res) => {
+    const url = req.originalUrl;
+    if (serverRoutes.some(r => url.startsWith(r))) {
+      // This shouldn't happen if routes are registered correctly,
+      // but as safety: return 404 instead of SPA
+      return res.status(404).send('Not found');
+    }
     res.sendFile(path.resolve(distPath, "index.html"));
   });
 }
