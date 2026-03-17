@@ -2813,7 +2813,7 @@ export class DatabaseStorage {
   exportTable(tableName: string): any[] {
     // Sanitize table name to prevent SQL injection
     const validTables = [
-      'users', 'organizations', 'organization_members', 'api_settings',
+      'users', 'organizations', 'organization_members', 'org_members', 'api_settings',
       'email_accounts', 'templates', 'campaigns', 'messages', 'contacts',
       'contact_lists', 'contact_list_members', 'tracking_events',
       'unified_inbox', 'followup_sequences', 'followup_steps', 'followup_messages',
@@ -2832,7 +2832,7 @@ export class DatabaseStorage {
   /** Import rows into a table, skipping duplicates (INSERT OR IGNORE) */
   importTable(tableName: string, rows: any[]): { imported: number; errors: number } {
     const validTables = [
-      'users', 'organizations', 'organization_members', 'api_settings',
+      'users', 'organizations', 'organization_members', 'org_members', 'api_settings',
       'email_accounts', 'templates', 'campaigns', 'messages', 'contacts',
       'contact_lists', 'contact_list_members', 'tracking_events',
       'unified_inbox', 'followup_sequences', 'followup_steps', 'followup_messages',
@@ -2870,6 +2870,11 @@ export class DatabaseStorage {
   /** Get the database file path */
   getDbPath(): string {
     return DB_PATH;
+  }
+
+  /** Run a direct SQL statement (for admin fixes) */
+  runDirectSQL(sql: string, params: any[] = []): any {
+    return db.prepare(sql).run(...params);
   }
 
   /** Check if running on Azure */

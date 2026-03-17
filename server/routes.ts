@@ -8197,17 +8197,16 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         }
       }
       
-      // 3. Promote specified user to superadmin (or first admin)
+      // 3. Promote specified user to superadmin using direct UPDATE
       const targetEmail = req.body.superadminEmail || 'dev@aegis.edu.in';
       const targetUser = allUsers.find((u: any) => u.email === targetEmail);
       if (targetUser) {
         try {
-          storage.importTable('users', [{
-            ...targetUser,
-            isSuperAdmin: 1,
-            role: 'admin',
-          }]);
-          fixes.push(`Promoted ${targetEmail} to superadmin`);
+          storage.runDirectSQL(
+            `UPDATE users SET isSuperAdmin = 1, role = 'admin' WHERE id = ?`,
+            [targetUser.id]
+          );
+          fixes.push(`Promoted ${targetEmail} (id: ${targetUser.id}) to superadmin`);
         } catch (e) {
           fixes.push(`Failed to promote ${targetEmail}: ${e}`);
         }
