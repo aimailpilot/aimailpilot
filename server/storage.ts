@@ -34,19 +34,110 @@ function getDbPath(): string {
   return localPath;
 }
 
+const isAzure = !!(process.env.WEBSITE_SITE_NAME || process.env.AZURE_WEBAPP_NAME || 
+                   process.env.APPSETTING_WEBSITE_SITE_NAME || fs.existsSync('/home/site/wwwroot'));
+
 const DB_PATH = getDbPath();
 console.log(`[DB] Using database at: ${DB_PATH}`);
 const db = new Database(DB_PATH);
 
-// Enable WAL mode for better concurrent read performance
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
-// High-volume performance tuning
-db.pragma('synchronous = NORMAL');      // Faster writes (WAL provides crash safety)
-db.pragma('cache_size = -64000');       // 64MB cache (default is 2MB)
-db.pragma('temp_store = MEMORY');       // Use RAM for temp tables
-db.pragma('mmap_size = 268435456');     // 256MB memory-mapped I/O
-db.pragma('wal_autocheckpoint = 1000'); // Checkpoint every 1000 pages
+// ===== CRITICAL: SQLite configuration for Azure vs Local =====
+// Azure App Service uses CIFS/SMB network share for /home mount.
+// SQLite WAL mode is UNSAFE on network shares because:
+// 1. WAL uses shared memory (.db-shm) which requires POSIX locking (not available on CIFS)
+// 2. Memory-mapped I/O (mmap) doesn't work correctly on network shares
+// 3. When container restarts, un-checkpointed WAL data is LOST
+// This was the ROOT CAUSE of data loss on Azure deployments.
+if (isAzure) {
+  // AZURE: Use DELETE journal mode (safe for network shares)
+  db.pragma('journal_mode = DELETE');
+  db.pragma('foreign_keys = ON');
+  db.pragma('synchronous = FULL');           // Ensure all writes are flushed to disk
+  db.pragma('cache_size = -16000');          // 16MB cache (conservative for Azure)
+  db.pragma('temp_store = MEMORY');          // Use RAM for temp tables
+  // Do NOT use mmap on Azure CIFS - it's unreliable
+  db.pragma('mmap_size = 0');
+  db.pragma('busy_timeout = 10000');         // Wait 10s for locks instead of failing immediately
+  console.log(`[DB] Azure mode: journal_mode=DELETE, synchronous=FULL, mmap=OFF (safe for CIFS/SMB)`);
+} else {
+  // LOCAL: WAL mode for better performance
+  db.pragma('journal_mode = WAL');
+  db.pragma('foreign_keys = ON');
+  db.pragma('synchronous = NORMAL');         // Faster writes (WAL provides crash safety)
+  db.pragma('cache_size = -64000');          // 64MB cache
+  db.pragma('temp_store = MEMORY');          // Use RAM for temp tables
+  db.pragma('mmap_size = 268435456');        // 256MB memory-mapped I/O
+  db.pragma('wal_autocheckpoint = 1000');    // Checkpoint every 1000 pages
+  console.log(`[DB] Local mode: journal_mode=WAL, synchronous=NORMAL, mmap=256MB`);
+}
+
+// ===== AZURE: Automatic database backup on startup =====
+// Creates a timestamped backup copy every time the server starts.
+// This protects against data loss from Azure container restarts.
+if (isAzure) {
+  try {
+    const backupDir = '/home/data/backups';
+    if (!fs.existsSync(backupDir)) {
+      fs.mkdirSync(backupDir, { recursive: true });
+    }
+    
+    // Only backup if the DB has data (file > 100KB)
+    const stats = fs.statSync(DB_PATH);
+    if (stats.size > 100 * 1024) {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const backupPath = path.join(backupDir, `aimailpilot-${timestamp}.db`);
+      
+      // Use SQLite backup API for consistent backup (not file copy)
+      db.backup(backupPath).then(() => {
+        console.log(`[DB] Azure backup created: ${backupPath} (${(stats.size / 1024 / 1024).toFixed(1)}MB)`);
+        
+        // Keep only last 5 backups to save space
+        try {
+          const backups = fs.readdirSync(backupDir)
+            .filter(f => f.startsWith('aimailpilot-') && f.endsWith('.db'))
+            .sort()
+            .reverse();
+          for (let i = 5; i < backups.length; i++) {
+            fs.unlinkSync(path.join(backupDir, backups[i]));
+            console.log(`[DB] Removed old backup: ${backups[i]}`);
+          }
+        } catch (e) { /* ignore cleanup errors */ }
+      }).catch((err: any) => {
+        console.error(`[DB] Azure backup failed:`, err);
+        // Fallback: simple file copy
+        try {
+          fs.copyFileSync(DB_PATH, backupPath);
+          console.log(`[DB] Azure backup (file copy) created: ${backupPath}`);
+        } catch (e2) {
+          console.error(`[DB] Azure backup file copy also failed:`, e2);
+        }
+      });
+    } else {
+      console.log(`[DB] Azure backup skipped: DB too small (${stats.size} bytes), likely empty`);
+    }
+  } catch (e) {
+    console.error('[DB] Azure backup error:', e);
+  }
+}
+
+// ===== GRACEFUL SHUTDOWN: Checkpoint WAL and close DB =====
+// Even though Azure uses DELETE mode now, this handles edge cases
+function gracefulShutdown(signal: string) {
+  console.log(`[DB] ${signal} received, closing database...`);
+  try {
+    if (!isAzure) {
+      // Checkpoint WAL before closing (local only since Azure uses DELETE mode)
+      db.pragma('wal_checkpoint(TRUNCATE)');
+    }
+    db.close();
+    console.log(`[DB] Database closed cleanly`);
+  } catch (e) {
+    console.error(`[DB] Error closing database:`, e);
+  }
+  process.exit(0);
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 function genId() { return crypto.randomUUID(); }
 function now() { return new Date().toISOString(); }

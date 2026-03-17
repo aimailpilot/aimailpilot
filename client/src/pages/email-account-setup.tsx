@@ -13,7 +13,7 @@ import {
   Mail, Plus, Trash2, TestTube, CheckCircle, XCircle, 
   Loader2, Shield, Eye, EyeOff, AlertCircle, Inbox, Server,
   ExternalLink, Zap, Globe, Lock, Send, RefreshCw, Copy,
-  ChevronRight, Wifi, WifiOff, Clock, Settings, User
+  ChevronRight, Wifi, WifiOff, Clock, Settings, User, AlertTriangle
 } from "lucide-react";
 
 interface EmailAccount {
@@ -26,6 +26,8 @@ interface EmailAccount {
   dailySent: number;
   userId?: string;
   authMethod?: 'oauth' | 'smtp';
+  hasValidTokens?: boolean;
+  tokenStatus?: 'connected' | 'tokens_missing' | 'smtp' | 'unknown';
   smtpConfig?: {
     host: string;
     port: number;
@@ -649,7 +651,11 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
                       <div className="flex items-center gap-4 text-[11px] text-gray-400">
                         <span className="flex items-center gap-1">
                           {(account.authMethod === 'oauth' || account.smtpConfig?.auth?.pass === 'OAUTH_TOKEN') ? (
-                            <><Shield className="h-3 w-3 text-emerald-500" /> <span className="text-emerald-600 font-medium">OAuth ({account.provider === 'outlook' || account.provider === 'microsoft' ? 'Microsoft Graph' : 'Gmail API'})</span></>
+                            account.tokenStatus === 'tokens_missing' ? (
+                              <><AlertTriangle className="h-3 w-3 text-red-500" /> <span className="text-red-600 font-medium">OAuth ({account.provider === 'outlook' || account.provider === 'microsoft' ? 'Microsoft' : 'Gmail'}) - Tokens Missing!</span></>
+                            ) : (
+                              <><Shield className="h-3 w-3 text-emerald-500" /> <span className="text-emerald-600 font-medium">OAuth ({account.provider === 'outlook' || account.provider === 'microsoft' ? 'Microsoft Graph' : 'Gmail API'})</span></>
+                            )
                           ) : (
                             <><Server className="h-3 w-3" /> {account.smtpConfig?.host}:{account.smtpConfig?.port}</>
                           )}
@@ -669,8 +675,26 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
 
                     {/* Actions */}
                     <div className="flex items-center gap-2 flex-shrink-0">
+                      {/* OAuth tokens missing - proactive Re-authenticate button */}
+                      {account.tokenStatus === 'tokens_missing' && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            if (account.provider === 'outlook' || account.provider === 'microsoft') {
+                              window.location.href = '/api/auth/outlook-connect?email=' + encodeURIComponent(account.email);
+                            } else {
+                              window.location.href = '/api/auth/gmail-connect?email=' + encodeURIComponent(account.email);
+                            }
+                          }}
+                          className="h-8 text-xs bg-red-50 text-red-700 border-red-200 hover:bg-red-100 hover:text-red-800 animate-pulse"
+                        >
+                          <AlertTriangle className="h-3 w-3 mr-1" /> Connect OAuth
+                        </Button>
+                      )}
+
                       {/* OAuth token expired - Re-authenticate button */}
-                      {thisTestResult && !thisTestResult.success && (
+                      {account.tokenStatus !== 'tokens_missing' && thisTestResult && !thisTestResult.success && (
                         (thisTestResult.error || '').match(/OAuth|token.*expired|re-authenticate|401|403|OAUTH/i)
                       ) && (account.authMethod === 'oauth' || account.smtpConfig?.auth?.pass === 'OAUTH_TOKEN') && (
                         <Button

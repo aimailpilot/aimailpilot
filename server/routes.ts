@@ -2044,15 +2044,43 @@ export async function registerRoutes(app: Express): Promise<Server> {
         } catch (e) { /* ignore */ }
       }
       
+      // Check token status for each account so UI can show re-authenticate warnings
+      const orgSettings = await storage.getApiSettings(req.user.organizationId);
+      
       const safe = filtered.map((a: any) => {
         const isOAuth = a.smtpConfig?.auth?.pass === 'OAUTH_TOKEN';
         // canManage: admins manage all, members manage only their own
         const canManage = isAdmin || a.userId === req.user.id;
         const ownerInfo = isAdmin && a.userId ? memberLookup[a.userId] : null;
+        
+        // Check if OAuth tokens actually exist for this account
+        let hasValidTokens = false;
+        let tokenStatus = 'unknown';
+        if (isOAuth) {
+          if (a.provider === 'outlook' || a.provider === 'microsoft') {
+            // Check per-sender Outlook tokens
+            const hasPerSender = !!(orgSettings[`outlook_sender_${a.email}_access_token`] || orgSettings[`outlook_sender_${a.email}_refresh_token`]);
+            const hasOrgLevel = !!(orgSettings.microsoft_access_token || orgSettings.microsoft_refresh_token);
+            hasValidTokens = hasPerSender || (hasOrgLevel && orgSettings.microsoft_user_email === a.email);
+            tokenStatus = hasValidTokens ? 'connected' : 'tokens_missing';
+          } else if (a.provider === 'gmail' || a.provider === 'google') {
+            const hasPerSender = !!(orgSettings[`gmail_sender_${a.email}_access_token`] || orgSettings[`gmail_sender_${a.email}_refresh_token`]);
+            const hasOrgLevel = !!(orgSettings.gmail_access_token || orgSettings.gmail_refresh_token);
+            hasValidTokens = hasPerSender || (hasOrgLevel && orgSettings.gmail_user_email === a.email);
+            tokenStatus = hasValidTokens ? 'connected' : 'tokens_missing';
+          }
+        } else {
+          // SMTP accounts don't need OAuth tokens
+          hasValidTokens = true;
+          tokenStatus = 'smtp';
+        }
+        
         return {
           ...a,
           authMethod: isOAuth ? 'oauth' : 'smtp',
           canManage,
+          hasValidTokens,
+          tokenStatus,
           // Admin-only: show who added this account
           addedByName: ownerInfo?.name || null,
           addedByEmail: ownerInfo?.email || null,
@@ -3597,6 +3625,111 @@ Which account should I use and why? If I need to split across accounts, provide 
       });
     } catch (error) {
       res.status(500).json({ message: 'Failed to get tracking status' });
+    }
+  });
+
+  // Comprehensive bounce/reply tracking diagnostics
+  app.get('/api/reply-tracking/diagnostics', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const settings = await storage.getApiSettings(orgId);
+      const emailAccounts = await storage.getEmailAccounts(orgId);
+      
+      // Check all token sources
+      const gmailTokenSources: any[] = [];
+      const outlookTokenSources: any[] = [];
+      
+      for (const key of Object.keys(settings)) {
+        if (key.startsWith('gmail_sender_') && key.endsWith('_access_token')) {
+          const email = key.match(/^gmail_sender_(.+?)_access_token$/)?.[1] || 'unknown';
+          gmailTokenSources.push({ 
+            email, type: 'per-sender', 
+            hasAccessToken: !!settings[`gmail_sender_${email}_access_token`],
+            hasRefreshToken: !!settings[`gmail_sender_${email}_refresh_token`],
+            tokenExpiryRaw: settings[`gmail_sender_${email}_token_expiry`] || null,
+          });
+        }
+        if (key.startsWith('outlook_sender_') && key.endsWith('_access_token')) {
+          const email = key.match(/^outlook_sender_(.+?)_access_token$/)?.[1] || 'unknown';
+          outlookTokenSources.push({ 
+            email, type: 'per-sender',
+            hasAccessToken: !!settings[`outlook_sender_${email}_access_token`],
+            hasRefreshToken: !!settings[`outlook_sender_${email}_refresh_token`],
+            tokenExpiryRaw: settings[`outlook_sender_${email}_token_expiry`] || null,
+          });
+        }
+      }
+      
+      // Org-level tokens
+      if (settings.gmail_access_token || settings.gmail_refresh_token) {
+        gmailTokenSources.push({ 
+          email: settings.gmail_user_email || 'org-level', type: 'org-level',
+          hasAccessToken: !!settings.gmail_access_token,
+          hasRefreshToken: !!settings.gmail_refresh_token,
+          tokenExpiryRaw: settings.gmail_token_expiry || null,
+        });
+      }
+      if (settings.microsoft_access_token || settings.microsoft_refresh_token) {
+        outlookTokenSources.push({ 
+          email: settings.microsoft_user_email || 'org-level', type: 'org-level',
+          hasAccessToken: !!settings.microsoft_access_token,
+          hasRefreshToken: !!settings.microsoft_refresh_token,
+          tokenExpiryRaw: settings.microsoft_token_expiry || null,
+        });
+      }
+      
+      // Accounts vs tokens comparison
+      const accountsWithoutTokens = emailAccounts.filter((a: any) => {
+        if (a.smtpConfig?.auth?.pass !== 'OAUTH_TOKEN') return false; // SMTP accounts don't need OAuth tokens
+        if (a.provider === 'outlook' || a.provider === 'microsoft') {
+          return !settings[`outlook_sender_${a.email}_access_token`] && 
+                 !settings[`outlook_sender_${a.email}_refresh_token`] &&
+                 !(settings.microsoft_access_token && settings.microsoft_user_email === a.email);
+        }
+        if (a.provider === 'gmail' || a.provider === 'google') {
+          return !settings[`gmail_sender_${a.email}_access_token`] && 
+                 !settings[`gmail_sender_${a.email}_refresh_token`] &&
+                 !(settings.gmail_access_token && settings.gmail_user_email === a.email);
+        }
+        return false;
+      }).map((a: any) => ({ email: a.email, provider: a.provider, id: a.id }));
+      
+      // Bounce statistics
+      const bouncedMessages = await storage.getBouncedMessagesWithContacts(orgId);
+      const bounceEvents = await storage.getBounceEventsWithContacts(orgId);
+      
+      // Tracker status
+      const gmailStatus = gmailReplyTracker.getStatus();
+      const outlookStatus = outlookReplyTracker.getStatus();
+      
+      res.json({
+        orgId,
+        trackerStatus: {
+          gmail: { ...gmailStatus, hasTokens: orgHasGmailTokens(settings) },
+          outlook: { ...outlookStatus, hasTokens: orgHasOutlookTokens(settings) },
+        },
+        tokenSources: {
+          gmail: gmailTokenSources,
+          outlook: outlookTokenSources,
+        },
+        emailAccounts: emailAccounts.map((a: any) => ({ 
+          id: a.id, email: a.email, provider: a.provider, 
+          isOAuth: a.smtpConfig?.auth?.pass === 'OAUTH_TOKEN',
+          isActive: a.isActive,
+        })),
+        accountsWithoutTokens,
+        bounceStats: {
+          bouncedMessages: bouncedMessages.length,
+          bounceEvents: bounceEvents.length,
+        },
+        recommendation: accountsWithoutTokens.length > 0
+          ? `${accountsWithoutTokens.length} OAuth account(s) missing tokens. These accounts need re-authentication: ${accountsWithoutTokens.map(a => a.email).join(', ')}`
+          : 'All OAuth accounts have tokens. Bounce tracking should be working.',
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error('[ReplyTracking] Diagnostics error:', error);
+      res.status(500).json({ message: 'Failed to get tracking diagnostics' });
     }
   });
 
@@ -6207,16 +6340,25 @@ Example response:
     try {
       const orgId = req.user.organizationId;
       const lookbackMinutes = parseInt(req.body.lookbackMinutes) || 120;
-      const results: any = { gmail: null, outlook: null };
+      const results: any = { gmail: null, outlook: null, warnings: [] as string[] };
 
       const settings = await storage.getApiSettings(orgId);
 
       // CRITICAL: Check BOTH org-level AND per-sender tokens
       if (orgHasGmailTokens(settings)) {
         results.gmail = await gmailReplyTracker.checkForReplies(orgId, lookbackMinutes);
+      } else {
+        results.warnings.push('No Gmail OAuth tokens found. Gmail bounce detection is disabled.');
       }
       if (orgHasOutlookTokens(settings)) {
         results.outlook = await outlookReplyTracker.checkForReplies(orgId, lookbackMinutes);
+      } else {
+        // Check if there are Outlook email accounts that need OAuth
+        const emailAccounts = await storage.getEmailAccounts(orgId);
+        const outlookAccounts = emailAccounts.filter((a: any) => a.provider === 'outlook' || a.provider === 'microsoft');
+        if (outlookAccounts.length > 0) {
+          results.warnings.push(`${outlookAccounts.length} Outlook account(s) found but no OAuth tokens. Re-authenticate these accounts to enable Outlook bounce detection: ${outlookAccounts.map((a: any) => a.email).join(', ')}`);
+        }
       }
 
       // Auto-sync bounce status to contacts after every inbox sync
