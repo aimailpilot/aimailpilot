@@ -504,6 +504,7 @@ export default function AdvancedSettings() {
             <div>
               <Label htmlFor="ms-client-secret" className="text-sm font-medium text-gray-700">
                 Client Secret <span className="text-red-500">*</span>
+                <span className="text-xs text-amber-600 font-normal ml-1">(Use the Secret <strong>Value</strong>, NOT the Secret ID)</span>
               </Label>
               <div className="relative mt-1.5">
                 <Input
