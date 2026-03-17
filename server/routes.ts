@@ -8067,6 +8067,37 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     }
   });
 
+  // ========== OAuth redirect URI diagnostic ==========
+  app.get('/api/oauth-debug', async (req: any, res) => {
+    try {
+      const googleCreds = await getStoredOAuthCredentials('google');
+      const msCreds = await getStoredOAuthCredentials('microsoft');
+      const googleRedirect = getGoogleRedirectUri(req);
+      const msRedirect = getMicrosoftRedirectUri(req);
+      res.json({
+        google: {
+          clientId: googleCreds.clientId ? googleCreds.clientId.substring(0, 20) + '...' : 'NOT SET',
+          hasSecret: !!googleCreds.clientSecret,
+          redirectUri: googleRedirect,
+        },
+        microsoft: {
+          clientId: msCreds.clientId ? msCreds.clientId.substring(0, 20) + '...' : 'NOT SET',
+          hasSecret: !!msCreds.clientSecret,
+          redirectUri: msRedirect,
+        },
+        requestHeaders: {
+          host: req.headers['host'],
+          xForwardedHost: req.headers['x-forwarded-host'],
+          xOriginalHost: req.headers['x-original-host'],
+          xForwardedProto: req.headers['x-forwarded-proto'],
+        },
+        instruction: 'The redirect URIs above MUST be registered EXACTLY in Google Cloud Console > Credentials > OAuth Client > Authorized redirect URIs. Go add them if missing.',
+      });
+    } catch (error) {
+      res.status(500).json({ error: String(error) });
+    }
+  });
+
   // ========== EMERGENCY DB RESET (for corrupted databases) ==========
   app.post('/api/db-reset', async (req: any, res) => {
     try {
