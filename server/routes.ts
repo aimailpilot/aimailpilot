@@ -91,6 +91,33 @@ function getGoogleRedirectUri(req: any): string {
   return `${baseUrl}/api/auth/google/callback`;
 }
 
+/**
+ * Check if an organization has ANY Gmail or Outlook tokens (org-level OR per-sender).
+ * This is critical for starting reply/bounce tracking auto-checks.
+ * Previously, only org-level tokens were checked, missing per-sender tokens entirely.
+ */
+function orgHasGmailTokens(settings: Record<string, string>): boolean {
+  if (settings.gmail_access_token || settings.gmail_refresh_token) return true;
+  // Check for per-sender Gmail tokens: gmail_sender_{email}_access_token
+  for (const key of Object.keys(settings)) {
+    if (key.startsWith('gmail_sender_') && (key.endsWith('_access_token') || key.endsWith('_refresh_token'))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function orgHasOutlookTokens(settings: Record<string, string>): boolean {
+  if (settings.microsoft_access_token || settings.microsoft_refresh_token) return true;
+  // Check for per-sender Outlook tokens: outlook_sender_{email}_access_token
+  for (const key of Object.keys(settings)) {
+    if (key.startsWith('outlook_sender_') && (key.endsWith('_access_token') || key.endsWith('_refresh_token'))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Simple auth middleware
 const requireAuth = async (req: any, res: any, next: any) => {
   const userId = req.cookies?.user_id || req.session?.userId;
@@ -1584,6 +1611,253 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       res.json({ googleOAuth: false, microsoftOAuth: false });
     }
+  });
+
+  // ========== BRANDING / LEGAL PAGES ==========
+  // These are server-rendered so Microsoft Azure App Registration can crawl them
+
+  app.get('/termsofservice', (_req, res) => {
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Terms of Service - AImailPilot</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.7; color: #1a1a2e; background: #f8f9fa; }
+    .header { background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; padding: 3rem 2rem; text-align: center; }
+    .header h1 { font-size: 2.5rem; font-weight: 700; margin-bottom: 0.5rem; }
+    .header p { opacity: 0.9; font-size: 1.1rem; }
+    .container { max-width: 800px; margin: -2rem auto 3rem; padding: 2.5rem; background: white; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
+    h2 { color: #6366f1; font-size: 1.4rem; margin-top: 2rem; margin-bottom: 0.75rem; padding-bottom: 0.5rem; border-bottom: 2px solid #e5e7eb; }
+    h3 { color: #374151; font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+    p, li { color: #4b5563; margin-bottom: 0.75rem; }
+    ul { padding-left: 1.5rem; }
+    li { margin-bottom: 0.5rem; }
+    .effective-date { background: #f0f0ff; padding: 1rem; border-radius: 8px; border-left: 4px solid #6366f1; margin-bottom: 1.5rem; }
+    .footer { text-align: center; padding: 2rem; color: #9ca3af; font-size: 0.9rem; }
+    a { color: #6366f1; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Terms of Service</h1>
+    <p>AImailPilot - AI-Powered Email Campaign Platform</p>
+  </div>
+  <div class="container">
+    <div class="effective-date"><strong>Effective Date:</strong> March 17, 2026 &nbsp;|&nbsp; <strong>Last Updated:</strong> March 17, 2026</div>
+
+    <p>Welcome to AImailPilot ("Service", "we", "us", or "our"). By accessing or using our platform at <a href="https://aimailpilot.com">aimailpilot.com</a>, you agree to be bound by these Terms of Service ("Terms"). Please read them carefully.</p>
+
+    <h2>1. Acceptance of Terms</h2>
+    <p>By creating an account or using AImailPilot, you confirm that you are at least 18 years old, have the legal capacity to enter into a binding agreement, and agree to these Terms and our <a href="/privacystatement">Privacy Statement</a>.</p>
+
+    <h2>2. Description of Service</h2>
+    <p>AImailPilot is an AI-powered email campaign management platform that provides:</p>
+    <ul>
+      <li>Email campaign creation, scheduling, and management</li>
+      <li>Contact list management and segmentation</li>
+      <li>Email template creation with AI-assisted personalization</li>
+      <li>Campaign analytics including open, click, reply, and bounce tracking</li>
+      <li>Integration with email providers (Gmail, Microsoft Outlook) via OAuth</li>
+      <li>Multi-step follow-up sequences</li>
+      <li>Unified inbox for managing replies</li>
+    </ul>
+
+    <h2>3. User Accounts</h2>
+    <h3>3.1 Account Registration</h3>
+    <p>You may register using Google or Microsoft OAuth. You are responsible for maintaining the confidentiality of your account and for all activities that occur under your account.</p>
+    <h3>3.2 Account Hierarchy</h3>
+    <p>AImailPilot supports a hierarchical account structure: Super Admin, Organization Admins, and Members. Permissions and access are governed by your role within your organization.</p>
+
+    <h2>4. Acceptable Use Policy</h2>
+    <p>You agree NOT to use AImailPilot to:</p>
+    <ul>
+      <li>Send unsolicited bulk email (spam) in violation of applicable laws</li>
+      <li>Violate any applicable anti-spam laws including CAN-SPAM, GDPR, CASL, or similar regulations</li>
+      <li>Send emails containing malware, phishing attempts, or fraudulent content</li>
+      <li>Harvest or collect email addresses without consent</li>
+      <li>Impersonate any person or entity</li>
+      <li>Interfere with or disrupt the Service or servers</li>
+      <li>Use the Service for any illegal or unauthorized purpose</li>
+    </ul>
+
+    <h2>5. Email Sending &amp; Compliance</h2>
+    <p>You are solely responsible for ensuring your email campaigns comply with all applicable laws and regulations. AImailPilot provides tools to help compliance (unsubscribe links, bounce management) but does not guarantee legal compliance of your campaigns.</p>
+
+    <h2>6. Third-Party Integrations</h2>
+    <p>AImailPilot integrates with third-party services including Google (Gmail API) and Microsoft (Graph API). Your use of these integrations is subject to the respective third-party terms of service. We access only the permissions you explicitly grant during OAuth authorization.</p>
+
+    <h2>7. Data &amp; Content</h2>
+    <h3>7.1 Your Data</h3>
+    <p>You retain ownership of all data you upload or create through the Service, including contacts, email templates, and campaign content.</p>
+    <h3>7.2 Data Handling</h3>
+    <p>We handle your data in accordance with our <a href="/privacystatement">Privacy Statement</a>. We do not sell your data to third parties.</p>
+
+    <h2>8. Intellectual Property</h2>
+    <p>AImailPilot and its original content, features, and functionality are owned by us and are protected by international copyright, trademark, and other intellectual property laws.</p>
+
+    <h2>9. Limitation of Liability</h2>
+    <p>To the maximum extent permitted by law, AImailPilot shall not be liable for any indirect, incidental, special, consequential, or punitive damages, including loss of profits, data, or business opportunities, arising from your use of the Service.</p>
+
+    <h2>10. Disclaimer of Warranties</h2>
+    <p>The Service is provided "AS IS" and "AS AVAILABLE" without warranties of any kind, either express or implied. We do not guarantee that the Service will be uninterrupted, secure, or error-free.</p>
+
+    <h2>11. Termination</h2>
+    <p>We may suspend or terminate your account at any time for violation of these Terms. You may terminate your account at any time by contacting us. Upon termination, your right to use the Service ceases immediately.</p>
+
+    <h2>12. Changes to Terms</h2>
+    <p>We reserve the right to modify these Terms at any time. Material changes will be communicated via email or through the Service. Continued use after changes constitutes acceptance of the new Terms.</p>
+
+    <h2>13. Contact Us</h2>
+    <p>For questions about these Terms, please contact us at:</p>
+    <ul>
+      <li>Email: <a href="mailto:support@aimailpilot.com">support@aimailpilot.com</a></li>
+      <li>Website: <a href="https://aimailpilot.com">https://aimailpilot.com</a></li>
+    </ul>
+  </div>
+  <div class="footer">&copy; 2026 AImailPilot. All rights reserved.</div>
+</body>
+</html>`);
+  });
+
+  app.get('/privacystatement', (_req, res) => {
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privacy Statement - AImailPilot</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.7; color: #1a1a2e; background: #f8f9fa; }
+    .header { background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; padding: 3rem 2rem; text-align: center; }
+    .header h1 { font-size: 2.5rem; font-weight: 700; margin-bottom: 0.5rem; }
+    .header p { opacity: 0.9; font-size: 1.1rem; }
+    .container { max-width: 800px; margin: -2rem auto 3rem; padding: 2.5rem; background: white; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
+    h2 { color: #6366f1; font-size: 1.4rem; margin-top: 2rem; margin-bottom: 0.75rem; padding-bottom: 0.5rem; border-bottom: 2px solid #e5e7eb; }
+    h3 { color: #374151; font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+    p, li { color: #4b5563; margin-bottom: 0.75rem; }
+    ul { padding-left: 1.5rem; }
+    li { margin-bottom: 0.5rem; }
+    .effective-date { background: #f0f0ff; padding: 1rem; border-radius: 8px; border-left: 4px solid #6366f1; margin-bottom: 1.5rem; }
+    .footer { text-align: center; padding: 2rem; color: #9ca3af; font-size: 0.9rem; }
+    a { color: #6366f1; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+    th, td { text-align: left; padding: 0.75rem; border-bottom: 1px solid #e5e7eb; }
+    th { background: #f9fafb; color: #374151; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Privacy Statement</h1>
+    <p>AImailPilot - AI-Powered Email Campaign Platform</p>
+  </div>
+  <div class="container">
+    <div class="effective-date"><strong>Effective Date:</strong> March 17, 2026 &nbsp;|&nbsp; <strong>Last Updated:</strong> March 17, 2026</div>
+
+    <p>AImailPilot ("we", "us", or "our") is committed to protecting your privacy. This Privacy Statement explains how we collect, use, disclose, and safeguard your information when you use our platform at <a href="https://aimailpilot.com">aimailpilot.com</a>.</p>
+
+    <h2>1. Information We Collect</h2>
+    <h3>1.1 Information You Provide</h3>
+    <ul>
+      <li><strong>Account Information:</strong> Name, email address, and profile picture obtained through Google or Microsoft OAuth sign-in</li>
+      <li><strong>Contact Data:</strong> Email addresses, names, company names, and other contact details you upload for email campaigns</li>
+      <li><strong>Email Content:</strong> Email templates, campaign content, and follow-up sequences you create</li>
+      <li><strong>Organization Data:</strong> Organization name and settings configured by administrators</li>
+    </ul>
+    <h3>1.2 Information Collected Automatically</h3>
+    <ul>
+      <li><strong>Usage Data:</strong> Campaign statistics (sends, opens, clicks, replies, bounces)</li>
+      <li><strong>Email Tracking Data:</strong> Open tracking via pixel, click tracking via redirect links</li>
+      <li><strong>Log Data:</strong> Server logs including IP addresses, browser type, and access times</li>
+    </ul>
+    <h3>1.3 Information from Third Parties</h3>
+    <ul>
+      <li><strong>Google OAuth:</strong> Email, name, profile picture (scopes: email, profile, Gmail API for sending/reading emails)</li>
+      <li><strong>Microsoft OAuth:</strong> Email, name, profile (scopes: User.Read, Mail.Read, Mail.ReadWrite, Mail.Send, SMTP.Send)</li>
+    </ul>
+
+    <h2>2. How We Use Your Information</h2>
+    <p>We use collected information to:</p>
+    <ul>
+      <li>Provide and maintain the AImailPilot service</li>
+      <li>Authenticate your identity via OAuth providers</li>
+      <li>Send email campaigns on your behalf through connected email accounts</li>
+      <li>Track campaign performance (opens, clicks, replies, bounces)</li>
+      <li>Detect and process email replies and bounces</li>
+      <li>Manage your contact lists and segmentation</li>
+      <li>Generate AI-powered email personalization</li>
+      <li>Improve and optimize the Service</li>
+    </ul>
+
+    <h2>3. Microsoft Graph API &amp; Gmail API Usage</h2>
+    <p>When you connect your Microsoft or Google account, AImailPilot accesses the following data through their respective APIs:</p>
+    <table>
+      <tr><th>Permission</th><th>Purpose</th></tr>
+      <tr><td>Mail.Send</td><td>Send campaign emails on your behalf</td></tr>
+      <tr><td>Mail.Read / Mail.ReadWrite</td><td>Detect replies and bounces to your campaign emails</td></tr>
+      <tr><td>User.Read</td><td>Retrieve your profile information for account setup</td></tr>
+      <tr><td>SMTP.Send</td><td>Fallback email sending via SMTP protocol</td></tr>
+    </table>
+    <p>We only access your mailbox to detect replies and bounces related to campaigns sent through AImailPilot. We do not read, store, or analyze your personal emails unrelated to our Service.</p>
+
+    <h2>4. Data Storage &amp; Security</h2>
+    <ul>
+      <li>Data is stored securely on cloud infrastructure with encryption at rest and in transit</li>
+      <li>OAuth tokens are stored securely and used only for authorized operations</li>
+      <li>We implement industry-standard security measures to protect against unauthorized access</li>
+      <li>Access to data is restricted to authorized personnel only</li>
+    </ul>
+
+    <h2>5. Data Sharing</h2>
+    <p>We do <strong>not</strong> sell, rent, or trade your personal information. We may share data only in these circumstances:</p>
+    <ul>
+      <li><strong>With your consent:</strong> When you explicitly authorize sharing</li>
+      <li><strong>Service providers:</strong> Third-party services essential to operating the platform (hosting, email delivery)</li>
+      <li><strong>Legal requirements:</strong> When required by law, subpoena, or government request</li>
+      <li><strong>Business transfers:</strong> In connection with a merger, acquisition, or sale of assets</li>
+    </ul>
+
+    <h2>6. Data Retention</h2>
+    <p>We retain your data for as long as your account is active or as needed to provide the Service. Upon account termination, we will delete your data within 90 days, except where retention is required by law.</p>
+
+    <h2>7. Your Rights</h2>
+    <p>Depending on your jurisdiction, you may have the right to:</p>
+    <ul>
+      <li>Access, correct, or delete your personal data</li>
+      <li>Export your data in a portable format</li>
+      <li>Withdraw consent for data processing</li>
+      <li>Object to automated decision-making</li>
+      <li>Lodge a complaint with a supervisory authority</li>
+    </ul>
+    <p>To exercise these rights, contact us at <a href="mailto:support@aimailpilot.com">support@aimailpilot.com</a>.</p>
+
+    <h2>8. Cookies &amp; Tracking</h2>
+    <p>We use essential cookies for session management and authentication. Campaign tracking uses pixel images and redirect links to measure opens and clicks. Recipients can opt out via the unsubscribe link in each email.</p>
+
+    <h2>9. Children's Privacy</h2>
+    <p>AImailPilot is not intended for use by individuals under 18 years of age. We do not knowingly collect data from children.</p>
+
+    <h2>10. International Data Transfers</h2>
+    <p>Your data may be transferred to and processed in countries other than your own. We ensure appropriate safeguards are in place for international data transfers.</p>
+
+    <h2>11. Changes to This Privacy Statement</h2>
+    <p>We may update this Privacy Statement periodically. Material changes will be communicated via email or through the Service. The "Last Updated" date at the top indicates the most recent revision.</p>
+
+    <h2>12. Contact Us</h2>
+    <p>For privacy-related questions or concerns, please contact us at:</p>
+    <ul>
+      <li>Email: <a href="mailto:support@aimailpilot.com">support@aimailpilot.com</a></li>
+      <li>Website: <a href="https://aimailpilot.com">https://aimailpilot.com</a></li>
+    </ul>
+  </div>
+  <div class="footer">&copy; 2026 AImailPilot. All rights reserved.</div>
+</body>
+</html>`);
   });
 
   app.get('/api/test', (req, res) => {
@@ -3248,54 +3522,105 @@ Which account should I use and why? If I need to split across accounts, provide 
 
   // ========== GMAIL REPLY TRACKING ==========
 
-  // Check for replies via Gmail API (manual trigger)
+  // Check for replies via Gmail & Outlook APIs (manual trigger)
   app.post('/api/reply-tracking/check', requireAuth, async (req: any, res) => {
     try {
       const lookbackMinutes = parseInt(req.body.lookbackMinutes) || 1440; // Default 24h for better bounce detection
-      console.log(`[ReplyTracking] Manual check triggered with lookback ${lookbackMinutes} minutes`);
-      const result = await gmailReplyTracker.checkForReplies(req.user.organizationId, lookbackMinutes);
-      console.log(`[ReplyTracking] Check complete: ${result.checked} checked, ${result.newReplies} new events, ${result.errors.length} errors`);
-      res.json(result);
+      const orgId = req.user.organizationId;
+      const settings = await storage.getApiSettings(orgId);
+      console.log(`[ReplyTracking] Manual check triggered for org ${orgId} with lookback ${lookbackMinutes} minutes`);
+      
+      const results: any = { gmail: null, outlook: null, checked: 0, newReplies: 0, errors: [] as string[], replies: [] as any[] };
+      
+      // Check Gmail if tokens exist
+      if (orgHasGmailTokens(settings)) {
+        try {
+          const gmailResult = await gmailReplyTracker.checkForReplies(orgId, lookbackMinutes);
+          results.gmail = gmailResult;
+          results.checked += gmailResult.checked;
+          results.newReplies += gmailResult.newReplies;
+          results.errors.push(...gmailResult.errors);
+          results.replies.push(...gmailResult.replies);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          results.errors.push(`Gmail: ${msg}`);
+          console.error('[ReplyTracking] Gmail check error:', msg);
+        }
+      }
+      
+      // Check Outlook if tokens exist
+      if (orgHasOutlookTokens(settings)) {
+        try {
+          const outlookResult = await outlookReplyTracker.checkForReplies(orgId, lookbackMinutes);
+          results.outlook = outlookResult;
+          results.checked += outlookResult.checked;
+          results.newReplies += outlookResult.newReplies;
+          results.errors.push(...outlookResult.errors);
+          results.replies.push(...outlookResult.replies);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          results.errors.push(`Outlook: ${msg}`);
+          console.error('[ReplyTracking] Outlook check error:', msg);
+        }
+      }
+      
+      console.log(`[ReplyTracking] Check complete: ${results.checked} checked, ${results.newReplies} new events, ${results.errors.length} errors`);
+      res.json(results);
     } catch (error) {
       console.error('Reply check error:', error);
       res.status(500).json({ message: 'Failed to check for replies' });
     }
   });
 
-  // Get reply tracking status
+  // Get reply tracking status (Gmail + Outlook)
   app.get('/api/reply-tracking/status', requireAuth, async (req: any, res) => {
     try {
-      const status = gmailReplyTracker.getStatus();
+      const gmailStatus = gmailReplyTracker.getStatus();
+      const outlookStatus = outlookReplyTracker.getStatus();
       const settings = await storage.getApiSettings(req.user.organizationId);
-      const hasGmailToken = !!(settings.gmail_access_token || settings.gmail_refresh_token);
+      const hasGmailToken = orgHasGmailTokens(settings);
+      const hasOutlookToken = orgHasOutlookTokens(settings);
       const gmailEmail = settings.gmail_user_email || null;
 
       res.json({
-        ...status,
-        configured: hasGmailToken,
+        ...gmailStatus,
+        configured: hasGmailToken || hasOutlookToken,
         gmailEmail,
         hasRefreshToken: !!settings.gmail_refresh_token,
+        outlook: {
+          ...outlookStatus,
+          configured: hasOutlookToken,
+        },
       });
     } catch (error) {
       res.status(500).json({ message: 'Failed to get tracking status' });
     }
   });
 
-  // Start auto-polling for replies
+  // Start auto-polling for replies (Gmail + Outlook)
   app.post('/api/reply-tracking/start', requireAuth, async (req: any, res) => {
     try {
       const intervalMinutes = parseInt(req.body.intervalMinutes) || 5;
-      gmailReplyTracker.startAutoCheck(req.user.organizationId, intervalMinutes);
+      const orgId = req.user.organizationId;
+      const settings = await storage.getApiSettings(orgId);
+      
+      if (orgHasGmailTokens(settings)) {
+        gmailReplyTracker.startAutoCheck(orgId, intervalMinutes);
+      }
+      if (orgHasOutlookTokens(settings)) {
+        outlookReplyTracker.startAutoCheck(orgId, intervalMinutes);
+      }
       res.json({ success: true, intervalMinutes });
     } catch (error) {
       res.status(500).json({ message: 'Failed to start reply tracking' });
     }
   });
 
-  // Stop auto-polling for replies
+  // Stop auto-polling for replies (Gmail + Outlook)
   app.post('/api/reply-tracking/stop', requireAuth, async (req: any, res) => {
     try {
       gmailReplyTracker.stopAutoCheck();
+      outlookReplyTracker.stopAutoCheck();
       res.json({ success: true });
     } catch (error) {
       res.status(500).json({ message: 'Failed to stop reply tracking' });
@@ -5883,10 +6208,11 @@ Example response:
 
       const settings = await storage.getApiSettings(orgId);
 
-      if (settings.gmail_access_token || settings.gmail_refresh_token) {
+      // CRITICAL: Check BOTH org-level AND per-sender tokens
+      if (orgHasGmailTokens(settings)) {
         results.gmail = await gmailReplyTracker.checkForReplies(orgId, lookbackMinutes);
       }
-      if (settings.microsoft_access_token || settings.microsoft_refresh_token) {
+      if (orgHasOutlookTokens(settings)) {
         results.outlook = await outlookReplyTracker.checkForReplies(orgId, lookbackMinutes);
       }
 
@@ -6043,12 +6369,12 @@ Example response:
 
       res.json({
         gmail: {
-          connected: !!(settings.gmail_access_token || settings.gmail_refresh_token),
+          connected: orgHasGmailTokens(settings),
           email: settings.gmail_email || null,
           ...gmailStatus,
         },
         outlook: {
-          connected: !!(settings.microsoft_access_token || settings.microsoft_refresh_token),
+          connected: orgHasOutlookTokens(settings),
           email: settings.microsoft_user_email || null,
           ...outlookStatus,
         },
@@ -7465,16 +7791,19 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     });
   });
 
-  // Start Gmail reply tracking auto-check for all organizations that have tokens
+  // Start Gmail/Outlook reply & bounce tracking auto-check for all organizations
+  // CRITICAL: Check BOTH org-level AND per-sender tokens (outlook_sender_*, gmail_sender_*)
+  // Previously only org-level tokens were checked, causing bounce tracking to not start
+  // for orgs where tokens are stored per-sender (e.g., after OAuth connect flow)
   try {
     const allOrgIds = await storage.getAllOrganizationIds();
     for (const orgId of allOrgIds) {
       const orgSettings = await storage.getApiSettings(orgId);
-      if (orgSettings.gmail_access_token || orgSettings.gmail_refresh_token) {
+      if (orgHasGmailTokens(orgSettings)) {
         console.log(`[ReplyTracker] Gmail tokens found for org ${orgId}, starting auto-check...`);
         gmailReplyTracker.startAutoCheck(orgId, 5);
       }
-      if (orgSettings.microsoft_access_token || orgSettings.microsoft_refresh_token) {
+      if (orgHasOutlookTokens(orgSettings)) {
         console.log(`[ReplyTracker] Outlook tokens found for org ${orgId}, starting auto-check...`);
         outlookReplyTracker.startAutoCheck(orgId, 5);
       }
