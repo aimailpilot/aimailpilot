@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Pagination } from "@/components/ui/pagination";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
@@ -53,6 +54,12 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
 
   // Reply tracking status
   const [replyTrackingStatus, setReplyTrackingStatus] = useState<any>(null);
+
+  // Pagination state
+  const [trackingPage, setTrackingPage] = useState(1);
+  const trackingPerPage = 15;
+  const [emailsPage, setEmailsPage] = useState(1);
+  const emailsPerPage = 25;
 
   const fetchDetail = async (recalculate = false) => {
     setLoading(true);
@@ -367,7 +374,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
       if (latestEventTime > entry.lastActivity) entry.lastActivity = latestEventTime;
     }
   }
-  const trackingRows = Array.from(contactEventMap.values())
+  const allTrackingRows = Array.from(contactEventMap.values())
     .sort((a, b) => {
       // Sort by engagement level: replied > clicked > opened > sent
       const getEngagement = (r: typeof a) => {
@@ -379,8 +386,13 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
       const diff = getEngagement(b) - getEngagement(a);
       if (diff !== 0) return diff;
       return new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime();
-    })
-    .slice(0, 30);
+    });
+  
+  const trackingTotalPages = Math.ceil(allTrackingRows.length / trackingPerPage);
+  const trackingRows = allTrackingRows.slice(
+    (trackingPage - 1) * trackingPerPage,
+    trackingPage * trackingPerPage
+  );
 
   const isActive = campaign.status === 'active' || campaign.status === 'following_up';
   const isPaused = campaign.status === 'paused';
@@ -767,14 +779,11 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-base font-bold text-gray-900 flex items-center gap-2">
             Tracking
-            <span className="text-[11px] font-normal text-gray-400 bg-gray-100 rounded-md px-1.5 py-0.5">{trackingRows.length}</span>
+            <span className="text-[11px] font-normal text-gray-400 bg-gray-100 rounded-md px-1.5 py-0.5">{allTrackingRows.length}</span>
           </h3>
-          {trackingRows.length > 0 && (
-            <button className="text-xs text-blue-600 hover:text-blue-700 font-semibold transition-colors">View all</button>
-          )}
         </div>
 
-        {trackingRows.length === 0 ? (
+        {allTrackingRows.length === 0 ? (
           <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm p-16 text-center">
             <div className="w-14 h-14 rounded-2xl bg-gray-50 border border-gray-100 flex items-center justify-center mx-auto mb-4">
               <Eye className="h-6 w-6 text-gray-300" />
@@ -850,6 +859,16 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
               </tbody>
             </table>
           </div>
+          {allTrackingRows.length > trackingPerPage && (
+            <Pagination
+              currentPage={trackingPage}
+              totalPages={trackingTotalPages}
+              onPageChange={setTrackingPage}
+              itemsPerPage={trackingPerPage}
+              totalItems={allTrackingRows.length}
+              showSummary={true}
+            />
+          )}
         )}
       </div>
 
@@ -902,20 +921,26 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
             </div>
 
             {/* Table rows */}
-            {filteredMessages.slice(0, 50).map((msg: CampaignMessage) => {
-              const statusLabel = msg.repliedAt || (msg.replyCount && msg.replyCount > 0) ? 'Replied' :
-                msg.clickedAt || (msg.clickCount && msg.clickCount > 0) ? 'Clicked' :
-                msg.openedAt || (msg.openCount && msg.openCount > 0) ? 'Opened' :
-                msg.status === 'sent' ? 'Delivered' : msg.status === 'failed' ? 'Failed' : 'Sending';
+            {(() => {
+              const totalEmailPages = Math.ceil(filteredMessages.length / emailsPerPage);
+              const paginatedMessages = filteredMessages.slice(
+                (emailsPage - 1) * emailsPerPage,
+                emailsPage * emailsPerPage
+              );
+              return paginatedMessages.map((msg: CampaignMessage) => {
+                const statusLabel = msg.repliedAt || (msg.replyCount && msg.replyCount > 0) ? 'Replied' :
+                  msg.clickedAt || (msg.clickCount && msg.clickCount > 0) ? 'Clicked' :
+                  msg.openedAt || (msg.openCount && msg.openCount > 0) ? 'Opened' :
+                  msg.status === 'sent' ? 'Delivered' : msg.status === 'failed' ? 'Failed' : 'Sending';
 
-              const statusStyles: Record<string, string> = {
-                Replied: 'bg-amber-50 text-amber-700 border-amber-200',
-                Clicked: 'bg-purple-50 text-purple-700 border-purple-200',
-                Opened: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-                Delivered: 'bg-blue-50 text-blue-700 border-blue-200',
-                Failed: 'bg-red-50 text-red-700 border-red-200',
-                Sending: 'bg-gray-50 text-gray-600 border-gray-200',
-              };
+                const statusStyles: Record<string, string> = {
+                  Replied: 'bg-amber-50 text-amber-700 border-amber-200',
+                  Clicked: 'bg-purple-50 text-purple-700 border-purple-200',
+                  Opened: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+                  Delivered: 'bg-blue-50 text-blue-700 border-blue-200',
+                  Failed: 'bg-red-50 text-red-700 border-red-200',
+                  Sending: 'bg-gray-50 text-gray-600 border-gray-200',
+                };
 
               return (
                 <div key={msg.id}
@@ -969,11 +994,19 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
               );
             })}
           </div>
-        )}
-        {filteredMessages.length > 50 && (
-          <div className="text-xs text-gray-400 text-center mt-3 font-medium">
-            Showing 50 of {filteredMessages.length} emails
-          </div>
+          {filteredMessages.length > emailsPerPage && (() => {
+            const totalEmailPages = Math.ceil(filteredMessages.length / emailsPerPage);
+            return (
+              <Pagination
+                currentPage={emailsPage}
+                totalPages={totalEmailPages}
+                onPageChange={setEmailsPage}
+                itemsPerPage={emailsPerPage}
+                totalItems={filteredMessages.length}
+                showSummary={true}
+              />
+            );
+          })()}
         )}
       </div>
 
