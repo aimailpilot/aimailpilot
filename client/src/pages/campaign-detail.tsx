@@ -97,6 +97,9 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
     }
   }, [detail?.campaign?.status]);
 
+  // Reset emails page when search/filter changes
+  useEffect(() => { setEmailsPage(1); }, [searchQuery, statusFilter]);
+
   // Close actions menu on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
