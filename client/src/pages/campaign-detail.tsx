@@ -969,8 +969,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
             </div>
 
             {/* Table rows */}
-            {(() => {
-              return emailMessages.map((msg: CampaignMessage) => {
+            {emailMessages.map((msg: CampaignMessage) => {
                 const statusLabel = msg.repliedAt || (msg.replyCount && msg.replyCount > 0) ? 'Replied' :
                   msg.clickedAt || (msg.clickCount && msg.clickCount > 0) ? 'Clicked' :
                   msg.openedAt || (msg.openCount && msg.openCount > 0) ? 'Opened' :
