@@ -1533,6 +1533,59 @@ export class DatabaseStorage {
     return (db.prepare('SELECT COUNT(*) as c FROM messages WHERE campaignId = ?').get(campaignId) as any).c;
   }
 
+  async getCampaignMessagesFiltered(campaignId: string, limit = 25, offset = 0, filter = 'all', search = '') {
+    let where = 'WHERE m.campaignId = ?';
+    const params: any[] = [campaignId];
+
+    if (filter === 'opened') {
+      where += ' AND (m.openedAt IS NOT NULL OR m.openCount > 0)';
+    } else if (filter === 'clicked') {
+      where += ' AND (m.clickedAt IS NOT NULL OR m.clickCount > 0)';
+    } else if (filter === 'replied') {
+      where += ' AND (m.repliedAt IS NOT NULL OR m.replyCount > 0)';
+    } else if (filter === 'bounced') {
+      where += " AND (m.status = 'bounced' OR m.status = 'failed')";
+    }
+
+    if (search) {
+      where += ' AND (c.email LIKE ? OR c.firstName LIKE ? OR c.lastName LIKE ?)';
+      const like = `%${search}%`;
+      params.push(like, like, like);
+    }
+
+    const total = (db.prepare(
+      `SELECT COUNT(*) as cnt FROM messages m LEFT JOIN contacts c ON m.contactId = c.id ${where}`
+    ).get(...params) as any).cnt;
+
+    const messages = db.prepare(
+      `SELECT m.* FROM messages m LEFT JOIN contacts c ON m.contactId = c.id ${where} ORDER BY m.createdAt DESC LIMIT ? OFFSET ?`
+    ).all(...params, limit, offset);
+
+    const enriched = messages.map((m: any) => {
+      const events = db.prepare("SELECT * FROM tracking_events WHERE messageId = ? AND type != 'prefetch' ORDER BY createdAt ASC").all(m.id).map(hydrateEvent);
+      const contact = m.contactId ? hydrateContact(db.prepare('SELECT * FROM contacts WHERE id = ?').get(m.contactId)) : null;
+      return {
+        ...m,
+        contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company } : null,
+        events,
+        openCount: events.filter((e: any) => {
+          if (e.type !== 'open') return false;
+          if (e.metadata && typeof e.metadata === 'string') {
+            try { const meta = JSON.parse(e.metadata); if (meta.duplicate) return false; } catch {}
+          } else if (e.metadata && e.metadata.duplicate) return false;
+          return true;
+        }).length,
+        clickCount: events.filter((e: any) => e.type === 'click').length,
+        replyCount: events.filter((e: any) => e.type === 'reply').length,
+        firstOpenedAt: events.find((e: any) => e.type === 'open')?.createdAt || null,
+        firstClickedAt: events.find((e: any) => e.type === 'click')?.createdAt || null,
+        firstRepliedAt: events.find((e: any) => e.type === 'reply')?.createdAt || null,
+      };
+    });
+
+    return { messages: enriched, total };
+  }
+
   // Get unopened campaign messages for Gmail API open detection
   // Increased limit to support 10-20K email/day volume
   async getUnopenedCampaignMessages(orgId: string, cutoff: string) {

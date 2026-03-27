@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **IMPORTANT**: Before making any changes, read `status.md`. It lists features that are confirmed working in production and **must not be broken**. Do not modify code for those features unless explicitly asked to fix a bug in them.
+
 ## Commands
 
 ```bash
@@ -58,6 +60,51 @@ shared/schema.ts  Drizzle ORM schema (PostgreSQL dialect, used for type definiti
 
 **Path aliases**: `@/*` maps to `client/src/*`, `@shared/*` maps to `shared/*` (configured in both `tsconfig.json` and `vite.config.ts`).
 
+## Authentication & Login
+
+### Frontend
+- **Auth hook**: `client/src/hooks/use-auth.ts` — `useAuth()` fetches `/api/auth/user`, exposes `login`/`logout`
+- **Login page**: `client/src/pages/landing-page.tsx` — Google/Microsoft OAuth buttons redirect to `/api/auth/google` or `/api/auth/microsoft`
+- **App router**: `client/src/App.tsx:39` — checks setup status + auth on mount, routes to `LandingPage` if unauthenticated
+
+### Backend Routes (all in `server/routes.ts`)
+| Line | Endpoint | Description |
+|------|----------|-------------|
+| ~375 | Session setup | `MemoryStore`, 24hr TTL, httpOnly cookies |
+| ~122 | `requireAuth` middleware | Checks `req.cookies.user_id` or `req.session.userId`; auto-restores session from DB after restart |
+| ~399 | `POST /api/auth/simple-login` | Dev-only demo login (no password) |
+| ~414 | `GET /api/setup/status` | Returns setup state: needsSetup, googleConfigured, etc. |
+| ~504 | `GET /api/auth/google` | Starts Google OAuth flow |
+| ~544 | `GET /api/auth/google/callback` | Handles Google token exchange + user creation |
+| ~854 | `GET /api/auth/gmail-connect` | Adds Gmail as a sender account (requires auth) |
+| ~948 | `GET /api/auth/microsoft` | Starts Microsoft OAuth flow |
+| ~991 | `GET /api/auth/microsoft/callback` | Handles Microsoft token exchange + user creation |
+| ~1335 | `GET /api/auth/outlook-connect` | Adds Outlook as a sender account (requires auth) |
+| ~1549 | `GET /api/auth/user` | Returns current session user |
+| ~1588 | `POST /api/auth/logout` | Clears cookies + destroys session |
+
+### OAuth Services
+- `server/auth/google-oauth.ts` — `GoogleOAuthService`: `getAuthUrl()`, `exchangeCodeForTokens()`, `getUserInfo()`, `refreshAccessToken()`
+- `server/auth/microsoft-oauth.ts` — `MicrosoftOAuthService` (uses `@azure/msal-node`): same interface
+
+### OAuth Scopes
+- **Google**: `gmail.readonly`, `gmail.send`, `gmail.modify`, `spreadsheets.readonly`, `userinfo.email`, `userinfo.profile`
+- **Microsoft**: `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `SMTP.Send`, `User.Read`, `openid`, `profile`, `email`
+
+### Key Auth Patterns
+- **Session restore**: After server restart, `requireAuth` auto-restores session from `req.cookies.user_id` DB lookup
+- **Two OAuth sub-flows**: `purpose='add_sender'` stores per-sender tokens; default flow creates user session
+- **Per-sender tokens**: Stored in `api_settings` keyed as `gmail_sender_{email}_access_token` etc.
+- **OAuth credentials fallback**: `getStoredOAuthCredentials()` (~line 280) checks current org → superadmin org → env vars
+- **Org assignment**: `ensureUserOrganization()` (~line 334) on login checks invitations, adopts ownerless orgs
+- **Redirect URI**: Dynamic base URL detection (~line 51) handles www/non-www mismatch in production (`aimailpilot.com`)
+
+### Secondary OAuth Routes (`server/routes/oauth-routes.ts`)
+- `GET /oauth/gmail/auth/:organizationId` — Gmail demo connect
+- `GET /oauth/outlook/auth/:organizationId` — Outlook demo connect
+- `POST /oauth/import/googlesheets`, `/oauth/import/excel`, `/oauth/import/csv` — Contact imports
+- `POST /oauth/test-connection`, `POST /oauth/revoke` — Account management
+
 ## Environment Variables
 
 Key env vars the server expects:
@@ -68,3 +115,11 @@ Key env vars the server expects:
 - `NODE_ENV` - `development` or `production`
 
 Database path defaults to `./data/aimailpilot.db` (Azure: `/home/data/aimailpilot.db`).
+
+## Common Debugging Tips
+
+- **Session lost after restart**: Expected — MemoryStore is non-persistent. Session auto-restores from `user_id` cookie via DB lookup in `requireAuth`.
+- **OAuth redirect mismatch**: Check `getGoogleRedirectUri()` / `getMicrosoftRedirectUri()` (~line 51 in `routes.ts`). Must match what's registered in Google/Microsoft app consoles.
+- **Emails not sending**: Check `campaign-engine.ts` throttling and per-account daily send limits. Daily counters reset via polling in `server/index.ts`.
+- **Adding a new API route**: Add to `server/routes.ts` (primary) or a new file under `server/routes/` mounted in `server/index.ts`.
+- **Frontend query not refreshing**: Check `queryClient` invalidation in `client/src/lib/queryClient.ts`.

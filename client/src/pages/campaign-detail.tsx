@@ -56,15 +56,21 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
   const [replyTrackingStatus, setReplyTrackingStatus] = useState<any>(null);
 
   // Pagination state
-  const [trackingPage, setTrackingPage] = useState(1);
   const trackingPerPage = 15;
-  const [emailsPage, setEmailsPage] = useState(1);
+  const [trackingPage, setTrackingPage] = useState(1);
+  const [trackingMessages, setTrackingMessages] = useState<CampaignMessage[]>([]);
+  const [trackingTotal, setTrackingTotal] = useState(0);
+  const [trackingLoading, setTrackingLoading] = useState(false);
+
   const emailsPerPage = 25;
+  const [emailsPage, setEmailsPage] = useState(1);
+  const [emailMessages, setEmailMessages] = useState<CampaignMessage[]>([]);
+  const [emailTotal, setEmailTotal] = useState(0);
+  const [emailsLoading, setEmailsLoading] = useState(false);
 
   const fetchDetail = async (recalculate = false) => {
     setLoading(true);
     try {
-      // Optionally recalculate stats from actual messages first
       if (recalculate) {
         await fetch(`/api/campaigns/${campaignId}/recalculate`, { method: 'POST', credentials: 'include' });
       }
@@ -80,6 +86,41 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
     }
   };
 
+  const fetchTrackingMessages = async (page: number) => {
+    setTrackingLoading(true);
+    try {
+      const res = await fetch(
+        `/api/campaigns/${campaignId}/messages?page=${page}&limit=${trackingPerPage}`,
+        { credentials: 'include' }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setTrackingMessages(data.messages);
+        setTrackingTotal(data.total);
+      }
+    } catch (e) {}
+    setTrackingLoading(false);
+  };
+
+  const fetchEmailMessages = async (page: number, filter: string, search: string) => {
+    setEmailsLoading(true);
+    try {
+      const params = new URLSearchParams({
+        page: String(page),
+        limit: String(emailsPerPage),
+        filter,
+        search,
+      });
+      const res = await fetch(`/api/campaigns/${campaignId}/messages?${params}`, { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        setEmailMessages(data.messages);
+        setEmailTotal(data.total);
+      }
+    } catch (e) {}
+    setEmailsLoading(false);
+  };
+
   const fetchReplyStatus = async () => {
     try {
       const res = await fetch('/api/reply-tracking/status', { credentials: 'include' });
@@ -88,6 +129,8 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
   };
 
   useEffect(() => { fetchDetail(); fetchReplyStatus(); }, [campaignId]);
+  useEffect(() => { fetchTrackingMessages(trackingPage); }, [campaignId, trackingPage]);
+  useEffect(() => { fetchEmailMessages(emailsPage, statusFilter, searchQuery); }, [campaignId, emailsPage, statusFilter, searchQuery]);
 
   // Auto-refresh every 10s for active campaigns
   useEffect(() => {
@@ -99,6 +142,14 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
 
   // Reset emails page when search/filter changes
   useEffect(() => { setEmailsPage(1); }, [searchQuery, statusFilter]);
+
+  // Refresh table data when detail reloads (e.g. after recalculate)
+  useEffect(() => {
+    if (detail) {
+      fetchTrackingMessages(trackingPage);
+      fetchEmailMessages(emailsPage, statusFilter, searchQuery);
+    }
+  }, [detail?.campaign?.updatedAt]);
 
   // Close actions menu on outside click
   useEffect(() => {
@@ -346,23 +397,12 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
     { label: 'Unsubscribes', value: analytics?.unsubscribed || campaign.unsubscribedCount || 0, emoji: '🚫', emojiBg: 'bg-gray-50 border-gray-100', rate: analytics?.unsubscribeRate ? `${analytics.unsubscribeRate}%` : null },
   ];
 
-  // Filter messages
-  const filteredMessages = messages.filter((m: CampaignMessage) => {
-    const matchesSearch =
-      (m.contact?.email || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (m.contact?.firstName || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (m.contact?.lastName || '').toLowerCase().includes(searchQuery.toLowerCase());
-    if (statusFilter === 'all') return matchesSearch;
-    if (statusFilter === 'opened') return matchesSearch && (m.openedAt || (m.openCount && m.openCount > 0));
-    if (statusFilter === 'clicked') return matchesSearch && (m.clickedAt || (m.clickCount && m.clickCount > 0));
-    if (statusFilter === 'replied') return matchesSearch && (m.repliedAt || (m.replyCount && m.replyCount > 0));
-    if (statusFilter === 'bounced') return matchesSearch && (m.status === 'failed' || m.status === 'bounced');
-    return matchesSearch;
-  });
+  // emailMessages and emailTotal come from server-side pagination (filter/search applied server-side)
 
   // Tracking rows - show ALL contacts with their engagement status (Mailmeteor-style)
+  // Build tracking rows from server-paginated trackingMessages
   const contactEventMap = new Map<string, { contact: any; email: string; events: TrackingEvent[]; lastActivity: string; message: CampaignMessage }>();
-  for (const msg of messages) {
+  for (const msg of trackingMessages) {
     if (!msg.contact) continue;
     const key = msg.contact.email;
     if (!contactEventMap.has(key)) {
@@ -377,9 +417,8 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
       if (latestEventTime > entry.lastActivity) entry.lastActivity = latestEventTime;
     }
   }
-  const allTrackingRows = Array.from(contactEventMap.values())
+  const trackingRows = Array.from(contactEventMap.values())
     .sort((a, b) => {
-      // Sort by engagement level: replied > clicked > opened > sent
       const getEngagement = (r: typeof a) => {
         if (r.message.repliedAt || r.message.replyCount) return 4;
         if (r.events.some(e => e.type === 'click')) return 3;
@@ -390,12 +429,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
       if (diff !== 0) return diff;
       return new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime();
     });
-  
-  const trackingTotalPages = Math.ceil(allTrackingRows.length / trackingPerPage);
-  const trackingRows = allTrackingRows.slice(
-    (trackingPage - 1) * trackingPerPage,
-    trackingPage * trackingPerPage
-  );
+  const trackingTotalPages = Math.ceil(trackingTotal / trackingPerPage);
 
   const isActive = campaign.status === 'active' || campaign.status === 'following_up';
   const isPaused = campaign.status === 'paused';
@@ -782,11 +816,15 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-base font-bold text-gray-900 flex items-center gap-2">
             Tracking
-            <span className="text-[11px] font-normal text-gray-400 bg-gray-100 rounded-md px-1.5 py-0.5">{allTrackingRows.length}</span>
+            <span className="text-[11px] font-normal text-gray-400 bg-gray-100 rounded-md px-1.5 py-0.5">{trackingTotal}</span>
           </h3>
         </div>
 
-        {allTrackingRows.length === 0 ? (
+        {trackingLoading && trackingMessages.length === 0 ? (
+          <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm p-10 text-center">
+            <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto" />
+          </div>
+        ) : trackingTotal === 0 ? (
           <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm p-16 text-center">
             <div className="w-14 h-14 rounded-2xl bg-gray-50 border border-gray-100 flex items-center justify-center mx-auto mb-4">
               <Eye className="h-6 w-6 text-gray-300" />
@@ -862,13 +900,13 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
               </tbody>
             </table>
           </div>
-          {allTrackingRows.length > trackingPerPage && (
+          {trackingTotal > trackingPerPage && (
             <Pagination
               currentPage={trackingPage}
               totalPages={trackingTotalPages}
               onPageChange={setTrackingPage}
               itemsPerPage={trackingPerPage}
-              totalItems={allTrackingRows.length}
+              totalItems={trackingTotal}
               showSummary={true}
             />
           )}
@@ -903,12 +941,16 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
           </div>
         </div>
 
-        {filteredMessages.length === 0 ? (
+        {emailsLoading && emailMessages.length === 0 ? (
+          <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm p-10 text-center">
+            <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto" />
+          </div>
+        ) : emailMessages.length === 0 ? (
           <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm p-16 text-center">
             <div className="w-14 h-14 rounded-2xl bg-gray-50 border border-gray-100 flex items-center justify-center mx-auto mb-4">
               <Mail className="h-6 w-6 text-gray-300" />
             </div>
-            <p className="text-sm font-medium text-gray-500 mb-1">{messages.length === 0 ? 'No emails sent yet' : 'No emails match your filters'}</p>
+            <p className="text-sm font-medium text-gray-500 mb-1">{emailTotal === 0 && statusFilter === 'all' && !searchQuery ? 'No emails sent yet' : 'No emails match your filters'}</p>
             <p className="text-xs text-gray-400">Try adjusting your search or filter criteria</p>
           </div>
         ) : (
@@ -925,12 +967,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
 
             {/* Table rows */}
             {(() => {
-              const totalEmailPages = Math.ceil(filteredMessages.length / emailsPerPage);
-              const paginatedMessages = filteredMessages.slice(
-                (emailsPage - 1) * emailsPerPage,
-                emailsPage * emailsPerPage
-              );
-              return paginatedMessages.map((msg: CampaignMessage) => {
+              return emailMessages.map((msg: CampaignMessage) => {
                 const statusLabel = msg.repliedAt || (msg.replyCount && msg.replyCount > 0) ? 'Replied' :
                   msg.clickedAt || (msg.clickCount && msg.clickCount > 0) ? 'Clicked' :
                   msg.openedAt || (msg.openCount && msg.openCount > 0) ? 'Opened' :
@@ -997,19 +1034,16 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
               );
             })}
           </div>
-          {filteredMessages.length > emailsPerPage && (() => {
-            const totalEmailPages = Math.ceil(filteredMessages.length / emailsPerPage);
-            return (
-              <Pagination
-                currentPage={emailsPage}
-                totalPages={totalEmailPages}
-                onPageChange={setEmailsPage}
-                itemsPerPage={emailsPerPage}
-                totalItems={filteredMessages.length}
-                showSummary={true}
-              />
-            );
-          })()}
+          {emailTotal > emailsPerPage && (
+            <Pagination
+              currentPage={emailsPage}
+              totalPages={Math.ceil(emailTotal / emailsPerPage)}
+              onPageChange={setEmailsPage}
+              itemsPerPage={emailsPerPage}
+              totalItems={emailTotal}
+              showSummary={true}
+            />
+          )}
         )}
       </div>
 

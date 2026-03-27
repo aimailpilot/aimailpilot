@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell.exe -Command \"Set-Location ''C:\\\\Users\\\\Bhupesh\\\\Documents\\\\GitHub\\\\aimailpilot''; node_modules\\\\typescript\\\\bin\\\\tsc --noEmit 2>&1\")"
+    ]
+  }
+}
