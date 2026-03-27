@@ -833,6 +833,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
             <p className="text-xs text-gray-400">Events will appear here as recipients interact with your emails</p>
           </div>
         ) : (
+          <>
           <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden">
             <table className="w-full">
               <thead>
@@ -910,6 +911,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
               showSummary={true}
             />
           )}
+          </>
         )}
       </div>
 
@@ -954,6 +956,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
             <p className="text-xs text-gray-400">Try adjusting your search or filter criteria</p>
           </div>
         ) : (
+          <>
           <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden">
             {/* Table header */}
             <div className="grid grid-cols-[2fr_80px_70px_70px_70px_90px] gap-1 px-5 py-2.5 border-b border-gray-100 bg-gray-50/80 text-[11px] font-semibold uppercase tracking-wider text-gray-400">
@@ -1044,6 +1047,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
               showSummary={true}
             />
           )}
+          </>
         )}
       </div>
 
