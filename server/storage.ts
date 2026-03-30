@@ -681,6 +681,7 @@ try { db.exec(`ALTER TABLE campaigns ADD COLUMN sendingConfig TEXT`); } catch (e
 // Campaign includeUnsubscribe and trackOpens flags
 try { db.exec(`ALTER TABLE campaigns ADD COLUMN includeUnsubscribe INTEGER DEFAULT 0`); } catch (e) { /* already exists */ }
 try { db.exec(`ALTER TABLE campaigns ADD COLUMN trackOpens INTEGER DEFAULT 1`); } catch (e) { /* already exists */ }
+try { db.exec(`ALTER TABLE campaigns ADD COLUMN spamCount INTEGER DEFAULT 0`); } catch (e) { /* already exists */ }
 
 // ========== v12 Unified Inbox & Contact Engine Migrations ==========
 
@@ -1786,6 +1787,7 @@ export class DatabaseStorage {
     const replied = campaign.repliedCount || 0;
     const bounced = campaign.bouncedCount || 0;
     const unsub = campaign.unsubscribedCount || 0;
+    const spam = (campaign as any).spamCount || 0;
 
     // v12: Enhanced analytics with reply/bounce breakdowns
     const replyBreakdown = db.prepare(`
@@ -1813,12 +1815,13 @@ export class DatabaseStorage {
     return {
       campaignId,
       campaignName: campaign.name,
-      totalSent, delivered: totalSent - bounced, opened, clicked, replied, bounced, unsubscribed: unsub,
+      totalSent, delivered: totalSent - bounced, opened, clicked, replied, bounced, unsubscribed: unsub, spam,
       openRate: totalSent > 0 ? ((opened / totalSent) * 100).toFixed(1) : '0',
       clickRate: opened > 0 ? ((clicked / opened) * 100).toFixed(1) : '0',
       replyRate: totalSent > 0 ? ((replied / totalSent) * 100).toFixed(1) : '0',
       bounceRate: totalSent > 0 ? ((bounced / totalSent) * 100).toFixed(1) : '0',
       unsubscribeRate: totalSent > 0 ? ((unsub / totalSent) * 100).toFixed(1) : '0',
+      spamRate: totalSent > 0 ? ((spam / totalSent) * 100).toFixed(1) : '0',
       deliveryRate: totalSent > 0 ? (((totalSent - bounced) / totalSent) * 100).toFixed(1) : '0',
       positiveReplies,
       replyBreakdown,

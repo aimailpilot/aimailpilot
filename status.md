@@ -10,7 +10,9 @@ This file tracks features that are confirmed working in production.
 ### 1. Email Sending
 - SMTP email sending is fully functional across all supported providers (Gmail OAuth, Outlook OAuth, SendGrid, Elastic Email, generic SMTP)
 - Per-account daily send limits and throttling work correctly
-- **Do not touch**: `server/services/campaign-engine.ts`, `server/services/smtp-email-service.ts`
+- Test email sending works for OAuth accounts (Gmail API / Microsoft Graph) with automatic token refresh
+- **Fix applied**: `/api/campaigns/send-test` now detects OAuth accounts and sends via Gmail API / Microsoft Graph with token refresh + 401 retry, instead of using raw SMTP with the `OAUTH_TOKEN` placeholder
+- **Do not touch**: `server/services/campaign-engine.ts`, `server/services/smtp-email-service.ts`, OAuth token refresh logic in `/api/campaigns/send-test` route
 
 ### 2. Google OAuth / Google Auth
 - Google login flow works end-to-end (login + add sender)

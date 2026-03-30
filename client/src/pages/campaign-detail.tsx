@@ -343,6 +343,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
     { label: 'Replied', value: analytics?.replied || campaign.repliedCount || 0, emoji: '💬', emojiBg: 'bg-blue-50 border-blue-100', rate: analytics?.replyRate ? `${analytics.replyRate}%` : null },
     { label: 'Bounces', value: analytics?.bounced || campaign.bouncedCount || 0, emoji: '⚠️', emojiBg: 'bg-pink-50 border-pink-100', rate: analytics?.bounceRate ? `${analytics.bounceRate}%` : null },
     { label: 'Unsubscribes', value: analytics?.unsubscribed || campaign.unsubscribedCount || 0, emoji: '🚫', emojiBg: 'bg-gray-50 border-gray-100', rate: analytics?.unsubscribeRate ? `${analytics.unsubscribeRate}%` : null },
+    { label: 'Spam', value: analytics?.spam || campaign.spamCount || 0, emoji: '🛑', emojiBg: 'bg-red-50 border-red-100', rate: analytics?.spamRate ? `${analytics.spamRate}%` : null },
   ];
 
   // Filter messages for emails table (client-side)
@@ -641,6 +642,9 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
                   <th className="text-center px-3 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">
                     Unsubs <Info className="h-2.5 w-2.5 inline text-gray-300 ml-0.5" />
                   </th>
+                  <th className="text-center px-3 py-3 text-[11px] text-gray-400 font-semibold uppercase tracking-wider">
+                    Spam <Info className="h-2.5 w-2.5 inline text-gray-300 ml-0.5" />
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -700,6 +704,10 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
                     </td>
                     <td className="text-center px-3 py-4">
                       <span className="text-lg font-bold text-gray-900 tabular-nums">{(step as any).isPending ? '-' : step.unsubscribed}</span>
+                      {!(step as any).isPending && <span className="text-[11px] text-gray-400 ml-1">0%</span>}
+                    </td>
+                    <td className="text-center px-3 py-4">
+                      <span className="text-lg font-bold text-gray-900 tabular-nums">{(step as any).isPending ? '-' : ((step as any).spam || 0)}</span>
                       {!(step as any).isPending && <span className="text-[11px] text-gray-400 ml-1">0%</span>}
                     </td>
                   </tr>

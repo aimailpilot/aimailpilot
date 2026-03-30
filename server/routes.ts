@@ -3371,11 +3371,12 @@ Which account should I use and why? If I need to split across accounts, provide 
         const replied = stepMsgs.filter((m: any) => m.repliedAt || (m.replyCount && m.replyCount > 0)).length;
         const bounced = stepMsgs.filter((m: any) => m.status === 'bounced' || (m.status === 'failed' && m.errorMessage && m.errorMessage.toLowerCase().includes('bounce'))).length;
         const unsub = 0; // tracked at campaign level
+        const spam = 0; // tracked at campaign level
         return {
           stepNumber: stepNum,
           label: stepNum === 0 ? 'Step 1' : `Step ${stepNum + 1}`,
           description: stepNum === 0 ? 'Sent at campaign creation' : null, // Will be enhanced with followup info
-          sent, opened, clicked, replied, bounced, unsubscribed: unsub,
+          sent, opened, clicked, replied, bounced, unsubscribed: unsub, spam,
           openRate: sent > 0 ? ((opened / sent) * 100).toFixed(1) : '0',
           clickRate: sent > 0 ? ((clicked / sent) * 100).toFixed(1) : '0',
           replyRate: sent > 0 ? ((replied / sent) * 100).toFixed(1) : '0',
@@ -3400,7 +3401,7 @@ Which account should I use and why? If I need to split across accounts, provide 
                   stepNumber: (step as any).stepNumber,
                   label: `Step ${(step as any).stepNumber + 1}`,
                   description: null,
-                  sent: 0, opened: 0, clicked: 0, replied: 0, bounced: 0, unsubscribed: 0,
+                  sent: 0, opened: 0, clicked: 0, replied: 0, bounced: 0, unsubscribed: 0, spam: 0,
                   openRate: '0', clickRate: '0', replyRate: '0',
                   isPending: true,
                 };
