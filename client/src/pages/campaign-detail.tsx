@@ -31,6 +31,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [showActions, setShowActions] = useState(false);
   const actionsRef = useRef<HTMLDivElement>(null);
+  const emailsSectionRef = useRef<HTMLDivElement>(null);
 
   // Rename state
   const [isRenaming, setIsRenaming] = useState(false);
@@ -337,13 +338,13 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
   };
 
   const overviewStats = [
-    { label: 'Emails sent', value: analytics?.totalSent || campaign.sentCount || 0, emoji: '📨', emojiBg: 'bg-rose-50 border-rose-100', rate: null },
-    { label: 'Opens', value: analytics?.opened || campaign.openedCount || 0, emoji: '👀', emojiBg: 'bg-amber-50 border-amber-100', rate: analytics?.openRate ? `${analytics.openRate}%` : null },
-    { label: 'Clicks', value: analytics?.clicked || campaign.clickedCount || 0, emoji: '🖱️', emojiBg: 'bg-teal-50 border-teal-100', rate: analytics?.clickRate ? `${analytics.clickRate}%` : null },
-    { label: 'Replied', value: analytics?.replied || campaign.repliedCount || 0, emoji: '💬', emojiBg: 'bg-blue-50 border-blue-100', rate: analytics?.replyRate ? `${analytics.replyRate}%` : null },
-    { label: 'Bounces', value: analytics?.bounced || campaign.bouncedCount || 0, emoji: '⚠️', emojiBg: 'bg-pink-50 border-pink-100', rate: analytics?.bounceRate ? `${analytics.bounceRate}%` : null },
-    { label: 'Unsubscribes', value: analytics?.unsubscribed || campaign.unsubscribedCount || 0, emoji: '🚫', emojiBg: 'bg-gray-50 border-gray-100', rate: analytics?.unsubscribeRate ? `${analytics.unsubscribeRate}%` : null },
-    { label: 'Spam', value: analytics?.spam || campaign.spamCount || 0, emoji: '🛑', emojiBg: 'bg-red-50 border-red-100', rate: analytics?.spamRate ? `${analytics.spamRate}%` : null },
+    { label: 'Emails sent', value: analytics?.totalSent || campaign.sentCount || 0, emoji: '📨', emojiBg: 'bg-rose-50 border-rose-100', rate: null, filter: 'all' },
+    { label: 'Opens', value: analytics?.opened || campaign.openedCount || 0, emoji: '👀', emojiBg: 'bg-amber-50 border-amber-100', rate: analytics?.openRate ? `${analytics.openRate}%` : null, filter: 'opened' },
+    { label: 'Clicks', value: analytics?.clicked || campaign.clickedCount || 0, emoji: '🖱️', emojiBg: 'bg-teal-50 border-teal-100', rate: analytics?.clickRate ? `${analytics.clickRate}%` : null, filter: 'clicked' },
+    { label: 'Replied', value: analytics?.replied || campaign.repliedCount || 0, emoji: '💬', emojiBg: 'bg-blue-50 border-blue-100', rate: analytics?.replyRate ? `${analytics.replyRate}%` : null, filter: 'replied' },
+    { label: 'Bounces', value: analytics?.bounced || campaign.bouncedCount || 0, emoji: '⚠️', emojiBg: 'bg-pink-50 border-pink-100', rate: analytics?.bounceRate ? `${analytics.bounceRate}%` : null, filter: 'bounced' },
+    { label: 'Unsubscribes', value: analytics?.unsubscribed || campaign.unsubscribedCount || 0, emoji: '🚫', emojiBg: 'bg-gray-50 border-gray-100', rate: analytics?.unsubscribeRate ? `${analytics.unsubscribeRate}%` : null, filter: 'unsubscribed' },
+    { label: 'Spam', value: analytics?.spam || campaign.spamCount || 0, emoji: '🛑', emojiBg: 'bg-red-50 border-red-100', rate: analytics?.spamRate ? `${analytics.spamRate}%` : null, filter: 'spam' },
   ];
 
   // Filter messages for emails table (client-side)
@@ -357,6 +358,8 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
     if (statusFilter === 'clicked') return matchesSearch && (m.clickedAt || (m.clickCount && m.clickCount > 0));
     if (statusFilter === 'replied') return matchesSearch && (m.repliedAt || (m.replyCount && m.replyCount > 0));
     if (statusFilter === 'bounced') return matchesSearch && (m.status === 'failed' || m.status === 'bounced');
+    if (statusFilter === 'unsubscribed') return matchesSearch && (m as any).unsubscribed;
+    if (statusFilter === 'spam') return matchesSearch && (m as any).spamReported;
     return matchesSearch;
   });
 
@@ -556,7 +559,12 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
         {/* Stats grid */}
         <div className="grid grid-cols-4 lg:grid-cols-7 gap-4">
           {overviewStats.map((stat) => (
-            <div key={stat.label} className="text-center group">
+            <div key={stat.label} className={`text-center group cursor-pointer rounded-xl p-3 transition-all ${statusFilter === stat.filter ? 'bg-blue-50 ring-1 ring-blue-200' : 'hover:bg-gray-50'}`}
+              onClick={() => {
+                setStatusFilter(stat.filter);
+                setEmailsPage(1);
+                setTimeout(() => emailsSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+              }}>
               <div className={`w-14 h-14 rounded-2xl border ${stat.emojiBg} flex items-center justify-center mx-auto mb-3 group-hover:scale-105 transition-transform`}>
                 <span className="text-2xl">{stat.emoji}</span>
               </div>
@@ -883,7 +891,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
       </div>
 
       {/* ===================== ALL EMAILS TABLE ===================== */}
-      <div className="px-6 pb-6">
+      <div className="px-6 pb-6" ref={emailsSectionRef}>
         <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
           <h3 className="text-base font-bold text-gray-900 flex items-center gap-2">
             All Emails
@@ -900,7 +908,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
               />
             </div>
             <div className="flex items-center bg-gray-100 rounded-lg p-0.5">
-              {['all', 'opened', 'clicked', 'replied', 'bounced'].map(f => (
+              {['all', 'opened', 'clicked', 'replied', 'bounced', 'unsubscribed', 'spam'].map(f => (
                 <button key={f} onClick={() => setStatusFilter(f)}
                   className={`px-2.5 py-1 text-[11px] font-semibold rounded-md transition-all capitalize ${
                     statusFilter === f ? 'bg-white text-gray-900 shadow-sm ring-1 ring-gray-200/60' : 'text-gray-500 hover:text-gray-700'
