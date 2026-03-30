@@ -6620,6 +6620,80 @@ Example response:
     }
   });
 
+  // ========== v12: ENHANCED INBOX API ==========
+  // NOTE: These routes MUST be registered before /api/inbox/:id to avoid Express treating "enhanced"/"stats" as an :id param
+
+  // Enhanced inbox with all new filters (replaces base inbox for frontend)
+  app.get('/api/inbox/enhanced', requireAuth, async (req: any, res) => {
+    try {
+      const { status, emailAccountId, campaignId, replyType, bounceType, leadStatus, assignedTo, isStarred, search, limit, offset, viewMode } = req.query;
+      const role = req.user.role;
+      const isAdmin = role === 'owner' || role === 'admin';
+      const parsedLimit = parseInt(limit as string) || 50;
+      const parsedOffset = parseInt(offset as string) || 0;
+
+      const filters: any = { status, emailAccountId, campaignId, replyType, bounceType, leadStatus, assignedTo, search, viewMode };
+      if (isStarred === 'true') filters.isStarred = true;
+
+      if (!isAdmin) {
+        const userAccounts = await storage.getEmailAccountsForUser(req.user.organizationId, req.user.id);
+        const userAccountIds = userAccounts.map((a: any) => a.id);
+        if (userAccountIds.length === 0) return res.json({ messages: [], total: 0, unread: 0, stats: {} });
+        if (!emailAccountId || emailAccountId === 'all') {
+          filters.emailAccountId = userAccountIds.join(',');
+        }
+      }
+
+      const messages = await storage.getInboxMessagesEnhanced(req.user.organizationId, filters, parsedLimit, parsedOffset);
+      const total = await storage.getInboxMessageCountEnhanced(req.user.organizationId, filters);
+      const stats = await storage.getInboxStats(req.user.organizationId);
+      const unread = stats.unread;
+
+      // Enrich messages (individual try/catch to prevent one bad message from crashing the whole endpoint)
+      const enriched = await Promise.all(messages.map(async (m: any) => {
+        try {
+          let contact = null;
+          if (m.contactId) contact = await storage.getContact(m.contactId);
+          if (!contact && m.fromEmail) contact = await storage.getContactByEmail(req.user.organizationId, m.fromEmail);
+          let accountOwner = null;
+          if (isAdmin && m.emailAccountId) {
+            const acct = await storage.getEmailAccount(m.emailAccountId);
+            if (acct && (acct as any).userId) {
+              const owner = await storage.getUser((acct as any).userId);
+              if (owner) accountOwner = { id: owner.id, email: owner.email, firstName: (owner as any).firstName, lastName: (owner as any).lastName };
+            }
+          }
+          let campaign = null;
+          if (m.campaignId) campaign = await storage.getCampaign(m.campaignId);
+          return {
+            ...m,
+            contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company, jobTitle: contact.jobTitle, status: contact.status, score: contact.score, leadStatus: (contact as any).leadStatus } : null,
+            campaign: campaign ? { id: campaign.id, name: campaign.name } : null,
+            accountOwner,
+          };
+        } catch (enrichErr) {
+          console.error(`[Enhanced Inbox] Failed to enrich message ${m.id}:`, enrichErr);
+          return { ...m, contact: null, campaign: null, accountOwner: null };
+        }
+      }));
+
+      res.json({ messages: enriched, total, unread, stats });
+    } catch (error) {
+      console.error('Enhanced inbox error:', error);
+      res.status(500).json({ message: 'Failed to fetch enhanced inbox' });
+    }
+  });
+
+  // Get inbox stats
+  app.get('/api/inbox/stats', requireAuth, async (req: any, res) => {
+    try {
+      const stats = await storage.getInboxStats(req.user.organizationId);
+      res.json(stats);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch inbox stats' });
+    }
+  });
+
   // Get single inbox message
   app.get('/api/inbox/:id', requireAuth, async (req: any, res) => {
     try {
@@ -6956,78 +7030,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     }
   });
 
-  // ========== v12: ENHANCED INBOX API ==========
-
-  // Enhanced inbox with all new filters (replaces base inbox for frontend)
-  app.get('/api/inbox/enhanced', requireAuth, async (req: any, res) => {
-    try {
-      const { status, emailAccountId, campaignId, replyType, bounceType, leadStatus, assignedTo, isStarred, search, limit, offset, viewMode } = req.query;
-      const role = req.user.role;
-      const isAdmin = role === 'owner' || role === 'admin';
-      const parsedLimit = parseInt(limit as string) || 50;
-      const parsedOffset = parseInt(offset as string) || 0;
-
-      const filters: any = { status, emailAccountId, campaignId, replyType, bounceType, leadStatus, assignedTo, search, viewMode };
-      if (isStarred === 'true') filters.isStarred = true;
-
-      if (!isAdmin) {
-        const userAccounts = await storage.getEmailAccountsForUser(req.user.organizationId, req.user.id);
-        const userAccountIds = userAccounts.map((a: any) => a.id);
-        if (userAccountIds.length === 0) return res.json({ messages: [], total: 0, unread: 0, stats: {} });
-        if (!emailAccountId || emailAccountId === 'all') {
-          filters.emailAccountId = userAccountIds.join(',');
-        }
-      }
-
-      const messages = await storage.getInboxMessagesEnhanced(req.user.organizationId, filters, parsedLimit, parsedOffset);
-      const total = await storage.getInboxMessageCountEnhanced(req.user.organizationId, filters);
-      const stats = await storage.getInboxStats(req.user.organizationId);
-      const unread = stats.unread;
-
-      // Enrich messages (individual try/catch to prevent one bad message from crashing the whole endpoint)
-      const enriched = await Promise.all(messages.map(async (m: any) => {
-        try {
-          let contact = null;
-          if (m.contactId) contact = await storage.getContact(m.contactId);
-          if (!contact && m.fromEmail) contact = await storage.getContactByEmail(req.user.organizationId, m.fromEmail);
-          let accountOwner = null;
-          if (isAdmin && m.emailAccountId) {
-            const acct = await storage.getEmailAccount(m.emailAccountId);
-            if (acct && (acct as any).userId) {
-              const owner = await storage.getUser((acct as any).userId);
-              if (owner) accountOwner = { id: owner.id, email: owner.email, firstName: (owner as any).firstName, lastName: (owner as any).lastName };
-            }
-          }
-          let campaign = null;
-          if (m.campaignId) campaign = await storage.getCampaign(m.campaignId);
-          return {
-            ...m,
-            contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company, jobTitle: contact.jobTitle, status: contact.status, score: contact.score, leadStatus: (contact as any).leadStatus } : null,
-            campaign: campaign ? { id: campaign.id, name: campaign.name } : null,
-            accountOwner,
-          };
-        } catch (enrichErr) {
-          console.error(`[Enhanced Inbox] Failed to enrich message ${m.id}:`, enrichErr);
-          return { ...m, contact: null, campaign: null, accountOwner: null };
-        }
-      }));
-
-      res.json({ messages: enriched, total, unread, stats });
-    } catch (error) {
-      console.error('Enhanced inbox error:', error);
-      res.status(500).json({ message: 'Failed to fetch enhanced inbox' });
-    }
-  });
-
-  // Get inbox stats
-  app.get('/api/inbox/stats', requireAuth, async (req: any, res) => {
-    try {
-      const stats = await storage.getInboxStats(req.user.organizationId);
-      res.json(stats);
-    } catch (error) {
-      res.status(500).json({ message: 'Failed to fetch inbox stats' });
-    }
-  });
+  // (enhanced inbox and stats routes moved above /:id route to avoid Express param matching)
 
   // Classify a reply
   app.post('/api/inbox/:id/classify', requireAuth, async (req: any, res) => {
