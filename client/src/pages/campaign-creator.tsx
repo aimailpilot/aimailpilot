@@ -92,6 +92,15 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
   const [sendingTest, setSendingTest] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
+  // Variables dropdown
+  const [showVarsDropdown, setShowVarsDropdown] = useState(false);
+  useEffect(() => {
+    if (!showVarsDropdown) return;
+    const close = () => setShowVarsDropdown(false);
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [showVarsDropdown]);
+
   // Dialogs
   const [showRecipients, setShowRecipients] = useState(false);
   const [showAutopilot, setShowAutopilot] = useState(false);
@@ -1171,18 +1180,22 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                       if (url) execCmd('insertImage', url);
                     }} title="Image" />
                     {/* Merge tags */}
-                    <div className="relative group">
-                      <button className="p-1.5 rounded hover:bg-gray-200 text-gray-500 flex items-center gap-0.5 text-sm font-mono" title="Variables">
+                    <div className="relative" onMouseDown={(e) => e.stopPropagation()}>
+                      <button className="p-1.5 rounded hover:bg-gray-200 text-gray-500 flex items-center gap-0.5 text-sm font-mono" title="Variables"
+                        onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); setShowVarsDropdown(prev => !prev); }}>
                         {'{ }'} <ChevronDown className="h-3 w-3" />
                       </button>
-                      <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg py-1 w-44 hidden group-hover:block z-50">
-                        {['firstName', 'lastName', 'email', 'company', 'jobTitle', 'fullName'].map(v => (
-                          <button key={v} onClick={() => insertVariable(v)}
-                            className="w-full text-left px-3 py-1.5 text-xs hover:bg-blue-50 text-gray-700 font-mono">
-                            {`{{${v}}}`}
-                          </button>
-                        ))}
-                      </div>
+                      {showVarsDropdown && (
+                        <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg py-1 w-44 z-50"
+                          onMouseDown={(e) => e.stopPropagation()}>
+                          {['firstName', 'lastName', 'email', 'company', 'jobTitle', 'fullName'].map(v => (
+                            <button key={v} onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); insertVariable(v); setShowVarsDropdown(false); }}
+                              className="w-full text-left px-3 py-1.5 text-xs hover:bg-blue-50 text-gray-700 font-mono">
+                              {`{{${v}}}`}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                     <ToolbarSep />
                     {/* Font family */}
@@ -1205,18 +1218,22 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                   <div className="flex items-center gap-2 flex-1">
                     <span className="text-xs text-gray-500 font-medium">HTML Source Editor</span>
                     {/* Variables in HTML mode */}
-                    <div className="relative group">
-                      <button className="p-1 rounded hover:bg-gray-200 text-gray-500 flex items-center gap-0.5 text-xs font-mono" title="Insert Variable">
+                    <div className="relative" onMouseDown={(e) => e.stopPropagation()}>
+                      <button className="p-1 rounded hover:bg-gray-200 text-gray-500 flex items-center gap-0.5 text-xs font-mono" title="Insert Variable"
+                        onMouseDown={(e) => { e.stopPropagation(); setShowVarsDropdown(prev => !prev); }}>
                         {'{{ }}'} <ChevronDown className="h-3 w-3" />
                       </button>
-                      <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg py-1 w-44 hidden group-hover:block z-50">
-                        {['firstName', 'lastName', 'email', 'company', 'jobTitle', 'fullName'].map(v => (
-                          <button key={v} onClick={() => insertVariable(v)}
-                            className="w-full text-left px-3 py-1.5 text-xs hover:bg-blue-50 text-gray-700 font-mono">
-                            {`{{${v}}}`}
-                          </button>
-                        ))}
-                      </div>
+                      {showVarsDropdown && (
+                        <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg py-1 w-44 z-50"
+                          onMouseDown={(e) => e.stopPropagation()}>
+                          {['firstName', 'lastName', 'email', 'company', 'jobTitle', 'fullName'].map(v => (
+                            <button key={v} onClick={() => { insertVariable(v); setShowVarsDropdown(false); }}
+                              className="w-full text-left px-3 py-1.5 text-xs hover:bg-blue-50 text-gray-700 font-mono">
+                              {`{{${v}}}`}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}

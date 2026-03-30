@@ -17,27 +17,34 @@ This file tracks features that are confirmed working in production.
 - Token exchange, user creation, session setup all working
 - **Do not touch**: `server/auth/google-oauth.ts`, Google OAuth routes in `server/routes.ts` (~lines 504–944)
 
-### 3. Campaign Tracking
+### 3. Unified Inbox / Inbox Sync
+- Inbox sync is working (Gmail and Outlook reply tracking)
+- Enhanced inbox endpoint (`/api/inbox/enhanced`) displays messages correctly
+- Unread count badge matches actual inbox content
+- **Fix applied**: Route ordering — `/api/inbox/enhanced` and `/api/inbox/stats` must be registered before `/api/inbox/:id` in Express to avoid param matching conflict
+- **Do not touch**: route registration order of `/api/inbox/enhanced`, `/api/inbox/stats` relative to `/api/inbox/:id` in `server/routes.ts`
+
+### 4. Campaign Tracking
 - Email open tracking is working
 - Email click tracking is working
 - Email reply tracking is working
 - **Do not touch**: tracking-related routes and webhook handlers in `server/routes.ts` and `server/services/gmail-reply-tracker.ts`, `server/services/outlook-reply-tracker.ts`
 
-### 4. Contact Management
+### 5. Contact Management
 - Contact upload via CSV is working
 - Bounce email handling updates contacts correctly
 - All contact CRUD operations are working
 - **Do not touch**: contact-related storage methods in `server/storage.ts`, CSV import in `server/routes/oauth-routes.ts`
 
-### 5. Template Creation
+### 6. Template Creation
 - Email template creation, editing, and variable substitution are working
 - **Do not touch**: template routes in `server/routes.ts`, `server/services/personalization-engine.ts`
 
-### 6. OpenAI API via Azure
+### 7. OpenAI API via Azure
 - Azure OpenAI integration is working in all places it is used
 - **Do not touch**: `server/services/llm.ts` — Azure endpoint config, API key, model/deployment settings
 
-### 7. Azure App Deployment
+### 8. Azure App Deployment
 - The Azure App Service deployment is working correctly
 - **Do not touch**: any Azure-related config files, deployment scripts, `web.config`, `.deployment`, `startup.sh`, or any file that affects how the app runs on Azure
 - Database path `/home/data/aimailpilot.db` must remain as-is for Azure
