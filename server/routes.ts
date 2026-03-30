@@ -3945,11 +3945,128 @@ Which account should I use and why? If I need to split across accounts, provide 
       `;
 
       const firstSubject = campaignEngine.personalizeContent(emailSteps[0].subject || 'Test Email', data);
-      const result = await smtpEmailService.sendEmail(account.id, account.smtpConfig, {
-        to: toEmail,
-        subject: `[TEST] ${firstSubject}`,
-        html: fullHtml,
-      });
+      const testSubject = `[TEST] ${firstSubject}`;
+      const provider = (account as any).provider || account.smtpConfig?.provider || '';
+      const isOAuthAccount = account.smtpConfig?.auth?.pass === 'OAUTH_TOKEN';
+      const fromEmail = account.smtpConfig?.fromEmail || (account as any).email || '';
+      const orgId = req.user.organizationId;
+
+      let result: any;
+
+      if ((provider === 'gmail' || provider === 'google') && isOAuthAccount) {
+        // Send via Gmail API with token refresh
+        const settings = await storage.getApiSettings(orgId);
+        let accessToken = settings[`gmail_sender_${fromEmail}_access_token`] || settings.gmail_access_token;
+        const refreshToken = settings[`gmail_sender_${fromEmail}_refresh_token`] || settings.gmail_refresh_token;
+        const tokenExpiry = settings[`gmail_sender_${fromEmail}_token_expiry`] || settings.gmail_token_expiry;
+        const expiry = parseInt(tokenExpiry || '0');
+
+        // Refresh if expired or about to expire
+        if (refreshToken && (!accessToken || Date.now() >= expiry - 300000)) {
+          const clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID || '';
+          const clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET || '';
+          if (clientId && clientSecret) {
+            try {
+              const oauth2Client = createOAuth2Client({ clientId, clientSecret, redirectUri: '' });
+              oauth2Client.setCredentials({ refresh_token: refreshToken });
+              const { credentials } = await oauth2Client.refreshAccessToken();
+              if (credentials.access_token) {
+                accessToken = credentials.access_token;
+                await storage.setApiSetting(orgId, `gmail_sender_${fromEmail}_access_token`, credentials.access_token);
+                if (credentials.expiry_date) await storage.setApiSetting(orgId, `gmail_sender_${fromEmail}_token_expiry`, String(credentials.expiry_date));
+              }
+            } catch (refreshErr) {
+              console.error('[SendTest] Gmail token refresh failed:', refreshErr);
+            }
+          }
+        }
+
+        if (!accessToken) {
+          return res.status(400).json({ success: false, error: `Gmail OAuth token not found for ${fromEmail}. Please re-authenticate with Google.` });
+        }
+
+        // Send via Gmail API
+        const fromHeader = account.smtpConfig?.fromName ? `${account.smtpConfig.fromName} <${fromEmail}>` : fromEmail;
+        const raw = Buffer.from(
+          `From: ${fromHeader}\r\nTo: ${toEmail}\r\nSubject: ${testSubject}\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset="UTF-8"\r\n\r\n${fullHtml}`
+        ).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+        const sendResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ raw }),
+        });
+
+        if (sendResp.ok) {
+          const sendData = await sendResp.json() as any;
+          result = { success: true, messageId: sendData.id };
+        } else {
+          const errText = await sendResp.text();
+          result = { success: false, error: `Gmail API error (${sendResp.status}): ${errText}` };
+        }
+      } else if ((provider === 'outlook' || provider === 'microsoft') && isOAuthAccount) {
+        // Send via Microsoft Graph API with token refresh
+        const settings = await storage.getApiSettings(orgId);
+        let accessToken = settings[`outlook_sender_${fromEmail}_access_token`] || settings.microsoft_access_token;
+        const refreshToken = settings[`outlook_sender_${fromEmail}_refresh_token`] || settings.microsoft_refresh_token;
+        const tokenExpiry = settings[`outlook_sender_${fromEmail}_token_expiry`] || settings.microsoft_token_expiry;
+        const expiry = parseInt(tokenExpiry || '0');
+
+        if (refreshToken && (!accessToken || Date.now() >= expiry - 300000)) {
+          const clientId = settings.microsoft_oauth_client_id || process.env.MICROSOFT_CLIENT_ID || '';
+          const clientSecret = settings.microsoft_oauth_client_secret || process.env.MICROSOFT_CLIENT_SECRET || '';
+          if (clientId && clientSecret) {
+            try {
+              const tokenResp = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token', scope: 'Mail.Send Mail.ReadWrite' }),
+              });
+              if (tokenResp.ok) {
+                const tokens = await tokenResp.json() as any;
+                if (tokens.access_token) {
+                  accessToken = tokens.access_token;
+                  await storage.setApiSetting(orgId, `outlook_sender_${fromEmail}_access_token`, tokens.access_token);
+                  if (tokens.expires_in) await storage.setApiSetting(orgId, `outlook_sender_${fromEmail}_token_expiry`, String(Date.now() + tokens.expires_in * 1000));
+                }
+              }
+            } catch (refreshErr) {
+              console.error('[SendTest] Outlook token refresh failed:', refreshErr);
+            }
+          }
+        }
+
+        if (!accessToken) {
+          return res.status(400).json({ success: false, error: `Outlook OAuth token not found for ${fromEmail}. Please re-authenticate with Microsoft.` });
+        }
+
+        const graphResp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: {
+              subject: testSubject,
+              body: { contentType: 'HTML', content: fullHtml },
+              toRecipients: [{ emailAddress: { address: toEmail } }],
+            },
+            saveToSentItems: true,
+          }),
+        });
+
+        if (graphResp.ok) {
+          result = { success: true, messageId: `graph-${Date.now()}` };
+        } else {
+          const errText = await graphResp.text();
+          result = { success: false, error: `Graph API error (${graphResp.status}): ${errText}` };
+        }
+      } else {
+        // Non-OAuth account — use SMTP directly
+        result = await smtpEmailService.sendEmail(account.id, account.smtpConfig, {
+          to: toEmail,
+          subject: testSubject,
+          html: fullHtml,
+        });
+      }
 
       res.json({ ...result, stepsIncluded: emailSteps.length });
     } catch (error) {
