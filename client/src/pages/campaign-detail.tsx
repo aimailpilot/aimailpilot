@@ -554,7 +554,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
         </div>
 
         {/* Stats grid */}
-        <div className="grid grid-cols-3 lg:grid-cols-6 gap-4">
+        <div className="grid grid-cols-4 lg:grid-cols-7 gap-4">
           {overviewStats.map((stat) => (
             <div key={stat.label} className="text-center group">
               <div className={`w-14 h-14 rounded-2xl border ${stat.emojiBg} flex items-center justify-center mx-auto mb-3 group-hover:scale-105 transition-transform`}>
