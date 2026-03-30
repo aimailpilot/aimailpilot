@@ -3334,8 +3334,8 @@ Which account should I use and why? If I need to split across accounts, provide 
       let campaign = await storage.getCampaign(req.params.id);
       if (!campaign) return res.status(404).json({ message: 'Campaign not found' });
 
-      const messages = await storage.getCampaignMessagesEnriched(req.params.id, 200, 0);
       const totalMessages = await storage.getCampaignMessagesTotalCount(req.params.id);
+      const messages = await storage.getCampaignMessagesEnriched(req.params.id, totalMessages || 5000, 0);
       
       // Auto-recalculate stats from actual messages if sentCount appears stale
       // (e.g. messages exist but sentCount is 0, or sentCount < actual sent messages)
