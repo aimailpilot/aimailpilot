@@ -3958,31 +3958,53 @@ Which account should I use and why? If I need to split across accounts, provide 
         const settings = await storage.getApiSettings(orgId);
         let accessToken = settings[`gmail_sender_${fromEmail}_access_token`] || settings.gmail_access_token;
         const refreshToken = settings[`gmail_sender_${fromEmail}_refresh_token`] || settings.gmail_refresh_token;
-        const tokenExpiry = settings[`gmail_sender_${fromEmail}_token_expiry`] || settings.gmail_token_expiry;
-        const expiry = parseInt(tokenExpiry || '0');
+        const clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID || '';
+        const clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET || '';
 
-        // Refresh if expired or about to expire
-        if (refreshToken && (!accessToken || Date.now() >= expiry - 300000)) {
-          const clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID || '';
-          const clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET || '';
-          if (clientId && clientSecret) {
-            try {
-              const oauth2Client = createOAuth2Client({ clientId, clientSecret, redirectUri: '' });
-              oauth2Client.setCredentials({ refresh_token: refreshToken });
-              const { credentials } = await oauth2Client.refreshAccessToken();
-              if (credentials.access_token) {
-                accessToken = credentials.access_token;
-                await storage.setApiSetting(orgId, `gmail_sender_${fromEmail}_access_token`, credentials.access_token);
-                if (credentials.expiry_date) await storage.setApiSetting(orgId, `gmail_sender_${fromEmail}_token_expiry`, String(credentials.expiry_date));
+        // Also check superadmin org for OAuth credentials
+        let effectiveClientId = clientId;
+        let effectiveClientSecret = clientSecret;
+        if (!effectiveClientId || !effectiveClientSecret) {
+          try {
+            const superAdminOrgId = await storage.getSuperAdminOrgId();
+            if (superAdminOrgId && superAdminOrgId !== orgId) {
+              const superSettings = await storage.getApiSettings(superAdminOrgId);
+              if (superSettings.google_oauth_client_id) {
+                effectiveClientId = superSettings.google_oauth_client_id;
+                effectiveClientSecret = superSettings.google_oauth_client_secret || '';
               }
-            } catch (refreshErr) {
-              console.error('[SendTest] Gmail token refresh failed:', refreshErr);
             }
+          } catch (e) { /* ignore */ }
+          if (!effectiveClientId) effectiveClientId = process.env.GOOGLE_CLIENT_ID || '';
+          if (!effectiveClientSecret) effectiveClientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
+        }
+
+        // Helper to refresh token
+        const doRefresh = async (): Promise<string | null> => {
+          if (!refreshToken || !effectiveClientId || !effectiveClientSecret) return null;
+          try {
+            const oauth2Client = createOAuth2Client({ clientId: effectiveClientId, clientSecret: effectiveClientSecret, redirectUri: '' });
+            oauth2Client.setCredentials({ refresh_token: refreshToken });
+            const { credentials } = await oauth2Client.refreshAccessToken();
+            if (credentials.access_token) {
+              await storage.setApiSetting(orgId, `gmail_sender_${fromEmail}_access_token`, credentials.access_token);
+              if (credentials.expiry_date) await storage.setApiSetting(orgId, `gmail_sender_${fromEmail}_token_expiry`, String(credentials.expiry_date));
+              return credentials.access_token;
+            }
+          } catch (refreshErr) {
+            console.error('[SendTest] Gmail token refresh failed:', refreshErr);
           }
+          return null;
+        };
+
+        // Always force-refresh the token before sending test email to ensure it's valid
+        const refreshedToken = await doRefresh();
+        if (refreshedToken) {
+          accessToken = refreshedToken;
         }
 
         if (!accessToken) {
-          return res.status(400).json({ success: false, error: `Gmail OAuth token not found for ${fromEmail}. Please re-authenticate with Google.` });
+          return res.status(400).json({ success: false, error: `Gmail OAuth token not found for ${fromEmail}. Please disconnect and re-connect this Gmail account.` });
         }
 
         // Send via Gmail API
@@ -3991,15 +4013,31 @@ Which account should I use and why? If I need to split across accounts, provide 
           `From: ${fromHeader}\r\nTo: ${toEmail}\r\nSubject: ${testSubject}\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset="UTF-8"\r\n\r\n${fullHtml}`
         ).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
-        const sendResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+        let sendResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
           method: 'POST',
           headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ raw }),
         });
 
+        // If 401, force refresh and retry once
+        if (sendResp.status === 401) {
+          console.log(`[SendTest] Gmail API returned 401 for ${fromEmail}, forcing token refresh and retry...`);
+          const retryToken = await doRefresh();
+          if (retryToken) {
+            accessToken = retryToken;
+            sendResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${retryToken}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ raw }),
+            });
+          }
+        }
+
         if (sendResp.ok) {
           const sendData = await sendResp.json() as any;
           result = { success: true, messageId: sendData.id };
+        } else if (sendResp.status === 401) {
+          result = { success: false, error: `Gmail OAuth token is invalid for ${fromEmail}. Please disconnect this account and re-connect it with Google to refresh permissions.` };
         } else {
           const errText = await sendResp.text();
           result = { success: false, error: `Gmail API error (${sendResp.status}): ${errText}` };
