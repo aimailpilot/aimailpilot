@@ -234,7 +234,8 @@ export default function UnifiedInbox() {
       });
       if (resp.ok) {
         const data = await resp.json();
-        if (data.totalNew > 0 || data.results?.autoClassified > 0) fetchMessages();
+        // Always refresh messages after sync to recover from any prior fetch failures
+        fetchMessages();
       }
     } catch (err) {
       console.error('Sync error:', err);

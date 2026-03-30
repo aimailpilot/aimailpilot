@@ -1,7 +1,13 @@
 {
   "permissions": {
     "allow": [
-      "Bash(powershell.exe -Command \"Set-Location ''C:\\\\Users\\\\Bhupesh\\\\Documents\\\\GitHub\\\\aimailpilot''; node_modules\\\\typescript\\\\bin\\\\tsc --noEmit 2>&1\")"
+      "Bash(powershell.exe -Command \"Set-Location ''C:\\\\Users\\\\Bhupesh\\\\Documents\\\\GitHub\\\\aimailpilot''; node_modules\\\\typescript\\\\bin\\\\tsc --noEmit 2>&1\")",
+      "Bash(npm run:*)",
+      "Bash(npx tsc:*)",
+      "Bash(where node:*)",
+      "Bash(where npm:*)",
+      "Bash(cmd /c \"where node\")",
+      "Bash(cmd /c \"where npm\")"
     ]
   }
 }

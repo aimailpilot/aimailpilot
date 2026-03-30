@@ -6984,27 +6984,32 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       const stats = await storage.getInboxStats(req.user.organizationId);
       const unread = stats.unread;
 
-      // Enrich messages
+      // Enrich messages (individual try/catch to prevent one bad message from crashing the whole endpoint)
       const enriched = await Promise.all(messages.map(async (m: any) => {
-        let contact = null;
-        if (m.contactId) contact = await storage.getContact(m.contactId);
-        if (!contact && m.fromEmail) contact = await storage.getContactByEmail(req.user.organizationId, m.fromEmail);
-        let accountOwner = null;
-        if (isAdmin && m.emailAccountId) {
-          const acct = await storage.getEmailAccount(m.emailAccountId);
-          if (acct && (acct as any).userId) {
-            const owner = await storage.getUser((acct as any).userId);
-            if (owner) accountOwner = { id: owner.id, email: owner.email, firstName: (owner as any).firstName, lastName: (owner as any).lastName };
+        try {
+          let contact = null;
+          if (m.contactId) contact = await storage.getContact(m.contactId);
+          if (!contact && m.fromEmail) contact = await storage.getContactByEmail(req.user.organizationId, m.fromEmail);
+          let accountOwner = null;
+          if (isAdmin && m.emailAccountId) {
+            const acct = await storage.getEmailAccount(m.emailAccountId);
+            if (acct && (acct as any).userId) {
+              const owner = await storage.getUser((acct as any).userId);
+              if (owner) accountOwner = { id: owner.id, email: owner.email, firstName: (owner as any).firstName, lastName: (owner as any).lastName };
+            }
           }
+          let campaign = null;
+          if (m.campaignId) campaign = await storage.getCampaign(m.campaignId);
+          return {
+            ...m,
+            contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company, jobTitle: contact.jobTitle, status: contact.status, score: contact.score, leadStatus: (contact as any).leadStatus } : null,
+            campaign: campaign ? { id: campaign.id, name: campaign.name } : null,
+            accountOwner,
+          };
+        } catch (enrichErr) {
+          console.error(`[Enhanced Inbox] Failed to enrich message ${m.id}:`, enrichErr);
+          return { ...m, contact: null, campaign: null, accountOwner: null };
         }
-        let campaign = null;
-        if (m.campaignId) campaign = await storage.getCampaign(m.campaignId);
-        return {
-          ...m,
-          contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company, jobTitle: contact.jobTitle, status: contact.status, score: contact.score, leadStatus: (contact as any).leadStatus } : null,
-          campaign: campaign ? { id: campaign.id, name: campaign.name } : null,
-          accountOwner,
-        };
       }));
 
       res.json({ messages: enriched, total, unread, stats });
