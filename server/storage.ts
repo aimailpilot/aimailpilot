@@ -1490,6 +1490,9 @@ export class DatabaseStorage {
   async getTrackingEvents(campaignId: string) {
     return db.prepare("SELECT * FROM tracking_events WHERE campaignId = ? AND type != 'prefetch' ORDER BY createdAt DESC").all(campaignId).map(hydrateEvent);
   }
+  async getRecentTrackingEvents(campaignId: string, limit = 50) {
+    return db.prepare("SELECT * FROM tracking_events WHERE campaignId = ? AND type != 'prefetch' ORDER BY createdAt DESC LIMIT ?").all(campaignId, limit).map(hydrateEvent);
+  }
   async getTrackingEventsByMessage(messageId: string) {
     return db.prepare("SELECT * FROM tracking_events WHERE messageId = ? AND type != 'prefetch' ORDER BY createdAt ASC").all(messageId).map(hydrateEvent);
   }
@@ -1506,17 +1509,49 @@ export class DatabaseStorage {
 
   // ========== Enriched Campaign Messages ==========
   async getCampaignMessagesEnriched(campaignId: string, limit = 200, offset = 0) {
-    const messages = db.prepare('SELECT * FROM messages WHERE campaignId = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(campaignId, limit, offset);
+    const messages = db.prepare('SELECT * FROM messages WHERE campaignId = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(campaignId, limit, offset) as any[];
+    if (messages.length === 0) return [];
+
+    // Batch-load all tracking events for these messages (1 query instead of N)
+    const messageIds = messages.map((m: any) => m.id);
+    const CHUNK = 500;
+    const allEvents: any[] = [];
+    for (let i = 0; i < messageIds.length; i += CHUNK) {
+      const chunk = messageIds.slice(i, i + CHUNK);
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = db.prepare(`SELECT * FROM tracking_events WHERE messageId IN (${placeholders}) AND type != 'prefetch' ORDER BY createdAt ASC`).all(...chunk);
+      allEvents.push(...rows.map(hydrateEvent));
+    }
+    // Group events by messageId
+    const eventsByMessageId = new Map<string, any[]>();
+    for (const evt of allEvents) {
+      const arr = eventsByMessageId.get(evt.messageId) || [];
+      arr.push(evt);
+      eventsByMessageId.set(evt.messageId, arr);
+    }
+
+    // Batch-load all contacts for these messages (1 query instead of N)
+    const contactIds = [...new Set(messages.map((m: any) => m.contactId).filter(Boolean))];
+    const contactMap = new Map<string, any>();
+    for (let i = 0; i < contactIds.length; i += CHUNK) {
+      const chunk = contactIds.slice(i, i + CHUNK);
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = db.prepare(`SELECT * FROM contacts WHERE id IN (${placeholders})`).all(...chunk);
+      for (const r of rows) {
+        const c = hydrateContact(r);
+        if (c) contactMap.set(c.id, c);
+      }
+    }
+
     return messages.map((m: any) => {
-      const events = db.prepare("SELECT * FROM tracking_events WHERE messageId = ? AND type != 'prefetch' ORDER BY createdAt ASC").all(m.id).map(hydrateEvent);
-      const contact = m.contactId ? hydrateContact(db.prepare('SELECT * FROM contacts WHERE id = ?').get(m.contactId)) : null;
+      const events = eventsByMessageId.get(m.id) || [];
+      const contact = m.contactId ? contactMap.get(m.contactId) || null : null;
       return {
         ...m,
         contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company } : null,
         events,
         openCount: events.filter((e: any) => {
           if (e.type !== 'open') return false;
-          // Filter out duplicate opens (metadata contains { duplicate: true })
           if (e.metadata && typeof e.metadata === 'string') {
             try { const meta = JSON.parse(e.metadata); if (meta.duplicate) return false; } catch {}
           } else if (e.metadata && e.metadata.duplicate) return false;
@@ -1532,6 +1567,51 @@ export class DatabaseStorage {
   }
   async getCampaignMessagesTotalCount(campaignId: string) {
     return (db.prepare('SELECT COUNT(*) as c FROM messages WHERE campaignId = ?').get(campaignId) as any).c;
+  }
+
+  // Lightweight stats query — single SQL, no per-message enrichment
+  async getCampaignMessageStats(campaignId: string) {
+    const row = db.prepare(`
+      SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN status = 'sent' OR status = 'sending' THEN 1 ELSE 0 END) as sent,
+        SUM(CASE WHEN status = 'bounced' OR (status = 'failed' AND errorMessage LIKE '%bounce%') THEN 1 ELSE 0 END) as bounced,
+        SUM(CASE WHEN openedAt IS NOT NULL OR openCount > 0 THEN 1 ELSE 0 END) as opened,
+        SUM(CASE WHEN clickedAt IS NOT NULL OR clickCount > 0 THEN 1 ELSE 0 END) as clicked,
+        SUM(CASE WHEN repliedAt IS NOT NULL OR replyCount > 0 THEN 1 ELSE 0 END) as replied
+      FROM messages WHERE campaignId = ?
+    `).get(campaignId) as any;
+    return {
+      total: row.total || 0,
+      sent: row.sent || 0,
+      bounced: row.bounced || 0,
+      opened: row.opened || 0,
+      clicked: row.clicked || 0,
+      replied: row.replied || 0,
+    };
+  }
+
+  // Lightweight per-step stats — single SQL with GROUP BY, no per-message enrichment
+  async getCampaignStepStats(campaignId: string) {
+    const rows = db.prepare(`
+      SELECT
+        COALESCE(stepNumber, 0) as stepNumber,
+        COUNT(*) as total,
+        SUM(CASE WHEN status = 'sent' OR status = 'sending' THEN 1 ELSE 0 END) as sent,
+        SUM(CASE WHEN status = 'bounced' OR (status = 'failed' AND errorMessage LIKE '%bounce%') THEN 1 ELSE 0 END) as bounced,
+        SUM(CASE WHEN openedAt IS NOT NULL OR openCount > 0 THEN 1 ELSE 0 END) as opened,
+        SUM(CASE WHEN clickedAt IS NOT NULL OR clickCount > 0 THEN 1 ELSE 0 END) as clicked,
+        SUM(CASE WHEN repliedAt IS NOT NULL OR replyCount > 0 THEN 1 ELSE 0 END) as replied
+      FROM messages WHERE campaignId = ? GROUP BY COALESCE(stepNumber, 0) ORDER BY stepNumber ASC
+    `).all(campaignId) as any[];
+    return rows.map((r: any) => ({
+      stepNumber: r.stepNumber,
+      sent: r.sent || 0,
+      bounced: r.bounced || 0,
+      opened: r.opened || 0,
+      clicked: r.clicked || 0,
+      replied: r.replied || 0,
+    }));
   }
 
   async getCampaignMessagesFiltered(campaignId: string, limit = 25, offset = 0, filter = 'all', search = '') {
@@ -1562,9 +1642,31 @@ export class DatabaseStorage {
       `SELECT m.* FROM messages m LEFT JOIN contacts c ON m.contactId = c.id ${where} ORDER BY m.createdAt DESC LIMIT ? OFFSET ?`
     ).all(...params, limit, offset);
 
+    // Batch-load events and contacts (same optimization as getCampaignMessagesEnriched)
+    const messageIds = messages.map((m: any) => m.id);
+    const CHUNK = 500;
+    const allEvents: any[] = [];
+    for (let i = 0; i < messageIds.length; i += CHUNK) {
+      const chunk = messageIds.slice(i, i + CHUNK);
+      const ph = chunk.map(() => '?').join(',');
+      allEvents.push(...db.prepare(`SELECT * FROM tracking_events WHERE messageId IN (${ph}) AND type != 'prefetch' ORDER BY createdAt ASC`).all(...chunk).map(hydrateEvent));
+    }
+    const eventsByMsgId = new Map<string, any[]>();
+    for (const evt of allEvents) { const arr = eventsByMsgId.get(evt.messageId) || []; arr.push(evt); eventsByMsgId.set(evt.messageId, arr); }
+
+    const contactIds = [...new Set(messages.map((m: any) => m.contactId).filter(Boolean))];
+    const contactMap = new Map<string, any>();
+    for (let i = 0; i < contactIds.length; i += CHUNK) {
+      const chunk = contactIds.slice(i, i + CHUNK);
+      const ph = chunk.map(() => '?').join(',');
+      for (const r of db.prepare(`SELECT * FROM contacts WHERE id IN (${ph})`).all(...chunk)) {
+        const c = hydrateContact(r); if (c) contactMap.set(c.id, c);
+      }
+    }
+
     const enriched = messages.map((m: any) => {
-      const events = db.prepare("SELECT * FROM tracking_events WHERE messageId = ? AND type != 'prefetch' ORDER BY createdAt ASC").all(m.id).map(hydrateEvent);
-      const contact = m.contactId ? hydrateContact(db.prepare('SELECT * FROM contacts WHERE id = ?').get(m.contactId)) : null;
+      const events = eventsByMsgId.get(m.id) || [];
+      const contact = m.contactId ? contactMap.get(m.contactId) || null : null;
       return {
         ...m,
         contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company } : null,

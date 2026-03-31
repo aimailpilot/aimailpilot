@@ -3335,51 +3335,44 @@ Which account should I use and why? If I need to split across accounts, provide 
       if (!campaign) return res.status(404).json({ message: 'Campaign not found' });
 
       const totalMessages = await storage.getCampaignMessagesTotalCount(req.params.id);
-      const messages = await storage.getCampaignMessagesEnriched(req.params.id, totalMessages || 5000, 0);
-      
-      // Auto-recalculate stats from actual messages if sentCount appears stale
-      // (e.g. messages exist but sentCount is 0, or sentCount < actual sent messages)
-      const actualSent = messages.filter((m: any) => m.status === 'sent' || m.status === 'sending').length;
-      const actualBounced = messages.filter((m: any) => m.status === 'bounced' || (m.status === 'failed' && m.errorMessage && m.errorMessage.toLowerCase().includes('bounce'))).length;
-      const actualOpened = messages.filter((m: any) => m.openedAt || (m.openCount && m.openCount > 0)).length;
-      const actualClicked = messages.filter((m: any) => m.clickedAt || (m.clickCount && m.clickCount > 0)).length;
-      const actualReplied = messages.filter((m: any) => m.repliedAt || (m.replyCount && m.replyCount > 0)).length;
-      
-      if (actualSent > 0 && (campaign.sentCount || 0) < actualSent) {
-        console.log(`[Campaign] Auto-fixing stale stats for ${req.params.id}: DB sentCount=${campaign.sentCount}, actual=${actualSent}`);
+
+      // Use lightweight SQL aggregation for stats instead of loading all messages
+      const msgStats = await storage.getCampaignMessageStats(req.params.id);
+
+      // Auto-recalculate stats if sentCount appears stale
+      if (msgStats.sent > 0 && (campaign.sentCount || 0) < msgStats.sent) {
+        console.log(`[Campaign] Auto-fixing stale stats for ${req.params.id}: DB sentCount=${campaign.sentCount}, actual=${msgStats.sent}`);
         await storage.updateCampaign(req.params.id, {
-          sentCount: actualSent,
-          bouncedCount: actualBounced,
-          openedCount: actualOpened,
-          clickedCount: actualClicked,
-          repliedCount: actualReplied,
-          totalRecipients: Math.max(campaign.totalRecipients || 0, actualSent + actualBounced),
+          sentCount: msgStats.sent,
+          bouncedCount: msgStats.bounced,
+          openedCount: msgStats.opened,
+          clickedCount: msgStats.clicked,
+          repliedCount: msgStats.replied,
+          totalRecipients: Math.max(campaign.totalRecipients || 0, msgStats.sent + msgStats.bounced),
         });
         campaign = await storage.getCampaign(req.params.id);
       }
 
-      const analytics = await storage.getCampaignAnalytics(req.params.id);
-      const trackingEvents = await storage.getTrackingEvents(req.params.id);
+      // Load all messages with batch-optimized enrichment (2-3 SQL queries total, not 2*N)
+      const messages = await storage.getCampaignMessagesEnriched(req.params.id, totalMessages || 5000, 0);
 
-      // Step-by-step breakdown analytics
-      const stepNumbers = [...new Set(messages.map((m: any) => m.stepNumber || 0))].sort((a: number, b: number) => a - b);
-      const stepAnalytics = stepNumbers.map((stepNum: number) => {
-        const stepMsgs = messages.filter((m: any) => (m.stepNumber || 0) === stepNum);
-        const sent = stepMsgs.filter((m: any) => m.status === 'sent' || m.status === 'sending').length;
-        const opened = stepMsgs.filter((m: any) => m.openedAt || (m.openCount && m.openCount > 0)).length;
-        const clicked = stepMsgs.filter((m: any) => m.clickedAt || (m.clickCount && m.clickCount > 0)).length;
-        const replied = stepMsgs.filter((m: any) => m.repliedAt || (m.replyCount && m.replyCount > 0)).length;
-        const bounced = stepMsgs.filter((m: any) => m.status === 'bounced' || (m.status === 'failed' && m.errorMessage && m.errorMessage.toLowerCase().includes('bounce'))).length;
-        const unsub = 0; // tracked at campaign level
-        const spam = 0; // tracked at campaign level
+      const analytics = await storage.getCampaignAnalytics(req.params.id);
+      // Only fetch recent tracking events (not all — can be thousands for large campaigns)
+      const trackingEvents = await storage.getRecentTrackingEvents(req.params.id, 50);
+
+      // Step-by-step breakdown analytics using lightweight SQL aggregation
+      const stepStatsRows = await storage.getCampaignStepStats(req.params.id);
+      const stepAnalytics = stepStatsRows.map((row: any) => {
+        const sent = row.sent;
         return {
-          stepNumber: stepNum,
-          label: stepNum === 0 ? 'Step 1' : `Step ${stepNum + 1}`,
-          description: stepNum === 0 ? 'Sent at campaign creation' : null, // Will be enhanced with followup info
-          sent, opened, clicked, replied, bounced, unsubscribed: unsub, spam,
-          openRate: sent > 0 ? ((opened / sent) * 100).toFixed(1) : '0',
-          clickRate: sent > 0 ? ((clicked / sent) * 100).toFixed(1) : '0',
-          replyRate: sent > 0 ? ((replied / sent) * 100).toFixed(1) : '0',
+          stepNumber: row.stepNumber,
+          label: row.stepNumber === 0 ? 'Step 1' : `Step ${row.stepNumber + 1}`,
+          description: row.stepNumber === 0 ? 'Sent at campaign creation' : null,
+          sent, opened: row.opened, clicked: row.clicked, replied: row.replied, bounced: row.bounced,
+          unsubscribed: 0, spam: 0,
+          openRate: sent > 0 ? ((row.opened / sent) * 100).toFixed(1) : '0',
+          clickRate: sent > 0 ? ((row.clicked / sent) * 100).toFixed(1) : '0',
+          replyRate: sent > 0 ? ((row.replied / sent) * 100).toFixed(1) : '0',
         };
       });
 
@@ -3459,7 +3452,7 @@ Which account should I use and why? If I need to split across accounts, provide 
         analytics,
         messages,
         totalMessages,
-        recentEvents: trackingEvents.slice(0, 50),
+        recentEvents: trackingEvents,
         stepAnalytics,
         followupSequences,
         hasActiveFollowups: followupSequences.length > 0 && followupSequences.some((s: any) => s.steps && s.steps.length > 0),
