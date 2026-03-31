@@ -89,13 +89,33 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
 
   useEffect(() => { fetchDetail(); fetchReplyStatus(); }, [campaignId]);
 
-  // Auto-refresh every 10s for active campaigns
+  // Silent background refresh every 60s for active campaigns (no UI flicker)
   useEffect(() => {
     if (detail?.campaign?.status === 'active') {
-      const interval = setInterval(fetchDetail, 10000);
+      const interval = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/campaigns/${campaignId}/detail`, { credentials: 'include' });
+          if (!res.ok) return;
+          const data = await res.json();
+          // Only update state if key metrics changed — avoids unnecessary re-renders
+          setDetail(prev => {
+            if (!prev) return data;
+            const pc = prev.campaign;
+            const nc = data.campaign;
+            const changed = pc.sentCount !== nc.sentCount ||
+              pc.openedCount !== nc.openedCount ||
+              pc.clickedCount !== nc.clickedCount ||
+              pc.repliedCount !== nc.repliedCount ||
+              pc.bouncedCount !== nc.bouncedCount ||
+              pc.status !== nc.status ||
+              (prev.messages?.length || 0) !== (data.messages?.length || 0);
+            return changed ? data : prev;
+          });
+        } catch (e) { /* silent fail */ }
+      }, 60000);
       return () => clearInterval(interval);
     }
-  }, [detail?.campaign?.status]);
+  }, [detail?.campaign?.status, campaignId]);
 
   // Reset emails page when search/filter changes
   useEffect(() => { setEmailsPage(1); }, [searchQuery, statusFilter]);
