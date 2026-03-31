@@ -3353,12 +3353,13 @@ Which account should I use and why? If I need to split across accounts, provide 
         campaign = await storage.getCampaign(req.params.id);
       }
 
-      // Load all messages with batch-optimized enrichment (2-3 SQL queries total, not 2*N)
-      const messages = await storage.getCampaignMessagesEnriched(req.params.id, totalMessages || 5000, 0);
+      // Load messages with batch-optimized enrichment (2-3 SQL queries total, not 2*N)
+      // Cap at 500 to prevent timeout on very large campaigns — frontend paginates at 25/page anyway
+      const messages = await storage.getCampaignMessagesEnriched(req.params.id, Math.min(totalMessages || 500, 500), 0);
 
       const analytics = await storage.getCampaignAnalytics(req.params.id);
       // Only fetch recent tracking events (not all — can be thousands for large campaigns)
-      const trackingEvents = await storage.getRecentTrackingEvents(req.params.id, 50);
+      const trackingEvents = await storage.getRecentCampaignTrackingEvents(req.params.id, 50);
 
       // Step-by-step breakdown analytics using lightweight SQL aggregation
       const stepStatsRows = await storage.getCampaignStepStats(req.params.id);

@@ -51,6 +51,15 @@ This file tracks features that are confirmed working in production.
 - **Do not touch**: any Azure-related config files, deployment scripts, `web.config`, `.deployment`, `startup.sh`, or any file that affects how the app runs on Azure
 - Database path `/home/data/aimailpilot.db` must remain as-is for Azure
 
+### 9. Database Safety (CRITICAL)
+- **NEVER** add code that deletes, renames, moves, or recreates the database file
+- **NEVER** add `integrity_check` or any pragma as a startup gate — Azure CIFS causes false failures
+- **NEVER** add a "reset database" feature that actually deletes the DB file
+- If the DB fails to open: **retry**, then **crash** — do NOT create a fresh DB over an existing file
+- Backups are at `/home/data/backups/` on Azure — restore manually via Kudu SSH if needed
+- See `DATABASE-RECOVERY.md` for full restore procedure
+- **Do not touch**: database initialization code in `server/storage.ts` (lines 53–137), the `autoRestoreBackup` function, or the backup mechanism
+
 ---
 
 ## General Rule

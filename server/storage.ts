@@ -50,43 +50,89 @@ const isAzure = !!(process.env.WEBSITE_SITE_NAME || process.env.AZURE_WEBAPP_NAM
 const DB_PATH = getDbPath();
 console.log(`[DB] Using database at: ${DB_PATH}`);
 
-// ===== CRITICAL: Handle corrupted database files =====
-// SQLite WAL mode on Azure CIFS can corrupt the DB. If the DB is malformed,
-// we rename the corrupt file as a backup and create a fresh database.
+// ===== Database initialization =====
+// SAFETY: NEVER delete, rename, or recreate the database file automatically.
+// If the current DB is empty/fresh but a .corrupt backup exists, RESTORE it first.
+
+function autoRestoreBackup(): boolean {
+  // Check if current DB is empty or missing — if so, look for .corrupt backups to restore
+  const dbDir = path.dirname(DB_PATH);
+  const dbName = path.basename(DB_PATH);
+
+  try {
+    const files = fs.readdirSync(dbDir);
+    // Find all .corrupt backup files sorted by timestamp (newest first)
+    const backups = files
+      .filter(f => f.startsWith(dbName + '.corrupt.'))
+      .map(f => ({ name: f, path: path.join(dbDir, f), stat: fs.statSync(path.join(dbDir, f)) }))
+      .filter(f => f.stat.size > 50000) // Only consider backups larger than 50KB (not empty DBs)
+      .sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs); // Newest first
+
+    if (backups.length === 0) return false;
+
+    const currentExists = fs.existsSync(DB_PATH);
+    const currentSize = currentExists ? fs.statSync(DB_PATH).size : 0;
+    const bestBackup = backups[0];
+
+    console.log(`[DB] Found ${backups.length} backup(s). Best: ${bestBackup.name} (${(bestBackup.stat.size / 1024).toFixed(1)}KB). Current DB: ${(currentSize / 1024).toFixed(1)}KB`);
+
+    // Restore if: current DB doesn't exist, or current DB is much smaller than backup (likely empty/fresh)
+    if (!currentExists || currentSize < 50000 && bestBackup.stat.size > currentSize * 10) {
+      console.log(`[DB] AUTO-RESTORING from backup: ${bestBackup.name} (${(bestBackup.stat.size / 1024 / 1024).toFixed(2)}MB)`);
+      // Back up the current empty DB just in case
+      if (currentExists && currentSize > 0) {
+        fs.copyFileSync(DB_PATH, DB_PATH + '.empty.' + Date.now());
+      }
+      fs.copyFileSync(bestBackup.path, DB_PATH);
+      console.log(`[DB] Restore complete! Database restored from ${bestBackup.name}`);
+      return true;
+    }
+  } catch (err) {
+    console.error(`[DB] Auto-restore check failed:`, err);
+  }
+  return false;
+}
+
+// Try auto-restore before opening DB
+autoRestoreBackup();
+
 let db: InstanceType<typeof Database>;
 try {
   db = new Database(DB_PATH);
-  // Quick integrity check — if this fails, the DB is corrupt
-  db.pragma('integrity_check');
-  console.log(`[DB] Database opened successfully`);
-} catch (e: any) {
-  console.error(`[DB] CRITICAL: Database is corrupted or unreadable: ${e.message}`);
-  
-  // Rename the corrupt file so we don't lose it entirely
-  const corruptPath = `${DB_PATH}.corrupt.${Date.now()}`;
-  try {
-    if (fs.existsSync(DB_PATH)) {
-      fs.renameSync(DB_PATH, corruptPath);
-      console.log(`[DB] Corrupt database renamed to: ${corruptPath}`);
+  // Verify the DB has real data (not just empty schema)
+  const tableCount = (db.prepare("SELECT COUNT(*) as c FROM sqlite_master WHERE type='table'").get() as any).c;
+  console.log(`[DB] Database opened successfully (${tableCount} tables)`);
+
+  // If DB opened but has no tables and a backup exists, try restore
+  if (tableCount === 0) {
+    console.log(`[DB] Database has no tables — checking for backups...`);
+    db.close();
+    if (autoRestoreBackup()) {
+      db = new Database(DB_PATH);
+      const newCount = (db.prepare("SELECT COUNT(*) as c FROM sqlite_master WHERE type='table'").get() as any).c;
+      console.log(`[DB] After restore: ${newCount} tables`);
+    } else {
+      db = new Database(DB_PATH);
     }
-    // Also clean up WAL/SHM files that may be causing issues
-    for (const ext of ['-wal', '-shm', '-journal']) {
-      const auxFile = DB_PATH + ext;
-      if (fs.existsSync(auxFile)) {
-        fs.unlinkSync(auxFile);
-        console.log(`[DB] Removed auxiliary file: ${auxFile}`);
-      }
-    }
-  } catch (renameErr) {
-    console.error(`[DB] Failed to rename corrupt database:`, renameErr);
-    // Force delete if rename fails
-    try { fs.unlinkSync(DB_PATH); } catch (e2) { /* ignore */ }
   }
-  
-  // Create a fresh database
-  console.log(`[DB] Creating fresh database at: ${DB_PATH}`);
-  db = new Database(DB_PATH);
-  console.log(`[DB] Fresh database created. Data must be restored via /api/superadmin/db-import`);
+} catch (e: any) {
+  console.error(`[DB] Failed to open database: ${e.message}. Retrying in 3 seconds...`);
+  // Wait and retry — Azure CIFS locks can cause transient failures during deployment
+  // Use synchronous busy-wait (3 seconds) since this only runs on DB open failure
+  const waitUntil = Date.now() + 3000;
+  while (Date.now() < waitUntil) { /* busy wait */ }
+  try {
+    db = new Database(DB_PATH);
+    console.log(`[DB] Database opened on retry`);
+  } catch (e2: any) {
+    console.error(`[DB] FATAL: Cannot open database after retry: ${e2.message}`);
+    if (!fs.existsSync(DB_PATH)) {
+      console.log(`[DB] No database file found at ${DB_PATH}, creating new one`);
+      db = new Database(DB_PATH);
+    } else {
+      throw new Error(`Cannot open existing database at ${DB_PATH}: ${e2.message}. Manual intervention required.`);
+    }
+  }
 }
 
 // ===== CRITICAL: SQLite configuration for Azure vs Local =====
@@ -1490,7 +1536,7 @@ export class DatabaseStorage {
   async getTrackingEvents(campaignId: string) {
     return db.prepare("SELECT * FROM tracking_events WHERE campaignId = ? AND type != 'prefetch' ORDER BY createdAt DESC").all(campaignId).map(hydrateEvent);
   }
-  async getRecentTrackingEvents(campaignId: string, limit = 50) {
+  async getRecentCampaignTrackingEvents(campaignId: string, limit = 50) {
     return db.prepare("SELECT * FROM tracking_events WHERE campaignId = ? AND type != 'prefetch' ORDER BY createdAt DESC LIMIT ?").all(campaignId, limit).map(hydrateEvent);
   }
   async getTrackingEventsByMessage(messageId: string) {
@@ -1570,15 +1616,16 @@ export class DatabaseStorage {
   }
 
   // Lightweight stats query — single SQL, no per-message enrichment
+  // NOTE: messages table only has openedAt/clickedAt/repliedAt — NOT openCount/clickCount/replyCount
   async getCampaignMessageStats(campaignId: string) {
     const row = db.prepare(`
       SELECT
         COUNT(*) as total,
         SUM(CASE WHEN status = 'sent' OR status = 'sending' THEN 1 ELSE 0 END) as sent,
         SUM(CASE WHEN status = 'bounced' OR (status = 'failed' AND errorMessage LIKE '%bounce%') THEN 1 ELSE 0 END) as bounced,
-        SUM(CASE WHEN openedAt IS NOT NULL OR openCount > 0 THEN 1 ELSE 0 END) as opened,
-        SUM(CASE WHEN clickedAt IS NOT NULL OR clickCount > 0 THEN 1 ELSE 0 END) as clicked,
-        SUM(CASE WHEN repliedAt IS NOT NULL OR replyCount > 0 THEN 1 ELSE 0 END) as replied
+        SUM(CASE WHEN openedAt IS NOT NULL THEN 1 ELSE 0 END) as opened,
+        SUM(CASE WHEN clickedAt IS NOT NULL THEN 1 ELSE 0 END) as clicked,
+        SUM(CASE WHEN repliedAt IS NOT NULL THEN 1 ELSE 0 END) as replied
       FROM messages WHERE campaignId = ?
     `).get(campaignId) as any;
     return {
@@ -1592,6 +1639,7 @@ export class DatabaseStorage {
   }
 
   // Lightweight per-step stats — single SQL with GROUP BY, no per-message enrichment
+  // NOTE: messages table only has openedAt/clickedAt/repliedAt — NOT openCount/clickCount/replyCount
   async getCampaignStepStats(campaignId: string) {
     const rows = db.prepare(`
       SELECT
@@ -1599,9 +1647,9 @@ export class DatabaseStorage {
         COUNT(*) as total,
         SUM(CASE WHEN status = 'sent' OR status = 'sending' THEN 1 ELSE 0 END) as sent,
         SUM(CASE WHEN status = 'bounced' OR (status = 'failed' AND errorMessage LIKE '%bounce%') THEN 1 ELSE 0 END) as bounced,
-        SUM(CASE WHEN openedAt IS NOT NULL OR openCount > 0 THEN 1 ELSE 0 END) as opened,
-        SUM(CASE WHEN clickedAt IS NOT NULL OR clickCount > 0 THEN 1 ELSE 0 END) as clicked,
-        SUM(CASE WHEN repliedAt IS NOT NULL OR replyCount > 0 THEN 1 ELSE 0 END) as replied
+        SUM(CASE WHEN openedAt IS NOT NULL THEN 1 ELSE 0 END) as opened,
+        SUM(CASE WHEN clickedAt IS NOT NULL THEN 1 ELSE 0 END) as clicked,
+        SUM(CASE WHEN repliedAt IS NOT NULL THEN 1 ELSE 0 END) as replied
       FROM messages WHERE campaignId = ? GROUP BY COALESCE(stepNumber, 0) ORDER BY stepNumber ASC
     `).all(campaignId) as any[];
     return rows.map((r: any) => ({
@@ -3040,27 +3088,13 @@ export class DatabaseStorage {
     return isAzure;
   }
 
-  /** Force reset corrupted database - closes, deletes file, process must restart */
+  // ===== GUARDRAIL: resetCorruptDatabase has been REMOVED =====
+  // This method used to delete the production database file. It caused catastrophic data loss.
+  // NEVER add any method that deletes, renames, or overwrites the database file.
+  // If the DB is corrupt, restore from /home/data/backups/ via Kudu SSH manually.
   resetCorruptDatabase(): { success: boolean; message: string } {
-    try {
-      // Close current connection
-      try { db.close(); } catch (e) { /* ignore */ }
-      
-      // Delete corrupt DB and auxiliary files
-      for (const file of [DB_PATH, DB_PATH + '-wal', DB_PATH + '-shm', DB_PATH + '-journal']) {
-        try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch (e) { /* ignore */ }
-      }
-      
-      console.log(`[DB] Corrupt database deleted: ${DB_PATH}`);
-      console.log(`[DB] Process will exit - PM2/Azure will restart with fresh DB`);
-      
-      // Force process exit so PM2/Azure restarts with fresh DB and schema
-      setTimeout(() => process.exit(1), 500);
-      
-      return { success: true, message: `Database deleted at ${DB_PATH}. Server restarting with fresh DB...` };
-    } catch (e: any) {
-      return { success: false, message: e.message };
-    }
+    console.error('[DB] resetCorruptDatabase called but BLOCKED — this method is disabled to prevent data loss');
+    return { success: false, message: 'Database reset is disabled. Restore manually from /home/data/backups/ via Kudu SSH.' };
   }
 }
 
