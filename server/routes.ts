@@ -5188,6 +5188,213 @@ Example response:
     }
   });
 
+  // ===== DELIVERABILITY ANALYSIS =====
+  // Analyzes email template subject + content for spam triggers, deliverability issues,
+  // and provides AI-powered suggestions to improve inbox placement.
+  app.post('/api/templates/analyze-deliverability', async (req: any, res) => {
+    try {
+      const { subject, content } = req.body;
+      if (!subject && !content) return res.status(400).json({ message: 'Subject or content required' });
+
+      const subjectLower = (subject || '').toLowerCase();
+      const contentLower = (content || '').toLowerCase();
+      const combined = subjectLower + ' ' + contentLower;
+
+      // Strip HTML tags for text analysis
+      const textOnly = (content || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+      const textLower = textOnly.toLowerCase();
+
+      const issues: { severity: 'critical' | 'warning' | 'info'; category: string; message: string; fix?: string }[] = [];
+      let score = 100;
+
+      // ===== 1. SPAM TRIGGER WORDS =====
+      const spamTriggers: { words: string[]; severity: 'critical' | 'warning'; penalty: number }[] = [
+        { words: ['free', 'act now', 'limited time', 'urgent', 'buy now', 'order now', 'click here', 'no obligation', 'risk free', 'guaranteed'], severity: 'warning', penalty: 3 },
+        { words: ['winner', 'congratulations', 'you have been selected', 'million dollars', 'earn money', 'make money', 'cash bonus', 'double your income'], severity: 'critical', penalty: 8 },
+        { words: ['100% free', 'no cost', 'no credit card', 'no purchase necessary', 'apply now', 'offer expires', 'once in a lifetime', 'special promotion'], severity: 'warning', penalty: 4 },
+        { words: ['viagra', 'pharmacy', 'weight loss', 'enlargement', 'casino'], severity: 'critical', penalty: 20 },
+      ];
+
+      const foundSpamWords: string[] = [];
+      for (const group of spamTriggers) {
+        for (const word of group.words) {
+          if (combined.includes(word)) {
+            foundSpamWords.push(word);
+            score -= group.penalty;
+            issues.push({
+              severity: group.severity,
+              category: 'Spam Words',
+              message: `Contains spam trigger word: "${word}"`,
+              fix: `Remove or rephrase "${word}" — spam filters flag this`,
+            });
+          }
+        }
+      }
+
+      // ===== 2. SUBJECT LINE ANALYSIS =====
+      if (subject) {
+        if (subject.length > 60) {
+          score -= 5;
+          issues.push({ severity: 'warning', category: 'Subject Line', message: `Subject is ${subject.length} chars (recommended: under 60)`, fix: 'Shorten subject — long subjects get clipped on mobile' });
+        }
+        if (/^[A-Z\s!]+$/.test(subject) || subject === subject.toUpperCase()) {
+          score -= 10;
+          issues.push({ severity: 'critical', category: 'Subject Line', message: 'Subject is ALL CAPS', fix: 'Use normal capitalization — ALL CAPS triggers spam filters' });
+        }
+        if ((subject.match(/!/g) || []).length > 1) {
+          score -= 5;
+          issues.push({ severity: 'warning', category: 'Subject Line', message: 'Multiple exclamation marks in subject', fix: 'Use at most one exclamation mark' });
+        }
+        if ((subject.match(/\?/g) || []).length > 2) {
+          score -= 3;
+          issues.push({ severity: 'info', category: 'Subject Line', message: 'Multiple question marks in subject', fix: 'Reduce question marks for a cleaner subject' });
+        }
+        if (/\$\d|₹|€/.test(subject)) {
+          score -= 5;
+          issues.push({ severity: 'warning', category: 'Subject Line', message: 'Currency symbols in subject line', fix: 'Move pricing to the email body — currency in subject triggers filters' });
+        }
+        if (!subject.includes('{{')) {
+          issues.push({ severity: 'info', category: 'Subject Line', message: 'No personalization in subject', fix: 'Add {{firstName}} or {{company}} — personalized subjects get 26% higher open rates' });
+        }
+      }
+
+      // ===== 3. CONTENT ANALYSIS =====
+      const htmlContent = content || '';
+      const linkCount = (htmlContent.match(/<a\s/gi) || []).length;
+      const imageCount = (htmlContent.match(/<img\s/gi) || []).length;
+      const wordCount = textOnly.split(/\s+/).filter(Boolean).length;
+
+      // Text to link ratio
+      if (linkCount > 0 && wordCount < linkCount * 20) {
+        score -= 8;
+        issues.push({ severity: 'warning', category: 'Content', message: `Too many links relative to text (${linkCount} links, ${wordCount} words)`, fix: 'Add more text content — aim for at least 20 words per link' });
+      }
+      if (linkCount > 5) {
+        score -= 5;
+        issues.push({ severity: 'warning', category: 'Content', message: `${linkCount} links in email`, fix: 'Reduce to 2-3 links maximum — too many links look spammy' });
+      }
+
+      // Image to text ratio
+      if (imageCount > 0 && wordCount < 50) {
+        score -= 10;
+        issues.push({ severity: 'critical', category: 'Content', message: 'Image-heavy email with little text', fix: 'Add at least 50 words of text — image-only emails often go to spam' });
+      }
+      if (imageCount > 3) {
+        score -= 5;
+        issues.push({ severity: 'warning', category: 'Content', message: `${imageCount} images in email`, fix: 'Reduce images — some email clients block images by default' });
+      }
+
+      // Short email
+      if (wordCount < 20 && wordCount > 0) {
+        score -= 5;
+        issues.push({ severity: 'warning', category: 'Content', message: `Very short email (${wordCount} words)`, fix: 'Emails under 20 words may look auto-generated to spam filters' });
+      }
+
+      // Very long email
+      if (wordCount > 500) {
+        issues.push({ severity: 'info', category: 'Content', message: `Long email (${wordCount} words)`, fix: 'Consider shortening — emails between 50-200 words get the best engagement' });
+      }
+
+      // ALL CAPS in content
+      const capsWords = textOnly.split(/\s+/).filter(w => w.length > 3 && w === w.toUpperCase() && /[A-Z]/.test(w));
+      if (capsWords.length > 3) {
+        score -= 5;
+        issues.push({ severity: 'warning', category: 'Content', message: `${capsWords.length} ALL CAPS words in content`, fix: 'Reduce caps — excessive caps triggers spam filters' });
+      }
+
+      // ===== 4. PERSONALIZATION CHECK =====
+      const variables = (combined.match(/\{\{(\w+)\}\}/g) || []);
+      if (variables.length === 0) {
+        score -= 5;
+        issues.push({ severity: 'warning', category: 'Personalization', message: 'No personalization variables used', fix: 'Add {{firstName}}, {{company}}, etc. — personalized emails have 2x higher reply rates' });
+      } else if (variables.length >= 2) {
+        issues.push({ severity: 'info', category: 'Personalization', message: `Good: using ${variables.length} personalization variables`, fix: undefined });
+      }
+
+      // ===== 5. HTML QUALITY =====
+      if (htmlContent.includes('<style') || htmlContent.includes('<link')) {
+        issues.push({ severity: 'info', category: 'HTML', message: 'External/embedded stylesheets detected', fix: 'Use inline styles — many email clients strip <style> tags' });
+      }
+      if (htmlContent.includes('javascript:') || htmlContent.includes('<script')) {
+        score -= 15;
+        issues.push({ severity: 'critical', category: 'HTML', message: 'JavaScript detected in email', fix: 'Remove all JavaScript — it\'s blocked by email clients and triggers spam filters' });
+      }
+      if (htmlContent.includes('display:none') || htmlContent.includes('visibility:hidden')) {
+        score -= 10;
+        issues.push({ severity: 'critical', category: 'HTML', message: 'Hidden content detected', fix: 'Remove hidden elements — spam filters treat these as deceptive' });
+      }
+
+      // ===== 6. UNSUBSCRIBE =====
+      if (!combined.includes('unsubscribe')) {
+        issues.push({ severity: 'info', category: 'Compliance', message: 'No unsubscribe mention', fix: 'Enable the unsubscribe link when sending — required by CAN-SPAM and improves deliverability' });
+      }
+
+      // Clamp score
+      score = Math.max(0, Math.min(100, score));
+      const grade = score >= 80 ? 'A' : score >= 60 ? 'B' : score >= 40 ? 'C' : 'D';
+
+      // ===== AI-POWERED SUGGESTIONS (if Azure OpenAI configured) =====
+      let aiSuggestions: string[] = [];
+      try {
+        const settings = await storage.getApiSettingsWithAzureFallback(req.user.organizationId);
+        const endpoint = settings.azure_openai_endpoint;
+        const apiKey = settings.azure_openai_api_key;
+        const deploymentName = settings.azure_openai_deployment;
+        const apiVersion = settings.azure_openai_api_version || '2024-08-01-preview';
+
+        if (endpoint && apiKey && deploymentName) {
+          const aiPrompt = `You are an email deliverability expert. Analyze this email and give 3-5 short, actionable suggestions to improve inbox placement and avoid spam filters. Focus on practical improvements only.
+
+Subject: ${subject || '(empty)'}
+Content (text): ${textOnly.slice(0, 1000)}
+
+Current issues found: ${issues.length > 0 ? issues.map(i => i.message).join('; ') : 'None'}
+Word count: ${wordCount}, Links: ${linkCount}, Images: ${imageCount}
+
+Return ONLY a JSON array of strings, each 1-2 sentences. Example: ["Add a personalized greeting with the recipient's name", "Shorten the subject to under 50 characters"]`;
+
+          const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${deploymentName}/chat/completions?api-version=${apiVersion}`;
+          const aiResp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'api-key': apiKey },
+            body: JSON.stringify({
+              messages: [
+                { role: 'system', content: 'You are an email deliverability expert. Respond only with a valid JSON array of strings.' },
+                { role: 'user', content: aiPrompt },
+              ],
+              temperature: 0.3,
+              max_tokens: 500,
+            }),
+          });
+
+          if (aiResp.ok) {
+            const aiData = await aiResp.json() as any;
+            const raw = aiData.choices?.[0]?.message?.content || '';
+            try {
+              const parsed = JSON.parse(raw.replace(/```json\n?|```/g, '').trim());
+              if (Array.isArray(parsed)) aiSuggestions = parsed.slice(0, 5);
+            } catch { /* AI returned non-JSON, skip */ }
+          }
+        }
+      } catch { /* AI not available, that's fine */ }
+
+      res.json({
+        score,
+        grade,
+        wordCount,
+        linkCount,
+        imageCount,
+        personalizationCount: variables.length,
+        spamWordsFound: foundSpamWords,
+        issues,
+        aiSuggestions,
+      });
+    } catch (error) {
+      console.error('Deliverability analysis error:', error);
+      res.status(500).json({ message: 'Failed to analyze deliverability' });
+    }
+  });
+
   app.get('/api/templates/:id', async (req: any, res) => {
     try {
       const template = await storage.getEmailTemplate(req.params.id);

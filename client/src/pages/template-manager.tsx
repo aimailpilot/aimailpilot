@@ -90,6 +90,40 @@ export default function TemplateManager() {
   const [aiResult, setAiResult] = useState<{ content: string; model: string; provider: string; textContent?: string; htmlContent?: string; format?: string } | null>(null);
   const [aiError, setAiError] = useState('');
 
+  // Deliverability analysis state
+  const [showDeliverability, setShowDeliverability] = useState(false);
+  const [deliverabilityLoading, setDeliverabilityLoading] = useState(false);
+  const [deliverabilityResult, setDeliverabilityResult] = useState<{
+    score: number; grade: string; wordCount: number; linkCount: number; imageCount: number;
+    personalizationCount: number; spamWordsFound: string[];
+    issues: { severity: 'critical' | 'warning' | 'info'; category: string; message: string; fix?: string }[];
+    aiSuggestions: string[];
+  } | null>(null);
+  const deliverabilityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const analyzeDeliverability = async (subj?: string, cont?: string) => {
+    const s = subj ?? formSubject;
+    const c = cont ?? formContent;
+    if (!s && !c) { setDeliverabilityResult(null); return; }
+    setDeliverabilityLoading(true);
+    try {
+      const res = await fetch('/api/templates/analyze-deliverability', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ subject: s, content: c }),
+      });
+      if (res.ok) setDeliverabilityResult(await res.json());
+    } catch { /* ignore */ }
+    setDeliverabilityLoading(false);
+  };
+
+  // Debounced auto-analysis when content or subject changes
+  useEffect(() => {
+    if (!showDeliverability) return;
+    if (deliverabilityTimerRef.current) clearTimeout(deliverabilityTimerRef.current);
+    deliverabilityTimerRef.current = setTimeout(() => analyzeDeliverability(), 1500);
+    return () => { if (deliverabilityTimerRef.current) clearTimeout(deliverabilityTimerRef.current); };
+  }, [formSubject, formContent, showDeliverability]);
+
   const categories = ['general', 'onboarding', 'follow-up', 'marketing', 'outreach', 'newsletter', 'transactional'];
 
   const personalizationVars = [
@@ -138,6 +172,8 @@ export default function TemplateManager() {
     }
     setEditorMode('visual');
     setShowAiSection(false);
+    setShowDeliverability(false);
+    setDeliverabilityResult(null);
     setAiResult(null);
     setAiError('');
     setShowEditor(true);
@@ -502,6 +538,12 @@ export default function TemplateManager() {
           )}
 
           <div className="flex items-center gap-2">
+            <button onClick={() => { setShowDeliverability(!showDeliverability); if (!showDeliverability && !deliverabilityResult) analyzeDeliverability(); }}
+              className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md transition-all font-medium ${
+                showDeliverability ? 'bg-green-100 text-green-700 border border-green-300' : 'text-gray-500 hover:bg-green-50 hover:text-green-600 border border-transparent'
+              }`}>
+              <Shield className="h-3.5 w-3.5" /> Deliverability
+            </button>
             <button onClick={() => setShowAiSection(!showAiSection)}
               className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md transition-all font-medium ${
                 showAiSection ? 'bg-purple-100 text-purple-700 border border-purple-300' : 'text-gray-500 hover:bg-purple-50 hover:text-purple-600 border border-transparent'
@@ -519,6 +561,119 @@ export default function TemplateManager() {
             </button>
           </div>
         </div>
+
+        {/* Deliverability Panel (collapsible, above editor) */}
+        {showDeliverability && (
+          <div className="px-6 py-4 bg-gradient-to-r from-green-50 to-emerald-50 border-b border-green-200/50 shrink-0 max-h-[45vh] overflow-y-auto">
+            <div className="max-w-4xl mx-auto">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <div className="w-6 h-6 rounded-md bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center">
+                    <Shield className="h-3.5 w-3.5 text-white" />
+                  </div>
+                  <span className="text-xs font-bold text-gray-800">Deliverability Analysis</span>
+                  {deliverabilityLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-green-600" />}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => analyzeDeliverability()} className="text-xs px-3 py-1 bg-white border border-green-200 rounded-md text-green-700 hover:bg-green-50 font-medium">
+                    Re-analyze
+                  </button>
+                  <button onClick={() => setShowDeliverability(false)} className="p-1 hover:bg-green-100 rounded">
+                    <X className="h-3.5 w-3.5 text-gray-400" />
+                  </button>
+                </div>
+              </div>
+
+              {deliverabilityResult ? (
+                <div className="space-y-3">
+                  {/* Score + Stats Row */}
+                  <div className="flex items-start gap-3">
+                    {/* Score Circle */}
+                    <div className={`flex-shrink-0 w-16 h-16 rounded-xl flex flex-col items-center justify-center font-bold ${
+                      deliverabilityResult.grade === 'A' ? 'bg-green-100 text-green-700' :
+                      deliverabilityResult.grade === 'B' ? 'bg-blue-100 text-blue-700' :
+                      deliverabilityResult.grade === 'C' ? 'bg-yellow-100 text-yellow-700' :
+                      'bg-red-100 text-red-700'
+                    }`}>
+                      <span className="text-2xl leading-none">{deliverabilityResult.grade}</span>
+                      <span className="text-[10px] font-medium opacity-70">{deliverabilityResult.score}/100</span>
+                    </div>
+
+                    {/* Quick Stats */}
+                    <div className="flex-1 grid grid-cols-4 gap-2">
+                      {[
+                        { label: 'Words', value: deliverabilityResult.wordCount, good: deliverabilityResult.wordCount >= 50 && deliverabilityResult.wordCount <= 200 },
+                        { label: 'Links', value: deliverabilityResult.linkCount, good: deliverabilityResult.linkCount <= 3 },
+                        { label: 'Images', value: deliverabilityResult.imageCount, good: deliverabilityResult.imageCount <= 2 },
+                        { label: 'Variables', value: deliverabilityResult.personalizationCount, good: deliverabilityResult.personalizationCount >= 1 },
+                      ].map(s => (
+                        <div key={s.label} className={`rounded-lg px-3 py-2 text-center border ${s.good ? 'bg-white border-green-200' : 'bg-white border-orange-200'}`}>
+                          <div className={`text-lg font-bold ${s.good ? 'text-green-700' : 'text-orange-600'}`}>{s.value}</div>
+                          <div className="text-[10px] text-gray-500 font-medium">{s.label}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Issues */}
+                  {deliverabilityResult.issues.length > 0 && (
+                    <div className="space-y-1.5">
+                      <div className="text-[11px] font-semibold text-gray-600 uppercase tracking-wider">Issues Found ({deliverabilityResult.issues.length})</div>
+                      {deliverabilityResult.issues.map((issue, i) => (
+                        <div key={i} className={`flex items-start gap-2 rounded-lg px-3 py-2 text-xs border ${
+                          issue.severity === 'critical' ? 'bg-red-50 border-red-200' :
+                          issue.severity === 'warning' ? 'bg-yellow-50 border-yellow-200' :
+                          'bg-blue-50 border-blue-200'
+                        }`}>
+                          <span className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold text-white ${
+                            issue.severity === 'critical' ? 'bg-red-500' : issue.severity === 'warning' ? 'bg-yellow-500' : 'bg-blue-400'
+                          }`}>
+                            {issue.severity === 'critical' ? '!' : issue.severity === 'warning' ? '⚠' : 'i'}
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-semibold text-gray-700">{issue.category}</span>
+                              <span className="text-gray-500">—</span>
+                              <span className="text-gray-600">{issue.message}</span>
+                            </div>
+                            {issue.fix && <div className="text-gray-500 mt-0.5">💡 {issue.fix}</div>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {deliverabilityResult.issues.length === 0 && (
+                    <div className="bg-green-100 border border-green-200 rounded-lg px-4 py-3 text-xs text-green-800 font-medium">
+                      No issues found — your email looks good for deliverability!
+                    </div>
+                  )}
+
+                  {/* AI Suggestions */}
+                  {deliverabilityResult.aiSuggestions.length > 0 && (
+                    <div className="space-y-1.5">
+                      <div className="text-[11px] font-semibold text-gray-600 uppercase tracking-wider flex items-center gap-1.5">
+                        <Sparkles className="h-3 w-3 text-purple-500" /> AI Suggestions
+                      </div>
+                      <div className="grid gap-1.5">
+                        {deliverabilityResult.aiSuggestions.map((tip, i) => (
+                          <div key={i} className="flex items-start gap-2 bg-white border border-purple-200 rounded-lg px-3 py-2 text-xs text-gray-700">
+                            <span className="text-purple-500 font-bold mt-px">{i + 1}.</span>
+                            <span>{tip}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="text-xs text-gray-500 text-center py-4">
+                  {deliverabilityLoading ? 'Analyzing your email...' : 'Add subject and content, then click Re-analyze'}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* AI Section (collapsible, above editor) */}
         {showAiSection && (
