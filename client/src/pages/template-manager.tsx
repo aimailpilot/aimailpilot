@@ -15,7 +15,7 @@ import {
   AlignLeft, AlignCenter, AlignRight, Type, Strikethrough, ChevronDown,
   Monitor, Info, User, Users, Star, TrendingUp, AlertTriangle, Mail,
   MessageSquare, MousePointer, Shield, ArrowUpDown, ChevronRight,
-  ArrowLeft, Save, Palette
+  ArrowLeft, Save, Palette, Smartphone, Send, CheckCircle
 } from "lucide-react";
 
 interface TemplateCreator {
@@ -70,6 +70,15 @@ export default function TemplateManager() {
   const [previewHtml, setPreviewHtml] = useState('');
   const [previewSubject, setPreviewSubject] = useState('');
   const [previewContact, setPreviewContact] = useState<any>(null);
+  const [previewMode, setPreviewMode] = useState<'desktop' | 'mobile'>('desktop');
+
+  // Test email state
+  const [testEmail, setTestEmail] = useState('');
+  const [testEmailAccountId, setTestEmailAccountId] = useState('');
+  const [testSending, setTestSending] = useState(false);
+  const [testSent, setTestSent] = useState(false);
+  const [testError, setTestError] = useState('');
+  const [emailAccounts, setEmailAccounts] = useState<any[]>([]);
 
   // Form
   const [formName, setFormName] = useState('');
@@ -376,6 +385,55 @@ export default function TemplateManager() {
         setShowPreview(true);
       }
     } catch (e) { /* ignore */ }
+  };
+
+  // Fetch email accounts when preview opens
+  useEffect(() => {
+    if (showPreview && emailAccounts.length === 0) {
+      fetch('/api/email-accounts', { credentials: 'include' })
+        .then(r => r.ok ? r.json() : [])
+        .then(accounts => {
+          setEmailAccounts(accounts || []);
+          if (accounts?.length > 0 && !testEmailAccountId) {
+            setTestEmailAccountId(accounts[0].id);
+          }
+        })
+        .catch(() => {});
+    }
+    if (!showPreview) {
+      setTestSent(false);
+      setTestError('');
+    }
+  }, [showPreview]);
+
+  const sendTestEmail = async () => {
+    if (!testEmail || !testEmailAccountId) return;
+    setTestSending(true);
+    setTestSent(false);
+    setTestError('');
+    try {
+      const res = await fetch('/api/campaigns/send-test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          emailAccountId: testEmailAccountId,
+          toEmail: testEmail,
+          subject: previewSubject,
+          content: previewHtml,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setTestSent(true);
+        setTimeout(() => setTestSent(false), 4000);
+      } else {
+        setTestError(data.error || 'Failed to send test email');
+      }
+    } catch {
+      setTestError('Failed to send test email');
+    }
+    setTestSending(false);
   };
 
   const insertVariable = (varName: string) => {
@@ -927,23 +985,53 @@ export default function TemplateManager() {
         </div>
 
         {/* Preview Dialog (still a dialog for overlay) */}
-        <Dialog open={showPreview} onOpenChange={setShowPreview}>
-          <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+        <Dialog open={showPreview} onOpenChange={(open) => { setShowPreview(open); if (!open) setPreviewMode('desktop'); }}>
+          <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
             <DialogHeader>
-              <DialogTitle className="flex items-center gap-2">
-                <Monitor className="h-4 w-4 text-blue-600" /> Email Preview
-              </DialogTitle>
-              <DialogDescription>Variables are replaced with sample data.</DialogDescription>
+              <div className="flex items-center justify-between">
+                <div>
+                  <DialogTitle className="flex items-center gap-2">
+                    <Eye className="h-4 w-4 text-blue-600" /> Email Preview
+                  </DialogTitle>
+                  <DialogDescription>Variables are replaced with sample data.</DialogDescription>
+                </div>
+                <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
+                  <button
+                    onClick={() => setPreviewMode('desktop')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${previewMode === 'desktop' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                  >
+                    <Monitor className="h-3.5 w-3.5" /> Desktop
+                  </button>
+                  <button
+                    onClick={() => setPreviewMode('mobile')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${previewMode === 'mobile' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                  >
+                    <Smartphone className="h-3.5 w-3.5" /> Mobile
+                  </button>
+                </div>
+              </div>
             </DialogHeader>
             <div className="space-y-4">
               <div className="bg-gray-50 rounded-xl p-4 border border-gray-100">
                 <div className="text-[10px] text-gray-400 font-semibold uppercase mb-1">Subject Line</div>
                 <div className="font-semibold text-gray-900">{previewSubject}</div>
               </div>
-              <div className="border border-gray-200 rounded-xl bg-white overflow-hidden">
-                <div className="p-6">
-                  <div dangerouslySetInnerHTML={{ __html: previewHtml }}
-                    className="prose prose-sm max-w-none text-gray-800 [&_a]:text-blue-600 [&_img]:max-w-full" />
+              <div className={`flex justify-center ${previewMode === 'mobile' ? 'bg-gray-100 rounded-xl p-6' : ''}`}>
+                <div className={`border border-gray-200 rounded-xl bg-white overflow-hidden transition-all duration-300 ${previewMode === 'mobile' ? 'w-[375px] shadow-xl rounded-[2rem] border-[8px] border-gray-800 relative' : 'w-full'}`}>
+                  {previewMode === 'mobile' && (
+                    <div className="bg-gray-800 text-center py-2">
+                      <div className="w-20 h-1.5 bg-gray-600 rounded-full mx-auto" />
+                    </div>
+                  )}
+                  <div className={previewMode === 'mobile' ? 'p-4 max-h-[500px] overflow-y-auto' : 'p-6'}>
+                    <div dangerouslySetInnerHTML={{ __html: previewHtml }}
+                      className={`prose max-w-none text-gray-800 [&_a]:text-blue-600 [&_img]:max-w-full ${previewMode === 'mobile' ? 'prose-sm text-[13px]' : 'prose-sm'}`} />
+                  </div>
+                  {previewMode === 'mobile' && (
+                    <div className="bg-gray-800 text-center py-3">
+                      <div className="w-10 h-10 border-2 border-gray-600 rounded-full mx-auto" />
+                    </div>
+                  )}
                 </div>
               </div>
               {previewContact && (
@@ -952,6 +1040,42 @@ export default function TemplateManager() {
                   <span>Sample: {previewContact.firstName} {previewContact.lastName} ({previewContact.email})</span>
                 </div>
               )}
+
+              {/* Send Test Email Section */}
+              <div className="border border-gray-200 rounded-xl p-4 bg-gray-50/50">
+                <div className="text-xs font-semibold text-gray-500 uppercase mb-3 flex items-center gap-1.5">
+                  <Send className="h-3.5 w-3.5" /> Send Test Email
+                </div>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={testEmailAccountId}
+                    onChange={(e) => setTestEmailAccountId(e.target.value)}
+                    className="h-9 text-sm border border-gray-200 rounded-lg px-2 bg-white min-w-[180px]"
+                  >
+                    {emailAccounts.length === 0 && <option value="">No accounts</option>}
+                    {emailAccounts.map((acc: any) => (
+                      <option key={acc.id} value={acc.id}>{acc.name || acc.email}</option>
+                    ))}
+                  </select>
+                  <Input
+                    type="email"
+                    placeholder="recipient@example.com"
+                    value={testEmail}
+                    onChange={(e) => { setTestEmail(e.target.value); setTestError(''); }}
+                    className="h-9 text-sm flex-1"
+                  />
+                  <Button
+                    size="sm"
+                    onClick={sendTestEmail}
+                    disabled={testSending || !testEmail || !testEmailAccountId}
+                    className="h-9 px-4"
+                  >
+                    {testSending ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" /> : testSent ? <CheckCircle className="h-3.5 w-3.5 mr-1.5 text-green-300" /> : <Send className="h-3.5 w-3.5 mr-1.5" />}
+                    {testSending ? 'Sending...' : testSent ? 'Sent!' : 'Send Test'}
+                  </Button>
+                </div>
+                {testError && <p className="text-xs text-red-500 mt-2">{testError}</p>}
+              </div>
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={() => setShowPreview(false)}>Close</Button>
@@ -1215,23 +1339,53 @@ export default function TemplateManager() {
       )}
 
       {/* Preview Dialog */}
-      <Dialog open={showPreview} onOpenChange={setShowPreview}>
-        <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+      <Dialog open={showPreview} onOpenChange={(open) => { setShowPreview(open); if (!open) setPreviewMode('desktop'); }}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Monitor className="h-4 w-4 text-blue-600" /> Email Preview
-            </DialogTitle>
-            <DialogDescription>Variables are replaced with sample data.</DialogDescription>
+            <div className="flex items-center justify-between">
+              <div>
+                <DialogTitle className="flex items-center gap-2">
+                  <Eye className="h-4 w-4 text-blue-600" /> Email Preview
+                </DialogTitle>
+                <DialogDescription>Variables are replaced with sample data.</DialogDescription>
+              </div>
+              <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
+                <button
+                  onClick={() => setPreviewMode('desktop')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${previewMode === 'desktop' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                >
+                  <Monitor className="h-3.5 w-3.5" /> Desktop
+                </button>
+                <button
+                  onClick={() => setPreviewMode('mobile')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${previewMode === 'mobile' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                >
+                  <Smartphone className="h-3.5 w-3.5" /> Mobile
+                </button>
+              </div>
+            </div>
           </DialogHeader>
           <div className="space-y-4">
             <div className="bg-gray-50 rounded-xl p-4 border border-gray-100">
               <div className="text-[10px] text-gray-400 font-semibold uppercase mb-1">Subject Line</div>
               <div className="font-semibold text-gray-900">{previewSubject}</div>
             </div>
-            <div className="border border-gray-200 rounded-xl bg-white overflow-hidden">
-              <div className="p-6">
-                <div dangerouslySetInnerHTML={{ __html: previewHtml }}
-                  className="prose prose-sm max-w-none text-gray-800 [&_a]:text-blue-600 [&_img]:max-w-full" />
+            <div className={`flex justify-center ${previewMode === 'mobile' ? 'bg-gray-100 rounded-xl p-6' : ''}`}>
+              <div className={`border border-gray-200 rounded-xl bg-white overflow-hidden transition-all duration-300 ${previewMode === 'mobile' ? 'w-[375px] shadow-xl rounded-[2rem] border-[8px] border-gray-800 relative' : 'w-full'}`}>
+                {previewMode === 'mobile' && (
+                  <div className="bg-gray-800 text-center py-2">
+                    <div className="w-20 h-1.5 bg-gray-600 rounded-full mx-auto" />
+                  </div>
+                )}
+                <div className={previewMode === 'mobile' ? 'p-4 max-h-[500px] overflow-y-auto' : 'p-6'}>
+                  <div dangerouslySetInnerHTML={{ __html: previewHtml }}
+                    className={`prose max-w-none text-gray-800 [&_a]:text-blue-600 [&_img]:max-w-full ${previewMode === 'mobile' ? 'prose-sm text-[13px]' : 'prose-sm'}`} />
+                </div>
+                {previewMode === 'mobile' && (
+                  <div className="bg-gray-800 text-center py-3">
+                    <div className="w-10 h-10 border-2 border-gray-600 rounded-full mx-auto" />
+                  </div>
+                )}
               </div>
             </div>
             {previewContact && (
@@ -1240,6 +1394,42 @@ export default function TemplateManager() {
                 <span>Sample: {previewContact.firstName} {previewContact.lastName} ({previewContact.email})</span>
               </div>
             )}
+
+            {/* Send Test Email Section */}
+            <div className="border border-gray-200 rounded-xl p-4 bg-gray-50/50">
+              <div className="text-xs font-semibold text-gray-500 uppercase mb-3 flex items-center gap-1.5">
+                <Send className="h-3.5 w-3.5" /> Send Test Email
+              </div>
+              <div className="flex items-center gap-2">
+                <select
+                  value={testEmailAccountId}
+                  onChange={(e) => setTestEmailAccountId(e.target.value)}
+                  className="h-9 text-sm border border-gray-200 rounded-lg px-2 bg-white min-w-[180px]"
+                >
+                  {emailAccounts.length === 0 && <option value="">No accounts</option>}
+                  {emailAccounts.map((acc: any) => (
+                    <option key={acc.id} value={acc.id}>{acc.name || acc.email}</option>
+                  ))}
+                </select>
+                <Input
+                  type="email"
+                  placeholder="recipient@example.com"
+                  value={testEmail}
+                  onChange={(e) => { setTestEmail(e.target.value); setTestError(''); }}
+                  className="h-9 text-sm flex-1"
+                />
+                <Button
+                  size="sm"
+                  onClick={sendTestEmail}
+                  disabled={testSending || !testEmail || !testEmailAccountId}
+                  className="h-9 px-4"
+                >
+                  {testSending ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" /> : testSent ? <CheckCircle className="h-3.5 w-3.5 mr-1.5 text-green-300" /> : <Send className="h-3.5 w-3.5 mr-1.5" />}
+                  {testSending ? 'Sending...' : testSent ? 'Sent!' : 'Send Test'}
+                </Button>
+              </div>
+              {testError && <p className="text-xs text-red-500 mt-2">{testError}</p>}
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowPreview(false)}>Close</Button>
