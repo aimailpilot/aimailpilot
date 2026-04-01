@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Pagination } from "@/components/ui/pagination";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
@@ -14,7 +16,7 @@ import {
   MailOpen, MousePointer, MessageSquare, AlertCircle, UserMinus,
   Bold, Italic, Underline, Link, Image, Code, List, ListOrdered,
   AlignLeft, FileText, MoreVertical, Sparkles, Hash,
-  Monitor, Smartphone, Loader2, X, Zap, Link2
+  Monitor, Smartphone, Loader2, X, Zap, Link2, Settings2
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { CampaignDetail, CampaignMessage, TrackingEvent, StepAnalytics, ActivityTimelineItem } from "@/types";
@@ -61,6 +63,30 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
   const [testSending, setTestSending] = useState(false);
   const [testSent, setTestSent] = useState(false);
   const [testError, setTestError] = useState('');
+
+  // Campaign settings state
+  const [trackEmails, setTrackEmails] = useState(true);
+  const [unsubscribeLink, setUnsubscribeLink] = useState(false);
+  const [showAutopilot, setShowAutopilot] = useState(false);
+  const [autopilot, setAutopilot] = useState<{
+    enabled: boolean;
+    days: { [key: string]: { enabled: boolean; startTime: string; endTime: string } };
+    maxPerDay: number;
+    delayBetween: number;
+    delayUnit: 'seconds' | 'minutes';
+  }>({
+    enabled: false,
+    days: {
+      Monday: { enabled: true, startTime: '09:00', endTime: '17:00' },
+      Tuesday: { enabled: true, startTime: '09:00', endTime: '17:00' },
+      Wednesday: { enabled: true, startTime: '09:00', endTime: '17:00' },
+      Thursday: { enabled: true, startTime: '09:00', endTime: '17:00' },
+      Friday: { enabled: true, startTime: '09:00', endTime: '17:00' },
+      Saturday: { enabled: true, startTime: '09:00', endTime: '17:00' },
+      Sunday: { enabled: false, startTime: '09:00', endTime: '20:00' },
+    },
+    maxPerDay: 400, delayBetween: 5, delayUnit: 'minutes',
+  });
 
   // Expanded sections
   const [showAllEmails, setShowAllEmails] = useState(true);
@@ -192,10 +218,19 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
   const openUpdateDialog = async () => {
     setShowActions(false);
     if (!detail) return;
-    setUpdateSubject(detail.campaign.subject || '');
-    setUpdateContent(detail.campaign.content || '');
-    setUpdateEmailAccountId(detail.campaign.emailAccountId || '');
+    const c = detail.campaign;
+    setUpdateSubject(c.subject || '');
+    setUpdateContent(c.content || '');
+    setUpdateEmailAccountId(c.emailAccountId || '');
     setUpdateError('');
+    setTrackEmails(c.trackOpens !== 0 && c.trackOpens !== false);
+    setUnsubscribeLink(c.includeUnsubscribe === 1 || c.includeUnsubscribe === true);
+    // Load autopilot from sendingConfig if it exists
+    if (c.sendingConfig?.autopilot) {
+      setAutopilot({ ...c.sendingConfig.autopilot, enabled: true });
+    } else {
+      setAutopilot(prev => ({ ...prev, enabled: false }));
+    }
     setShowUpdateDialog(true);
 
     try {
@@ -205,7 +240,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
 
     setTimeout(() => {
       if (editorRef.current) {
-        editorRef.current.innerHTML = detail.campaign.content || '';
+        editorRef.current.innerHTML = c.content || '';
       }
     }, 100);
   };
@@ -215,6 +250,11 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
     setUpdateError('');
     try {
       const content = editorRef.current?.innerHTML || updateContent;
+      const sendingConfig = autopilot.enabled ? {
+        delayBetweenEmails: autopilot.delayBetween * (autopilot.delayUnit === 'minutes' ? 60000 : 1000),
+        autopilot,
+        timezoneOffset: new Date().getTimezoneOffset(),
+      } : (detail?.campaign?.sendingConfig || null);
       const res = await fetch(`/api/campaigns/${campaignId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -223,6 +263,9 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
           subject: updateSubject,
           content,
           emailAccountId: updateEmailAccountId || undefined,
+          trackOpens: trackEmails ? 1 : 0,
+          includeUnsubscribe: unsubscribeLink ? 1 : 0,
+          sendingConfig,
         }),
       });
       if (res.ok) {
@@ -1249,41 +1292,46 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
                   </div>
                 </div>
 
-                {/* Right: Settings sidebar like Mailmeteor */}
+                {/* Right: Settings sidebar */}
                 <div className="w-[220px] shrink-0 border-l border-gray-100 overflow-y-auto">
                   <div className="px-5 pt-5 pb-2">
                     <h4 className="text-base font-bold text-gray-900">Settings</h4>
                   </div>
-                  <div className="px-2 py-1 space-y-0.5">
-                    {/* Schedule send */}
-                    <button className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-gray-50 transition-colors group">
-                      <Calendar className="h-4 w-4 text-gray-400 group-hover:text-gray-600" />
-                      <span className="text-sm text-gray-700">Schedule send</span>
-                      <Calendar className="h-3.5 w-3.5 text-gray-300 ml-auto" />
-                    </button>
+                  <div className="px-3 py-1 space-y-1">
                     {/* Autopilot */}
-                    <button className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-gray-50 transition-colors group">
-                      <Zap className="h-4 w-4 text-gray-400 group-hover:text-gray-600" />
-                      <span className="text-sm text-gray-700">Autopilot</span>
-                      <Info className="h-3.5 w-3.5 text-gray-300 ml-auto" />
+                    <button onClick={() => setShowAutopilot(true)}
+                      className="w-full flex items-center justify-between py-2.5 text-sm text-gray-700 hover:text-blue-600 transition-colors group">
+                      <span className="flex items-center gap-2.5">
+                        <Zap className="h-4 w-4 text-gray-400 group-hover:text-blue-500" />
+                        Autopilot
+                        <Info className="h-3 w-3 text-gray-300" />
+                      </span>
+                      <Settings2 className="h-4 w-4 text-gray-300 group-hover:text-blue-500" />
                     </button>
+                    {autopilot.enabled && (
+                      <div className="ml-6 mb-1 text-[11px] text-purple-600 bg-purple-50 rounded px-2 py-1">
+                        {autopilot.maxPerDay}/day, {autopilot.delayBetween} {autopilot.delayUnit} delay
+                      </div>
+                    )}
+
                     {/* Track emails */}
-                    <div className="flex items-center gap-3 px-3 py-2.5">
-                      <Eye className="h-4 w-4 text-gray-400" />
-                      <span className="text-sm text-gray-700">Track emails</span>
-                      <Info className="h-3 w-3 text-gray-300" />
-                      <div className="ml-auto w-9 h-5 bg-blue-600 rounded-full relative cursor-pointer flex-shrink-0">
-                        <div className="absolute right-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow-sm transition-all" />
-                      </div>
+                    <div className="flex items-center justify-between py-2.5">
+                      <span className="text-sm text-gray-700 flex items-center gap-2.5">
+                        <Eye className="h-4 w-4 text-gray-400" />
+                        Track emails
+                        <Info className="h-3 w-3 text-gray-300" />
+                      </span>
+                      <Switch checked={trackEmails} onCheckedChange={setTrackEmails} />
                     </div>
+
                     {/* Unsubscribe link */}
-                    <div className="flex items-center gap-3 px-3 py-2.5">
-                      <Link2 className="h-4 w-4 text-gray-400" />
-                      <span className="text-sm text-gray-700">Unsubscribe link</span>
-                      <Info className="h-3 w-3 text-gray-300" />
-                      <div className="ml-auto w-9 h-5 bg-gray-300 rounded-full relative cursor-pointer flex-shrink-0">
-                        <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow-sm transition-all" />
-                      </div>
+                    <div className="flex items-center justify-between py-2.5">
+                      <span className="text-sm text-gray-700 flex items-center gap-2.5">
+                        <Link2 className="h-4 w-4 text-gray-400" />
+                        Unsubscribe
+                        <Info className="h-3 w-3 text-gray-300" />
+                      </span>
+                      <Switch checked={unsubscribeLink} onCheckedChange={setUnsubscribeLink} />
                     </div>
                   </div>
                 </div>
@@ -1398,6 +1446,85 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
               </div>
             </>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* ===================== AUTOPILOT DIALOG ===================== */}
+      <Dialog open={showAutopilot} onOpenChange={setShowAutopilot}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Autopilot</DialogTitle>
+            <DialogDescription>Improve your deliverability with these sending options.</DialogDescription>
+          </DialogHeader>
+          <div className="flex gap-8 mt-2">
+            <div className="flex-1">
+              <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Send only on</div>
+              <div className="space-y-2">
+                {['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'].map(day => {
+                  const dayConfig = autopilot.days[day];
+                  return (
+                    <div key={day} className={`flex items-center gap-3 ${!dayConfig.enabled ? 'opacity-50' : ''}`}>
+                      <input type="checkbox" checked={dayConfig.enabled}
+                        onChange={e => setAutopilot(prev => ({ ...prev, days: { ...prev.days, [day]: { ...prev.days[day], enabled: e.target.checked } } }))}
+                        className="h-4 w-4 rounded border-gray-300 text-blue-600" />
+                      <span className="text-sm text-gray-700 w-24">{day}</span>
+                      <input type="time" value={dayConfig.startTime}
+                        onChange={e => setAutopilot(prev => ({ ...prev, days: { ...prev.days, [day]: { ...prev.days[day], startTime: e.target.value } } }))}
+                        disabled={!dayConfig.enabled}
+                        className="text-xs border border-gray-200 rounded px-2 py-1 w-24 disabled:bg-gray-50" />
+                      <span className="text-xs text-gray-400">to</span>
+                      <input type="time" value={dayConfig.endTime}
+                        onChange={e => setAutopilot(prev => ({ ...prev, days: { ...prev.days, [day]: { ...prev.days[day], endTime: e.target.value } } }))}
+                        disabled={!dayConfig.enabled}
+                        className="text-xs border border-gray-200 rounded px-2 py-1 w-24 disabled:bg-gray-50" />
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="w-56">
+              <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Sending rate</div>
+              <div className="mb-3">
+                <label className="text-sm text-gray-700 mb-1 block">Max emails per day:</label>
+                <Input type="number" value={autopilot.maxPerDay}
+                  onChange={e => setAutopilot(prev => ({ ...prev, maxPerDay: parseInt(e.target.value) || 100 }))}
+                  className="h-9" />
+              </div>
+              <div className="mb-5">
+                <label className="text-sm text-gray-700 mb-1 block">Delay between emails:</label>
+                <div className="flex gap-2">
+                  <Input type="number" value={autopilot.delayBetween}
+                    onChange={e => setAutopilot(prev => ({ ...prev, delayBetween: parseInt(e.target.value) || 1 }))}
+                    className="h-9 w-20" />
+                  <select value={autopilot.delayUnit}
+                    onChange={e => setAutopilot(prev => ({ ...prev, delayUnit: e.target.value as any }))}
+                    className="h-9 border border-gray-200 rounded-md px-2 text-sm flex-1">
+                    <option value="seconds">seconds</option>
+                    <option value="minutes">minutes</option>
+                  </select>
+                </div>
+              </div>
+              <div className="border-t border-gray-100 pt-4">
+                <div className="text-xs text-gray-400 mb-1">Summary</div>
+                <div className="text-sm text-gray-600">
+                  If you send {campaign.totalRecipients || totalMessages || 100} emails, it will take about{' '}
+                  <span className="font-semibold underline decoration-dotted">
+                    {(() => {
+                      const count = campaign.totalRecipients || totalMessages || 100;
+                      const totalMinutes = count * (autopilot.delayUnit === 'minutes' ? autopilot.delayBetween : autopilot.delayBetween / 60);
+                      if (totalMinutes < 60) return `${Math.ceil(totalMinutes)} minutes`;
+                      if (totalMinutes < 1440) return `${Math.ceil(totalMinutes / 60)} hours`;
+                      return `${Math.ceil(count / (autopilot.maxPerDay || 100))} days`;
+                    })()}
+                  </span>.
+                </div>
+              </div>
+            </div>
+          </div>
+          <DialogFooter className="mt-4">
+            <Button variant="outline" onClick={() => setShowAutopilot(false)}>Cancel</Button>
+            <Button className="bg-blue-600 hover:bg-blue-700" onClick={() => { setAutopilot(prev => ({ ...prev, enabled: true })); setShowAutopilot(false); }}>Apply</Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

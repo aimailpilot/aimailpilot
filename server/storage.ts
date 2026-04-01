@@ -1491,9 +1491,9 @@ export class DatabaseStorage {
       }
     }
     const m = { ...existing, ...cleanData };
-    db.prepare(`UPDATE campaigns SET name=?, description=?, status=?, totalRecipients=?, sentCount=?, openedCount=?, clickedCount=?, repliedCount=?, bouncedCount=?, unsubscribedCount=?, subject=?, content=?, emailAccountId=?, templateId=?, contactIds=?, segmentId=?, scheduledAt=?, sendingConfig=?, updatedAt=? WHERE id=?`).run(
+    db.prepare(`UPDATE campaigns SET name=?, description=?, status=?, totalRecipients=?, sentCount=?, openedCount=?, clickedCount=?, repliedCount=?, bouncedCount=?, unsubscribedCount=?, subject=?, content=?, emailAccountId=?, templateId=?, contactIds=?, segmentId=?, scheduledAt=?, sendingConfig=?, trackOpens=?, includeUnsubscribe=?, updatedAt=? WHERE id=?`).run(
       m.name, m.description, m.status, m.totalRecipients, m.sentCount, m.openedCount, m.clickedCount, m.repliedCount, m.bouncedCount, m.unsubscribedCount,
-      m.subject, m.content, m.emailAccountId || null, m.templateId || null, toJson(m.contactIds), m.segmentId || null, toSqlDate(m.scheduledAt), toJson(m.sendingConfig), now(), id
+      m.subject, m.content, m.emailAccountId || null, m.templateId || null, toJson(m.contactIds), m.segmentId || null, toSqlDate(m.scheduledAt), toJson(m.sendingConfig), m.trackOpens ?? 1, m.includeUnsubscribe ?? 0, now(), id
     );
     return this.getCampaign(id);
   }
