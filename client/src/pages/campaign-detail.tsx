@@ -14,7 +14,7 @@ import {
   MailOpen, MousePointer, MessageSquare, AlertCircle, UserMinus,
   Bold, Italic, Underline, Link, Image, Code, List, ListOrdered,
   AlignLeft, FileText, MoreVertical, Sparkles, Hash,
-  Monitor, Smartphone, Loader2, X
+  Monitor, Smartphone, Loader2, X, Zap, Link2
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { CampaignDetail, CampaignMessage, TrackingEvent, StepAnalytics, ActivityTimelineItem } from "@/types";
@@ -1249,20 +1249,40 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
                   </div>
                 </div>
 
-                {/* Right: Settings sidebar */}
-                <div className="w-[200px] shrink-0 border-l border-gray-100 bg-gray-50/40 px-4 py-5 overflow-y-auto">
-                  <h4 className="text-sm font-bold text-gray-900 mb-4">Settings</h4>
-                  <div className="space-y-4">
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm text-gray-600">Track emails</span>
-                      <div className="w-9 h-5 bg-blue-600 rounded-full relative cursor-pointer">
-                        <div className="absolute right-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow-sm" />
+                {/* Right: Settings sidebar like Mailmeteor */}
+                <div className="w-[220px] shrink-0 border-l border-gray-100 overflow-y-auto">
+                  <div className="px-5 pt-5 pb-2">
+                    <h4 className="text-base font-bold text-gray-900">Settings</h4>
+                  </div>
+                  <div className="px-2 py-1 space-y-0.5">
+                    {/* Schedule send */}
+                    <button className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-gray-50 transition-colors group">
+                      <Calendar className="h-4 w-4 text-gray-400 group-hover:text-gray-600" />
+                      <span className="text-sm text-gray-700">Schedule send</span>
+                      <Calendar className="h-3.5 w-3.5 text-gray-300 ml-auto" />
+                    </button>
+                    {/* Autopilot */}
+                    <button className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-gray-50 transition-colors group">
+                      <Zap className="h-4 w-4 text-gray-400 group-hover:text-gray-600" />
+                      <span className="text-sm text-gray-700">Autopilot</span>
+                      <Info className="h-3.5 w-3.5 text-gray-300 ml-auto" />
+                    </button>
+                    {/* Track emails */}
+                    <div className="flex items-center gap-3 px-3 py-2.5">
+                      <Eye className="h-4 w-4 text-gray-400" />
+                      <span className="text-sm text-gray-700">Track emails</span>
+                      <Info className="h-3 w-3 text-gray-300" />
+                      <div className="ml-auto w-9 h-5 bg-blue-600 rounded-full relative cursor-pointer flex-shrink-0">
+                        <div className="absolute right-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow-sm transition-all" />
                       </div>
                     </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm text-gray-600">Unsubscribe link</span>
-                      <div className="w-9 h-5 bg-gray-300 rounded-full relative cursor-pointer">
-                        <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow-sm" />
+                    {/* Unsubscribe link */}
+                    <div className="flex items-center gap-3 px-3 py-2.5">
+                      <Link2 className="h-4 w-4 text-gray-400" />
+                      <span className="text-sm text-gray-700">Unsubscribe link</span>
+                      <Info className="h-3 w-3 text-gray-300" />
+                      <div className="ml-auto w-9 h-5 bg-gray-300 rounded-full relative cursor-pointer flex-shrink-0">
+                        <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow-sm transition-all" />
                       </div>
                     </div>
                   </div>
