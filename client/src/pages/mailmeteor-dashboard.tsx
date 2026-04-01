@@ -189,11 +189,32 @@ export default function MailMeteorDashboard() {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeFilter, setActiveFilter] = useState("All");
   const [viewMode, setViewMode] = useState<'dashboard' | 'campaign'>('dashboard');
-  const [currentView, setCurrentView] = useState<ViewType>('campaigns');
+  const [currentView, setCurrentViewRaw] = useState<ViewType>(() => {
+    // Restore view from URL hash on initial load (e.g. #contacts, #campaign-detail/abc123)
+    const hash = window.location.hash.replace('#', '');
+    const validViews = ['campaigns', 'templates', 'contacts', 'inbox', 'setup', 'analytics', 'verification', 'tracking', 'account', 'billing', 'followups', 'insights', 'tools', 'advanced-settings', 'team', 'superadmin', 'warmup', 'campaign-detail'];
+    if (hash.startsWith('campaign-detail/')) return 'campaign-detail' as ViewType;
+    return validViews.includes(hash) ? hash as ViewType : 'campaigns';
+  });
+  const setCurrentView = (view: ViewType) => {
+    setCurrentViewRaw(view);
+    // Persist the view in the URL hash so refresh restores it
+    if (view === 'campaign-detail') return; // campaign-detail hash is set separately with ID
+    window.history.replaceState(null, '', `#${view}`);
+  };
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [insightsExpanded, setInsightsExpanded] = useState(false);
   const [toolsExpanded, setToolsExpanded] = useState(false);
-  const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(null);
+  const [selectedCampaignId, setSelectedCampaignIdRaw] = useState<string | null>(() => {
+    const hash = window.location.hash.replace('#', '');
+    if (hash.startsWith('campaign-detail/')) return hash.split('/')[1] || null;
+    return null;
+  });
+  const setSelectedCampaignId = (id: string | null) => {
+    setSelectedCampaignIdRaw(id);
+    if (id) window.history.replaceState(null, '', `#campaign-detail/${id}`);
+    // When clearing campaign ID, the hash is updated by setCurrentView('campaigns')
+  };
   const [location, setLocation] = useLocation();
   const [userOrgs, setUserOrgs] = useState<Array<{ id: string; name: string; role: string; isDefault: boolean }>>([]);
   const [currentOrgName, setCurrentOrgName] = useState('');
@@ -256,7 +277,7 @@ export default function MailMeteorDashboard() {
     // We'll clean after a short delay
     if (viewParam) {
       setTimeout(() => {
-        window.history.replaceState({}, '', window.location.pathname);
+        window.history.replaceState({}, '', window.location.pathname + window.location.hash);
       }, 500);
     }
   }, []);
