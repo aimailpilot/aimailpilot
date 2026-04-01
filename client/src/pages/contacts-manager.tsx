@@ -15,7 +15,8 @@ import {
   AlertTriangle, Ban, Link2, Sheet, Pencil, ExternalLink, ShieldX, ListX, LayoutList,
   Copy, ArrowRight, ChevronDown, Info, Sparkles, RefreshCw,
   Phone, Globe, MapPin, Linkedin, DollarSign, Hash, Calendar, Factory,
-  Zap, BarChart3, Flame
+  Zap, BarChart3, Flame, Wand2, FileText, Bold, Italic, Underline, Link,
+  ListOrdered, AlignLeft, Code, Type
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -178,6 +179,13 @@ export default function ContactsManager() {
   const [sendEmailAccounts, setSendEmailAccounts] = useState<any[]>([]);
   const [sendEmailLoading, setSendEmailLoading] = useState(false);
   const [sendEmailResult, setSendEmailResult] = useState<any>(null);
+  const [sendEmailMode, setSendEmailMode] = useState<'manual' | 'template' | 'ai'>('manual');
+  const [sendEmailTemplates, setSendEmailTemplates] = useState<any[]>([]);
+  const [sendEmailTemplateSearch, setSendEmailTemplateSearch] = useState('');
+  const [sendEmailAiPrompt, setSendEmailAiPrompt] = useState('');
+  const [sendEmailAiGenerating, setSendEmailAiGenerating] = useState(false);
+  const sendEmailEditorRef = useRef<HTMLDivElement>(null);
+  const [sendEmailEditorMode, setSendEmailEditorMode] = useState<'visual' | 'html'>('visual');
 
   // Debounced search
   useEffect(() => {
@@ -390,24 +398,77 @@ export default function ContactsManager() {
   const openSendEmailDialog = async () => {
     if (selectedIds.length === 0) { alert('Select contacts first'); return; }
     setSendEmailSubject(''); setSendEmailContent(''); setSendEmailResult(null); setSendEmailLoading(false);
+    setSendEmailMode('manual'); setSendEmailTemplateSearch(''); setSendEmailAiPrompt('');
+    setSendEmailEditorMode('visual');
     try {
-      const res = await fetch('/api/email-accounts', { credentials: 'include' });
-      if (res.ok) {
-        const accounts = await res.json();
+      const [accRes, tplRes] = await Promise.all([
+        fetch('/api/email-accounts', { credentials: 'include' }),
+        fetch('/api/templates/mine', { credentials: 'include' }),
+      ]);
+      if (accRes.ok) {
+        const accounts = await accRes.json();
         setSendEmailAccounts(accounts);
         if (accounts.length > 0 && !sendEmailAccountId) setSendEmailAccountId(accounts[0].id);
       }
-    } catch (e) { console.error('Failed to load email accounts:', e); }
+      if (tplRes.ok) {
+        const templates = await tplRes.json();
+        // Also fetch team templates
+        const teamRes = await fetch('/api/templates/team', { credentials: 'include' });
+        const teamTemplates = teamRes.ok ? await teamRes.json() : [];
+        setSendEmailTemplates([...templates, ...teamTemplates]);
+      }
+    } catch (e) { console.error('Failed to load email accounts/templates:', e); }
     setShowSendEmailDialog(true);
+    setTimeout(() => {
+      if (sendEmailEditorRef.current) sendEmailEditorRef.current.innerHTML = '';
+    }, 100);
+  };
+
+  const handleAiGenerate = async () => {
+    if (!sendEmailAiPrompt.trim()) return;
+    setSendEmailAiGenerating(true);
+    try {
+      const res = await fetch('/api/llm/generate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ prompt: sendEmailAiPrompt, type: 'template', format: 'html' }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const content = data.content || '';
+        setSendEmailContent(content);
+        if (data.subject) setSendEmailSubject(data.subject);
+        setSendEmailMode('manual');
+        setSendEmailEditorMode('visual');
+        setTimeout(() => {
+          if (sendEmailEditorRef.current) sendEmailEditorRef.current.innerHTML = content;
+        }, 50);
+      }
+    } catch (e) { console.error('AI generation failed:', e); }
+    setSendEmailAiGenerating(false);
+  };
+
+  const applyTemplate = (template: any) => {
+    setSendEmailSubject(template.subject || '');
+    setSendEmailContent(template.content || '');
+    setSendEmailMode('manual');
+    setSendEmailEditorMode('visual');
+    setTimeout(() => {
+      if (sendEmailEditorRef.current) sendEmailEditorRef.current.innerHTML = template.content || '';
+    }, 50);
   };
 
   const handleSendEmail = async () => {
-    if (!sendEmailAccountId || !sendEmailSubject.trim() || !sendEmailContent.trim()) return;
+    // Sync content from visual editor before sending
+    const content = (sendEmailEditorMode === 'visual' && sendEmailEditorRef.current)
+      ? sendEmailEditorRef.current.innerHTML
+      : sendEmailContent;
+    if (!sendEmailAccountId || !sendEmailSubject.trim() || !content.trim()) return;
+    setSendEmailContent(content);
     setSendEmailLoading(true); setSendEmailResult(null);
     try {
       const res = await fetch('/api/contacts/send-email', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-        body: JSON.stringify({ contactIds: selectedIds, emailAccountId: sendEmailAccountId, subject: sendEmailSubject, content: sendEmailContent }),
+        body: JSON.stringify({ contactIds: selectedIds, emailAccountId: sendEmailAccountId, subject: sendEmailSubject, content }),
       });
       const data = await res.json();
       setSendEmailResult(data);
@@ -2139,17 +2200,18 @@ export default function ContactsManager() {
 
       {/* ==================== SEND EMAIL DIALOG ==================== */}
       <Dialog open={showSendEmailDialog} onOpenChange={setShowSendEmailDialog}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
+          <DialogHeader className="shrink-0">
             <DialogTitle className="flex items-center gap-2">
               <div className="bg-blue-50 p-2 rounded-lg"><Mail className="h-4 w-4 text-blue-600" /></div>
               Send Email to {selectedIds.length} Contact{selectedIds.length !== 1 ? 's' : ''}
             </DialogTitle>
             <DialogDescription className="text-sm text-gray-500">
-              Compose and send an email to selected contacts. Use {'{{firstName}}'}, {'{{lastName}}'}, {'{{company}}'}, {'{{jobTitle}}'} for personalization.
+              Choose a template, use AI, or write manually. Use {'{{firstName}}'}, {'{{lastName}}'}, {'{{company}}'}, {'{{jobTitle}}'} for personalization.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-2">
+
+          <div className="flex-1 overflow-y-auto space-y-4 py-2">
             {/* From Account */}
             <div>
               <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1 block">From</Label>
@@ -2173,32 +2235,186 @@ export default function ContactsManager() {
               )}
             </div>
 
-            {/* Subject */}
-            <div>
-              <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1 block">Subject</Label>
-              <Input
-                value={sendEmailSubject} onChange={e => setSendEmailSubject(e.target.value)}
-                placeholder="e.g., Quick question about {{company}}"
-                className="h-9 text-sm"
-              />
+            {/* Mode Tabs */}
+            <div className="flex items-center gap-1 border-b border-gray-200">
+              {([
+                { key: 'manual', icon: Pencil, label: 'Write' },
+                { key: 'template', icon: FileText, label: 'Template' },
+                { key: 'ai', icon: Wand2, label: 'AI Write' },
+              ] as const).map(({ key, icon: Icon, label }) => (
+                <button key={key} onClick={() => setSendEmailMode(key)}
+                  className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-all ${
+                    sendEmailMode === key
+                      ? 'text-blue-600 border-blue-600'
+                      : 'text-gray-500 border-transparent hover:text-gray-700 hover:border-gray-300'
+                  }`}>
+                  <Icon className="h-3.5 w-3.5" /> {label}
+                </button>
+              ))}
             </div>
 
-            {/* Content */}
-            <div>
-              <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1 block">Email Content (HTML)</Label>
-              <textarea
-                value={sendEmailContent} onChange={e => setSendEmailContent(e.target.value)}
-                placeholder={"Hi {{firstName}},\n\nI wanted to reach out about...\n\nBest regards"}
-                className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2.5 resize-none h-40 outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-100 transition-all font-mono"
-              />
-              <div className="flex gap-1.5 mt-1.5 flex-wrap">
-                {['{{firstName}}', '{{lastName}}', '{{company}}', '{{jobTitle}}', '{{email}}'].map(v => (
-                  <button key={v} onClick={() => setSendEmailContent(prev => prev + v)} className="text-[10px] px-2 py-0.5 bg-blue-50 text-blue-600 rounded-md hover:bg-blue-100 border border-blue-100">
-                    {v}
-                  </button>
-                ))}
+            {/* Template Selection Mode */}
+            {sendEmailMode === 'template' && (
+              <div className="space-y-3">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400" />
+                  <Input
+                    value={sendEmailTemplateSearch} onChange={e => setSendEmailTemplateSearch(e.target.value)}
+                    placeholder="Search templates..."
+                    className="pl-9 h-9 text-sm"
+                  />
+                </div>
+                <div className="max-h-64 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">
+                  {sendEmailTemplates
+                    .filter(t => !sendEmailTemplateSearch || t.name?.toLowerCase().includes(sendEmailTemplateSearch.toLowerCase()) || t.subject?.toLowerCase().includes(sendEmailTemplateSearch.toLowerCase()))
+                    .map((t: any) => (
+                      <button key={t.id} onClick={() => applyTemplate(t)}
+                        className="w-full text-left px-4 py-3 hover:bg-blue-50 transition-colors group">
+                        <div className="flex items-center justify-between">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <h4 className="text-sm font-medium text-gray-900 truncate">{t.name}</h4>
+                              {t.category && (
+                                <Badge variant="outline" className="text-[9px] shrink-0">{t.category}</Badge>
+                              )}
+                            </div>
+                            <p className="text-xs text-gray-500 truncate mt-0.5">{t.subject}</p>
+                          </div>
+                          <ArrowRight className="h-3.5 w-3.5 text-gray-300 group-hover:text-blue-500 shrink-0 ml-2" />
+                        </div>
+                      </button>
+                    ))}
+                  {sendEmailTemplates.filter(t => !sendEmailTemplateSearch || t.name?.toLowerCase().includes(sendEmailTemplateSearch.toLowerCase())).length === 0 && (
+                    <div className="px-4 py-8 text-center text-sm text-gray-400">
+                      {sendEmailTemplates.length === 0 ? 'No templates found. Create one in Templates.' : 'No matching templates.'}
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
+            )}
+
+            {/* AI Write Mode */}
+            {sendEmailMode === 'ai' && (
+              <div className="space-y-3">
+                <div>
+                  <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1.5 block">Describe the email you want to write</Label>
+                  <textarea
+                    value={sendEmailAiPrompt} onChange={e => setSendEmailAiPrompt(e.target.value)}
+                    placeholder="e.g., Write a cold outreach email to introduce our AI marketing platform to CEOs. Keep it short and professional."
+                    className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2.5 resize-none h-24 outline-none focus:border-purple-300 focus:ring-2 focus:ring-purple-100 transition-all"
+                  />
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {['Cold outreach to decision makers', 'Follow-up after no reply', 'Meeting request', 'Product introduction', 'Partnership proposal'].map(s => (
+                    <button key={s} onClick={() => setSendEmailAiPrompt(s)}
+                      className="text-[10px] px-2.5 py-1 bg-purple-50 text-purple-600 rounded-full hover:bg-purple-100 border border-purple-100 font-medium">
+                      {s}
+                    </button>
+                  ))}
+                </div>
+                <Button onClick={handleAiGenerate} disabled={sendEmailAiGenerating || !sendEmailAiPrompt.trim()}
+                  className="bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white">
+                  {sendEmailAiGenerating ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Generating...</> : <><Wand2 className="h-3.5 w-3.5 mr-1.5" /> Generate Email</>}
+                </Button>
+              </div>
+            )}
+
+            {/* Manual Write / Editor Mode (shown for manual, and after template/AI selection) */}
+            {sendEmailMode === 'manual' && (
+              <div className="space-y-3">
+                {/* Subject */}
+                <div>
+                  <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1 block">Subject</Label>
+                  <Input
+                    value={sendEmailSubject} onChange={e => setSendEmailSubject(e.target.value)}
+                    placeholder="e.g., Quick question about {{company}}"
+                    className="h-9 text-sm"
+                  />
+                </div>
+
+                {/* Editor Toolbar */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <Label className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Email Content</Label>
+                    <button onClick={() => {
+                      if (sendEmailEditorMode === 'visual') {
+                        setSendEmailEditorMode('html');
+                        if (sendEmailEditorRef.current) setSendEmailContent(sendEmailEditorRef.current.innerHTML);
+                      } else {
+                        setSendEmailEditorMode('visual');
+                        setTimeout(() => {
+                          if (sendEmailEditorRef.current) sendEmailEditorRef.current.innerHTML = sendEmailContent;
+                        }, 50);
+                      }
+                    }} className="text-[10px] px-2 py-0.5 bg-gray-100 text-gray-600 rounded hover:bg-gray-200 font-medium flex items-center gap-1">
+                      <Code className="h-3 w-3" /> {sendEmailEditorMode === 'visual' ? 'HTML' : 'Visual'}
+                    </button>
+                  </div>
+
+                  {sendEmailEditorMode === 'visual' ? (
+                    <>
+                      <div className="flex items-center gap-0.5 px-2 py-1.5 border border-b-0 border-gray-200 rounded-t-lg bg-gray-50">
+                        {[
+                          { cmd: 'bold', icon: Bold, title: 'Bold' },
+                          { cmd: 'italic', icon: Italic, title: 'Italic' },
+                          { cmd: 'underline', icon: Underline, title: 'Underline' },
+                        ].map(({ cmd, icon: Icon, title }) => (
+                          <button key={cmd} title={title} onMouseDown={e => { e.preventDefault(); document.execCommand(cmd); }}
+                            className="p-1.5 rounded hover:bg-gray-200 text-gray-600">
+                            <Icon className="h-3.5 w-3.5" />
+                          </button>
+                        ))}
+                        <div className="w-px h-5 bg-gray-200 mx-1" />
+                        <button title="Insert Link" onMouseDown={e => { e.preventDefault(); const url = prompt('Enter URL:'); if (url) document.execCommand('createLink', false, url); }}
+                          className="p-1.5 rounded hover:bg-gray-200 text-gray-600">
+                          <Link className="h-3.5 w-3.5" />
+                        </button>
+                        <button title="Ordered List" onMouseDown={e => { e.preventDefault(); document.execCommand('insertOrderedList'); }}
+                          className="p-1.5 rounded hover:bg-gray-200 text-gray-600">
+                          <ListOrdered className="h-3.5 w-3.5" />
+                        </button>
+                        <button title="Unordered List" onMouseDown={e => { e.preventDefault(); document.execCommand('insertUnorderedList'); }}
+                          className="p-1.5 rounded hover:bg-gray-200 text-gray-600">
+                          <List className="h-3.5 w-3.5" />
+                        </button>
+                        <div className="w-px h-5 bg-gray-200 mx-1" />
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <button className="flex items-center gap-1 px-2 py-1 rounded hover:bg-gray-200 text-gray-600 text-[11px] font-medium">
+                              <Type className="h-3 w-3" /> Variables <ChevronDown className="h-2.5 w-2.5" />
+                            </button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="start" className="w-40">
+                            {['firstName', 'lastName', 'email', 'company', 'jobTitle', 'fullName'].map(v => (
+                              <DropdownMenuItem key={v} onClick={() => {
+                                document.execCommand('insertText', false, `{{${v}}}`);
+                                if (sendEmailEditorRef.current) setSendEmailContent(sendEmailEditorRef.current.innerHTML);
+                              }}>
+                                <span className="text-xs">{`{{${v}}}`}</span>
+                              </DropdownMenuItem>
+                            ))}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                      <div
+                        ref={sendEmailEditorRef}
+                        contentEditable
+                        onInput={() => { if (sendEmailEditorRef.current) setSendEmailContent(sendEmailEditorRef.current.innerHTML); }}
+                        className="w-full text-sm border border-gray-200 rounded-b-lg px-4 py-3 min-h-[200px] max-h-[300px] overflow-y-auto outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-100 transition-all leading-relaxed [&:empty]:before:content-[attr(data-placeholder)] [&:empty]:before:text-gray-300 [&:empty]:before:italic [&_a]:text-blue-600 [&_a]:underline"
+                        data-placeholder="Hi {{firstName}}, &#10;&#10;Write your email content here..."
+                        suppressContentEditableWarning
+                      />
+                    </>
+                  ) : (
+                    <textarea
+                      value={sendEmailContent} onChange={e => setSendEmailContent(e.target.value)}
+                      placeholder={"<p>Hi {{firstName}},</p>\n\n<p>Your email content here...</p>"}
+                      className="w-full text-sm border border-gray-200 rounded-lg px-4 py-3 resize-none min-h-[200px] max-h-[300px] outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-100 transition-all font-mono text-[13px] bg-[#1e1e2e] text-[#cdd6f4]"
+                    />
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Result */}
             {sendEmailResult && (
@@ -2208,18 +2424,19 @@ export default function ContactsManager() {
                     <span className="text-red-700">{sendEmailResult.error}</span>
                   ) : (
                     <span className={sendEmailResult.sent > 0 ? 'text-green-700' : 'text-red-700'}>
-                      ✅ Sent: {sendEmailResult.sent} | ❌ Failed: {sendEmailResult.failed} | Total: {sendEmailResult.total}
+                      Sent: {sendEmailResult.sent} | Failed: {sendEmailResult.failed} | Total: {sendEmailResult.total}
                     </span>
                   )}
                 </AlertDescription>
               </Alert>
             )}
           </div>
-          <DialogFooter className="gap-2">
+
+          <DialogFooter className="shrink-0 gap-2 border-t pt-4">
             <Button variant="outline" onClick={() => setShowSendEmailDialog(false)}>Cancel</Button>
             <Button
               onClick={handleSendEmail}
-              disabled={sendEmailLoading || !sendEmailAccountId || !sendEmailSubject.trim() || !sendEmailContent.trim()}
+              disabled={sendEmailLoading || !sendEmailAccountId || !sendEmailSubject.trim() || !sendEmailContent.trim() || sendEmailMode !== 'manual'}
               className="bg-blue-600 hover:bg-blue-700 text-white"
             >
               {sendEmailLoading ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Sending...</> : <><Mail className="h-3.5 w-3.5 mr-1.5" /> Send to {selectedIds.length} Contact{selectedIds.length !== 1 ? 's' : ''}</>}

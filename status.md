@@ -74,7 +74,21 @@ This file tracks features that are confirmed working in production.
 - Both preview dialogs (editor view + list view) have the same features
 - **Do not touch**: preview dialog code and `sendTestEmail` function in `client/src/pages/template-manager.tsx`
 
-### 12. Database Safety (CRITICAL)
+### 12. Template Visibility (Private/Public)
+- Owners/admins can toggle templates between Private (only creator sees) and Public (visible to team)
+- Members always create private templates; only owners/admins can set public
+- Team Templates tab for members only shows public templates from other users
+- Backend enforces: `isPublic` field stripped from non-admin PUT/POST requests
+- **Do not touch**: `getPublicEmailTemplatesExcludingUser` in `server/storage.ts`; visibility logic in `POST /api/templates` and `PUT /api/templates/:id` in `server/routes.ts`; visibility toggle UI in `client/src/pages/template-manager.tsx`
+
+### 13. AI Template Content Insertion
+- AI-generated text content is properly converted to HTML before insertion into contentEditable editor
+- `textToHtml()` helper converts plain text → `<p>` tags, `\n` → `<br>`, `**bold**` → `<strong>`
+- Detects existing HTML and passes through unchanged
+- Applied to "Use Content", "Use Text", and "Use HTML" buttons
+- **Do not touch**: `textToHtml` function and AI result insertion logic in `client/src/pages/template-manager.tsx`
+
+### 14. Database Safety (CRITICAL)
 - **NEVER** add code that deletes, renames, moves, or recreates the database file
 - **NEVER** add `integrity_check` or any pragma as a startup gate — Azure CIFS causes false failures
 - **NEVER** add a "reset database" feature that actually deletes the DB file
