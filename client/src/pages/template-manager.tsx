@@ -718,143 +718,6 @@ export default function TemplateManager() {
           </div>
         </div>
 
-        {/* Deliverability Panel (collapsible, above editor) */}
-        {showDeliverability && (
-          <div className="px-6 py-4 bg-gradient-to-r from-green-50 to-emerald-50 border-b border-green-200/50 shrink-0 max-h-[45vh] overflow-y-auto">
-            <div className="max-w-4xl mx-auto">
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2">
-                  <div className="w-6 h-6 rounded-md bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center">
-                    <Shield className="h-3.5 w-3.5 text-white" />
-                  </div>
-                  <span className="text-xs font-bold text-gray-800">Deliverability Analysis</span>
-                  {deliverabilityLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-green-600" />}
-                </div>
-                <div className="flex items-center gap-2">
-                  {deliverabilityResult && deliverabilityResult.issues.length > 0 && (
-                    <button onClick={autoFixDeliverability} disabled={fixLoading}
-                      className="flex items-center gap-1.5 text-xs px-3 py-1 bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-md hover:from-purple-700 hover:to-indigo-700 font-medium disabled:opacity-50">
-                      {fixLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wand2 className="h-3 w-3" />}
-                      Auto-fix with AI
-                    </button>
-                  )}
-                  <button onClick={() => analyzeDeliverability()} className="text-xs px-3 py-1 bg-white border border-green-200 rounded-md text-green-700 hover:bg-green-50 font-medium">
-                    Re-analyze
-                  </button>
-                  <button onClick={() => setShowDeliverability(false)} className="p-1 hover:bg-green-100 rounded">
-                    <X className="h-3.5 w-3.5 text-gray-400" />
-                  </button>
-                </div>
-              </div>
-
-              {deliverabilityResult ? (
-                <div className="space-y-3">
-                  {/* Score + Stats Row */}
-                  <div className="flex items-start gap-3">
-                    {/* Score Circle */}
-                    <div className={`flex-shrink-0 w-16 h-16 rounded-xl flex flex-col items-center justify-center font-bold ${
-                      deliverabilityResult.grade === 'A' ? 'bg-green-100 text-green-700' :
-                      deliverabilityResult.grade === 'B' ? 'bg-blue-100 text-blue-700' :
-                      deliverabilityResult.grade === 'C' ? 'bg-yellow-100 text-yellow-700' :
-                      'bg-red-100 text-red-700'
-                    }`}>
-                      <span className="text-2xl leading-none">{deliverabilityResult.grade}</span>
-                      <span className="text-[10px] font-medium opacity-70">{deliverabilityResult.score}/100</span>
-                    </div>
-
-                    {/* Quick Stats */}
-                    <div className="flex-1 grid grid-cols-4 gap-2">
-                      {[
-                        { label: 'Words', value: deliverabilityResult.wordCount, good: deliverabilityResult.wordCount >= 50 && deliverabilityResult.wordCount <= 200 },
-                        { label: 'Links', value: deliverabilityResult.linkCount, good: deliverabilityResult.linkCount <= 3 },
-                        { label: 'Images', value: deliverabilityResult.imageCount, good: deliverabilityResult.imageCount <= 2 },
-                        { label: 'Variables', value: deliverabilityResult.personalizationCount, good: deliverabilityResult.personalizationCount >= 1 },
-                      ].map(s => (
-                        <div key={s.label} className={`rounded-lg px-3 py-2 text-center border ${s.good ? 'bg-white border-green-200' : 'bg-white border-orange-200'}`}>
-                          <div className={`text-lg font-bold ${s.good ? 'text-green-700' : 'text-orange-600'}`}>{s.value}</div>
-                          <div className="text-[10px] text-gray-500 font-medium">{s.label}</div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Issues */}
-                  {deliverabilityResult.issues.length > 0 && (
-                    <div className="space-y-1.5">
-                      <div className="text-[11px] font-semibold text-gray-600 uppercase tracking-wider">Issues Found ({deliverabilityResult.issues.length})</div>
-                      {deliverabilityResult.issues.map((issue, i) => (
-                        <div key={i} className={`flex items-start gap-2 rounded-lg px-3 py-2 text-xs border ${
-                          issue.severity === 'critical' ? 'bg-red-50 border-red-200' :
-                          issue.severity === 'warning' ? 'bg-yellow-50 border-yellow-200' :
-                          'bg-blue-50 border-blue-200'
-                        }`}>
-                          <span className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold text-white ${
-                            issue.severity === 'critical' ? 'bg-red-500' : issue.severity === 'warning' ? 'bg-yellow-500' : 'bg-blue-400'
-                          }`}>
-                            {issue.severity === 'critical' ? '!' : issue.severity === 'warning' ? '⚠' : 'i'}
-                          </span>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-1.5">
-                              <span className="font-semibold text-gray-700">{issue.category}</span>
-                              <span className="text-gray-500">—</span>
-                              <span className="text-gray-600">{issue.message}</span>
-                            </div>
-                            {issue.fix && <div className="text-gray-500 mt-0.5">💡 {issue.fix}</div>}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {deliverabilityResult.issues.length === 0 && (
-                    <div className="bg-green-100 border border-green-200 rounded-lg px-4 py-3 text-xs text-green-800 font-medium">
-                      No issues found — your email looks good for deliverability!
-                    </div>
-                  )}
-
-                  {/* AI Suggestions */}
-                  {deliverabilityResult.aiSuggestions.length > 0 && (
-                    <div className="space-y-1.5">
-                      <div className="text-[11px] font-semibold text-gray-600 uppercase tracking-wider flex items-center gap-1.5">
-                        <Sparkles className="h-3 w-3 text-purple-500" /> AI Suggestions
-                      </div>
-                      <div className="grid gap-1.5">
-                        {deliverabilityResult.aiSuggestions.map((tip, i) => (
-                          <div key={i} className="flex items-start gap-2 bg-white border border-purple-200 rounded-lg px-3 py-2 text-xs text-gray-700">
-                            <span className="text-purple-500 font-bold mt-px">{i + 1}.</span>
-                            <span>{tip}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Changes applied by auto-fix */}
-                  {fixChanges.length > 0 && (
-                    <div className="space-y-1.5">
-                      <div className="text-[11px] font-semibold text-gray-600 uppercase tracking-wider flex items-center gap-1.5">
-                        <Wand2 className="h-3 w-3 text-green-500" /> Changes Applied
-                      </div>
-                      <div className="bg-green-50 border border-green-200 rounded-lg px-3 py-2">
-                        {fixChanges.map((change, i) => (
-                          <div key={i} className="flex items-start gap-2 text-xs text-green-800 py-0.5">
-                            <span className="text-green-500 mt-0.5">✓</span>
-                            <span>{change}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="text-xs text-gray-500 text-center py-4">
-                  {deliverabilityLoading ? 'Analyzing your email...' : 'Add subject and content, then click Re-analyze'}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
         {/* AI Section (collapsible, above editor) */}
         {showAiSection && (
           <div className="px-6 py-4 bg-gradient-to-r from-purple-50 to-indigo-50 border-b border-purple-200/50 shrink-0">
@@ -962,25 +825,164 @@ export default function TemplateManager() {
           </div>
         )}
 
-        {/* Main Editor Area - takes all remaining space */}
-        <div className="flex-1 overflow-hidden bg-white">
-          {editorMode === 'visual' ? (
-            <div
-              ref={editorRef}
-              contentEditable
-              onInput={() => { if (editorRef.current) { setFormContent(editorRef.current.innerHTML); pendingContentRef.current = editorRef.current.innerHTML; } }}
-              className="h-full overflow-y-auto px-8 py-6 text-sm text-gray-800 outline-none leading-relaxed max-w-4xl mx-auto [&:empty]:before:content-[attr(data-placeholder)] [&:empty]:before:text-gray-300 [&:empty]:before:italic [&_a]:text-blue-600 [&_a]:underline [&_img]:max-w-full [&_img]:rounded"
-              data-placeholder="Start composing your email template here..."
-              suppressContentEditableWarning
-            />
-          ) : (
-            <textarea
-              value={formContent}
-              onChange={(e) => { setFormContent(e.target.value); pendingContentRef.current = e.target.value; }}
-              className="w-full h-full px-8 py-6 text-[13px] font-mono leading-relaxed bg-[#1e1e2e] text-[#cdd6f4] outline-none resize-none border-0 selection:bg-blue-800/50"
-              placeholder="<p>Hi {{firstName}},</p>&#10;&#10;<p>Your HTML email content here...</p>"
-              spellCheck={false}
-            />
+        {/* Main Editor Area + Deliverability Side Panel */}
+        <div className="flex-1 overflow-hidden flex">
+          {/* Editor */}
+          <div className={`flex-1 overflow-hidden bg-white transition-all duration-300 ${showDeliverability ? 'min-w-0' : ''}`}>
+            {editorMode === 'visual' ? (
+              <div
+                ref={editorRef}
+                contentEditable
+                onInput={() => { if (editorRef.current) { setFormContent(editorRef.current.innerHTML); pendingContentRef.current = editorRef.current.innerHTML; } }}
+                className="h-full overflow-y-auto px-8 py-6 text-sm text-gray-800 outline-none leading-relaxed max-w-4xl mx-auto [&:empty]:before:content-[attr(data-placeholder)] [&:empty]:before:text-gray-300 [&:empty]:before:italic [&_a]:text-blue-600 [&_a]:underline [&_img]:max-w-full [&_img]:rounded"
+                data-placeholder="Start composing your email template here..."
+                suppressContentEditableWarning
+              />
+            ) : (
+              <textarea
+                value={formContent}
+                onChange={(e) => { setFormContent(e.target.value); pendingContentRef.current = e.target.value; }}
+                className="w-full h-full px-8 py-6 text-[13px] font-mono leading-relaxed bg-[#1e1e2e] text-[#cdd6f4] outline-none resize-none border-0 selection:bg-blue-800/50"
+                placeholder="<p>Hi {{firstName}},</p>&#10;&#10;<p>Your HTML email content here...</p>"
+                spellCheck={false}
+              />
+            )}
+          </div>
+
+          {/* Deliverability Side Panel */}
+          {showDeliverability && (
+            <div className="w-[340px] shrink-0 border-l border-green-200/50 bg-gradient-to-b from-green-50 to-emerald-50 overflow-y-auto">
+              <div className="p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-5 h-5 rounded-md bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center">
+                      <Shield className="h-3 w-3 text-white" />
+                    </div>
+                    <span className="text-xs font-bold text-gray-800">Deliverability</span>
+                    {deliverabilityLoading && <Loader2 className="h-3 w-3 animate-spin text-green-600" />}
+                  </div>
+                  <button onClick={() => setShowDeliverability(false)} className="p-1 hover:bg-green-100 rounded">
+                    <X className="h-3.5 w-3.5 text-gray-400" />
+                  </button>
+                </div>
+
+                {/* Action buttons */}
+                <div className="flex items-center gap-1.5">
+                  {deliverabilityResult && deliverabilityResult.issues.length > 0 && (
+                    <button onClick={autoFixDeliverability} disabled={fixLoading}
+                      className="flex items-center gap-1 text-[11px] px-2.5 py-1 bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-md hover:from-purple-700 hover:to-indigo-700 font-medium disabled:opacity-50">
+                      {fixLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wand2 className="h-3 w-3" />}
+                      Auto-fix
+                    </button>
+                  )}
+                  <button onClick={() => analyzeDeliverability()} className="text-[11px] px-2.5 py-1 bg-white border border-green-200 rounded-md text-green-700 hover:bg-green-50 font-medium">
+                    Re-analyze
+                  </button>
+                </div>
+
+                {deliverabilityResult ? (
+                  <div className="space-y-3">
+                    {/* Score */}
+                    <div className="flex items-center gap-3">
+                      <div className={`flex-shrink-0 w-14 h-14 rounded-xl flex flex-col items-center justify-center font-bold ${
+                        deliverabilityResult.grade === 'A' ? 'bg-green-100 text-green-700' :
+                        deliverabilityResult.grade === 'B' ? 'bg-blue-100 text-blue-700' :
+                        deliverabilityResult.grade === 'C' ? 'bg-yellow-100 text-yellow-700' :
+                        'bg-red-100 text-red-700'
+                      }`}>
+                        <span className="text-xl leading-none">{deliverabilityResult.grade}</span>
+                        <span className="text-[9px] font-medium opacity-70">{deliverabilityResult.score}/100</span>
+                      </div>
+
+                      {/* Quick Stats - 2x2 grid */}
+                      <div className="flex-1 grid grid-cols-2 gap-1.5">
+                        {[
+                          { label: 'Words', value: deliverabilityResult.wordCount, good: deliverabilityResult.wordCount >= 50 && deliverabilityResult.wordCount <= 200 },
+                          { label: 'Links', value: deliverabilityResult.linkCount, good: deliverabilityResult.linkCount <= 3 },
+                          { label: 'Images', value: deliverabilityResult.imageCount, good: deliverabilityResult.imageCount <= 2 },
+                          { label: 'Vars', value: deliverabilityResult.personalizationCount, good: deliverabilityResult.personalizationCount >= 1 },
+                        ].map(s => (
+                          <div key={s.label} className={`rounded-lg px-2 py-1.5 text-center border ${s.good ? 'bg-white border-green-200' : 'bg-white border-orange-200'}`}>
+                            <div className={`text-sm font-bold ${s.good ? 'text-green-700' : 'text-orange-600'}`}>{s.value}</div>
+                            <div className="text-[9px] text-gray-500 font-medium">{s.label}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Issues */}
+                    {deliverabilityResult.issues.length > 0 && (
+                      <div className="space-y-1.5">
+                        <div className="text-[10px] font-semibold text-gray-600 uppercase tracking-wider">Issues ({deliverabilityResult.issues.length})</div>
+                        {deliverabilityResult.issues.map((issue, i) => (
+                          <div key={i} className={`rounded-lg px-2.5 py-2 text-[11px] border ${
+                            issue.severity === 'critical' ? 'bg-red-50 border-red-200' :
+                            issue.severity === 'warning' ? 'bg-yellow-50 border-yellow-200' :
+                            'bg-blue-50 border-blue-200'
+                          }`}>
+                            <div className="flex items-start gap-1.5">
+                              <span className={`mt-0.5 flex-shrink-0 w-3.5 h-3.5 rounded-full flex items-center justify-center text-[8px] font-bold text-white ${
+                                issue.severity === 'critical' ? 'bg-red-500' : issue.severity === 'warning' ? 'bg-yellow-500' : 'bg-blue-400'
+                              }`}>
+                                {issue.severity === 'critical' ? '!' : issue.severity === 'warning' ? '!' : 'i'}
+                              </span>
+                              <div className="flex-1 min-w-0">
+                                <span className="font-semibold text-gray-700">{issue.category}</span>
+                                <span className="text-gray-500"> — </span>
+                                <span className="text-gray-600">{issue.message}</span>
+                                {issue.fix && <div className="text-gray-500 mt-0.5 text-[10px]">Tip: {issue.fix}</div>}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {deliverabilityResult.issues.length === 0 && (
+                      <div className="bg-green-100 border border-green-200 rounded-lg px-3 py-2.5 text-[11px] text-green-800 font-medium">
+                        No issues found — your email looks good!
+                      </div>
+                    )}
+
+                    {/* AI Suggestions */}
+                    {deliverabilityResult.aiSuggestions.length > 0 && (
+                      <div className="space-y-1.5">
+                        <div className="text-[10px] font-semibold text-gray-600 uppercase tracking-wider flex items-center gap-1">
+                          <Sparkles className="h-2.5 w-2.5 text-purple-500" /> AI Suggestions
+                        </div>
+                        {deliverabilityResult.aiSuggestions.map((tip, i) => (
+                          <div key={i} className="flex items-start gap-1.5 bg-white border border-purple-200 rounded-lg px-2.5 py-1.5 text-[11px] text-gray-700">
+                            <span className="text-purple-500 font-bold mt-px">{i + 1}.</span>
+                            <span>{tip}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Changes applied by auto-fix */}
+                    {fixChanges.length > 0 && (
+                      <div className="space-y-1.5">
+                        <div className="text-[10px] font-semibold text-gray-600 uppercase tracking-wider flex items-center gap-1">
+                          <Wand2 className="h-2.5 w-2.5 text-green-500" /> Changes Applied
+                        </div>
+                        <div className="bg-green-50 border border-green-200 rounded-lg px-2.5 py-2">
+                          {fixChanges.map((change, i) => (
+                            <div key={i} className="flex items-start gap-1.5 text-[11px] text-green-800 py-0.5">
+                              <span className="text-green-500 mt-0.5">&#10003;</span>
+                              <span>{change}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-[11px] text-gray-500 text-center py-6">
+                    {deliverabilityLoading ? 'Analyzing...' : 'Add subject and content, then click Re-analyze'}
+                  </div>
+                )}
+              </div>
+            </div>
           )}
         </div>
 
