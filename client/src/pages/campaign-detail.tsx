@@ -13,7 +13,8 @@ import {
   Info, Ban, Calendar, Shield, Timer, Repeat, Check,
   MailOpen, MousePointer, MessageSquare, AlertCircle, UserMinus,
   Bold, Italic, Underline, Link, Image, Code, List, ListOrdered,
-  AlignLeft, FileText, MoreVertical, Sparkles, Hash
+  AlignLeft, FileText, MoreVertical, Sparkles, Hash,
+  Monitor, Smartphone, Loader2, X
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { CampaignDetail, CampaignMessage, TrackingEvent, StepAnalytics, ActivityTimelineItem } from "@/types";
@@ -48,6 +49,18 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
   const [updateError, setUpdateError] = useState("");
   const [emailAccounts, setEmailAccounts] = useState<any[]>([]);
   const editorRef = useRef<HTMLDivElement>(null);
+
+  // Preview mode state
+  const [updateDialogMode, setUpdateDialogMode] = useState<'edit' | 'preview'>('edit');
+  const [previewDevice, setPreviewDevice] = useState<'desktop' | 'mobile'>('desktop');
+  const [previewHtml, setPreviewHtml] = useState('');
+  const [previewSubjectText, setPreviewSubjectText] = useState('');
+  const [previewContact, setPreviewContact] = useState<any>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [testEmail, setTestEmail] = useState('');
+  const [testSending, setTestSending] = useState(false);
+  const [testSent, setTestSent] = useState(false);
+  const [testError, setTestError] = useState('');
 
   // Expanded sections
   const [showAllEmails, setShowAllEmails] = useState(true);
@@ -228,6 +241,66 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
   const execCommand = (cmd: string, value?: string) => {
     document.execCommand(cmd, false, value);
     editorRef.current?.focus();
+  };
+
+  const loadPreview = async (contactIdx?: number) => {
+    setPreviewLoading(true);
+    try {
+      const content = editorRef.current?.innerHTML || updateContent;
+      const res = await fetch('/api/campaigns/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ subject: updateSubject, content }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPreviewSubjectText(data.subject);
+        setPreviewHtml(data.content);
+        setPreviewContact(data.contact);
+      }
+    } catch { /* ignore */ }
+    setPreviewLoading(false);
+  };
+
+  const showPreviewMode = async () => {
+    // Save current editor content before switching
+    if (editorRef.current) {
+      setUpdateContent(editorRef.current.innerHTML);
+    }
+    setUpdateDialogMode('preview');
+    await loadPreview();
+  };
+
+  const sendCampaignTestEmail = async () => {
+    if (!testEmail || !updateEmailAccountId) return;
+    setTestSending(true);
+    setTestSent(false);
+    setTestError('');
+    try {
+      const content = editorRef.current?.innerHTML || updateContent;
+      const res = await fetch('/api/campaigns/send-test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          emailAccountId: updateEmailAccountId,
+          toEmail: testEmail,
+          subject: updateSubject,
+          content,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setTestSent(true);
+        setTimeout(() => setTestSent(false), 4000);
+      } else {
+        setTestError(data.error || 'Failed to send');
+      }
+    } catch {
+      setTestError('Failed to send');
+    }
+    setTestSending(false);
   };
 
   // ========== ACTION HANDLERS ==========
@@ -1042,149 +1115,269 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
       </div>
 
       {/* ===================== UPDATE CAMPAIGN DIALOG ===================== */}
-      <Dialog open={showUpdateDialog} onOpenChange={setShowUpdateDialog}>
-        <DialogContent className="sm:max-w-[700px] max-h-[92vh] overflow-y-auto p-0 gap-0 rounded-2xl">
-          <DialogHeader className="px-6 pt-6 pb-0">
-            <div className="flex items-center justify-between">
-              <DialogTitle className="text-lg font-bold text-gray-900">Update campaign</DialogTitle>
-              <button onClick={() => setShowUpdateDialog(false)} className="text-blue-600 hover:text-blue-700 text-sm font-semibold transition-colors">
-                Show preview
-              </button>
-            </div>
-            <DialogDescription className="sr-only">Update your campaign settings, recipients, and message content.</DialogDescription>
-          </DialogHeader>
+      <Dialog open={showUpdateDialog} onOpenChange={(open) => { setShowUpdateDialog(open); if (!open) { setUpdateDialogMode('edit'); setTestSent(false); setTestError(''); } }}>
+        <DialogContent className="sm:max-w-[900px] max-h-[92vh] overflow-hidden p-0 gap-0 rounded-2xl flex flex-col">
+          {updateDialogMode === 'edit' ? (
+            <>
+              {/* ---- EDIT MODE ---- */}
+              <DialogHeader className="px-6 pt-5 pb-0 shrink-0">
+                <div className="flex items-center justify-between">
+                  <DialogTitle className="text-lg font-bold text-gray-900">Update campaign</DialogTitle>
+                  <button onClick={showPreviewMode} className="text-blue-600 hover:text-blue-700 text-sm font-semibold transition-colors flex items-center gap-1.5">
+                    <Eye className="h-3.5 w-3.5" /> Show preview
+                  </button>
+                </div>
+                <DialogDescription className="sr-only">Update your campaign settings, recipients, and message content.</DialogDescription>
+              </DialogHeader>
 
-          <div className="px-6 pt-5 pb-6 space-y-6">
-            {/* Status banners */}
-            {isEnded && (
-              <div className="flex items-start gap-3 px-4 py-3.5 bg-amber-50 border border-amber-200/80 rounded-xl">
-                <AlertCircle className="h-4 w-4 text-amber-600 flex-shrink-0 mt-0.5" />
-                <span className="text-sm text-amber-800 leading-relaxed">This campaign has ended on {formatDateTime(endedDate || campaign.updatedAt)}.</span>
-              </div>
-            )}
-            {isActive && (
-              <div className="flex items-start gap-3 px-4 py-3.5 bg-emerald-50 border border-emerald-200/80 rounded-xl">
-                <CheckCircle2 className="h-4 w-4 text-emerald-600 flex-shrink-0 mt-0.5" />
-                <span className="text-sm text-emerald-800 leading-relaxed">This campaign is currently active. Changes will apply to unsent emails only.</span>
-              </div>
-            )}
-            {isPaused && (
-              <div className="flex items-start gap-3 px-4 py-3.5 bg-blue-50 border border-blue-200/80 rounded-xl">
-                <Pause className="h-4 w-4 text-blue-600 flex-shrink-0 mt-0.5" />
-                <span className="text-sm text-blue-800 leading-relaxed">This campaign is paused. Changes will apply when you resume sending.</span>
-              </div>
-            )}
+              <div className="flex flex-1 overflow-hidden">
+                {/* Left: Main editor area */}
+                <div className="flex-1 overflow-y-auto px-6 pt-5 pb-6 space-y-5">
+                  {/* Status banners */}
+                  {isEnded && (
+                    <div className="flex items-start gap-3 px-4 py-3 bg-amber-50 border border-amber-200/80 rounded-xl">
+                      <AlertCircle className="h-4 w-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                      <span className="text-sm text-amber-800">This campaign has ended on {formatDateTime(endedDate || campaign.updatedAt)}.</span>
+                    </div>
+                  )}
+                  {isActive && (
+                    <div className="flex items-start gap-3 px-4 py-3 bg-emerald-50 border border-emerald-200/80 rounded-xl">
+                      <CheckCircle2 className="h-4 w-4 text-emerald-600 flex-shrink-0 mt-0.5" />
+                      <span className="text-sm text-emerald-800">This campaign is active. Changes apply to unsent emails only.</span>
+                    </div>
+                  )}
+                  {isPaused && (
+                    <div className="flex items-start gap-3 px-4 py-3 bg-blue-50 border border-blue-200/80 rounded-xl">
+                      <Pause className="h-4 w-4 text-blue-600 flex-shrink-0 mt-0.5" />
+                      <span className="text-sm text-blue-800">This campaign is paused. Changes will apply when you resume.</span>
+                    </div>
+                  )}
 
-            {/* Recipients section */}
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <h3 className="text-base font-bold text-gray-900">Recipients</h3>
-                <button className="text-gray-400 hover:text-gray-600 transition-colors p-1 rounded-md hover:bg-gray-100">
-                  <MoreVertical className="h-4 w-4" />
-                </button>
-              </div>
-              <p className="text-sm text-gray-600">
-                <span className="font-semibold text-gray-900">{campaign.totalRecipients || totalMessages}</span> recipients in your list
-                <span className="text-gray-300 mx-1.5">–</span>
-                <button className="text-blue-600 hover:text-blue-700 font-semibold transition-colors">Add recipients</button>
-              </p>
-            </div>
+                  {/* Recipients */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <h3 className="text-sm font-bold text-gray-900">Recipients</h3>
+                      <button className="text-gray-400 hover:text-gray-600 p-1 rounded-md hover:bg-gray-100">
+                        <MoreVertical className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                    <p className="text-sm text-gray-600">
+                      <span className="font-semibold text-gray-900">{campaign.totalRecipients || totalMessages}</span> recipients in your list
+                      <span className="text-gray-300 mx-1.5">-</span>
+                      <button className="text-blue-600 hover:text-blue-700 font-semibold">Add recipients</button>
+                    </p>
+                  </div>
 
-            <div className="border-t border-gray-100" />
+                  <div className="border-t border-gray-100" />
 
-            {/* Messages section */}
-            <div>
-              <h3 className="text-base font-bold text-gray-900 mb-4">Messages</h3>
+                  {/* Messages */}
+                  <div>
+                    <h3 className="text-sm font-bold text-gray-900 mb-3">Messages</h3>
 
-              {/* From field */}
-              <div className="flex items-center gap-3 mb-3">
-                <label className="text-sm text-gray-500 w-16 flex-shrink-0 font-medium">From</label>
-                <div className="flex-1 relative">
-                  <select
-                    value={updateEmailAccountId}
-                    onChange={(e) => setUpdateEmailAccountId(e.target.value)}
-                    className="w-full h-10 px-3 pr-8 text-sm border border-gray-200 rounded-lg bg-white focus:border-blue-400 focus:ring-2 focus:ring-blue-50 outline-none appearance-none cursor-pointer transition-all"
-                  >
-                    {emailAccounts.length === 0 && emailAccount && (
-                      <option value={emailAccount.id}>{emailAccount.displayName || emailAccount.email} &lt;{emailAccount.email}&gt;</option>
+                    {/* From */}
+                    <div className="flex items-center gap-3 mb-2.5">
+                      <label className="text-sm text-gray-500 w-16 flex-shrink-0 font-medium">From</label>
+                      <div className="flex-1 relative">
+                        <select
+                          value={updateEmailAccountId}
+                          onChange={(e) => setUpdateEmailAccountId(e.target.value)}
+                          className="w-full h-9 px-3 pr-8 text-sm border border-gray-200 rounded-lg bg-white focus:border-blue-400 focus:ring-2 focus:ring-blue-50 outline-none appearance-none cursor-pointer"
+                        >
+                          {emailAccounts.length === 0 && emailAccount && (
+                            <option value={emailAccount.id}>{emailAccount.displayName || emailAccount.email} &lt;{emailAccount.email}&gt;</option>
+                          )}
+                          {emailAccounts.map((a: any) => (
+                            <option key={a.id} value={a.id}>{a.displayName || a.email} &lt;{a.email}&gt;</option>
+                          ))}
+                        </select>
+                        <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
+                      </div>
+                    </div>
+
+                    {/* Subject */}
+                    <div className="flex items-center gap-3 mb-3">
+                      <label className="text-sm text-gray-500 w-16 flex-shrink-0 font-medium">Subject</label>
+                      <input
+                        value={updateSubject}
+                        onChange={(e) => setUpdateSubject(e.target.value)}
+                        className="flex-1 h-9 px-3 text-sm border border-gray-200 rounded-lg bg-white focus:border-blue-400 focus:ring-2 focus:ring-blue-50 outline-none"
+                        placeholder="Email subject line"
+                      />
+                    </div>
+
+                    {/* Rich text editor */}
+                    <div className="border border-gray-200 rounded-xl overflow-hidden">
+                      <div className="flex items-center gap-0.5 px-2 py-1.5 bg-gray-50/80 border-b border-gray-200 flex-wrap">
+                        <ToolbarBtn icon={<Bold className="h-3.5 w-3.5" />} onClick={() => execCommand('bold')} title="Bold" />
+                        <ToolbarBtn icon={<Italic className="h-3.5 w-3.5" />} onClick={() => execCommand('italic')} title="Italic" />
+                        <ToolbarBtn icon={<Underline className="h-3.5 w-3.5" />} onClick={() => execCommand('underline')} title="Underline" />
+                        <ToolbarSep />
+                        <ToolbarBtn icon={<Link className="h-3.5 w-3.5" />} onClick={() => {
+                          const url = prompt('Enter URL:');
+                          if (url) execCommand('createLink', url);
+                        }} title="Insert link" />
+                        <ToolbarBtn icon={<Image className="h-3.5 w-3.5" />} onClick={() => {
+                          const url = prompt('Image URL:');
+                          if (url) execCommand('insertImage', url);
+                        }} title="Insert image" />
+                        <ToolbarBtn icon={<Code className="h-3.5 w-3.5" />} onClick={() => {
+                          const tag = prompt('Variable name (e.g. firstName, lastName, company):');
+                          if (tag) execCommand('insertText', `{{${tag}}}`);
+                        }} title="Merge tag {{}}" />
+                        <ToolbarSep />
+                        <ToolbarBtn icon={<List className="h-3.5 w-3.5" />} onClick={() => execCommand('insertUnorderedList')} title="Bullet list" />
+                        <ToolbarBtn icon={<ListOrdered className="h-3.5 w-3.5" />} onClick={() => execCommand('insertOrderedList')} title="Numbered list" />
+                        <ToolbarBtn icon={<AlignLeft className="h-3.5 w-3.5" />} onClick={() => execCommand('justifyLeft')} title="Align left" />
+                        <ToolbarSep />
+                        <ToolbarBtn icon={<FileText className="h-3.5 w-3.5" />} onClick={() => execCommand('removeFormat')} title="Clear formatting" />
+                      </div>
+
+                      <div
+                        ref={editorRef}
+                        contentEditable
+                        className="min-h-[280px] max-h-[400px] overflow-y-auto px-4 py-3 text-sm text-gray-800 focus:outline-none leading-relaxed [&_a]:text-blue-600 [&_a]:underline [&_img]:max-w-full [&_img]:rounded-lg"
+                        style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' }}
+                        suppressContentEditableWarning
+                      />
+                    </div>
+
+                    {updateError && (
+                      <p className="text-sm text-red-600 mt-3 flex items-center gap-1.5 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                        <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" /> {updateError}
+                      </p>
                     )}
-                    {emailAccounts.map((a: any) => (
-                      <option key={a.id} value={a.id}>{a.displayName || a.email} &lt;{a.email}&gt;</option>
-                    ))}
-                  </select>
-                  <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
+                  </div>
+                </div>
+
+                {/* Right: Settings sidebar */}
+                <div className="w-[200px] shrink-0 border-l border-gray-100 bg-gray-50/40 px-4 py-5 overflow-y-auto">
+                  <h4 className="text-sm font-bold text-gray-900 mb-4">Settings</h4>
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-gray-600">Track emails</span>
+                      <div className="w-9 h-5 bg-blue-600 rounded-full relative cursor-pointer">
+                        <div className="absolute right-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow-sm" />
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-gray-600">Unsubscribe link</span>
+                      <div className="w-9 h-5 bg-gray-300 rounded-full relative cursor-pointer">
+                        <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow-sm" />
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
 
-              {/* Subject field */}
-              <div className="flex items-center gap-3 mb-4">
-                <label className="text-sm text-gray-500 w-16 flex-shrink-0 font-medium">Subject</label>
-                <input
-                  value={updateSubject}
-                  onChange={(e) => setUpdateSubject(e.target.value)}
-                  className="flex-1 h-10 px-3 text-sm border border-gray-200 rounded-lg bg-white focus:border-blue-400 focus:ring-2 focus:ring-blue-50 outline-none transition-all"
-                  placeholder="Email subject line"
-                />
-              </div>
+              <DialogFooter className="px-6 py-3.5 border-t border-gray-100 bg-gray-50/60 shrink-0">
+                <div className="flex items-center justify-end gap-3 w-full">
+                  <Button variant="outline" onClick={() => setShowUpdateDialog(false)} className="px-5 rounded-lg font-semibold">
+                    Cancel
+                  </Button>
+                  <Button onClick={saveUpdate} disabled={updateSaving} className="bg-gray-900 hover:bg-gray-800 text-white px-5 rounded-lg font-semibold shadow-sm">
+                    {updateSaving ? (
+                      <span className="flex items-center gap-2">
+                        <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" /> Saving...
+                      </span>
+                    ) : 'Update campaign'}
+                  </Button>
+                </div>
+              </DialogFooter>
+            </>
+          ) : (
+            <>
+              {/* ---- PREVIEW MODE ---- */}
+              <DialogHeader className="px-6 pt-5 pb-0 shrink-0">
+                <div className="flex items-center justify-between">
+                  <DialogTitle className="text-lg font-bold text-gray-900">Preview campaign</DialogTitle>
+                  <button onClick={() => setUpdateDialogMode('edit')} className="text-gray-400 hover:text-gray-600 p-1 rounded-md hover:bg-gray-100">
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+                <DialogDescription className="sr-only">Preview how your campaign email will look.</DialogDescription>
+              </DialogHeader>
 
-              {/* Rich text editor */}
-              <div className="border border-gray-200 rounded-xl overflow-hidden">
-                <div className="flex items-center gap-0.5 px-2 py-1.5 bg-gray-50/80 border-b border-gray-200 flex-wrap">
-                  <ToolbarBtn icon={<Bold className="h-3.5 w-3.5" />} onClick={() => execCommand('bold')} title="Bold" />
-                  <ToolbarBtn icon={<Italic className="h-3.5 w-3.5" />} onClick={() => execCommand('italic')} title="Italic" />
-                  <ToolbarBtn icon={<Underline className="h-3.5 w-3.5" />} onClick={() => execCommand('underline')} title="Underline" />
-                  <ToolbarSep />
-                  <ToolbarBtn icon={<Link className="h-3.5 w-3.5" />} onClick={() => {
-                    const url = prompt('Enter URL:');
-                    if (url) execCommand('createLink', url);
-                  }} title="Insert link" />
-                  <ToolbarBtn icon={<Image className="h-3.5 w-3.5" />} onClick={() => {
-                    const url = prompt('Image URL:');
-                    if (url) execCommand('insertImage', url);
-                  }} title="Insert image" />
-                  <ToolbarBtn icon={<Code className="h-3.5 w-3.5" />} onClick={() => {
-                    const tag = prompt('Variable name (e.g. firstName, lastName, company):');
-                    if (tag) execCommand('insertText', `{{${tag}}}`);
-                  }} title="Merge tag {{}}" />
-                  <ToolbarSep />
-                  <ToolbarBtn icon={<List className="h-3.5 w-3.5" />} onClick={() => execCommand('insertUnorderedList')} title="Bullet list" />
-                  <ToolbarBtn icon={<ListOrdered className="h-3.5 w-3.5" />} onClick={() => execCommand('insertOrderedList')} title="Numbered list" />
-                  <ToolbarBtn icon={<AlignLeft className="h-3.5 w-3.5" />} onClick={() => execCommand('justifyLeft')} title="Align left" />
-                  <ToolbarSep />
-                  <ToolbarBtn icon={<FileText className="h-3.5 w-3.5" />} onClick={() => execCommand('removeFormat')} title="Clear formatting" />
+              <div className="px-6 pt-4 pb-2 flex items-center justify-between shrink-0">
+                {/* Desktop / Mobile toggle */}
+                <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
+                  <button
+                    onClick={() => setPreviewDevice('desktop')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${previewDevice === 'desktop' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                  >
+                    <Monitor className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    onClick={() => setPreviewDevice('mobile')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${previewDevice === 'mobile' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                  >
+                    <Smartphone className="h-3.5 w-3.5" />
+                  </button>
                 </div>
 
-                <div
-                  ref={editorRef}
-                  contentEditable
-                  className="min-h-[300px] max-h-[420px] overflow-y-auto px-4 py-3 text-sm text-gray-800 focus:outline-none leading-relaxed [&_a]:text-blue-600 [&_a]:underline [&_img]:max-w-full [&_img]:rounded-lg"
-                  style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' }}
-                  suppressContentEditableWarning
-                />
-              </div>
-
-              {updateError && (
-                <p className="text-sm text-red-600 mt-3 flex items-center gap-1.5 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-                  <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" /> {updateError}
-                </p>
-              )}
-            </div>
-          </div>
-
-          <DialogFooter className="px-6 py-4 border-t border-gray-100 bg-gray-50/60">
-            <div className="flex items-center justify-end gap-3 w-full">
-              <Button variant="outline" onClick={() => setShowUpdateDialog(false)} className="px-5 rounded-lg font-semibold">
-                Cancel
-              </Button>
-              <Button onClick={saveUpdate} disabled={updateSaving} className="bg-gray-900 hover:bg-gray-800 text-white px-5 rounded-lg font-semibold shadow-sm">
-                {updateSaving ? (
-                  <span className="flex items-center gap-2">
-                    <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" /> Saving...
+                {/* Recipient count */}
+                {previewContact && (
+                  <span className="text-xs text-gray-500 bg-gray-100 rounded-md px-2 py-1">
+                    Sample: {previewContact.firstName} {previewContact.lastName}
                   </span>
-                ) : 'Update campaign'}
-              </Button>
-            </div>
-          </DialogFooter>
+                )}
+
+                {/* Send test email */}
+                <div className="flex items-center gap-2">
+                  <input
+                    type="email"
+                    placeholder="test@email.com"
+                    value={testEmail}
+                    onChange={(e) => { setTestEmail(e.target.value); setTestError(''); }}
+                    className="h-8 w-44 text-sm border border-gray-200 rounded-lg px-2.5 bg-white focus:border-blue-400 outline-none"
+                  />
+                  <Button size="sm" onClick={sendCampaignTestEmail} disabled={testSending || !testEmail || !updateEmailAccountId} className="h-8 px-3 text-xs">
+                    {testSending ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Send className="h-3 w-3 mr-1" />}
+                    {testSent ? 'Sent!' : 'Send test email'}
+                  </Button>
+                </div>
+              </div>
+              {testError && <div className="px-6 text-xs text-red-500">{testError}</div>}
+
+              {/* Preview content */}
+              <div className="flex-1 overflow-y-auto px-6 pb-6">
+                {previewLoading ? (
+                  <div className="flex items-center justify-center py-16">
+                    <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
+                  </div>
+                ) : (
+                  <div className={`flex justify-center ${previewDevice === 'mobile' ? 'bg-gray-100 rounded-xl p-6' : ''}`}>
+                    <div className={`bg-white border border-gray-200 rounded-xl overflow-hidden transition-all duration-300 ${previewDevice === 'mobile' ? 'w-[375px] shadow-xl rounded-[2rem] border-[8px] border-gray-800' : 'w-full'}`}>
+                      {previewDevice === 'mobile' && (
+                        <div className="bg-gray-800 text-center py-2">
+                          <div className="w-20 h-1.5 bg-gray-600 rounded-full mx-auto" />
+                        </div>
+                      )}
+                      <div className={previewDevice === 'mobile' ? 'p-4' : 'p-6'}>
+                        {/* Subject + From header */}
+                        <div className="mb-4 pb-4 border-b border-gray-100">
+                          <div className="text-base font-semibold text-gray-900 mb-1">{previewSubjectText || updateSubject}</div>
+                          <div className="text-sm font-medium text-gray-700">
+                            {emailAccounts.find(a => a.id === updateEmailAccountId)?.displayName || emailAccount?.displayName || ''} &lt;{emailAccounts.find(a => a.id === updateEmailAccountId)?.email || emailAccount?.email || ''}&gt;
+                          </div>
+                          {previewContact && (
+                            <div className="text-xs text-gray-400 mt-0.5">to: {previewContact.firstName} {previewContact.lastName} &lt;{previewContact.email}&gt;</div>
+                          )}
+                        </div>
+                        {/* Email body */}
+                        <div dangerouslySetInnerHTML={{ __html: previewHtml }}
+                          className={`prose max-w-none text-gray-800 [&_a]:text-blue-600 [&_img]:max-w-full ${previewDevice === 'mobile' ? 'prose-sm text-[13px]' : 'prose-sm'}`} />
+                      </div>
+                      {previewDevice === 'mobile' && (
+                        <div className="bg-gray-800 text-center py-3">
+                          <div className="w-10 h-10 border-2 border-gray-600 rounded-full mx-auto" />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
         </DialogContent>
       </Dialog>
     </div>

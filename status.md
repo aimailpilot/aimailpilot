@@ -59,7 +59,22 @@ This file tracks features that are confirmed working in production.
 - **Fix applied**: Renamed `getRecentCampaignTrackingEvents` to avoid conflict with existing `getRecentTrackingEvents` method
 - **Do not touch**: `getCampaignMessagesEnriched`, `getCampaignMessageStats`, `getCampaignStepStats`, `getRecentCampaignTrackingEvents` in `server/storage.ts`; `/api/campaigns/:id/detail` route in `server/routes.ts`
 
-### 10. Database Safety (CRITICAL)
+### 10. Template Deliverability Analysis
+- Deliverability scoring, spam word detection, and issue analysis are working in the template editor
+- AI auto-fix via Azure OpenAI rewrites subject/content to improve deliverability
+- Spam word highlighting in editor (contentEditable + subject overlay) is working
+- Deliverability panel renders as a **right sidebar** beside the editor (not stacked above)
+- **Do not touch**: `/api/templates/analyze-deliverability`, `/api/templates/fix-deliverability` routes in `server/routes.ts`; deliverability panel and spam highlighting logic in `client/src/pages/template-manager.tsx`
+
+### 11. Template Preview (Desktop/Mobile + Test Email)
+- Desktop/mobile preview toggle in template preview dialog is working
+- Mobile preview renders at 375px width with phone frame styling
+- Send test email from preview dialog is working — uses existing `/api/campaigns/send-test` endpoint
+- Email account selector auto-loads on preview open
+- Both preview dialogs (editor view + list view) have the same features
+- **Do not touch**: preview dialog code and `sendTestEmail` function in `client/src/pages/template-manager.tsx`
+
+### 12. Database Safety (CRITICAL)
 - **NEVER** add code that deletes, renames, moves, or recreates the database file
 - **NEVER** add `integrity_check` or any pragma as a startup gate — Azure CIFS causes false failures
 - **NEVER** add a "reset database" feature that actually deletes the DB file
