@@ -1151,6 +1151,17 @@ export class DatabaseStorage {
   async getContactLists(organizationId: string) {
     return db.prepare('SELECT * FROM contact_lists WHERE organizationId = ? ORDER BY createdAt DESC').all(organizationId).map(hydrateList);
   }
+  async getContactListsForUser(organizationId: string, userId: string) {
+    return db.prepare(`
+      SELECT DISTINCT cl.* FROM contact_lists cl
+      WHERE cl.organizationId = ?
+        AND (
+          cl.uploadedBy = ?
+          OR EXISTS (SELECT 1 FROM contacts c WHERE c.listId = cl.id AND c.assignedTo = ?)
+        )
+      ORDER BY cl.createdAt DESC
+    `).all(organizationId, userId, userId).map(hydrateList);
+  }
   async getContactList(id: string) { return hydrateList(db.prepare('SELECT * FROM contact_lists WHERE id = ?').get(id)); }
   async createContactList(list: any) {
     const id = genId(); const ts2 = now();

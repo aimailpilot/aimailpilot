@@ -4154,7 +4154,10 @@ Which account should I use and why? If I need to split across accounts, provide 
 
   app.get('/api/contact-lists', async (req: any, res) => {
     try {
-      const lists = await storage.getContactLists(req.user.organizationId);
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      const lists = isAdmin
+        ? await storage.getContactLists(req.user.organizationId)
+        : await storage.getContactListsForUser(req.user.organizationId, req.user.id);
       res.json(lists);
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch contact lists' });
@@ -4228,11 +4231,9 @@ Which account should I use and why? If I need to split across accounts, provide 
       let contacts;
       let total;
 
-      // KEY RULE: When viewing a specific list (listId is set), ALL org members 
-      // can see ALL contacts in that list. The assignedTo filter only applies 
-      // when browsing "All" contacts without a list filter.
-      // This ensures members who upload a list can see their data,
-      // and members who get a list allocated can also see it.
+      // ACCESS RULES:
+      // - Owner/Admin: see all contacts (optionally filtered by assignedTo for assignment view)
+      // - Member/Viewer: only see contacts assigned to them, even within a specific list
 
       // If admin is filtering by a specific member (assignment view)
       if (isAdmin && assignedTo) {
@@ -4247,15 +4248,14 @@ Which account should I use and why? If I need to split across accounts, provide 
             : await storage.getContactsForUser(req.user.organizationId, assignedTo, limit, offset, filters);
           total = await storage.getContactsCountForUser(req.user.organizationId, assignedTo, filters);
         }
-      } else if (!isAdmin && !listId) {
-        // Non-admin viewing "All" tab (no list filter) — only see assigned contacts
+      } else if (!isAdmin) {
+        // Non-admin: only see contacts assigned to them (whether browsing All or a specific list)
         contacts = search
           ? await storage.searchContactsForUser(req.user.organizationId, req.user.id, search, filters)
           : await storage.getContactsForUser(req.user.organizationId, req.user.id, limit, offset, filters);
         total = await storage.getContactsCountForUser(req.user.organizationId, req.user.id, filters);
       } else {
-        // Admin (no assignment filter) OR anyone viewing a specific list
-        // Show all contacts in scope
+        // Admin/Owner (no assignment filter): see all contacts in scope
         contacts = search
           ? await storage.searchContacts(req.user.organizationId, search, filters)
           : await storage.getContacts(req.user.organizationId, limit, offset, filters);
@@ -4275,7 +4275,7 @@ Which account should I use and why? If I need to split across accounts, provide 
           } else {
             allContacts = await storage.getContactsForUser(req.user.organizationId, assignedTo, 100000, 0, filters);
           }
-        } else if (!isAdmin && !listId) {
+        } else if (!isAdmin) {
           allContacts = await storage.getContactsForUser(req.user.organizationId, req.user.id, 100000, 0, filters);
         } else {
           allContacts = await storage.getContacts(req.user.organizationId, 100000, 0, filters);
