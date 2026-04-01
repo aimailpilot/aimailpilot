@@ -490,9 +490,16 @@ export class CampaignEngine {
       }
 
       // Filter out unsubscribed and bounced contacts
+      const beforeFilterCount = contacts.length;
+      const bouncedContacts = contacts.filter(c => c.status === 'bounced');
+      const unsubscribedContacts = contacts.filter(c => c.status === 'unsubscribed');
       contacts = contacts.filter(c => c.status !== 'unsubscribed' && c.status !== 'bounced');
 
-      if (contacts.length === 0) return { success: false, error: 'No contacts to send to' };
+      if (bouncedContacts.length > 0 || unsubscribedContacts.length > 0) {
+        console.log(`[CampaignEngine] Campaign ${campaignId} contact filtering: ${beforeFilterCount} loaded, ${bouncedContacts.length} bounced (${bouncedContacts.map(c => c.email).join(', ')}), ${unsubscribedContacts.length} unsubscribed, ${contacts.length} remaining`);
+      }
+
+      if (contacts.length === 0) return { success: false, error: `No contacts to send to (${bouncedContacts.length} bounced, ${unsubscribedContacts.length} unsubscribed out of ${beforeFilterCount} total)` };
 
       // ===== CRITICAL FIX: Skip contacts that already have messages for this campaign/step =====
       // This prevents duplicate sends when resuming a paused campaign

@@ -51,7 +51,15 @@ This file tracks features that are confirmed working in production.
 - **Do not touch**: any Azure-related config files, deployment scripts, `web.config`, `.deployment`, `startup.sh`, or any file that affects how the app runs on Azure
 - Database path `/home/data/aimailpilot.db` must remain as-is for Azure
 
-### 9. Database Safety (CRITICAL)
+### 9. Campaign Detail Page (Large Campaigns)
+- Campaign detail page loads correctly even for large campaigns (900+ messages)
+- **Fix applied**: Batch-optimized `getCampaignMessagesEnriched` from N+1 queries (2 per message) to 2-3 total queries using `IN(...)` SQL
+- **Fix applied**: Added `getCampaignMessageStats` (single SQL aggregation) and `getCampaignStepStats` (GROUP BY) for lightweight stats
+- **Fix applied**: Capped messages loaded on detail page to 500 to prevent timeout
+- **Fix applied**: Renamed `getRecentCampaignTrackingEvents` to avoid conflict with existing `getRecentTrackingEvents` method
+- **Do not touch**: `getCampaignMessagesEnriched`, `getCampaignMessageStats`, `getCampaignStepStats`, `getRecentCampaignTrackingEvents` in `server/storage.ts`; `/api/campaigns/:id/detail` route in `server/routes.ts`
+
+### 10. Database Safety (CRITICAL)
 - **NEVER** add code that deletes, renames, moves, or recreates the database file
 - **NEVER** add `integrity_check` or any pragma as a startup gate — Azure CIFS causes false failures
 - **NEVER** add a "reset database" feature that actually deletes the DB file

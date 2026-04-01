@@ -3467,6 +3467,45 @@ Which account should I use and why? If I need to split across accounts, provide 
     }
   });
 
+  // Campaign contact debug: show which contacts would be filtered and why
+  app.get('/api/campaigns/:id/contact-debug', async (req: any, res) => {
+    try {
+      const campaign = await storage.getCampaign(req.params.id);
+      if (!campaign) return res.status(404).json({ message: 'Campaign not found' });
+
+      // Load contacts the same way campaign engine does
+      let allContacts: any[] = [];
+      if (campaign.contactIds && campaign.contactIds.length > 0) {
+        allContacts = await storage.getContactsByIds(campaign.contactIds);
+      } else if (campaign.segmentId) {
+        allContacts = await storage.getContactsBySegment(campaign.segmentId);
+      }
+
+      const bounced = allContacts.filter(c => c.status === 'bounced').map(c => ({ id: c.id, email: c.email, status: c.status }));
+      const unsubscribed = allContacts.filter(c => c.status === 'unsubscribed').map(c => ({ id: c.id, email: c.email, status: c.status }));
+      const eligible = allContacts.filter(c => c.status !== 'bounced' && c.status !== 'unsubscribed').map(c => ({ id: c.id, email: c.email, status: c.status }));
+
+      // Check already-processed (dedup)
+      const existingMessages = await storage.getCampaignMessages(req.params.id, 100000, 0) as any[];
+      const processedContactIds = new Set(existingMessages.filter((m: any) => (m.stepNumber || 0) === 0).map((m: any) => m.contactId));
+      const alreadyProcessed = eligible.filter(c => processedContactIds.has(c.id));
+      const wouldSend = eligible.filter(c => !processedContactIds.has(c.id));
+
+      res.json({
+        storedContactIds: campaign.contactIds?.length || 0,
+        segmentId: campaign.segmentId || null,
+        loadedFromDb: allContacts.length,
+        bounced: { count: bounced.length, contacts: bounced },
+        unsubscribed: { count: unsubscribed.length, contacts: unsubscribed },
+        alreadyProcessed: { count: alreadyProcessed.length, contacts: alreadyProcessed },
+        wouldSend: { count: wouldSend.length, contacts: wouldSend },
+      });
+    } catch (error) {
+      console.error('Contact debug error:', error);
+      res.status(500).json({ message: 'Failed to debug contacts' });
+    }
+  });
+
   // Duplicate a campaign
   app.post('/api/campaigns/:id/duplicate', async (req: any, res) => {
     try {
