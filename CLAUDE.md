@@ -4,6 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > **IMPORTANT**: Before making any changes, read `status.md`. It lists features that are confirmed working in production and **must not be broken**. Do not modify code for those features unless explicitly asked to fix a bug in them.
 
+> **CRITICAL — DATABASE PROTECTION (read this before writing ANY server code)**
+> The production database has been accidentally deleted **4 times**. The following rules are NON-NEGOTIABLE:
+> 1. **NEVER** add `fs.unlinkSync`, `fs.renameSync`, `fs.rmSync`, or `fs.writeFileSync` targeting the database file or `DB_PATH`
+> 2. **NEVER** add `integrity_check` pragma — it causes false failures on Azure CIFS and triggers data loss
+> 3. **NEVER** add code that creates a fresh database over an existing one — if the DB fails to open, CRASH, do not recreate
+> 4. **NEVER** add a "reset database" feature, migration that drops tables, or any endpoint that wipes data
+> 5. **NEVER** modify the DB initialization code in `server/storage.ts` (lines 53–137) or the `autoRestoreBackup` function
+> 6. **NEVER** remove the `[DB-GUARDRAIL]` runtime protection in `server/storage.ts` — it blocks file deletion at runtime
+> 7. If you need to change database schema, use `ALTER TABLE ADD COLUMN` only — never drop/recreate tables
+> 8. Run `bash scripts/db-safety-check.sh` before deploying to verify no dangerous patterns exist
+> See `DATABASE-RECOVERY.md` for the full incident history and recovery procedure.
+
 ## Commands
 
 ```bash

@@ -135,6 +135,55 @@ try {
   }
 }
 
+// ===== DATABASE FILE PROTECTION GUARDRAIL =====
+// This guardrail intercepts any attempt to delete, rename, or overwrite the database file.
+// It was added after 4 incidents of production data loss caused by code that
+// accidentally deleted/renamed the database file during deployment.
+// DO NOT REMOVE OR MODIFY THIS GUARDRAIL.
+const _originalUnlinkSync = fs.unlinkSync;
+const _originalRenameSync = fs.renameSync;
+const _originalWriteFileSync = fs.writeFileSync;
+const dbBaseName = path.basename(DB_PATH).toLowerCase();
+const dbDirNorm = path.dirname(DB_PATH).replace(/\\/g, '/').toLowerCase();
+
+function isDbFile(filePath: string): boolean {
+  const norm = String(filePath).replace(/\\/g, '/').toLowerCase();
+  const base = path.basename(norm);
+  // Protect the main DB file and its journal/WAL files
+  return (base === dbBaseName || base === dbBaseName + '-wal' || base === dbBaseName + '-shm' || base === dbBaseName + '-journal')
+    && norm.includes(dbDirNorm);
+}
+
+fs.unlinkSync = function guardedUnlinkSync(p: fs.PathLike): void {
+  if (isDbFile(String(p))) {
+    console.error(`[DB-GUARDRAIL] BLOCKED attempt to DELETE database file: ${p}`);
+    console.error(`[DB-GUARDRAIL] Stack trace:`, new Error().stack);
+    throw new Error(`GUARDRAIL: Deleting the database file is forbidden. File: ${p}`);
+  }
+  return _originalUnlinkSync(p);
+} as typeof fs.unlinkSync;
+
+fs.renameSync = function guardedRenameSync(oldPath: fs.PathLike, newPath: fs.PathLike): void {
+  if (isDbFile(String(oldPath))) {
+    console.error(`[DB-GUARDRAIL] BLOCKED attempt to RENAME database file: ${oldPath} -> ${newPath}`);
+    console.error(`[DB-GUARDRAIL] Stack trace:`, new Error().stack);
+    throw new Error(`GUARDRAIL: Renaming the database file is forbidden. File: ${oldPath}`);
+  }
+  return _originalRenameSync(oldPath, newPath);
+} as typeof fs.renameSync;
+
+// Block writing an empty/small file over the database (which would wipe it)
+fs.writeFileSync = function guardedWriteFileSync(p: fs.PathOrFileDescriptor, data: any, options?: any): void {
+  if (typeof p === 'string' && isDbFile(p)) {
+    console.error(`[DB-GUARDRAIL] BLOCKED attempt to OVERWRITE database file: ${p}`);
+    console.error(`[DB-GUARDRAIL] Stack trace:`, new Error().stack);
+    throw new Error(`GUARDRAIL: Overwriting the database file is forbidden. File: ${p}`);
+  }
+  return _originalWriteFileSync(p, data, options);
+} as typeof fs.writeFileSync;
+
+console.log(`[DB-GUARDRAIL] Database file protection active for: ${DB_PATH}`);
+
 // ===== CRITICAL: SQLite configuration for Azure vs Local =====
 // Azure App Service uses CIFS/SMB network share for /home mount.
 // SQLite WAL mode is UNSAFE on network shares because:
