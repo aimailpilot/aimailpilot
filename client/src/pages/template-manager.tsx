@@ -100,6 +100,8 @@ export default function TemplateManager() {
     aiSuggestions: string[];
   } | null>(null);
   const deliverabilityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [fixLoading, setFixLoading] = useState(false);
+  const [fixChanges, setFixChanges] = useState<string[]>([]);
 
   const analyzeDeliverability = async (subj?: string, cont?: string) => {
     const s = subj ?? formSubject;
@@ -116,6 +118,34 @@ export default function TemplateManager() {
     setDeliverabilityLoading(false);
   };
 
+  const autoFixDeliverability = async () => {
+    if (!deliverabilityResult || deliverabilityResult.issues.length === 0) return;
+    setFixLoading(true);
+    setFixChanges([]);
+    try {
+      const res = await fetch('/api/templates/fix-deliverability', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ subject: formSubject, content: formContent, issues: deliverabilityResult.issues }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setFormSubject(data.subject);
+          setFormContent(data.content);
+          pendingContentRef.current = data.content;
+          if (editorRef.current && editorMode === 'visual') editorRef.current.innerHTML = data.content;
+          setFixChanges(data.changes || []);
+          // Re-analyze after fix
+          setTimeout(() => analyzeDeliverability(data.subject, data.content), 500);
+        }
+      } else {
+        const err = await res.json();
+        alert(err.message || 'Failed to auto-fix');
+      }
+    } catch { alert('Failed to connect to AI service'); }
+    setFixLoading(false);
+  };
+
   // Debounced auto-analysis when content or subject changes
   useEffect(() => {
     if (!showDeliverability) return;
@@ -123,6 +153,58 @@ export default function TemplateManager() {
     deliverabilityTimerRef.current = setTimeout(() => analyzeDeliverability(), 1500);
     return () => { if (deliverabilityTimerRef.current) clearTimeout(deliverabilityTimerRef.current); };
   }, [formSubject, formContent, showDeliverability]);
+
+  // Highlight spam words in visual editor using CSS Custom Highlight API or fallback
+  useEffect(() => {
+    if (!editorRef.current || editorMode !== 'visual') return;
+    const spamWords = deliverabilityResult?.spamWordsFound || [];
+    const editor = editorRef.current;
+
+    // Remove existing highlights
+    editor.querySelectorAll('mark[data-spam-highlight]').forEach(el => {
+      const parent = el.parentNode;
+      if (parent) {
+        parent.replaceChild(document.createTextNode(el.textContent || ''), el);
+        parent.normalize();
+      }
+    });
+
+    // Add highlights if deliverability panel is open and there are spam words
+    if (!showDeliverability || spamWords.length === 0) return;
+
+    const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+    const textNodes: Text[] = [];
+    while (walker.nextNode()) textNodes.push(walker.currentNode as Text);
+
+    for (const node of textNodes) {
+      const text = node.textContent || '';
+      const pattern = spamWords.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+      if (!pattern) continue;
+      const regex = new RegExp(`(${pattern})`, 'gi');
+      if (!regex.test(text)) continue;
+
+      const frag = document.createDocumentFragment();
+      let lastIndex = 0;
+      regex.lastIndex = 0;
+      let match;
+      while ((match = regex.exec(text)) !== null) {
+        if (match.index > lastIndex) {
+          frag.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+        }
+        const mark = document.createElement('mark');
+        mark.setAttribute('data-spam-highlight', 'true');
+        mark.style.cssText = 'background:#fecaca;color:#991b1b;border-radius:2px;padding:0 2px;cursor:help';
+        mark.title = `Spam trigger: "${match[0]}" — consider rephrasing`;
+        mark.textContent = match[0];
+        frag.appendChild(mark);
+        lastIndex = regex.lastIndex;
+      }
+      if (lastIndex < text.length) {
+        frag.appendChild(document.createTextNode(text.slice(lastIndex)));
+      }
+      node.parentNode?.replaceChild(frag, node);
+    }
+  }, [showDeliverability, deliverabilityResult?.spamWordsFound, editorMode]);
 
   const categories = ['general', 'onboarding', 'follow-up', 'marketing', 'outreach', 'newsletter', 'transactional'];
 
@@ -471,12 +553,28 @@ export default function TemplateManager() {
         <div className="px-6 pb-3 bg-white border-b border-gray-100 shrink-0">
           <div className="flex items-center gap-2">
             <span className="text-sm text-gray-400 font-medium shrink-0">Subject</span>
-            <input
-              value={formSubject}
-              onChange={(e) => setFormSubject(e.target.value)}
-              placeholder="Enter subject line..."
-              className="flex-1 text-sm text-gray-700 outline-none placeholder-gray-300 bg-transparent py-1.5"
-            />
+            <div className="flex-1 relative">
+              <input
+                value={formSubject}
+                onChange={(e) => setFormSubject(e.target.value)}
+                placeholder="Enter subject line..."
+                className={`w-full text-sm text-gray-700 outline-none placeholder-gray-300 bg-transparent py-1.5 ${
+                  showDeliverability && deliverabilityResult?.spamWordsFound?.some(w => formSubject.toLowerCase().includes(w)) ? 'text-transparent caret-gray-700' : ''
+                }`}
+              />
+              {/* Spam word highlight overlay for subject */}
+              {showDeliverability && deliverabilityResult?.spamWordsFound && deliverabilityResult.spamWordsFound.some(w => formSubject.toLowerCase().includes(w)) && (
+                <div className="absolute inset-0 pointer-events-none text-sm py-1.5 whitespace-pre" aria-hidden="true"
+                  dangerouslySetInnerHTML={{
+                    __html: deliverabilityResult.spamWordsFound.reduce(
+                      (text, word) => text.replace(new RegExp(`(${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi'),
+                        '<mark style="background:#fecaca;color:#991b1b;border-radius:2px;padding:0 2px">$1</mark>'),
+                      formSubject.replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                    ),
+                  }}
+                />
+              )}
+            </div>
             <Select value={formCategory} onValueChange={setFormCategory}>
               <SelectTrigger className="w-36 h-8 text-xs border-gray-200">
                 <SelectValue />
@@ -575,6 +673,13 @@ export default function TemplateManager() {
                   {deliverabilityLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-green-600" />}
                 </div>
                 <div className="flex items-center gap-2">
+                  {deliverabilityResult && deliverabilityResult.issues.length > 0 && (
+                    <button onClick={autoFixDeliverability} disabled={fixLoading}
+                      className="flex items-center gap-1.5 text-xs px-3 py-1 bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-md hover:from-purple-700 hover:to-indigo-700 font-medium disabled:opacity-50">
+                      {fixLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wand2 className="h-3 w-3" />}
+                      Auto-fix with AI
+                    </button>
+                  )}
                   <button onClick={() => analyzeDeliverability()} className="text-xs px-3 py-1 bg-white border border-green-200 rounded-md text-green-700 hover:bg-green-50 font-medium">
                     Re-analyze
                   </button>
@@ -660,6 +765,23 @@ export default function TemplateManager() {
                           <div key={i} className="flex items-start gap-2 bg-white border border-purple-200 rounded-lg px-3 py-2 text-xs text-gray-700">
                             <span className="text-purple-500 font-bold mt-px">{i + 1}.</span>
                             <span>{tip}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Changes applied by auto-fix */}
+                  {fixChanges.length > 0 && (
+                    <div className="space-y-1.5">
+                      <div className="text-[11px] font-semibold text-gray-600 uppercase tracking-wider flex items-center gap-1.5">
+                        <Wand2 className="h-3 w-3 text-green-500" /> Changes Applied
+                      </div>
+                      <div className="bg-green-50 border border-green-200 rounded-lg px-3 py-2">
+                        {fixChanges.map((change, i) => (
+                          <div key={i} className="flex items-start gap-2 text-xs text-green-800 py-0.5">
+                            <span className="text-green-500 mt-0.5">✓</span>
+                            <span>{change}</span>
                           </div>
                         ))}
                       </div>

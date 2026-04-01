@@ -5395,6 +5395,86 @@ Return ONLY a JSON array of strings, each 1-2 sentences. Example: ["Add a person
     }
   });
 
+  // AI Auto-fix: rewrite subject + content to fix deliverability issues
+  app.post('/api/templates/fix-deliverability', async (req: any, res) => {
+    try {
+      const { subject, content, issues } = req.body;
+      if (!subject && !content) return res.status(400).json({ message: 'Subject or content required' });
+
+      const settings = await storage.getApiSettingsWithAzureFallback(req.user.organizationId);
+      const endpoint = settings.azure_openai_endpoint;
+      const apiKey = settings.azure_openai_api_key;
+      const deploymentName = settings.azure_openai_deployment;
+      const apiVersion = settings.azure_openai_api_version || '2024-08-01-preview';
+
+      if (!endpoint || !apiKey || !deploymentName) {
+        return res.status(400).json({ message: 'Azure OpenAI not configured. Go to Advanced Settings to set up.' });
+      }
+
+      const issuesList = (issues || []).map((i: any) => `- [${i.severity}] ${i.category}: ${i.message}`).join('\n');
+
+      const prompt = `You are an email deliverability expert. Rewrite the email below to fix the deliverability issues listed. Keep the same meaning, tone, structure, and HTML formatting. Only fix the specific issues — do not change anything else unnecessarily.
+
+RULES:
+- Replace spam trigger words with professional alternatives (e.g., "free" → "complimentary" or "at no cost", "click here" → "learn more", "act now" → "take the next step")
+- If subject is too long, shorten it while keeping the key message
+- If ALL CAPS, convert to normal case
+- Remove excessive exclamation marks or question marks
+- Keep all {{variables}} exactly as they are — do NOT modify personalization tokens
+- Keep all HTML tags, links, images, and structure intact
+- Keep all tracking URLs and unsubscribe links unchanged
+- If the email has too many links, do NOT remove them — just improve the surrounding text
+
+ISSUES TO FIX:
+${issuesList || 'General deliverability improvement needed'}
+
+ORIGINAL SUBJECT:
+${subject || '(none)'}
+
+ORIGINAL CONTENT (HTML):
+${(content || '').slice(0, 8000)}
+
+Respond with ONLY a JSON object in this format:
+{"subject": "improved subject line", "content": "improved HTML content", "changes": ["list of changes you made"]}`;
+
+      const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${deploymentName}/chat/completions?api-version=${apiVersion}`;
+      const aiResp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'api-key': apiKey },
+        body: JSON.stringify({
+          messages: [
+            { role: 'system', content: 'You are an email deliverability expert. Respond only with valid JSON. Preserve all HTML structure and {{variables}}.' },
+            { role: 'user', content: prompt },
+          ],
+          temperature: 0.3,
+          max_tokens: 4000,
+        }),
+      });
+
+      if (!aiResp.ok) {
+        const errText = await aiResp.text();
+        return res.status(500).json({ message: `AI request failed: ${errText.slice(0, 200)}` });
+      }
+
+      const aiData = await aiResp.json() as any;
+      const raw = aiData.choices?.[0]?.message?.content || '';
+      try {
+        const parsed = JSON.parse(raw.replace(/```json\n?|```/g, '').trim());
+        res.json({
+          success: true,
+          subject: parsed.subject || subject,
+          content: parsed.content || content,
+          changes: parsed.changes || [],
+        });
+      } catch {
+        res.status(500).json({ message: 'AI returned invalid response. Please try again.' });
+      }
+    } catch (error) {
+      console.error('Fix deliverability error:', error);
+      res.status(500).json({ message: 'Failed to fix deliverability issues' });
+    }
+  });
+
   app.get('/api/templates/:id', async (req: any, res) => {
     try {
       const template = await storage.getEmailTemplate(req.params.id);
