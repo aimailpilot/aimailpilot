@@ -242,6 +242,20 @@ export default function TemplateManager() {
     setLoading(false);
   };
 
+  // Convert plain text to HTML for contentEditable insertion
+  const textToHtml = (text: string): string => {
+    if (!text) return '';
+    // If it already contains HTML tags, return as-is
+    if (/<[a-z][\s\S]*>/i.test(text)) return text;
+    // Convert markdown-style bold **text** to <strong>
+    let html = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+    // Split into paragraphs on double newlines, wrap in <p> tags
+    html = html.split(/\n\s*\n/).map(para =>
+      `<p>${para.replace(/\n/g, '<br>')}</p>`
+    ).join('\n');
+    return html;
+  };
+
   // Store pending content for the editor
   const pendingContentRef = useRef<string>('');
 
@@ -782,8 +796,9 @@ export default function TemplateManager() {
                         <div className="text-[10px] font-semibold text-gray-600 mb-1">Text Version</div>
                         <div className="text-xs text-gray-700 bg-white rounded-lg p-2 max-h-20 overflow-y-auto whitespace-pre-wrap border">{aiResult.textContent}</div>
                         <button onClick={() => {
-                          setFormContent(aiResult.textContent!); pendingContentRef.current = aiResult.textContent!;
-                          if (editorRef.current && editorMode === 'visual') editorRef.current.innerHTML = aiResult.textContent!;
+                          const htmlContent = textToHtml(aiResult.textContent!);
+                          setFormContent(htmlContent); pendingContentRef.current = htmlContent;
+                          if (editorRef.current && editorMode === 'visual') editorRef.current.innerHTML = htmlContent;
                         }} className="mt-1 w-full text-[11px] px-3 py-1 bg-purple-50 text-purple-700 rounded-md hover:bg-purple-100 font-medium border border-purple-200">Use Text</button>
                       </div>
                       <div>
@@ -799,8 +814,9 @@ export default function TemplateManager() {
                     <div>
                       <div className="text-xs text-gray-700 bg-white rounded-lg p-2 max-h-24 overflow-y-auto whitespace-pre-wrap border">{aiResult.content}</div>
                       <button onClick={() => {
-                        setFormContent(aiResult.content); pendingContentRef.current = aiResult.content;
-                        if (editorRef.current && editorMode === 'visual') editorRef.current.innerHTML = aiResult.content;
+                        const htmlContent = textToHtml(aiResult.content);
+                        setFormContent(htmlContent); pendingContentRef.current = htmlContent;
+                        if (editorRef.current && editorMode === 'visual') editorRef.current.innerHTML = htmlContent;
                       }} className="mt-1 text-[11px] px-4 py-1 bg-purple-50 text-purple-700 rounded-md hover:bg-purple-100 font-medium border border-purple-200">Use Content</button>
                     </div>
                   )}
