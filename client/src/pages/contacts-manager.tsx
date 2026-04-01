@@ -1259,24 +1259,6 @@ export default function ContactsManager() {
                         Unbounce Selected ({selectedIds.length})
                       </button>
                     )}
-                    <button
-                      className="px-3 py-1.5 text-xs font-medium bg-white border border-orange-300 text-orange-700 rounded-lg hover:bg-orange-50 transition-all"
-                      onClick={async () => {
-                        if (!confirm(`This will analyze all ${tabCounts.blocklist} bounced contacts and only remove those that were falsely bounced due to server/auth errors. Real bounces (invalid emails) will stay on the blocklist. Continue?`)) return;
-                        try {
-                          const res = await fetch('/api/contacts/smart-unbounce', {
-                            method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-                          });
-                          const data = await res.json();
-                          if (data.success) {
-                            alert(`Smart Unbounce Complete:\n• ${data.unbounced} false bounces removed from blocklist\n• ${data.keptBounced} real bounces kept on blocklist`);
-                            window.location.reload();
-                          }
-                        } catch { alert('Failed to smart-unbounce contacts'); }
-                      }}
-                    >
-                      Smart Unbounce
-                    </button>
                   </div>
                 </AlertDescription>
               </Alert>
