@@ -15,7 +15,7 @@ import {
   AlignLeft, AlignCenter, AlignRight, Type, Strikethrough, ChevronDown,
   Monitor, Info, User, Users, Star, TrendingUp, AlertTriangle, Mail,
   MessageSquare, MousePointer, Shield, ArrowUpDown, ChevronRight,
-  ArrowLeft, Save, Palette, Smartphone, Send, CheckCircle
+  ArrowLeft, Save, Palette, Smartphone, Send, CheckCircle, Lock, Globe
 } from "lucide-react";
 
 interface TemplateCreator {
@@ -43,6 +43,7 @@ interface Template {
   subject: string;
   content: string;
   variables: string[];
+  isPublic?: boolean | number;
   usageCount: number;
   createdBy?: string;
   createdAt: string;
@@ -80,11 +81,16 @@ export default function TemplateManager() {
   const [testError, setTestError] = useState('');
   const [emailAccounts, setEmailAccounts] = useState<any[]>([]);
 
+  // User role
+  const [userRole, setUserRole] = useState<string>('member');
+  const isOwnerOrAdmin = userRole === 'owner' || userRole === 'admin';
+
   // Form
   const [formName, setFormName] = useState('');
   const [formCategory, setFormCategory] = useState('general');
   const [formSubject, setFormSubject] = useState('');
   const [formContent, setFormContent] = useState('');
+  const [formIsPublic, setFormIsPublic] = useState(true);
   const [formLoading, setFormLoading] = useState(false);
 
   // Editor mode: 'visual' or 'html'
@@ -227,7 +233,12 @@ export default function TemplateManager() {
     { name: 'senderName', label: 'Sender Name' },
   ];
 
-  useEffect(() => { fetchAllTemplates(); }, []);
+  useEffect(() => {
+    fetchAllTemplates();
+    fetch('/api/auth/user', { credentials: 'include' }).then(r => r.ok ? r.json() : null).then(u => {
+      if (u?.role) setUserRole(u.role);
+    }).catch(() => {});
+  }, []);
 
   const fetchAllTemplates = async () => {
     setLoading(true);
@@ -266,6 +277,7 @@ export default function TemplateManager() {
       setFormCategory(template.category);
       setFormSubject(template.subject);
       setFormContent(template.content);
+      setFormIsPublic(template.isPublic ? true : false);
       pendingContentRef.current = template.content || '';
     } else {
       setEditTemplate(null);
@@ -273,6 +285,7 @@ export default function TemplateManager() {
       setFormCategory('general');
       setFormSubject('');
       setFormContent('');
+      setFormIsPublic(true);
       pendingContentRef.current = '';
     }
     setEditorMode('visual');
@@ -331,6 +344,7 @@ export default function TemplateManager() {
           subject: formSubject,
           content: formContent,
           variables,
+          isPublic: formIsPublic,
         }),
       });
       if (res.ok) {
@@ -600,6 +614,20 @@ export default function TemplateManager() {
               </DropdownMenuContent>
             </DropdownMenu>
 
+            {isOwnerOrAdmin && (
+              <button
+                onClick={() => setFormIsPublic(!formIsPublic)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border transition-all ${
+                  formIsPublic
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
+                    : 'bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100'
+                }`}
+                title={formIsPublic ? 'Visible to all team members' : 'Only visible to you'}
+              >
+                {formIsPublic ? <Globe className="h-3.5 w-3.5" /> : <Lock className="h-3.5 w-3.5" />}
+                {formIsPublic ? 'Public' : 'Private'}
+              </button>
+            )}
             <Button variant="outline" size="sm" onClick={handlePreviewForm} disabled={!formContent} className="text-sm">
               <Eye className="h-3.5 w-3.5 mr-1.5" /> Preview
             </Button>
@@ -1228,6 +1256,14 @@ export default function TemplateManager() {
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 mb-0.5">
                     <h4 className="font-semibold text-gray-900 text-sm truncate">{template.name}</h4>
+                    {isOwnerOrAdmin && !isTeam && (
+                      <span title={template.isPublic ? 'Public — visible to team' : 'Private — only you'} className={`flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded-full font-medium border ${
+                        template.isPublic ? 'bg-emerald-50 text-emerald-600 border-emerald-200' : 'bg-gray-100 text-gray-500 border-gray-200'
+                      }`}>
+                        {template.isPublic ? <Globe className="h-2.5 w-2.5" /> : <Lock className="h-2.5 w-2.5" />}
+                        {template.isPublic ? 'Public' : 'Private'}
+                      </span>
+                    )}
                     <Badge variant="outline" className={`text-[10px] font-medium shrink-0 ${catConfig.bg} ${catConfig.text} ${catConfig.border}`}>
                       <span className="mr-0.5">{catConfig.icon}</span> {template.category}
                     </Badge>
@@ -1326,6 +1362,20 @@ export default function TemplateManager() {
                           <DropdownMenuItem onClick={() => handleDuplicate(template)}>
                             <Copy className="h-3.5 w-3.5 mr-2" /> Duplicate
                           </DropdownMenuItem>
+                          {isOwnerOrAdmin && (
+                            <DropdownMenuItem onClick={async () => {
+                              try {
+                                await fetch(`/api/templates/${template.id}`, {
+                                  method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+                                  body: JSON.stringify({ isPublic: !template.isPublic }),
+                                });
+                                await fetchAllTemplates();
+                              } catch (e) { console.error('Toggle visibility failed:', e); }
+                            }}>
+                              {template.isPublic ? <Lock className="h-3.5 w-3.5 mr-2" /> : <Globe className="h-3.5 w-3.5 mr-2" />}
+                              {template.isPublic ? 'Make Private' : 'Make Public'}
+                            </DropdownMenuItem>
+                          )}
                           <DropdownMenuSeparator />
                           <DropdownMenuItem onClick={() => handleDelete(template.id)} className="text-red-600">
                             <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete

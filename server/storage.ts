@@ -1383,6 +1383,7 @@ export class DatabaseStorage {
   async getEmailTemplates(organizationId: string) { return db.prepare('SELECT * FROM templates WHERE organizationId = ?').all(organizationId).map(hydrateTemplate); }
   async getEmailTemplatesByUser(organizationId: string, userId: string) { return db.prepare('SELECT * FROM templates WHERE organizationId = ? AND createdBy = ? ORDER BY updatedAt DESC').all(organizationId, userId).map(hydrateTemplate); }
   async getEmailTemplatesExcludingUser(organizationId: string, userId: string) { return db.prepare('SELECT * FROM templates WHERE organizationId = ? AND (createdBy IS NULL OR createdBy != ?) ORDER BY updatedAt DESC').all(organizationId, userId).map(hydrateTemplate); }
+  async getPublicEmailTemplatesExcludingUser(organizationId: string, userId: string) { return db.prepare('SELECT * FROM templates WHERE organizationId = ? AND (createdBy IS NULL OR createdBy != ?) AND isPublic = 1 ORDER BY updatedAt DESC').all(organizationId, userId).map(hydrateTemplate); }
   async getEmailTemplate(id: string) { return hydrateTemplate(db.prepare('SELECT * FROM templates WHERE id = ?').get(id)); }
   async createEmailTemplate(template: any) {
     const id = genId(); const ts2 = now();

@@ -5178,9 +5178,13 @@ Example response:
   });
 
   // Get team templates (other users' templates in same org)
+  // Members only see public templates; owners/admins see all team templates
   app.get('/api/templates/team', async (req: any, res) => {
     try {
-      const templates = await storage.getEmailTemplatesExcludingUser(req.user.organizationId, req.user.id);
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      const templates = isAdmin
+        ? await storage.getEmailTemplatesExcludingUser(req.user.organizationId, req.user.id)
+        : await storage.getPublicEmailTemplatesExcludingUser(req.user.organizationId, req.user.id);
       const enriched = await enrichTemplatesWithScores(templates, req.user.organizationId, storage);
       res.json(enriched);
     } catch (error) {
@@ -5487,8 +5491,12 @@ Respond with ONLY a JSON object in this format:
 
   app.post('/api/templates', async (req: any, res) => {
     try {
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      // Members create private templates by default; only owners/admins can set public
+      const isPublic = isAdmin ? (req.body.isPublic !== undefined ? req.body.isPublic : true) : false;
       const template = await storage.createEmailTemplate({
         ...req.body,
+        isPublic,
         organizationId: req.user.organizationId,
         createdBy: req.user.id,
       });
@@ -5500,7 +5508,11 @@ Respond with ONLY a JSON object in this format:
 
   app.put('/api/templates/:id', async (req: any, res) => {
     try {
-      const updated = await storage.updateEmailTemplate(req.params.id, req.body);
+      const data = { ...req.body };
+      // Only owners/admins can change template visibility
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      if (!isAdmin) delete data.isPublic;
+      const updated = await storage.updateEmailTemplate(req.params.id, data);
       res.json(updated);
     } catch (error) {
       res.status(500).json({ message: 'Failed to update template' });
