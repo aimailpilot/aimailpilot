@@ -4829,6 +4829,126 @@ Example response:
     }
   });
 
+  // Unbounce contacts: reset selected contacts from 'bounced' back to 'cold'
+  app.post('/api/contacts/unbounce', async (req: any, res) => {
+    try {
+      const { contactIds } = req.body;
+      if (!Array.isArray(contactIds) || contactIds.length === 0) {
+        return res.status(400).json({ message: 'contactIds array required' });
+      }
+      let updated = 0;
+      for (const id of contactIds) {
+        try {
+          const contact = await storage.getContact(id);
+          if (contact && contact.status === 'bounced') {
+            await storage.updateContact(id, { status: 'cold' });
+            updated++;
+          }
+        } catch (e) { /* skip individual errors */ }
+      }
+      res.json({ success: true, updated, total: contactIds.length });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to unbounce contacts' });
+    }
+  });
+
+  // Analyze bounced contacts: separate real bounces from false positives (infrastructure failures)
+  app.get('/api/contacts/bounce-analysis', async (req: any, res) => {
+    try {
+      const allContacts = await storage.getContacts(req.user.organizationId, 100000, 0);
+      const bouncedContacts = allContacts.filter((c: any) => c.status === 'bounced');
+
+      // Infrastructure error patterns — these are NOT real bounces
+      const infraPatterns = ['oauth', 'token', 're-authenticate', '401', '403', 'smtp auth',
+        'credentials', 'graph api error', 'api error', 'connection refused', 'getaddrinfo',
+        'timeout', 'invalidauthenticationtoken', 'errormessage', 'econnrefused', 'socket hang up'];
+
+      const realBounces: any[] = [];
+      const falseBounces: any[] = [];
+
+      for (const contact of bouncedContacts) {
+        // Check all failed messages for this contact to see WHY it was marked bounced
+        const messages = await storage.getFailedMessagesByContact(contact.id, 5);
+
+        const errors = messages.map((m: any) => m.errorMessage || '').filter(Boolean);
+        const lastError = errors[0] || '';
+        const errorLower = lastError.toLowerCase();
+
+        // Check if ANY error is infrastructure-related
+        const isInfraFailure = errors.length === 0 || infraPatterns.some(p => errorLower.includes(p));
+
+        const entry = {
+          id: contact.id,
+          email: contact.email,
+          firstName: contact.firstName,
+          lastName: contact.lastName,
+          lastError: lastError.slice(0, 200),
+          failedMessageCount: errors.length,
+        };
+
+        if (isInfraFailure) {
+          falseBounces.push({ ...entry, reason: errors.length === 0 ? 'no error recorded' : 'infrastructure failure' });
+        } else {
+          realBounces.push({ ...entry, reason: 'real delivery failure' });
+        }
+      }
+
+      res.json({
+        totalBounced: bouncedContacts.length,
+        realBounces: { count: realBounces.length, contacts: realBounces },
+        falseBounces: { count: falseBounces.length, contacts: falseBounces },
+      });
+    } catch (error) {
+      console.error('Bounce analysis error:', error);
+      res.status(500).json({ message: 'Failed to analyze bounces' });
+    }
+  });
+
+  // Smart unbounce: only unbounce infrastructure failures, keep real bounces
+  app.post('/api/contacts/smart-unbounce', async (req: any, res) => {
+    try {
+      const allContacts = await storage.getContacts(req.user.organizationId, 100000, 0);
+      const bouncedContacts = allContacts.filter((c: any) => c.status === 'bounced');
+
+      const infraPatterns = ['oauth', 'token', 're-authenticate', '401', '403', 'smtp auth',
+        'credentials', 'graph api error', 'api error', 'connection refused', 'getaddrinfo',
+        'timeout', 'invalidauthenticationtoken', 'errormessage', 'econnrefused', 'socket hang up'];
+
+      let unbounced = 0;
+      let keptBounced = 0;
+      const unbouncedEmails: string[] = [];
+      const keptEmails: string[] = [];
+
+      for (const contact of bouncedContacts) {
+        const messages = await storage.getFailedMessagesByContact(contact.id, 5);
+
+        const errors = messages.map((m: any) => m.errorMessage || '').filter(Boolean);
+        const lastError = (errors[0] || '').toLowerCase();
+        const isInfraFailure = errors.length === 0 || infraPatterns.some(p => lastError.includes(p));
+
+        if (isInfraFailure) {
+          await storage.updateContact(contact.id, { status: 'cold' });
+          unbounced++;
+          unbouncedEmails.push(contact.email);
+        } else {
+          keptBounced++;
+          keptEmails.push(contact.email);
+        }
+      }
+
+      res.json({
+        success: true,
+        unbounced,
+        keptBounced,
+        totalAnalyzed: bouncedContacts.length,
+        unbouncedEmails: unbouncedEmails.slice(0, 50),
+        keptEmails: keptEmails.slice(0, 50),
+      });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to smart-unbounce contacts' });
+    }
+  });
+
   app.post('/api/contacts/delete-bulk', async (req: any, res) => {
     try {
       const { ids } = req.body;

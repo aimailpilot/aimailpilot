@@ -1235,8 +1235,49 @@ export default function ContactsManager() {
             {activeTab === 'blocklist' && (
               <Alert className="border-red-200 bg-red-50">
                 <Ban className="h-4 w-4 text-red-600" />
-                <AlertDescription className="text-sm text-red-700">
-                  These contacts have bounced and are on the blocklist. They will be <strong>automatically excluded</strong> from all future email campaigns to protect your sender reputation.
+                <AlertDescription className="text-sm text-red-700 flex items-center justify-between">
+                  <span>These contacts have bounced and are on the blocklist. They will be <strong>automatically excluded</strong> from all future email campaigns to protect your sender reputation.</span>
+                  <div className="flex gap-2 ml-4 flex-shrink-0">
+                    {selectedIds.length > 0 && (
+                      <button
+                        className="px-3 py-1.5 text-xs font-medium bg-white border border-orange-300 text-orange-700 rounded-lg hover:bg-orange-50 transition-all"
+                        onClick={async () => {
+                          try {
+                            const res = await fetch('/api/contacts/unbounce', {
+                              method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+                              body: JSON.stringify({ contactIds: selectedIds }),
+                            });
+                            const data = await res.json();
+                            if (data.success) {
+                              alert(`${data.updated} contact(s) removed from blocklist`);
+                              setSelectedIds([]);
+                              window.location.reload();
+                            }
+                          } catch { alert('Failed to unbounce contacts'); }
+                        }}
+                      >
+                        Unbounce Selected ({selectedIds.length})
+                      </button>
+                    )}
+                    <button
+                      className="px-3 py-1.5 text-xs font-medium bg-white border border-orange-300 text-orange-700 rounded-lg hover:bg-orange-50 transition-all"
+                      onClick={async () => {
+                        if (!confirm(`This will analyze all ${tabCounts.blocklist} bounced contacts and only remove those that were falsely bounced due to server/auth errors. Real bounces (invalid emails) will stay on the blocklist. Continue?`)) return;
+                        try {
+                          const res = await fetch('/api/contacts/smart-unbounce', {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+                          });
+                          const data = await res.json();
+                          if (data.success) {
+                            alert(`Smart Unbounce Complete:\n• ${data.unbounced} false bounces removed from blocklist\n• ${data.keptBounced} real bounces kept on blocklist`);
+                            window.location.reload();
+                          }
+                        } catch { alert('Failed to smart-unbounce contacts'); }
+                      }}
+                    >
+                      Smart Unbounce
+                    </button>
+                  </div>
                 </AlertDescription>
               </Alert>
             )}

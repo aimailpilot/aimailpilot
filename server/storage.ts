@@ -1500,6 +1500,9 @@ export class DatabaseStorage {
     return db.prepare('SELECT * FROM messages WHERE campaignId = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(campaignId, limit, offset);
   }
   async getCampaignMessage(id: string) { return db.prepare('SELECT * FROM messages WHERE id = ?').get(id) || null; }
+  async getFailedMessagesByContact(contactId: string, limit = 5) {
+    return db.prepare("SELECT errorMessage FROM messages WHERE contactId = ? AND status = 'failed' AND errorMessage IS NOT NULL ORDER BY createdAt DESC LIMIT ?").all(contactId, limit) as any[];
+  }
   async getCampaignMessageByTracking(trackingId: string) { return db.prepare('SELECT * FROM messages WHERE trackingId = ?').get(trackingId) || null; }
   async createCampaignMessage(message: any) {
     const id = genId();
