@@ -511,7 +511,7 @@ export class OutlookReplyTracker {
   /** Extract AImailPilot tracking IDs from message references */
   private extractTrackingIds(headerValue: string): string[] {
     if (!headerValue) return [];
-    const regex = /<([a-f0-9-]{36,})@[^>]+>/gi;
+    const regex = /<([a-f0-9][a-f0-9_-]{35,})@[^>]+>/gi;
     const ids: string[] = [];
     let match;
     while ((match = regex.exec(headerValue)) !== null) {
