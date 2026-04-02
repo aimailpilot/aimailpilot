@@ -439,7 +439,7 @@ db.exec(`
     subject TEXT,
     content TEXT,
     variables TEXT DEFAULT '[]',
-    isPublic INTEGER DEFAULT 0,
+    isPublic INTEGER DEFAULT 1,
     usageCount INTEGER DEFAULT 0,
     createdBy TEXT,
     createdAt TEXT NOT NULL,
@@ -718,6 +718,9 @@ try {
     console.log(`[SuperAdmin] Checked ${superAdminEmails.length} email(s) for superadmin promotion`);
   }
 } catch (e) { /* ignore */ }
+
+// ========== Templates migration: make all existing templates public by default ==========
+try { db.exec(`UPDATE templates SET isPublic = 1 WHERE isPublic = 0 OR isPublic IS NULL`); } catch (e) { /* ignore */ }
 
 // ========== Email account ownership migration: add userId ==========
 try { db.exec(`ALTER TABLE email_accounts ADD COLUMN userId TEXT`); } catch (e) { /* already exists */ }

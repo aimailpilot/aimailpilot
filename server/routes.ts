@@ -1548,31 +1548,55 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get('/api/auth/user', async (req, res) => {
     const session = req.session as any;
-    if (session?.user) return res.json(session.user);
-    const userId = req.cookies?.user_id;
+    const userId = req.cookies?.user_id || session?.userId;
     const userData = req.cookies?.user_data;
-    
+
+    // Helper: look up org role for a user
+    const getUserRole = async (uid: string) => {
+      try {
+        const orgId = session?.activeOrgId;
+        if (orgId) {
+          const membership = await storage.getOrgMember(orgId, uid);
+          if (membership) return (membership as any).role;
+        }
+        const defaultOrg = await storage.getUserDefaultOrganization(uid);
+        if (defaultOrg) return defaultOrg.memberRole || 'admin';
+      } catch (e) { /* ignore */ }
+      return 'member';
+    };
+
+    if (session?.user) {
+      // Ensure role is included
+      if (!session.user.role && userId) {
+        session.user.role = await getUserRole(userId);
+      }
+      return res.json(session.user);
+    }
+
     // Try restoring from cookie data first (existing behavior)
     if (userId && loggedInUsers.has(userId) && userData) {
       try {
         const user = JSON.parse(userData);
+        user.role = await getUserRole(userId);
         (req.session as any).userId = userId;
         (req.session as any).user = user;
         return res.json(user);
       } catch (err) { /* ignore */ }
     }
-    
+
     // Auto-restore from DB if server was restarted (loggedInUsers cleared)
     if (userId && !loggedInUsers.has(userId)) {
       try {
         const dbUser = await storage.getUser(userId) as any;
         if (dbUser && dbUser.isActive !== false) {
           loggedInUsers.add(userId);
+          const role = await getUserRole(userId);
           const userObj = {
             id: dbUser.id,
             email: dbUser.email,
             name: dbUser.name || dbUser.email,
             provider: dbUser.provider || 'google',
+            role,
           };
           (req.session as any).userId = userId;
           (req.session as any).user = userObj;
@@ -1581,7 +1605,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       } catch (e) { /* ignore */ }
     }
-    
+
     res.status(401).json({ error: 'Not authenticated' });
   });
 
