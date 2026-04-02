@@ -141,30 +141,148 @@ class EmailService {
     return accessToken ? { token: accessToken, email: resolvedEmail } : null;
   }
 
+  /**
+   * Get a valid Microsoft/Outlook access token for a specific sender email.
+   * Mirrors getGmailAccessToken but for Microsoft Graph API.
+   */
+  async getOutlookAccessToken(orgId: string, senderEmail?: string): Promise<{ token: string; email: string } | null> {
+    const settings = await storage.getApiSettings(orgId);
+
+    const senderPrefix = senderEmail ? `outlook_sender_${senderEmail}_` : '';
+    let accessToken = senderEmail ? settings[`${senderPrefix}access_token`] : null;
+    let refreshToken = senderEmail ? settings[`${senderPrefix}refresh_token`] : null;
+    let tokenExpiry = senderEmail ? settings[`${senderPrefix}token_expiry`] : null;
+
+    // Fall back to org-level tokens
+    if (!accessToken && !refreshToken) {
+      accessToken = settings.microsoft_access_token;
+      refreshToken = settings.microsoft_refresh_token;
+      tokenExpiry = settings.microsoft_token_expiry;
+    }
+
+    if (!accessToken && !refreshToken) return null;
+
+    const resolvedEmail = senderEmail || settings.microsoft_user_email || '';
+
+    // Refresh token if expired (5-minute buffer)
+    const expiry = parseInt(tokenExpiry || '0');
+    if (!accessToken || Date.now() > expiry - 300000) {
+      if (refreshToken) {
+        let clientId = settings.microsoft_oauth_client_id || '';
+        let clientSecret = settings.microsoft_oauth_client_secret || '';
+        if (!clientId || !clientSecret) {
+          try {
+            const superAdminOrgId = await storage.getSuperAdminOrgId();
+            if (superAdminOrgId && superAdminOrgId !== orgId) {
+              const superSettings = await storage.getApiSettings(superAdminOrgId);
+              if (superSettings.microsoft_oauth_client_id) {
+                clientId = superSettings.microsoft_oauth_client_id;
+                clientSecret = superSettings.microsoft_oauth_client_secret || '';
+              }
+            }
+          } catch (e) { /* ignore */ }
+        }
+        if (!clientId) clientId = process.env.MICROSOFT_CLIENT_ID || '';
+        if (!clientSecret) clientSecret = process.env.MICROSOFT_CLIENT_SECRET || '';
+
+        if (clientId && clientSecret) {
+          try {
+            const body = new URLSearchParams({
+              client_id: clientId, client_secret: clientSecret,
+              refresh_token: refreshToken,
+              grant_type: 'refresh_token',
+              scope: 'openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/SMTP.Send',
+            });
+            const resp = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+              method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString(),
+            });
+            if (resp.ok) {
+              const tokens = await resp.json() as any;
+              if (tokens.access_token) {
+                accessToken = tokens.access_token;
+                const exp = Date.now() + (tokens.expires_in || 3600) * 1000;
+                if (senderEmail && settings[`${senderPrefix}refresh_token`]) {
+                  await storage.setApiSetting(orgId, `${senderPrefix}access_token`, accessToken);
+                  if (tokens.refresh_token) await storage.setApiSetting(orgId, `${senderPrefix}refresh_token`, tokens.refresh_token);
+                  await storage.setApiSetting(orgId, `${senderPrefix}token_expiry`, String(exp));
+                } else {
+                  await storage.setApiSetting(orgId, 'microsoft_access_token', accessToken);
+                  if (tokens.refresh_token) await storage.setApiSetting(orgId, 'microsoft_refresh_token', tokens.refresh_token);
+                  await storage.setApiSetting(orgId, 'microsoft_token_expiry', String(exp));
+                }
+              }
+            }
+          } catch (e) {
+            console.error(`[Followup] Microsoft token refresh failed for ${senderEmail || 'org-default'}:`, e instanceof Error ? e.message : e);
+          }
+        }
+      }
+    }
+
+    return accessToken ? { token: accessToken, email: resolvedEmail } : null;
+  }
+
   async sendEmail(emailAccountId: string, message: EmailMessage, orgId?: string): Promise<EmailResult> {
     try {
-      // Determine the actual sending email address from the email account
+      // Determine the actual sending email address and provider from the email account
       let senderEmail: string | undefined;
+      let accountProvider: string | undefined;
       try {
         const emailAccount = await storage.getEmailAccount(emailAccountId);
         if (emailAccount?.email) {
           senderEmail = emailAccount.email;
         }
+        if ((emailAccount as any)?.provider) {
+          accountProvider = (emailAccount as any).provider;
+        }
       } catch (e) { /* ignore */ }
 
-      // Try Gmail API first if we have OAuth tokens
-      if (orgId) {
+      // Route to the correct provider based on the email account's provider
+      const isOutlook = accountProvider === 'outlook' || accountProvider === 'microsoft';
+      const isGmail = accountProvider === 'gmail' || accountProvider === 'google';
+
+      // For Outlook/Microsoft accounts: use Microsoft Graph API
+      if (isOutlook && orgId) {
+        const tokenResult = await this.getOutlookAccessToken(orgId, senderEmail);
+        if (tokenResult) {
+          const fromEmail = senderEmail || tokenResult.email || '';
+          console.log(`[Followup] Sending follow-up via Microsoft Graph to ${message.to} from ${fromEmail}`);
+
+          const graphMessage: any = {
+            subject: message.subject,
+            body: { contentType: 'HTML', content: message.html },
+            toRecipients: [{ emailAddress: { address: message.to } }],
+          };
+
+          const resp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${tokenResult.token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: graphMessage, saveToSentItems: true }),
+          });
+
+          if (resp.ok) {
+            return { success: true, messageId: `graph-followup-${Date.now()}` };
+          }
+
+          const errText = await resp.text();
+          console.error(`[Followup] Microsoft Graph send failed: ${resp.status} ${errText}`);
+          // Fall through to SMTP fallback below
+        }
+      }
+
+      // For Gmail accounts: use Gmail API
+      if (isGmail && orgId) {
         const tokenResult = await this.getGmailAccessToken(orgId, senderEmail);
-        
+
         if (tokenResult) {
           const fromEmail = senderEmail || tokenResult.email || '';
           console.log(`[Followup] Sending follow-up via Gmail API to ${message.to} from ${fromEmail}${message.threadId ? ' (thread: ' + message.threadId + ')' : ''}`);
-          
+
           // Build threading headers for in-reply-to
           const headers: Record<string, string> = {};
           if (message.inReplyTo) headers['In-Reply-To'] = message.inReplyTo;
           if (message.references) headers['References'] = message.references;
-          
+
           const result = await sendViaGmailAPI(tokenResult.token, {
             from: fromEmail,
             to: message.to,
@@ -175,6 +293,23 @@ class EmailService {
           });
           if (result.success) return result;
           console.log(`[Followup] Gmail API failed, trying SMTP: ${result.error}`);
+        }
+      }
+
+      // For unknown provider or API failure: try OAuth API based on available tokens
+      if (!isOutlook && !isGmail && orgId) {
+        // Try Gmail if tokens exist
+        const gmailToken = await this.getGmailAccessToken(orgId, senderEmail);
+        if (gmailToken) {
+          const fromEmail = senderEmail || gmailToken.email || '';
+          const headers: Record<string, string> = {};
+          if (message.inReplyTo) headers['In-Reply-To'] = message.inReplyTo;
+          if (message.references) headers['References'] = message.references;
+          const result = await sendViaGmailAPI(gmailToken.token, {
+            from: fromEmail, to: message.to, subject: message.subject, html: message.html,
+            headers: Object.keys(headers).length > 0 ? headers : undefined, threadId: message.threadId,
+          });
+          if (result.success) return result;
         }
       }
 
