@@ -52,22 +52,23 @@ async function sendViaMicrosoftGraph(
   opts: { from: string; to: string; subject: string; html: string; headers?: Record<string, string> }
 ): Promise<SendResult> {
   try {
+    // Build message — start simple (no from, no custom headers) for maximum compatibility
+    // Microsoft personal accounts reject explicit 'from' and custom internetMessageHeaders
     const message: any = {
       subject: opts.subject,
       body: { contentType: 'HTML', content: opts.html },
       toRecipients: [{ emailAddress: { address: opts.to } }],
     };
-    
-    // Only set 'from' if explicitly provided and different from the auth user
-    // For personal Microsoft accounts, omitting 'from' lets Graph use the authenticated user
-    if (opts.from) {
-      message.from = { emailAddress: { address: opts.from } };
-    }
-    
-    // Add custom headers if provided (X- headers for tracking)
-    if (opts.headers && Object.keys(opts.headers).length > 0) {
-      message.internetMessageHeaders = Object.entries(opts.headers)
-        .map(([name, value]) => ({ name, value }));
+
+    // Try sending with custom headers first (needed for tracking), then fall back progressively
+    const headersArr = (opts.headers && Object.keys(opts.headers).length > 0)
+      ? Object.entries(opts.headers).map(([name, value]) => ({ name, value }))
+      : null;
+
+    // Attempt 1: With custom headers (for tracking) — no explicit 'from'
+    // (Graph API uses the authenticated user's email automatically)
+    if (headersArr) {
+      message.internetMessageHeaders = headersArr;
     }
 
     const resp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
@@ -76,47 +77,35 @@ async function sendViaMicrosoftGraph(
       body: JSON.stringify({ message, saveToSentItems: true }),
     });
 
-    if (!resp.ok) {
-      const errText = await resp.text();
-      console.error(`[MicrosoftGraph] Send failed to ${opts.to}: status=${resp.status}, error=${errText}`);
-      
-      // If the error is about custom headers, retry without them
-      if (resp.status === 400 && errText.includes('internetMessageHeaders')) {
-        console.log(`[MicrosoftGraph] Retrying without custom headers for ${opts.to}`);
-        delete message.internetMessageHeaders;
-        const retryResp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message, saveToSentItems: true }),
-        });
-        if (retryResp.ok) {
-          return { success: true, messageId: `graph-${Date.now()}-noheaders` };
-        }
-        const retryErr = await retryResp.text();
-        console.error(`[MicrosoftGraph] Retry without headers also failed: ${retryResp.status} ${retryErr}`);
-      }
-      
-      // If error is about 'from' field, retry without it
-      if (resp.status === 400 && (errText.includes('from') || errText.includes('From') || errText.includes('sender'))) {
-        console.log(`[MicrosoftGraph] Retrying without explicit 'from' for ${opts.to}`);
-        delete message.from;
-        delete message.internetMessageHeaders;
-        const retryResp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message, saveToSentItems: true }),
-        });
-        if (retryResp.ok) {
-          return { success: true, messageId: `graph-${Date.now()}-nofrom` };
-        }
-        const retryErr = await retryResp.text();
-        console.error(`[MicrosoftGraph] Retry without from also failed: ${retryResp.status} ${retryErr}`);
-      }
-      
+    if (resp.ok) {
+      return { success: true, messageId: `graph-${Date.now()}` };
+    }
+
+    const errText = await resp.text();
+    console.error(`[MicrosoftGraph] Send failed to ${opts.to}: status=${resp.status}, error=${errText}`);
+
+    // Don't retry on auth errors — those need token refresh at a higher level
+    if (resp.status === 401 || resp.status === 403) {
       return { success: false, error: `Graph API error (${resp.status}): ${errText}` };
     }
 
-    return { success: true, messageId: `graph-${Date.now()}` };
+    // Attempt 2: Without custom headers (some accounts reject internetMessageHeaders)
+    if (headersArr) {
+      console.log(`[MicrosoftGraph] Retrying without custom headers for ${opts.to}`);
+      delete message.internetMessageHeaders;
+      const retry2 = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, saveToSentItems: true }),
+      });
+      if (retry2.ok) {
+        return { success: true, messageId: `graph-${Date.now()}-noheaders` };
+      }
+      const retry2Err = await retry2.text();
+      console.error(`[MicrosoftGraph] Retry without headers failed: ${retry2.status} ${retry2Err}`);
+    }
+
+    return { success: false, error: `Graph API error (${resp.status}): ${errText}` };
   } catch (err) {
     console.error(`[MicrosoftGraph] Exception sending to ${opts.to}:`, err);
     return { success: false, error: err instanceof Error ? err.message : String(err) };

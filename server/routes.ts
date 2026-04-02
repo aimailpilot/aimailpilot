@@ -4528,10 +4528,14 @@ Which account should I use and why? If I need to split across accounts, provide 
       const account = await storage.getEmailAccount(emailAccountId) as any;
       if (!account) return res.status(404).json({ success: false, error: 'Email account not found' });
 
-      // Determine sending method: Gmail OAuth or SMTP
+      // Determine sending method: Gmail OAuth, Outlook OAuth (Graph), or SMTP
       const settings = await storage.getApiSettings(req.user.organizationId);
+      const orgId = req.user.organizationId;
       const isGmail = account.provider === 'gmail';
+      const isOutlook = account.provider === 'outlook' || account.provider === 'microsoft';
+      const isOAuthAccount = account.smtpConfig?.auth?.pass === 'OAUTH_TOKEN';
       let gmailAccessToken: string | null = null;
+      let outlookAccessToken: string | null = null;
 
       if (isGmail) {
         // Try sender-specific tokens first, then org-wide tokens
@@ -4554,14 +4558,65 @@ Which account should I use and why? If I need to split across accounts, provide 
                 const tokenData = await tokenRes.json() as any;
                 gmailAccessToken = tokenData.access_token;
                 const settingPrefix = settings[`gmail_sender_${account.email}_access_token`] ? `gmail_sender_${account.email}` : 'gmail';
-                await storage.setApiSetting(req.user.organizationId, `${settingPrefix}_access_token`, gmailAccessToken!);
+                await storage.setApiSetting(orgId, `${settingPrefix}_access_token`, gmailAccessToken!);
                 if (tokenData.expires_in) {
-                  await storage.setApiSetting(req.user.organizationId, `${settingPrefix}_token_expiry`, String(Date.now() + tokenData.expires_in * 1000));
+                  await storage.setApiSetting(orgId, `${settingPrefix}_token_expiry`, String(Date.now() + tokenData.expires_in * 1000));
                 }
               }
             } catch (e) { console.error('[QuickSend] Token refresh error:', e); }
           }
         }
+      } else if (isOutlook && isOAuthAccount) {
+        // Try per-sender tokens first, then org-level tokens
+        outlookAccessToken = settings[`outlook_sender_${account.email}_access_token`] || settings.microsoft_access_token || null;
+        const outlookRefreshToken = settings[`outlook_sender_${account.email}_refresh_token`] || settings.microsoft_refresh_token;
+        const outlookTokenExpiry = settings[`outlook_sender_${account.email}_token_expiry`] || settings.microsoft_token_expiry;
+        const expiry = parseInt(outlookTokenExpiry || '0');
+
+        // Refresh token if expired or about to expire (5 min buffer)
+        if (outlookRefreshToken && (!outlookAccessToken || Date.now() >= expiry - 300000)) {
+          let msClientId = settings.microsoft_oauth_client_id || process.env.MICROSOFT_CLIENT_ID || '';
+          let msClientSecret = settings.microsoft_oauth_client_secret || process.env.MICROSOFT_CLIENT_SECRET || '';
+          // Fallback to superadmin org for credentials
+          if (!msClientId || !msClientSecret) {
+            try {
+              const superAdminOrgId = await storage.getSuperAdminOrgId();
+              if (superAdminOrgId && superAdminOrgId !== orgId) {
+                const superSettings = await storage.getApiSettings(superAdminOrgId);
+                if (superSettings.microsoft_oauth_client_id) {
+                  msClientId = superSettings.microsoft_oauth_client_id;
+                  msClientSecret = superSettings.microsoft_oauth_client_secret || '';
+                }
+              }
+            } catch (e) { /* ignore */ }
+          }
+          if (msClientId && msClientSecret) {
+            try {
+              const tokenRes = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({
+                  client_id: msClientId, client_secret: msClientSecret,
+                  refresh_token: outlookRefreshToken, grant_type: 'refresh_token',
+                  scope: 'openid profile email offline_access https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Mail.ReadWrite',
+                }),
+              });
+              if (tokenRes.ok) {
+                const tokenData = await tokenRes.json() as any;
+                if (tokenData.access_token) {
+                  outlookAccessToken = tokenData.access_token;
+                  const prefix = settings[`outlook_sender_${account.email}_access_token`] ? `outlook_sender_${account.email}_` : 'microsoft_';
+                  await storage.setApiSetting(orgId, `${prefix}access_token`, outlookAccessToken!);
+                  if (tokenData.refresh_token) await storage.setApiSetting(orgId, `${prefix}refresh_token`, tokenData.refresh_token);
+                  if (tokenData.expires_in) await storage.setApiSetting(orgId, `${prefix}token_expiry`, String(Date.now() + tokenData.expires_in * 1000));
+                }
+              } else {
+                console.error(`[QuickSend] Outlook token refresh failed: ${tokenRes.status}`);
+              }
+            } catch (e) { console.error('[QuickSend] Outlook token refresh error:', e); }
+          }
+        }
+        console.log(`[QuickSend] Outlook OAuth for ${account.email}: token=${outlookAccessToken ? 'present' : 'missing'}`);
       }
 
       // Fetch all contacts
@@ -4604,15 +4659,84 @@ Which account should I use and why? If I need to split across accounts, provide 
               failed++;
               console.error(`[QuickSend] Gmail error for ${contact.email}:`, errText.slice(0, 200));
             }
-          } else if (account.smtpConfig) {
-            // Send via SMTP
+          } else if (isOutlook && isOAuthAccount && outlookAccessToken) {
+            // Send via Microsoft Graph API
+            const graphMsg: any = {
+              subject: pSubject,
+              body: { contentType: 'HTML', content: pContent },
+              toRecipients: [{ emailAddress: { address: contact.email } }],
+            };
+            let graphRes = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${outlookAccessToken}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ message: graphMsg, saveToSentItems: true }),
+            });
+            if (graphRes.ok) {
+              results.push({ email: contact.email, success: true });
+              sent++;
+            } else {
+              const errText = await graphRes.text();
+              // If 401, try refreshing token once and retry
+              if (graphRes.status === 401) {
+                console.log(`[QuickSend] Outlook Graph 401 for ${contact.email}, attempting force refresh...`);
+                try {
+                  await storage.setApiSetting(orgId, `outlook_sender_${account.email}_token_expiry`, '0');
+                } catch (e) { /* ignore */ }
+                // Re-fetch settings and try refresh
+                const refreshedSettings = await storage.getApiSettings(orgId);
+                const rToken = refreshedSettings[`outlook_sender_${account.email}_refresh_token`] || refreshedSettings.microsoft_refresh_token;
+                let msClientId = refreshedSettings.microsoft_oauth_client_id || process.env.MICROSOFT_CLIENT_ID || '';
+                let msClientSecret = refreshedSettings.microsoft_oauth_client_secret || process.env.MICROSOFT_CLIENT_SECRET || '';
+                if (!msClientId || !msClientSecret) {
+                  try {
+                    const superOrgId = await storage.getSuperAdminOrgId();
+                    if (superOrgId && superOrgId !== orgId) {
+                      const ss = await storage.getApiSettings(superOrgId);
+                      if (ss.microsoft_oauth_client_id) { msClientId = ss.microsoft_oauth_client_id; msClientSecret = ss.microsoft_oauth_client_secret || ''; }
+                    }
+                  } catch (e) { /* ignore */ }
+                }
+                if (rToken && msClientId && msClientSecret) {
+                  try {
+                    const tRes = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+                      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                      body: new URLSearchParams({ client_id: msClientId, client_secret: msClientSecret, refresh_token: rToken, grant_type: 'refresh_token', scope: 'openid profile email offline_access https://graph.microsoft.com/Mail.Send' }),
+                    });
+                    if (tRes.ok) {
+                      const td = await tRes.json() as any;
+                      if (td.access_token) {
+                        outlookAccessToken = td.access_token;
+                        await storage.setApiSetting(orgId, `outlook_sender_${account.email}_access_token`, td.access_token);
+                        if (td.expires_in) await storage.setApiSetting(orgId, `outlook_sender_${account.email}_token_expiry`, String(Date.now() + td.expires_in * 1000));
+                        // Retry send
+                        graphRes = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+                          method: 'POST',
+                          headers: { Authorization: `Bearer ${outlookAccessToken}`, 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ message: graphMsg, saveToSentItems: true }),
+                        });
+                        if (graphRes.ok) {
+                          results.push({ email: contact.email, success: true });
+                          sent++;
+                          continue;
+                        }
+                      }
+                    }
+                  } catch (e) { console.error(`[QuickSend] Outlook token retry failed:`, e); }
+                }
+              }
+              results.push({ email: contact.email, success: false, error: `Graph API error (${graphRes.status}): ${errText.slice(0, 200)}` });
+              failed++;
+              console.error(`[QuickSend] Outlook Graph error for ${contact.email}:`, errText.slice(0, 200));
+            }
+          } else if (account.smtpConfig && !isOAuthAccount) {
+            // Send via SMTP (only for non-OAuth accounts with real SMTP credentials)
             const result = await smtpEmailService.sendEmail(account.id, account.smtpConfig, {
               to: contact.email, subject: pSubject, html: pContent,
             });
             if (result.success) { sent++; } else { failed++; }
             results.push({ email: contact.email, ...result });
           } else {
-            results.push({ email: contact.email, success: false, error: 'No sending method configured' });
+            results.push({ email: contact.email, success: false, error: isOAuthAccount ? `OAuth token not found for ${account.email}. Please re-authenticate in Account Settings.` : 'No sending method configured' });
             failed++;
           }
 
