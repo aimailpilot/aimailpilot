@@ -699,6 +699,47 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
         }
 
+        // Also create the email account in other orgs the user belongs to
+        const connectingUserId = stateUserId || (req.session as any)?.userId || req.cookies?.user_id || null;
+        if (connectingUserId) {
+          try {
+            const userOrgs = await storage.getUserOrganizations(connectingUserId);
+            for (const org of userOrgs) {
+              const otherOrgId = (org as any).id;
+              if (otherOrgId === effectiveOrgId) continue; // already handled above
+
+              // Store per-sender tokens in this org too
+              if (tokens.access_token) await storage.setApiSetting(otherOrgId, `gmail_sender_${email}_access_token`, tokens.access_token);
+              if (tokens.refresh_token) await storage.setApiSetting(otherOrgId, `gmail_sender_${email}_refresh_token`, tokens.refresh_token);
+              if (tokens.expiry_date) await storage.setApiSetting(otherOrgId, `gmail_sender_${email}_token_expiry`, String(tokens.expiry_date));
+
+              // Create email account in other org if it doesn't exist
+              const otherAccounts = await storage.getEmailAccounts(otherOrgId);
+              const existsInOtherOrg = otherAccounts.find((a: any) => a.email === email);
+              if (!existsInOtherOrg) {
+                await storage.createEmailAccount({
+                  organizationId: otherOrgId,
+                  userId: connectingUserId,
+                  provider: 'gmail',
+                  email,
+                  displayName: name,
+                  smtpConfig: {
+                    host: 'smtp.gmail.com', port: 587, secure: false,
+                    auth: { user: email, pass: 'OAUTH_TOKEN' },
+                    fromName: name, fromEmail: email, replyTo: '',
+                    provider: 'gmail',
+                  },
+                  dailyLimit: getProviderDailyLimit('gmail'),
+                  isActive: true,
+                });
+                console.log(`[Auth] Also added Gmail sender ${email} to org ${otherOrgId}`);
+              }
+            }
+          } catch (e) {
+            console.warn(`[Auth] Could not replicate Gmail account to other orgs:`, e);
+          }
+        }
+
         // Redirect back to the page that initiated the flow
         if (returnTo === 'contacts') {
           return res.redirect('/?view=contacts&gmail_connected=' + encodeURIComponent(email));
@@ -1184,6 +1225,47 @@ export async function registerRoutes(app: Express): Promise<Server> {
             console.log(`[Auth] Upgraded Outlook sender ${email} from SMTP password to OAuth`);
           } else {
             console.log(`[Auth] Outlook sender already exists: ${email}, tokens updated`);
+          }
+        }
+
+        // Also create the email account in other orgs the user belongs to
+        const connectingUserId = stateUserId || (req.session as any)?.userId || req.cookies?.user_id || null;
+        if (connectingUserId) {
+          try {
+            const userOrgs = await storage.getUserOrganizations(connectingUserId);
+            for (const org of userOrgs) {
+              const otherOrgId = (org as any).id;
+              if (otherOrgId === effectiveOrgId) continue; // already handled above
+
+              // Store per-sender tokens in this org too
+              if (tokens.access_token) await storage.setApiSetting(otherOrgId, `outlook_sender_${email}_access_token`, tokens.access_token);
+              if (tokens.refresh_token) await storage.setApiSetting(otherOrgId, `outlook_sender_${email}_refresh_token`, tokens.refresh_token);
+              if (tokens.expires_in) await storage.setApiSetting(otherOrgId, `outlook_sender_${email}_token_expiry`, String(Date.now() + tokens.expires_in * 1000));
+
+              // Create email account in other org if it doesn't exist
+              const otherAccounts = await storage.getEmailAccounts(otherOrgId);
+              const existsInOtherOrg = otherAccounts.find((a: any) => a.email === email);
+              if (!existsInOtherOrg) {
+                await storage.createEmailAccount({
+                  organizationId: otherOrgId,
+                  userId: connectingUserId,
+                  provider: 'outlook',
+                  email,
+                  displayName: name,
+                  smtpConfig: {
+                    host: 'smtp-mail.outlook.com', port: 587, secure: false,
+                    auth: { user: email, pass: 'OAUTH_TOKEN' },
+                    fromName: name, fromEmail: email, replyTo: '',
+                    provider: 'outlook',
+                  },
+                  dailyLimit: getProviderDailyLimit('outlook'),
+                  isActive: true,
+                });
+                console.log(`[Auth] Also added Outlook sender ${email} to org ${otherOrgId}`);
+              }
+            }
+          } catch (e) {
+            console.warn(`[Auth] Could not replicate email account to other orgs:`, e);
           }
         }
 
