@@ -5492,8 +5492,8 @@ Respond with ONLY a JSON object in this format:
   app.post('/api/templates', async (req: any, res) => {
     try {
       const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
-      // Members create private templates by default; only owners/admins can set public
-      const isPublic = isAdmin ? (req.body.isPublic !== undefined ? req.body.isPublic : true) : false;
+      // All templates are public by default; only owners/admins can change visibility
+      const isPublic = isAdmin ? (req.body.isPublic !== undefined ? req.body.isPublic : true) : true;
       const template = await storage.createEmailTemplate({
         ...req.body,
         isPublic,
