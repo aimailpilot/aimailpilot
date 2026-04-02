@@ -279,10 +279,11 @@ export class OutlookReplyTracker {
     const result = { checked: 0, newReplies: 0, errors: [] as string[], replies: [] as any[] };
 
     // Fetch recent inbox messages
+    // NOTE: internetMessageHeaders is NOT available in list queries — must fetch per-message
     const since = new Date(Date.now() - lookbackMinutes * 60 * 1000).toISOString();
     const filter = `receivedDateTime ge ${since}`;
     const select = 'id,conversationId,internetMessageId,subject,bodyPreview,body,from,toRecipients,receivedDateTime';
-    const endpoint = `/me/mailFolders/inbox/messages?$filter=${encodeURIComponent(filter)}&$select=${select}&$top=50&$orderby=receivedDateTime desc&$expand=internetMessageHeaders`;
+    const endpoint = `/me/mailFolders/inbox/messages?$filter=${encodeURIComponent(filter)}&$select=${select}&$top=50&$orderby=receivedDateTime desc`;
 
     const listData: GraphListResponse = await this.graphFetch(accessToken, endpoint);
     if (!listData.value || listData.value.length === 0) return result;
@@ -295,8 +296,16 @@ export class OutlookReplyTracker {
         const existing = await storage.getInboxMessageByOutlookId(msg.id);
         if (existing) continue;
 
-        // Check headers for In-Reply-To / References
-        const headers = msg.internetMessageHeaders || [];
+        // Fetch individual message to get internetMessageHeaders
+        // (Graph API only returns headers on single-message GET, not in list queries)
+        let headers: Array<{ name: string; value: string }> = [];
+        try {
+          const singleMsg = await this.graphFetch(accessToken, `/me/messages/${msg.id}?$select=internetMessageHeaders`);
+          headers = singleMsg?.internetMessageHeaders || [];
+        } catch (e) {
+          console.error(`[OutlookReplyTracker] Failed to fetch headers for message ${msg.id}:`, e);
+        }
+
         const getHeader = (name: string) => headers.find(h => h.name.toLowerCase() === name.toLowerCase())?.value || '';
         const inReplyTo = getHeader('In-Reply-To');
         const references = getHeader('References');
