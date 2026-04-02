@@ -184,13 +184,13 @@ if (isAzure) {
   // AZURE: Use DELETE journal mode (safe for network shares)
   db.pragma('journal_mode = DELETE');
   db.pragma('foreign_keys = ON');
-  db.pragma('synchronous = FULL');           // Ensure all writes are flushed to disk
-  db.pragma('cache_size = -16000');          // 16MB cache (conservative for Azure)
+  db.pragma('synchronous = NORMAL');         // NORMAL is safe with DELETE journal mode — only risks losing last txn on power failure (N/A on Azure)
+  db.pragma('cache_size = -256000');         // 256MB cache — P2v2 has 7GB RAM, keep entire DB in memory to avoid slow CIFS reads
   db.pragma('temp_store = MEMORY');          // Use RAM for temp tables
   // Do NOT use mmap on Azure CIFS - it's unreliable
   db.pragma('mmap_size = 0');
   db.pragma('busy_timeout = 10000');         // Wait 10s for locks instead of failing immediately
-  console.log(`[DB] Azure mode: journal_mode=DELETE, synchronous=FULL, mmap=OFF (safe for CIFS/SMB)`);
+  console.log(`[DB] Azure mode: journal_mode=DELETE, synchronous=NORMAL, cache=256MB, mmap=OFF (safe for CIFS/SMB)`);
 } else {
   // LOCAL: WAL mode for better performance
   db.pragma('journal_mode = WAL');
