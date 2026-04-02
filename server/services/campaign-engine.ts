@@ -45,40 +45,6 @@ async function sendViaGmailAPI(
 }
 
 /**
- * After sending via Graph API, query Sent Items to get the real internetMessageId
- * Microsoft assigns. This is needed for reply tracking since Graph overrides our Message-ID.
- * Runs asynchronously — does not block sending.
- */
-async function fetchSentItemMessageId(
-  accessToken: string,
-  recipientEmail: string,
-  subject: string,
-  messageRecordId: string
-): Promise<void> {
-  try {
-    // Wait a moment for the message to appear in Sent Items
-    await new Promise(r => setTimeout(r, 3000));
-    const filter = `subject eq '${subject.replace(/'/g, "''")}' and toRecipients/any(r: r/emailAddress/address eq '${recipientEmail}')`;
-    const endpoint = `https://graph.microsoft.com/v1.0/me/mailFolders/sentitems/messages?$filter=${encodeURIComponent(filter)}&$select=internetMessageId&$top=1&$orderby=sentDateTime desc`;
-    const resp = await fetch(endpoint, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    if (!resp.ok) return;
-    const data = await resp.json() as any;
-    const sentMsg = data?.value?.[0];
-    if (sentMsg?.internetMessageId) {
-      // Strip angle brackets: <ABC@outlook.com> -> ABC@outlook.com
-      const cleanId = sentMsg.internetMessageId.replace(/^<|>$/g, '');
-      await storage.updateCampaignMessage(messageRecordId, { providerMessageId: cleanId });
-      console.log(`[MicrosoftGraph] Stored real internetMessageId for ${recipientEmail}: ${cleanId}`);
-    }
-  } catch (e) {
-    // Non-critical — subject+sender fallback will still work
-    console.error(`[MicrosoftGraph] Failed to fetch sent item messageId:`, e);
-  }
-}
-
-/**
  * Send email via Microsoft Graph API using OAuth access token.
  */
 async function sendViaMicrosoftGraph(
@@ -1008,16 +974,6 @@ export class CampaignEngine {
             sentAt: nowIso,
             providerMessageId: result.messageId,
           });
-
-          // For Microsoft Graph sends, asynchronously fetch the real internetMessageId
-          // from Sent Items so reply tracking can match by providerMessageId
-          if ((provider === 'outlook' || provider === 'microsoft') && result.messageId?.startsWith('graph-')) {
-            const graphToken = await refreshMicrosoftToken(orgId, fromEmail);
-            if (graphToken) {
-              fetchSentItemMessageId(graphToken, contact.email, personalizedSubject, messageRecord.id)
-                .catch(e => console.error('[CampaignEngine] fetchSentItemMessageId error:', e));
-            }
-          }
 
           localSentCount++;
           autopilotDailySent++;

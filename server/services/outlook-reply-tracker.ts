@@ -296,20 +296,24 @@ export class OutlookReplyTracker {
         const existing = await storage.getInboxMessageByOutlookId(msg.id);
         if (existing) continue;
 
-        // Fetch individual message to get internetMessageHeaders
-        // (Graph API only returns headers on single-message GET, not in list queries)
-        let headers: Array<{ name: string; value: string }> = [];
-        try {
-          const singleMsg = await this.graphFetch(accessToken, `/me/messages/${msg.id}?$select=internetMessageHeaders`);
-          headers = singleMsg?.internetMessageHeaders || [];
-        } catch (e) {
-          console.error(`[OutlookReplyTracker] Failed to fetch headers for message ${msg.id}:`, e);
-        }
-
-        const getHeader = (name: string) => headers.find(h => h.name.toLowerCase() === name.toLowerCase())?.value || '';
-        const inReplyTo = getHeader('In-Reply-To');
-        const references = getHeader('References');
-        const allRefs = `${inReplyTo} ${references}`;
+        // Fetch individual message headers (Graph API only returns them on single-message GET)
+        // Lazy-load: only fetch if needed (skip for bounce detection which uses subject/sender)
+        let _headers: Array<{ name: string; value: string }> | null = null;
+        const getHeaders = async () => {
+          if (_headers !== null) return _headers;
+          try {
+            const singleMsg = await this.graphFetch(accessToken, `/me/messages/${msg.id}?$select=internetMessageHeaders`);
+            _headers = singleMsg?.internetMessageHeaders || [];
+          } catch (e) {
+            console.error(`[OutlookReplyTracker] Failed to fetch headers for message ${msg.id}:`, e);
+            _headers = [];
+          }
+          return _headers;
+        };
+        const getHeader = async (name: string) => {
+          const hdrs = await getHeaders();
+          return hdrs.find(h => h.name.toLowerCase() === name.toLowerCase())?.value || '';
+        };
 
         // ===== BOUNCE DETECTION for Outlook =====
         const senderAddr = (msg.from?.emailAddress?.address || '').toLowerCase();
@@ -329,8 +333,12 @@ export class OutlookReplyTracker {
             const bodyText = msg.body?.content || msg.bodyPreview || '';
             const emailPattern = /([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/g;
             const foundEmails = bodyText.match(emailPattern) || [];
-            
-            const trackingIds = this.extractTrackingIds(allRefs);
+
+            // Fetch headers for bounce tracking ID extraction
+            const bounceInReplyTo = await getHeader('In-Reply-To');
+            const bounceReferences = await getHeader('References');
+            const bounceAllRefs = `${bounceInReplyTo} ${bounceReferences}`;
+            const trackingIds = this.extractTrackingIds(bounceAllRefs);
             let bouncedMsg: any = null;
             
             for (const tid of trackingIds) {
@@ -398,8 +406,7 @@ export class OutlookReplyTracker {
           continue; // Don't process as reply
         }
 
-        // Try to match to a campaign message
-        const trackingIds = this.extractTrackingIds(allRefs);
+        // Try to match to a campaign message using multiple methods
         let campaignId: string | null = null;
         let messageId: string | null = null;
         let contactId: string | null = null;
@@ -409,44 +416,12 @@ export class OutlookReplyTracker {
         let matchedTrackingId = '';
         let matchMethod = 'tracking-id';
 
-        // Method 1: Match via tracking ID in In-Reply-To / References headers
-        for (const trackingId of trackingIds) {
-          const campaignMessage = await storage.getCampaignMessageByTracking(trackingId);
-          if (campaignMessage) {
-            matchedTrackingId = trackingId;
-            campaignId = campaignMessage.campaignId;
-            messageId = campaignMessage.id;
-            contactId = campaignMessage.contactId;
-            emailAccountId = campaignMessage.emailAccountId || null;
-            break;
-          }
-        }
-
-        // Method 2: Match via providerMessageId (Microsoft's actual internetMessageId)
-        if (!campaignId && inReplyTo) {
-          // Extract the raw message ID from In-Reply-To header (e.g., <ABC123@outlook.com>)
-          const replyToMatch = inReplyTo.match(/<([^>]+)>/);
-          if (replyToMatch) {
-            const providerMsg = await storage.getCampaignMessageByProviderMessageId(replyToMatch[1]);
-            if (providerMsg) {
-              matchMethod = 'provider-message-id';
-              matchedTrackingId = providerMsg.trackingId || '';
-              campaignId = providerMsg.campaignId;
-              messageId = providerMsg.id;
-              contactId = providerMsg.contactId;
-              emailAccountId = providerMsg.emailAccountId || null;
-              console.log(`[OutlookReplyTracker] Matched reply via providerMessageId: ${replyToMatch[1]}`);
-            }
-          }
-        }
-
-        // Method 3: Fallback — match by sender email + subject line
-        // Microsoft Graph overrides custom Message-ID headers, so replies often
-        // reference Microsoft's auto-generated ID instead of our tracking ID
-        if (!campaignId) {
+        // Method 3 FIRST: Match by sender email + subject (fastest — no extra API call)
+        // Microsoft Graph overrides custom Message-ID headers, so subject+sender
+        // is the most reliable method for Outlook-sent campaigns
+        {
           const fromEmail = msg.from?.emailAddress?.address;
           const subject = msg.subject || '';
-          // Strip common reply prefixes to get the original subject
           const cleanSubject = subject.replace(/^(re:\s*|fw:\s*|fwd:\s*)+/i, '').trim();
           if (fromEmail && cleanSubject) {
             const subjectMatch = await storage.getCampaignMessageByContactEmailAndSubject(fromEmail, cleanSubject);
@@ -457,7 +432,46 @@ export class OutlookReplyTracker {
               messageId = subjectMatch.id;
               contactId = subjectMatch.contactId;
               emailAccountId = subjectMatch.emailAccountId || null;
-              console.log(`[OutlookReplyTracker] Matched reply via subject+sender fallback: ${fromEmail} / "${cleanSubject}"`);
+              console.log(`[OutlookReplyTracker] Matched reply via subject+sender: ${fromEmail} / "${cleanSubject}"`);
+            }
+          }
+        }
+
+        // Method 1: Match via tracking ID in In-Reply-To / References headers
+        // Only fetch headers if subject+sender didn't match (avoids extra API call)
+        if (!campaignId) {
+          const inReplyTo = await getHeader('In-Reply-To');
+          const references = await getHeader('References');
+          const allRefs = `${inReplyTo} ${references}`;
+          const trackingIds = this.extractTrackingIds(allRefs);
+
+          for (const trackingId of trackingIds) {
+            const campaignMessage = await storage.getCampaignMessageByTracking(trackingId);
+            if (campaignMessage) {
+              matchMethod = 'tracking-id';
+              matchedTrackingId = trackingId;
+              campaignId = campaignMessage.campaignId;
+              messageId = campaignMessage.id;
+              contactId = campaignMessage.contactId;
+              emailAccountId = campaignMessage.emailAccountId || null;
+              break;
+            }
+          }
+
+          // Method 2: Match via providerMessageId (Microsoft's actual internetMessageId)
+          if (!campaignId && inReplyTo) {
+            const replyToMatch = inReplyTo.match(/<([^>]+)>/);
+            if (replyToMatch) {
+              const providerMsg = await storage.getCampaignMessageByProviderMessageId(replyToMatch[1]);
+              if (providerMsg) {
+                matchMethod = 'provider-message-id';
+                matchedTrackingId = providerMsg.trackingId || '';
+                campaignId = providerMsg.campaignId;
+                messageId = providerMsg.id;
+                contactId = providerMsg.contactId;
+                emailAccountId = providerMsg.emailAccountId || null;
+                console.log(`[OutlookReplyTracker] Matched reply via providerMessageId: ${replyToMatch[1]}`);
+              }
             }
           }
         }
