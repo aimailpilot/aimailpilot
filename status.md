@@ -75,11 +75,14 @@ This file tracks features that are confirmed working in production.
 - **Do not touch**: preview dialog code and `sendTestEmail` function in `client/src/pages/template-manager.tsx`
 
 ### 12. Template Visibility (Private/Public)
-- Owners/admins can toggle templates between Private (only creator sees) and Public (visible to team)
-- Members always create private templates; only owners/admins can set public
-- Team Templates tab for members only shows public templates from other users
+- All templates are **public by default** — visible to all team members
+- Only owners/admins can toggle templates to Private (only creator sees) or back to Public
+- Members cannot change visibility — their templates are always public
+- Team Templates tab for members only shows public templates from other users; owners/admins see all
+- DB default changed to `isPublic INTEGER DEFAULT 1`; migration sets all existing templates to public
+- `/api/auth/user` now returns `role` so the frontend can detect owner/admin correctly
 - Backend enforces: `isPublic` field stripped from non-admin PUT/POST requests
-- **Do not touch**: `getPublicEmailTemplatesExcludingUser` in `server/storage.ts`; visibility logic in `POST /api/templates` and `PUT /api/templates/:id` in `server/routes.ts`; visibility toggle UI in `client/src/pages/template-manager.tsx`
+- **Do not touch**: `getPublicEmailTemplatesExcludingUser` in `server/storage.ts`; visibility logic in `POST /api/templates` and `PUT /api/templates/:id` in `server/routes.ts`; visibility toggle UI and role-fetching in `client/src/pages/template-manager.tsx`; `getUserRole` helper in `/api/auth/user` route
 
 ### 13. AI Template Content Insertion
 - AI-generated text content is properly converted to HTML before insertion into contentEditable editor
@@ -88,7 +91,43 @@ This file tracks features that are confirmed working in production.
 - Applied to "Use Content", "Use Text", and "Use HTML" buttons
 - **Do not touch**: `textToHtml` function and AI result insertion logic in `client/src/pages/template-manager.tsx`
 
-### 14. Database Safety (CRITICAL)
+### 14. Contact List Access Control
+- Members see only contacts/lists uploaded by themselves or allocated to them
+- Owners/admins see all lists and contacts across the organization
+- SQL-level filtering via `getContactListsForUser` with EXISTS subquery on `uploadedBy` and `contacts.assignedTo`
+- **Do not touch**: `getContactListsForUser` in `server/storage.ts`; role-based filtering in `GET /api/contact-lists` and `GET /api/contacts` in `server/routes.ts`
+
+### 15. Campaign Update Dialog (Settings + Preview)
+- Campaign update dialog has two modes: Edit (with settings sidebar) and Preview (desktop/mobile toggle + test email)
+- Settings sidebar is functional: Autopilot config (day schedule, max per day, delay), Track emails toggle, Unsubscribe link toggle
+- `trackOpens` and `includeUnsubscribe` saved to campaign via `updateCampaign` SQL
+- `sendingConfig` JSON stores autopilot configuration
+- Preview mode shows personalized content from `/api/campaigns/preview`
+- **Do not touch**: update dialog modes, settings sidebar, autopilot dialog, and `loadPreview`/`showPreviewMode`/`sendCampaignTestEmail` in `client/src/pages/campaign-detail.tsx`; `trackOpens`/`includeUnsubscribe` in `updateCampaign` SQL in `server/storage.ts`
+
+### 16. URL Hash Navigation Persistence
+- Current view persists across page refresh using URL hash (`#contacts`, `#templates`, `#campaign-detail/{id}`, etc.)
+- `setCurrentView` wrapper updates hash via `replaceState`; initial state reads from hash
+- **Do not touch**: hash-based navigation logic in `client/src/pages/mailmeteor-dashboard.tsx`
+
+### 17. Outlook OAuth Email Sending (Campaigns + Quick Send)
+- Outlook OAuth email sending via Microsoft Graph API is working for campaigns and contact quick-send
+- **Fix applied**: `sendViaMicrosoftGraph` no longer sets explicit `from` field — Graph auto-uses the authenticated user's email (personal Microsoft accounts reject explicit `from`)
+- **Fix applied**: Retry logic tries with custom tracking headers first, falls back to without headers
+- **Fix applied**: `/api/contacts/send-email` now has full Outlook OAuth/Graph API support (was missing — only Gmail and SMTP were handled before)
+- Token refresh with 401 retry, superadmin credential fallback, per-sender token support all working
+- **Do not touch**: `sendViaMicrosoftGraph` function in `server/services/campaign-engine.ts`; Outlook Graph sending path in `/api/contacts/send-email` in `server/routes.ts`; Gmail sending code (already working, do not modify)
+
+### 18. Enhanced Send Email from Contacts
+- Send Email dialog in Contacts has three modes: Write (rich text editor), Template (select from existing), AI Write (generate with AI)
+- Template mode loads both My Templates + Team Templates with search
+- AI Write uses `/api/llm/generate` with quick prompt suggestions
+- Rich text toolbar with Bold/Italic/Underline/Link/Lists/Variables
+- Visual/HTML editor mode toggle
+- Content syncs from contentEditable before sending
+- **Do not touch**: send email dialog, `handleAiGenerate`, `applyTemplate`, `sendEmailEditorRef` in `client/src/pages/contacts-manager.tsx`
+
+### 19. Database Safety (CRITICAL)
 - **NEVER** add code that deletes, renames, moves, or recreates the database file
 - **NEVER** add `integrity_check` or any pragma as a startup gate — Azure CIFS causes false failures
 - **NEVER** add a "reset database" feature that actually deletes the DB file

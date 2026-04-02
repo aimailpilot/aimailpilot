@@ -10,7 +10,9 @@
       "Bash(cmd /c \"where npm\")",
       "Bash(cmd.exe /c \"cd /d C:\\\\Users\\\\Bhupesh\\\\Documents\\\\GitHub\\\\aimailpilot && npm run check 2>&1\")",
       "Bash(cmd.exe //c \"cd /d C:\\\\Users\\\\Bhupesh\\\\Documents\\\\GitHub\\\\aimailpilot && npx tsc --noEmit 2>&1\")",
-      "Bash(cmd.exe //c \"where node 2>&1 && where npm 2>&1\")"
+      "Bash(cmd.exe //c \"where node 2>&1 && where npm 2>&1\")",
+      "Bash(cmd.exe /c \"cd c:\\\\Users\\\\Bhupesh\\\\Documents\\\\GitHub\\\\aimailpilot && npm run check 2>&1\")",
+      "Bash(cmd.exe /c \"cd /d c:\\\\Users\\\\Bhupesh\\\\Documents\\\\GitHub\\\\aimailpilot && npm run check\")"
     ]
   }
 }

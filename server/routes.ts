@@ -8234,17 +8234,26 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   });
 
   // Helper: Send invitation email via the org's best available email channel
+  // Prioritizes the inviter's own email account so invitations come from the person who invited
   async function sendInvitationEmail(
     orgId: string,
     inviteeEmail: string,
     inviterName: string,
+    inviterEmail: string,
     orgName: string,
     role: string,
     acceptUrl: string
   ): Promise<{ sent: boolean; method?: string; error?: string }> {
     try {
       const settings = await storage.getApiSettings(orgId);
-      const accounts = await storage.getEmailAccounts(orgId);
+      const allAccounts = await storage.getEmailAccounts(orgId);
+
+      // Sort accounts so the inviter's own email account comes first
+      const accounts = [...allAccounts].sort((a, b) => {
+        const aIsInviter = a.email?.toLowerCase() === inviterEmail.toLowerCase() ? -1 : 0;
+        const bIsInviter = b.email?.toLowerCase() === inviterEmail.toLowerCase() ? -1 : 0;
+        return aIsInviter - bIsInviter;
+      });
       
       // Build a nice HTML invitation email
       const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
@@ -8279,73 +8288,115 @@ Generate an appropriate reply to the LATEST email above, considering the full co
 
       const subject = `${inviterName} invited you to join ${orgName} on AImailPilot`;
 
-      // Strategy 1: Try Gmail API with org-level or sender tokens
-      const gmailAccessToken = settings.gmail_access_token;
-      const gmailRefreshToken = settings.gmail_refresh_token;
-      const gmailEmail = settings.gmail_user_email;
-      
-      if (gmailAccessToken && gmailEmail) {
-        // Check if token needs refresh
-        let token = gmailAccessToken;
-        const expiry = parseInt(settings.gmail_token_expiry || '0');
-        if (Date.now() >= expiry - 300000 && gmailRefreshToken) {
+      // Helper: try sending via Gmail API for a specific account
+      async function tryGmailSend(email: string, accessToken: string, refreshToken?: string): Promise<boolean> {
+        let token = accessToken;
+        // Check if per-sender token needs refresh
+        const senderExpiry = parseInt(settings[`gmail_sender_${email}_token_expiry`] || '0');
+        const orgExpiry = parseInt(settings.gmail_token_expiry || '0');
+        const expiry = email === settings.gmail_user_email ? orgExpiry : senderExpiry;
+        if (Date.now() >= expiry - 300000 && refreshToken) {
           const clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID || '';
           const clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET || '';
           if (clientId && clientSecret) {
             try {
               const oauth2 = createOAuth2Client({ clientId, clientSecret, redirectUri: '' });
-              oauth2.setCredentials({ refresh_token: gmailRefreshToken });
+              oauth2.setCredentials({ refresh_token: refreshToken });
               const { credentials } = await oauth2.refreshAccessToken();
-              if (credentials.access_token) {
-                token = credentials.access_token;
-                await storage.setApiSetting(orgId, 'gmail_access_token', token);
-                if (credentials.expiry_date) await storage.setApiSetting(orgId, 'gmail_token_expiry', String(credentials.expiry_date));
-              }
-            } catch (e) { console.error('[InviteEmail] Gmail token refresh failed:', e); }
+              if (credentials.access_token) token = credentials.access_token;
+            } catch (e) { console.error(`[InviteEmail] Gmail token refresh failed for ${email}:`, e); }
           }
         }
-
-        const raw = createRawEmail({ from: gmailEmail, to: inviteeEmail, subject, body: htmlBody });
+        const raw = createRawEmail({ from: email, to: inviteeEmail, subject, body: htmlBody });
         const resp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
           method: 'POST',
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ raw }),
         });
         if (resp.ok) {
-          console.log(`[InviteEmail] Invitation sent to ${inviteeEmail} via Gmail API from ${gmailEmail}`);
-          return { sent: true, method: 'gmail-api' };
+          console.log(`[InviteEmail] Invitation sent to ${inviteeEmail} via Gmail API from ${email}`);
+          return true;
         }
-        console.error(`[InviteEmail] Gmail API failed (${resp.status}):`, await resp.text());
+        console.error(`[InviteEmail] Gmail API failed for ${email} (${resp.status}):`, await resp.text());
+        return false;
       }
 
-      // Strategy 2: Try Microsoft Graph API
-      const msAccessToken = settings.microsoft_access_token;
-      if (msAccessToken) {
+      // Helper: try sending via Microsoft Graph for a specific account
+      async function tryMsGraphSend(accessToken: string, accountEmail?: string): Promise<boolean> {
         const message = {
           subject,
-          body: { contentType: 'HTML', content: htmlBody },
+          body: { contentType: 'HTML' as const, content: htmlBody },
           toRecipients: [{ emailAddress: { address: inviteeEmail } }],
         };
         const resp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
           method: 'POST',
-          headers: { Authorization: `Bearer ${msAccessToken}`, 'Content-Type': 'application/json' },
+          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ message, saveToSentItems: true }),
         });
         if (resp.ok) {
-          console.log(`[InviteEmail] Invitation sent to ${inviteeEmail} via Microsoft Graph`);
-          return { sent: true, method: 'microsoft-graph' };
+          console.log(`[InviteEmail] Invitation sent to ${inviteeEmail} via Microsoft Graph${accountEmail ? ` from ${accountEmail}` : ''}`);
+          return true;
         }
-        console.error(`[InviteEmail] Microsoft Graph failed (${resp.status}):`, await resp.text());
+        console.error(`[InviteEmail] Microsoft Graph failed${accountEmail ? ` for ${accountEmail}` : ''} (${resp.status}):`, await resp.text());
+        return false;
       }
 
-      // Strategy 3: Try any SMTP-configured email account in the org
+      // PRIORITY 1: Try inviter's own per-sender Gmail token
+      const inviterGmailToken = settings[`gmail_sender_${inviterEmail}_access_token`];
+      const inviterGmailRefresh = settings[`gmail_sender_${inviterEmail}_refresh_token`];
+      if (inviterGmailToken) {
+        if (await tryGmailSend(inviterEmail, inviterGmailToken, inviterGmailRefresh)) {
+          return { sent: true, method: 'gmail-api' };
+        }
+      }
+
+      // PRIORITY 2: Try inviter's own per-sender Outlook token
+      const inviterMsToken = settings[`outlook_sender_${inviterEmail}_access_token`];
+      if (inviterMsToken) {
+        if (await tryMsGraphSend(inviterMsToken, inviterEmail)) {
+          return { sent: true, method: 'microsoft-graph' };
+        }
+      }
+
+      // PRIORITY 3: Try inviter's SMTP account directly
+      const inviterAccount = accounts.find(a => a.email?.toLowerCase() === inviterEmail.toLowerCase() && a.isActive);
+      if (inviterAccount && inviterAccount.smtpConfig && inviterAccount.smtpConfig.auth?.pass && inviterAccount.smtpConfig.auth.pass !== 'OAUTH_TOKEN') {
+        try {
+          const sendResult = await smtpEmailService.sendEmail(inviterAccount.id, inviterAccount.smtpConfig, {
+            to: inviteeEmail, subject, html: htmlBody,
+          });
+          if (sendResult.success) {
+            console.log(`[InviteEmail] Invitation sent to ${inviteeEmail} via SMTP from inviter (${inviterAccount.email})`);
+            return { sent: true, method: 'smtp' };
+          }
+        } catch (e) { console.error(`[InviteEmail] SMTP send failed for inviter ${inviterAccount.email}:`, e); }
+      }
+
+      // PRIORITY 4: Try org-level Gmail (if it matches inviter email)
+      const gmailEmail = settings.gmail_user_email;
+      const gmailAccessToken = settings.gmail_access_token;
+      const gmailRefreshToken = settings.gmail_refresh_token;
+      if (gmailAccessToken && gmailEmail) {
+        if (await tryGmailSend(gmailEmail, gmailAccessToken, gmailRefreshToken)) {
+          return { sent: true, method: 'gmail-api' };
+        }
+      }
+
+      // PRIORITY 5: Try org-level Microsoft Graph
+      const msAccessToken = settings.microsoft_access_token;
+      if (msAccessToken) {
+        if (await tryMsGraphSend(msAccessToken)) {
+          return { sent: true, method: 'microsoft-graph' };
+        }
+      }
+
+      // PRIORITY 6: Try remaining SMTP accounts (sorted so inviter's account is first via sort above)
       for (const account of accounts) {
+        if (account.email?.toLowerCase() === inviterEmail.toLowerCase()) continue; // already tried
         if (account.smtpConfig && account.smtpConfig.auth?.pass && account.smtpConfig.auth.pass !== 'OAUTH_TOKEN' && account.isActive) {
           try {
             const sendResult = await smtpEmailService.sendEmail(account.id, account.smtpConfig, {
-              to: inviteeEmail,
-              subject,
-              html: htmlBody,
+              to: inviteeEmail, subject, html: htmlBody,
             });
             if (sendResult.success) {
               console.log(`[InviteEmail] Invitation sent to ${inviteeEmail} via SMTP (${account.email})`);
@@ -8355,19 +8406,14 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         }
       }
 
-      // Strategy 4: Try per-sender Gmail tokens for any Gmail account
+      // PRIORITY 7: Try per-sender Gmail tokens for other accounts
       for (const account of accounts) {
+        if (account.email?.toLowerCase() === inviterEmail.toLowerCase()) continue; // already tried
         if (account.provider === 'gmail' && account.isActive) {
           const senderToken = settings[`gmail_sender_${account.email}_access_token`];
+          const senderRefresh = settings[`gmail_sender_${account.email}_refresh_token`];
           if (senderToken) {
-            const raw = createRawEmail({ from: account.email, to: inviteeEmail, subject, body: htmlBody });
-            const resp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
-              method: 'POST',
-              headers: { Authorization: `Bearer ${senderToken}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ raw }),
-            });
-            if (resp.ok) {
-              console.log(`[InviteEmail] Invitation sent to ${inviteeEmail} via Gmail API (sender: ${account.email})`);
+            if (await tryGmailSend(account.email, senderToken, senderRefresh)) {
               return { sent: true, method: 'gmail-api' };
             }
           }
@@ -8412,6 +8458,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         req.user.organizationId,
         email,
         inviterName,
+        req.user.email || '',
         orgName,
         role || 'member',
         acceptUrl
