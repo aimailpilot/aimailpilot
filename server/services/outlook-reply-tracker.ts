@@ -286,15 +286,20 @@ export class OutlookReplyTracker {
     const endpoint = `/me/mailFolders/inbox/messages?$filter=${encodeURIComponent(filter)}&$select=${select}&$top=50&$orderby=receivedDateTime desc`;
 
     const listData: GraphListResponse = await this.graphFetch(accessToken, endpoint);
-    if (!listData.value || listData.value.length === 0) return result;
+    if (!listData.value || listData.value.length === 0) {
+      console.log(`[OutlookReplyTracker] No messages in inbox for ${accountEmail} (lookback: ${lookbackMinutes}min)`);
+      return result;
+    }
 
     result.checked = listData.value.length;
+    console.log(`[OutlookReplyTracker] Found ${listData.value.length} inbox messages for ${accountEmail}`);
 
     for (const msg of listData.value) {
       try {
-        // Skip if already in inbox
+        // Skip if already in inbox AND already matched to a campaign
+        // Re-check messages that were stored without campaign matching (from older broken code)
         const existing = await storage.getInboxMessageByOutlookId(msg.id);
-        if (existing) continue;
+        if (existing && existing.campaignId) continue;
 
         // Fetch individual message headers (Graph API only returns them on single-message GET)
         // Lazy-load: only fetch if needed (skip for bounce detection which uses subject/sender)
@@ -416,13 +421,14 @@ export class OutlookReplyTracker {
         let matchedTrackingId = '';
         let matchMethod = 'tracking-id';
 
-        // Method 3 FIRST: Match by sender email + subject (fastest — no extra API call)
+        // Method 1 (fastest): Match by sender email + subject — no extra API call needed
         // Microsoft Graph overrides custom Message-ID headers, so subject+sender
         // is the most reliable method for Outlook-sent campaigns
         {
           const fromEmail = msg.from?.emailAddress?.address;
           const subject = msg.subject || '';
           const cleanSubject = subject.replace(/^(re:\s*|fw:\s*|fwd:\s*)+/i, '').trim();
+          console.log(`[OutlookReplyTracker] Trying subject+sender match: from="${fromEmail}" subject="${subject}" cleanSubject="${cleanSubject}"`);
           if (fromEmail && cleanSubject) {
             const subjectMatch = await storage.getCampaignMessageByContactEmailAndSubject(fromEmail, cleanSubject);
             if (subjectMatch) {
@@ -432,7 +438,9 @@ export class OutlookReplyTracker {
               messageId = subjectMatch.id;
               contactId = subjectMatch.contactId;
               emailAccountId = subjectMatch.emailAccountId || null;
-              console.log(`[OutlookReplyTracker] Matched reply via subject+sender: ${fromEmail} / "${cleanSubject}"`);
+              console.log(`[OutlookReplyTracker] MATCHED via subject+sender: ${fromEmail} / "${cleanSubject}" → campaign ${campaignId}`);
+            } else {
+              console.log(`[OutlookReplyTracker] No subject+sender match for ${fromEmail} / "${cleanSubject}"`);
             }
           }
         }
@@ -535,7 +543,7 @@ export class OutlookReplyTracker {
           } catch (e) { /* ignore */ }
         }
 
-        // ALWAYS store in unified_inbox
+        // Store in unified_inbox (or update if re-checking an unmatched message)
         const existingOutlookInbox = await storage.getInboxMessageByOutlookId(msg.id);
         if (!existingOutlookInbox) {
           await storage.createInboxMessage({
@@ -558,6 +566,12 @@ export class OutlookReplyTracker {
             receivedAt: msg.receivedDateTime,
           });
           console.log(`[OutlookReplyTracker] Stored message in unified inbox from ${msg.from?.emailAddress?.address} to ${accountEmail} (campaign match: ${!!campaignId})`);
+        } else if (!existingOutlookInbox.campaignId && campaignId) {
+          // Re-check: message was stored before without campaign match — update it now
+          try {
+            await storage.updateInboxMessage(existingOutlookInbox.id, { campaignId, messageId, contactId, emailAccountId });
+            console.log(`[OutlookReplyTracker] Updated inbox message ${existingOutlookInbox.id} with campaign match (method: ${matchMethod})`);
+          } catch (e) { /* ignore if updateInboxMessage doesn't exist */ }
         }
 
         if (isNewReply) {

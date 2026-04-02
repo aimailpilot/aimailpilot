@@ -1588,7 +1588,7 @@ export class DatabaseStorage {
     return db.prepare(`
       SELECT m.* FROM messages m
       JOIN contacts c ON m.contactId = c.id
-      WHERE LOWER(c.email) = LOWER(?) AND m.subject = ? AND m.status = 'sent' AND m.repliedAt IS NULL
+      WHERE LOWER(c.email) = LOWER(?) AND LOWER(TRIM(m.subject)) = LOWER(TRIM(?)) AND m.repliedAt IS NULL
       ORDER BY m.sentAt DESC LIMIT 1
     `).get(contactEmail, subject) || null;
   }
