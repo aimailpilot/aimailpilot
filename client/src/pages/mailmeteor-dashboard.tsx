@@ -1,18 +1,18 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, lazy, Suspense } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { useLocation } from "wouter";
-import { 
-  Mail, Plus, Search, Users, TrendingUp, BarChart3, 
+import {
+  Mail, Plus, Search, Users, TrendingUp, BarChart3,
   FileText, Target, Settings, LogOut, ChevronDown, ChevronRight,
   GitBranch, Zap, Send, Eye, MousePointerClick, Reply,
   Bell, Activity, Inbox, MoreHorizontal, Pause, Play, Trash2,
   ArrowUp, ArrowDown, Calendar, Sparkles, CreditCard, Lightbulb,
   Wrench, PieChart, Link2, Globe, RefreshCw, ExternalLink, XCircle,
-  AlertTriangle, Building2, Shield, Flame
+  AlertTriangle, Building2, Shield, Flame, Loader2
 } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -22,20 +22,29 @@ import { useCampaigns } from "@/hooks/use-campaigns";
 import type { Campaign } from "@/types";
 import type { TrackingEvent } from "@/types";
 
-// Import all page components
-import EmailAccountSetup from "./email-account-setup";
-import CampaignCreator from "./campaign-creator";
-import ContactsManager from "./contacts-manager";
-import AnalyticsDashboard from "./analytics-dashboard";
-import TemplateManager from "./template-manager";
-import FollowupSequenceBuilder from "./followup-builder";
-import CampaignDetailPage from "./campaign-detail";
-import AdvancedSettings from "./advanced-settings";
-import AccountSettings from "./account-settings";
-import UnifiedInbox from "./unified-inbox";
-import TeamManagement from "./team-management";
-import SuperAdminDashboard from "./superadmin-dashboard";
-import WarmupMonitoring from "./warmup-monitoring";
+// Lazy-load page components (code splitting — only loads when navigated to)
+const EmailAccountSetup = lazy(() => import("./email-account-setup"));
+const CampaignCreator = lazy(() => import("./campaign-creator"));
+const ContactsManager = lazy(() => import("./contacts-manager"));
+const AnalyticsDashboard = lazy(() => import("./analytics-dashboard"));
+const TemplateManager = lazy(() => import("./template-manager"));
+const FollowupSequenceBuilder = lazy(() => import("./followup-builder"));
+const CampaignDetailPage = lazy(() => import("./campaign-detail"));
+const AdvancedSettings = lazy(() => import("./advanced-settings"));
+const AccountSettings = lazy(() => import("./account-settings"));
+const UnifiedInbox = lazy(() => import("./unified-inbox"));
+const TeamManagement = lazy(() => import("./team-management"));
+const SuperAdminDashboard = lazy(() => import("./superadmin-dashboard"));
+const WarmupMonitoring = lazy(() => import("./warmup-monitoring"));
+
+// Loading fallback for lazy-loaded pages
+function PageLoader() {
+  return (
+    <div className="flex items-center justify-center h-64">
+      <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
+    </div>
+  );
+}
 
 type ViewType = 'campaigns' | 'templates' | 'contacts' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings' | 'team' | 'superadmin' | 'warmup';
 
@@ -771,9 +780,10 @@ export default function MailMeteorDashboard() {
 
         {/* Content */}
         <main className="flex-1 overflow-auto">
+         <Suspense fallback={<PageLoader />}>
           {/* Campaign Creator */}
           {viewMode === 'campaign' && (
-            <CampaignCreator 
+            <CampaignCreator
               onSuccess={() => { setViewMode('dashboard'); setCurrentView('campaigns'); }} 
               onBack={() => setViewMode('dashboard')}
             />
@@ -1006,6 +1016,7 @@ export default function MailMeteorDashboard() {
           {viewMode === 'dashboard' && currentView === 'warmup' && (
             <WarmupMonitoring />
           )}
+         </Suspense>
         </main>
       </div>
     </div>

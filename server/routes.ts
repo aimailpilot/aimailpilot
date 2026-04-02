@@ -119,22 +119,24 @@ function orgHasOutlookTokens(settings: Record<string, string>): boolean {
 }
 
 // Simple auth middleware
+// In-memory auth cache: userId+orgId -> resolved user object (TTL 60s)
+const authCache = new Map<string, { user: any; ts: number }>();
+const AUTH_CACHE_TTL = 60000; // 60 seconds
+
 const requireAuth = async (req: any, res: any, next: any) => {
   const userId = req.cookies?.user_id || req.session?.userId;
-  
+
   if (!userId) {
     return res.status(401).json({ error: 'Not authenticated' });
   }
-  
+
   // If userId exists but not in loggedInUsers (e.g. server restarted),
   // verify against the database and auto-re-authenticate
   if (!loggedInUsers.has(userId)) {
     try {
       const dbUser = await storage.getUser(userId) as any;
       if (dbUser && dbUser.isActive !== false) {
-        // User exists in DB - re-add to loggedInUsers
         loggedInUsers.add(userId);
-        // Restore session data from DB if not already in session
         if (!(req.session as any)?.user) {
           (req.session as any).userId = userId;
           (req.session as any).user = {
@@ -146,57 +148,64 @@ const requireAuth = async (req: any, res: any, next: any) => {
         }
         console.log(`[Auth] Auto-restored session for user ${dbUser.email} (${userId}) from DB after server restart`);
       } else {
-        // User not found in DB - invalid cookie
         return res.status(401).json({ error: 'Not authenticated' });
       }
     } catch (e) {
       return res.status(401).json({ error: 'Not authenticated' });
     }
   }
-  
-  // Get user data from session
+
+  // Determine which org is being requested
+  const requestedOrgId = req.query?.orgId || (req.session as any)?.activeOrgId || '';
+  const cacheKey = `${userId}:${requestedOrgId}`;
+
+  // Check auth cache first — avoids 4-6 DB queries per request
+  const cached = authCache.get(cacheKey);
+  if (cached && (Date.now() - cached.ts) < AUTH_CACHE_TTL) {
+    req.user = { ...cached.user };
+    // Auto-detect public URL for tracking links
+    const host = req.headers['x-forwarded-host'] || req.headers['host'];
+    if (host && !host.includes('localhost')) {
+      const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+      campaignEngine.setPublicBaseUrl(`${proto}://${host}`);
+    }
+    return next();
+  }
+
+  // Cache miss — resolve from DB (same logic as before)
   const sessionUser = (req.session as any)?.user;
-  
-  // Determine the active organization for this user
-  // Priority: 1) query param ?orgId, 2) session orgId, 3) user's default org from DB
-  let orgId = req.query?.orgId || (req.session as any)?.activeOrgId;
+  let orgId = requestedOrgId;
   let orgRole = 'admin';
-  
+
   if (!orgId) {
-    // Look up user's default organization from database
     try {
       const defaultOrg = await storage.getUserDefaultOrganization(userId);
       if (defaultOrg) {
         orgId = defaultOrg.id;
         orgRole = defaultOrg.memberRole || 'admin';
-        // Cache in session for future requests
         (req.session as any).activeOrgId = orgId;
       }
     } catch (e) {
-      // Fallback: try user's organizationId from DB
       try {
         const dbUser = await storage.getUser(userId);
         if (dbUser) orgId = (dbUser as any).organizationId;
       } catch (e2) { /* ignore */ }
     }
   } else {
-    // Verify user has access to the requested org
     try {
       const membership = await storage.getOrgMember(orgId, userId);
       if (membership) {
         orgRole = (membership as any).role;
       } else {
-        // User doesn't have access to this org
         return res.status(403).json({ error: 'Access denied to this organization' });
       }
     } catch (e) { /* fallback */ }
   }
-  
+
   if (!orgId) {
     return res.status(400).json({ error: 'No organization found. Please create or join an organization.' });
   }
-  
-  // Get user email/name reliably - from session, or fallback to DB
+
   let userEmail = sessionUser?.email;
   let userName = sessionUser?.name;
   let userFirstName = '';
@@ -213,20 +222,26 @@ const requireAuth = async (req: any, res: any, next: any) => {
     } catch (e) { /* ignore */ }
   }
 
-  req.user = { 
-    id: userId, 
-    organizationId: orgId, 
+  let isSuperAdmin = false;
+  try {
+    isSuperAdmin = await storage.isSuperAdmin(userId);
+  } catch (e) { /* ignore */ }
+
+  const resolvedUser = {
+    id: userId,
+    organizationId: orgId,
     role: orgRole,
     email: userEmail || 'unknown',
     name: userName || 'Unknown',
     firstName: userFirstName,
     lastName: userLastName,
-    isSuperAdmin: false,
+    isSuperAdmin,
   };
-  // Check superadmin status
-  try {
-    req.user.isSuperAdmin = await storage.isSuperAdmin(userId);
-  } catch (e) { /* ignore */ }
+
+  // Cache the resolved user for 60s
+  authCache.set(cacheKey, { user: resolvedUser, ts: Date.now() });
+  req.user = { ...resolvedUser };
+
   // Auto-detect public URL for tracking links
   const host = req.headers['x-forwarded-host'] || req.headers['host'];
   if (host && !host.includes('localhost')) {
@@ -1693,7 +1708,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post('/api/auth/logout', (req, res) => {
     const userId = req.cookies?.user_id || (req.session as any)?.userId;
-    if (userId) loggedInUsers.delete(userId);
+    if (userId) {
+      loggedInUsers.delete(userId);
+      // Clear auth cache for this user
+      for (const key of authCache.keys()) {
+        if (key.startsWith(`${userId}:`)) authCache.delete(key);
+      }
+    }
     res.clearCookie('user_id');
     res.clearCookie('user_data');
     res.clearCookie('connect.sid');
@@ -8218,7 +8239,11 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       
       await storage.setDefaultOrganization(req.user.id, organizationId);
       (req.session as any).activeOrgId = organizationId;
-      
+      // Clear auth cache for this user so next request picks up new org
+      for (const key of authCache.keys()) {
+        if (key.startsWith(`${req.user.id}:`)) authCache.delete(key);
+      }
+
       const org = await storage.getOrganization(organizationId);
       res.json({ success: true, organization: org });
     } catch (error) {
