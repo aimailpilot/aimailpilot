@@ -902,6 +902,16 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_notifications_org ON notifications(organizationId, createdAt);
 `);
 
+// Performance indexes for slow queries
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_status ON contacts(organizationId, status)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_org_created ON contacts(organizationId, createdAt)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_templates_org ON templates(organizationId, updatedAt)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_templates_created_by ON templates(createdBy)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_campaigns_org_created ON campaigns(organizationId, createdAt)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_campaigns_created_by ON campaigns(createdBy)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_campaign_status ON messages(campaignId, status)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_email_accounts_org ON email_accounts(organizationId)`); } catch (e) {}
+
 // Migrate existing email accounts to correct provider-based daily limits
 // Gmail=2000, Outlook=10000, ElasticEmail=unlimited, Custom=500
 try {
@@ -1189,17 +1199,25 @@ export class DatabaseStorage {
   }
 
   // ========== Contacts ==========
-  async getContacts(organizationId: string, limit = 50, offset = 0, filters?: { listId?: string }) {
-    if (filters?.listId) {
-      return db.prepare('SELECT * FROM contacts WHERE organizationId = ? AND listId = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(organizationId, filters.listId, limit, offset).map(hydrateContact);
-    }
-    return db.prepare('SELECT * FROM contacts WHERE organizationId = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(organizationId, limit, offset).map(hydrateContact);
+  async getContacts(organizationId: string, limit = 50, offset = 0, filters?: { listId?: string; status?: string; assignedTo?: string }) {
+    let sql = 'SELECT * FROM contacts WHERE organizationId = ?';
+    const params: any[] = [organizationId];
+    if (filters?.listId) { sql += ' AND listId = ?'; params.push(filters.listId); }
+    if (filters?.status) { sql += ' AND status = ?'; params.push(filters.status); }
+    if (filters?.assignedTo === 'unassigned') { sql += ' AND (assignedTo IS NULL OR assignedTo = \'\')'; }
+    else if (filters?.assignedTo) { sql += ' AND assignedTo = ?'; params.push(filters.assignedTo); }
+    sql += ' ORDER BY createdAt DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+    return db.prepare(sql).all(...params).map(hydrateContact);
   }
-  async getContactsCount(organizationId: string, filters?: { listId?: string }) {
-    if (filters?.listId) {
-      return (db.prepare('SELECT COUNT(*) as c FROM contacts WHERE organizationId = ? AND listId = ?').get(organizationId, filters.listId) as any).c;
-    }
-    return (db.prepare('SELECT COUNT(*) as c FROM contacts WHERE organizationId = ?').get(organizationId) as any).c;
+  async getContactsCount(organizationId: string, filters?: { listId?: string; status?: string; assignedTo?: string }) {
+    let sql = 'SELECT COUNT(*) as c FROM contacts WHERE organizationId = ?';
+    const params: any[] = [organizationId];
+    if (filters?.listId) { sql += ' AND listId = ?'; params.push(filters.listId); }
+    if (filters?.status) { sql += ' AND status = ?'; params.push(filters.status); }
+    if (filters?.assignedTo === 'unassigned') { sql += ' AND (assignedTo IS NULL OR assignedTo = \'\')'; }
+    else if (filters?.assignedTo) { sql += ' AND assignedTo = ?'; params.push(filters.assignedTo); }
+    return (db.prepare(sql).get(...params) as any).c;
   }
   async getContact(id: string) { return hydrateContact(db.prepare('SELECT * FROM contacts WHERE id = ?').get(id)); }
   // Bulk load contacts by IDs (avoids N+1 query pattern)
@@ -1339,7 +1357,7 @@ export class DatabaseStorage {
     batch();
     return true;
   }
-  async searchContacts(organizationId: string, query: string, filters?: { listId?: string }) {
+  async searchContacts(organizationId: string, query: string, filters?: { listId?: string; status?: string; assignedTo?: string }) {
     const q = `%${query.toLowerCase()}%`;
     let sql = `SELECT * FROM contacts WHERE organizationId = ? AND (
       LOWER(firstName) LIKE ? OR LOWER(lastName) LIKE ? OR LOWER(email) LIKE ? OR
@@ -1350,6 +1368,9 @@ export class DatabaseStorage {
     )`;
     const params: any[] = [organizationId, q, q, q, q, q, q, q, q, q, q, q, q, q, q, q, q, q];
     if (filters?.listId) { sql += ' AND listId = ?'; params.push(filters.listId); }
+    if (filters?.status) { sql += ' AND status = ?'; params.push(filters.status); }
+    if (filters?.assignedTo === 'unassigned') { sql += ' AND (assignedTo IS NULL OR assignedTo = \'\')'; }
+    else if (filters?.assignedTo) { sql += ' AND assignedTo = ?'; params.push(filters.assignedTo); }
     sql += ' ORDER BY createdAt DESC LIMIT 100';
     return db.prepare(sql).all(...params).map(hydrateContact);
   }
@@ -1434,23 +1455,28 @@ export class DatabaseStorage {
     const result = db.prepare('UPDATE contacts SET assignedTo = ?, updatedAt = ? WHERE listId = ? AND organizationId = ?').run(userId, ts, listId, organizationId);
     return result.changes;
   }
-  async getContactsForUser(organizationId: string, userId: string, limit = 50, offset = 0, filters?: { listId?: string }) {
-    if (filters?.listId) {
-      return db.prepare('SELECT * FROM contacts WHERE organizationId = ? AND assignedTo = ? AND listId = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(organizationId, userId, filters.listId, limit, offset).map(hydrateContact);
-    }
-    return db.prepare('SELECT * FROM contacts WHERE organizationId = ? AND assignedTo = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(organizationId, userId, limit, offset).map(hydrateContact);
+  async getContactsForUser(organizationId: string, userId: string, limit = 50, offset = 0, filters?: { listId?: string; status?: string }) {
+    let sql = 'SELECT * FROM contacts WHERE organizationId = ? AND assignedTo = ?';
+    const params: any[] = [organizationId, userId];
+    if (filters?.listId) { sql += ' AND listId = ?'; params.push(filters.listId); }
+    if (filters?.status) { sql += ' AND status = ?'; params.push(filters.status); }
+    sql += ' ORDER BY createdAt DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+    return db.prepare(sql).all(...params).map(hydrateContact);
   }
-  async getContactsCountForUser(organizationId: string, userId: string, filters?: { listId?: string }) {
-    if (filters?.listId) {
-      return (db.prepare('SELECT COUNT(*) as c FROM contacts WHERE organizationId = ? AND assignedTo = ? AND listId = ?').get(organizationId, userId, filters.listId) as any).c;
-    }
-    return (db.prepare('SELECT COUNT(*) as c FROM contacts WHERE organizationId = ? AND assignedTo = ?').get(organizationId, userId) as any).c;
+  async getContactsCountForUser(organizationId: string, userId: string, filters?: { listId?: string; status?: string }) {
+    let sql = 'SELECT COUNT(*) as c FROM contacts WHERE organizationId = ? AND assignedTo = ?';
+    const params: any[] = [organizationId, userId];
+    if (filters?.listId) { sql += ' AND listId = ?'; params.push(filters.listId); }
+    if (filters?.status) { sql += ' AND status = ?'; params.push(filters.status); }
+    return (db.prepare(sql).get(...params) as any).c;
   }
-  async searchContactsForUser(organizationId: string, userId: string, query: string, filters?: { listId?: string }) {
+  async searchContactsForUser(organizationId: string, userId: string, query: string, filters?: { listId?: string; status?: string }) {
     const q = `%${query}%`;
     let sql = `SELECT * FROM contacts WHERE organizationId = ? AND assignedTo = ? AND (email LIKE ? OR firstName LIKE ? OR lastName LIKE ? OR company LIKE ?)`;
     const params: any[] = [organizationId, userId, q, q, q, q];
     if (filters?.listId) { sql += ' AND listId = ?'; params.push(filters.listId); }
+    if (filters?.status) { sql += ' AND status = ?'; params.push(filters.status); }
     sql += ' ORDER BY createdAt DESC LIMIT 200';
     return db.prepare(sql).all(...params).map(hydrateContact);
   }

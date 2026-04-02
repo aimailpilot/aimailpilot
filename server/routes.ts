@@ -3096,28 +3096,24 @@ Which account should I use and why? If I need to split across accounts, provide 
       }
       
       // Auto-fix stale sentCount for campaigns that have messages but sentCount=0
+      // Uses lightweight single-SQL aggregation instead of loading all messages
       for (const c of campaigns as any[]) {
         if ((c.sentCount || 0) === 0 && (c.status === 'active' || c.status === 'completed')) {
           try {
-            const msgs = await storage.getCampaignMessagesEnriched(c.id, 10000, 0);
-            const actualSent = msgs.filter((m: any) => m.status === 'sent' || m.status === 'sending').length;
-            if (actualSent > 0) {
-              const actualBounced = msgs.filter((m: any) => m.status === 'bounced' || (m.status === 'failed' && m.errorMessage && m.errorMessage.toLowerCase().includes('bounce'))).length;
-              const actualOpened = msgs.filter((m: any) => m.openedAt).length;
-              const actualClicked = msgs.filter((m: any) => m.clickedAt).length;
-              const actualReplied = msgs.filter((m: any) => m.repliedAt).length;
+            const stats = await storage.getCampaignMessageStats(c.id);
+            if (stats.sent > 0) {
               await storage.updateCampaign(c.id, {
-                sentCount: actualSent, bouncedCount: actualBounced,
-                openedCount: actualOpened, clickedCount: actualClicked, repliedCount: actualReplied,
-                totalRecipients: Math.max(c.totalRecipients || 0, actualSent + actualBounced),
+                sentCount: stats.sent, bouncedCount: stats.bounced,
+                openedCount: stats.opened, clickedCount: stats.clicked, repliedCount: stats.replied,
+                totalRecipients: Math.max(c.totalRecipients || 0, stats.sent + stats.bounced),
               });
-              c.sentCount = actualSent;
-              c.bouncedCount = actualBounced;
-              c.openedCount = actualOpened;
-              c.clickedCount = actualClicked;
-              c.repliedCount = actualReplied;
-              c.totalRecipients = Math.max(c.totalRecipients || 0, actualSent + actualBounced);
-              console.log(`[Campaigns] Auto-fixed stats for ${c.id}: sent=${actualSent}`);
+              c.sentCount = stats.sent;
+              c.bouncedCount = stats.bounced;
+              c.openedCount = stats.opened;
+              c.clickedCount = stats.clicked;
+              c.repliedCount = stats.replied;
+              c.totalRecipients = Math.max(c.totalRecipients || 0, stats.sent + stats.bounced);
+              console.log(`[Campaigns] Auto-fixed stats for ${c.id}: sent=${stats.sent}`);
             }
           } catch (e) { /* ignore per-campaign errors */ }
         }
@@ -4331,9 +4327,13 @@ Which account should I use and why? If I need to split across accounts, provide 
       const status = req.query.status as string;
       const listId = req.query.listId as string;
       const assignedTo = req.query.assignedTo as string;
-      const filters = listId ? { listId } : undefined;
       const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
-      
+
+      // Build filters object with status — SQL handles filtering, no 100k row loads
+      const filters: { listId?: string; status?: string; assignedTo?: string } = {};
+      if (listId) filters.listId = listId;
+      if (status && status !== 'all') filters.status = status;
+
       let contacts;
       let total;
 
@@ -4341,13 +4341,13 @@ Which account should I use and why? If I need to split across accounts, provide 
       // - Owner/Admin: see all contacts (optionally filtered by assignedTo for assignment view)
       // - Member/Viewer: only see contacts assigned to them, even within a specific list
 
-      // If admin is filtering by a specific member (assignment view)
       if (isAdmin && assignedTo) {
         if (assignedTo === 'unassigned') {
-          const allContacts = await storage.getContacts(req.user.organizationId, 100000, 0, filters);
-          contacts = allContacts.filter((c: any) => !c.assignedTo);
-          total = contacts.length;
-          contacts = contacts.slice(offset, offset + limit);
+          filters.assignedTo = 'unassigned';
+          contacts = search
+            ? await storage.searchContacts(req.user.organizationId, search, filters)
+            : await storage.getContacts(req.user.organizationId, limit, offset, filters);
+          total = await storage.getContactsCount(req.user.organizationId, filters);
         } else {
           contacts = search
             ? await storage.searchContactsForUser(req.user.organizationId, assignedTo, search, filters)
@@ -4366,29 +4366,6 @@ Which account should I use and why? If I need to split across accounts, provide 
           ? await storage.searchContacts(req.user.organizationId, search, filters)
           : await storage.getContacts(req.user.organizationId, limit, offset, filters);
         total = await storage.getContactsCount(req.user.organizationId, filters);
-      }
-
-      // Status filter (bounced, unsubscribed, active)
-      // When filtering by status, we need to get ALL contacts first to filter correctly
-      // then apply pagination on the filtered result
-      if (status && status !== 'all') {
-        // Get all contacts in scope for this status (no pagination)
-        let allContacts;
-        if (isAdmin && assignedTo) {
-          if (assignedTo === 'unassigned') {
-            allContacts = await storage.getContacts(req.user.organizationId, 100000, 0, filters);
-            allContacts = allContacts.filter((c: any) => !c.assignedTo);
-          } else {
-            allContacts = await storage.getContactsForUser(req.user.organizationId, assignedTo, 100000, 0, filters);
-          }
-        } else if (!isAdmin) {
-          allContacts = await storage.getContactsForUser(req.user.organizationId, req.user.id, 100000, 0, filters);
-        } else {
-          allContacts = await storage.getContacts(req.user.organizationId, 100000, 0, filters);
-        }
-        const statusFiltered = allContacts.filter((c: any) => c.status === status);
-        total = statusFiltered.length;
-        contacts = statusFiltered.slice(offset, offset + limit);
       }
 
       res.json({ contacts, total, limit, offset });
@@ -5333,23 +5310,27 @@ Example response:
   async function enrichTemplatesWithScores(templates: any[], organizationId: string, storage: any) {
     const spamWords = ['free', 'urgent', 'act now', 'limited time', 'guaranteed', 'no obligation', 'risk free', 'click here', 'buy now', 'order now', 'winner', 'congratulations', 'earn money', 'make money', 'cash', 'discount', '100%', 'double your', 'million', 'billion'];
     const campaigns = await storage.getCampaigns(organizationId);
-    
-    return Promise.all(templates.map(async (t: any) => {
-      let creator = null;
-      if (t.createdBy) {
-        try {
-          const user = await storage.getUser(t.createdBy);
-          if (user) {
-            creator = {
-              id: user.id,
-              email: user.email,
-              firstName: (user as any).firstName || '',
-              lastName: (user as any).lastName || '',
-              name: (user as any).name || (user as any).firstName || user.email?.split('@')[0] || 'Unknown',
-            };
-          }
-        } catch (e) { /* ignore */ }
-      }
+
+    // Batch-load all unique creators in ONE query instead of N+1
+    const creatorIds = [...new Set(templates.map(t => t.createdBy).filter(Boolean))];
+    const creatorMap: Record<string, any> = {};
+    for (const cid of creatorIds) {
+      try {
+        const user = await storage.getUser(cid);
+        if (user) {
+          creatorMap[cid] = {
+            id: user.id,
+            email: user.email,
+            firstName: (user as any).firstName || '',
+            lastName: (user as any).lastName || '',
+            name: (user as any).name || (user as any).firstName || user.email?.split('@')[0] || 'Unknown',
+          };
+        }
+      } catch (e) { /* ignore */ }
+    }
+
+    return templates.map((t: any) => {
+      const creator = t.createdBy ? (creatorMap[t.createdBy] || null) : null;
 
       let score = { total: 0, openRate: 0, replyRate: 0, clickRate: 0, spamScore: 0, campaignsUsed: 0, grade: 'N/A' as string };
       try {
@@ -5383,7 +5364,7 @@ Example response:
       } catch (e) { /* ignore */ }
 
       return { ...t, creator, score };
-    }));
+    });
   }
 
   app.get('/api/templates', async (req: any, res) => {
