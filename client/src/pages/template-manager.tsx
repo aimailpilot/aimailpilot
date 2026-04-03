@@ -118,6 +118,41 @@ export default function TemplateManager() {
   const [fixLoading, setFixLoading] = useState(false);
   const [fixChanges, setFixChanges] = useState<string[]>([]);
 
+  // AI email feedback state
+  const [aiFeedback, setAiFeedback] = useState<string>('');
+  const [aiFeedbackLoading, setAiFeedbackLoading] = useState(false);
+  const aiFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const getAiFeedback = async (subj?: string, cont?: string) => {
+    const s = subj ?? formSubject;
+    const c = cont ?? formContent;
+    const plainText = c.replace(/<[^>]*>/g, '').trim();
+    if (plainText.length < 40) { setAiFeedback(''); return; }
+    setAiFeedbackLoading(true);
+    try {
+      const res = await fetch('/api/llm/generate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({
+          prompt: `You are an expert cold email coach. Analyze this email and give exactly ONE short actionable suggestion (max 15 words) to improve open/reply rate. Be specific, not generic. If the email is great, say "Looks great" with a brief reason.\n\nSubject: ${s}\n\nBody:\n${plainText.slice(0, 800)}`,
+          type: 'feedback', format: 'text',
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const text = (data.textContent || data.content || '').replace(/<[^>]*>/g, '').trim();
+        setAiFeedback(text.length > 120 ? text.slice(0, 120) + '…' : text);
+      }
+    } catch { /* ignore */ }
+    setAiFeedbackLoading(false);
+  };
+
+  // Debounced AI feedback when content changes (3s delay)
+  useEffect(() => {
+    if (aiFeedbackTimerRef.current) clearTimeout(aiFeedbackTimerRef.current);
+    aiFeedbackTimerRef.current = setTimeout(() => getAiFeedback(), 3000);
+    return () => { if (aiFeedbackTimerRef.current) clearTimeout(aiFeedbackTimerRef.current); };
+  }, [formSubject, formContent]);
+
   const analyzeDeliverability = async (subj?: string, cont?: string) => {
     const s = subj ?? formSubject;
     const c = cont ?? formContent;
@@ -574,9 +609,9 @@ export default function TemplateManager() {
   // ============================================================
   if (showEditor) {
     return (
-      <div className="flex flex-col h-[calc(100vh-64px)]">
-        {/* Top Bar - like Mailmeteor */}
-        <div className="flex items-center justify-between px-5 py-2.5 border-b border-gray-200 bg-white shrink-0">
+      <div className="flex flex-col h-[calc(100vh-64px)] bg-gray-50">
+        {/* Top Bar */}
+        <div className="flex items-center justify-between px-5 py-2.5 border-b border-gray-200 bg-white shadow-sm shrink-0">
           <div className="flex items-center gap-3">
             <button onClick={closeEditor}
               className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-800 transition-colors font-medium">
@@ -639,18 +674,18 @@ export default function TemplateManager() {
           </div>
         </div>
 
-        {/* Template Name - editable inline like Mailmeteor */}
-        <div className="px-6 pt-4 pb-2 bg-white shrink-0">
+        {/* Template Name + Subject Line - compact header */}
+        <div className="px-5 pt-2 pb-1.5 bg-white border-b border-gray-200 shrink-0">
           <input
             value={formName}
             onChange={(e) => setFormName(e.target.value)}
             placeholder="Template name"
-            className="text-2xl font-bold text-gray-900 w-full outline-none placeholder-gray-300 bg-transparent"
+            className="text-lg font-semibold text-gray-900 w-full outline-none placeholder-gray-300 bg-transparent mb-1"
           />
         </div>
 
         {/* Subject Line */}
-        <div className="px-6 pb-3 bg-white border-b border-gray-100 shrink-0">
+        <div className="px-5 py-2 bg-gray-50/50 border-b border-gray-200 shrink-0">
           <div className="flex items-center gap-2">
             <span className="text-sm text-gray-400 font-medium shrink-0">Subject</span>
             <div className="flex-1 relative">
@@ -691,7 +726,7 @@ export default function TemplateManager() {
         </div>
 
         {/* Toolbar */}
-        <div className="flex items-center justify-between px-4 py-1.5 border-b border-gray-100 bg-gray-50/80 shrink-0">
+        <div className="flex items-center justify-between px-4 py-1.5 border-b border-gray-200 bg-gray-50 shrink-0">
           {editorMode === 'visual' ? (
             <div className="flex items-center gap-0.5 flex-wrap">
               <TbBtn icon={<Bold className="h-4 w-4" />} onClick={() => execCmd('bold')} title="Bold" />
@@ -893,15 +928,15 @@ export default function TemplateManager() {
         )}
 
         {/* Main Editor Area + Deliverability Side Panel */}
-        <div className="flex-1 overflow-hidden flex">
+        <div className="flex-1 overflow-hidden flex bg-gray-100 p-3">
           {/* Editor */}
-          <div className={`flex-1 overflow-hidden bg-white transition-all duration-300 ${showDeliverability ? 'min-w-0' : ''}`}>
+          <div className={`flex-1 overflow-hidden bg-white transition-all duration-300 rounded-lg border border-gray-200 shadow-sm ${showDeliverability ? 'min-w-0' : ''}`}>
             {editorMode === 'visual' ? (
               <div
                 ref={editorRef}
                 contentEditable
                 onInput={() => { if (editorRef.current) { setFormContent(editorRef.current.innerHTML); pendingContentRef.current = editorRef.current.innerHTML; } }}
-                className="h-full overflow-y-auto px-8 py-6 text-sm text-gray-800 outline-none leading-relaxed max-w-4xl mx-auto [&:empty]:before:content-[attr(data-placeholder)] [&:empty]:before:text-gray-300 [&:empty]:before:italic [&_a]:text-blue-600 [&_a]:underline [&_img]:max-w-full [&_img]:rounded [&_ul]:list-disc [&_ul]:pl-6 [&_ul]:my-1 [&_ol]:list-decimal [&_ol]:pl-6 [&_ol]:my-1 [&_li]:my-0.5"
+                className="h-full overflow-y-auto px-8 py-5 text-sm text-gray-800 outline-none leading-relaxed max-w-4xl mx-auto [&:empty]:before:content-[attr(data-placeholder)] [&:empty]:before:text-gray-300 [&:empty]:before:italic [&_a]:text-blue-600 [&_a]:underline [&_img]:max-w-full [&_img]:rounded [&_ul]:list-disc [&_ul]:pl-6 [&_ul]:my-1 [&_ol]:list-decimal [&_ol]:pl-6 [&_ol]:my-1 [&_li]:my-0.5"
                 data-placeholder="Start composing your email template here..."
                 suppressContentEditableWarning
               />
@@ -918,7 +953,7 @@ export default function TemplateManager() {
 
           {/* Deliverability Side Panel */}
           {showDeliverability && (
-            <div className="w-[340px] shrink-0 border-l border-green-200/50 bg-gradient-to-b from-green-50 to-emerald-50 overflow-y-auto">
+            <div className="w-[340px] shrink-0 ml-3 rounded-lg border border-green-200 bg-gradient-to-b from-green-50 to-emerald-50 overflow-y-auto shadow-sm">
               <div className="p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
@@ -1052,6 +1087,22 @@ export default function TemplateManager() {
             </div>
           )}
         </div>
+
+        {/* AI Feedback Bar */}
+        {(aiFeedback || aiFeedbackLoading) && (
+          <div className="shrink-0 px-4 py-1.5 bg-amber-50 border-t border-amber-200 flex items-center gap-2">
+            {aiFeedbackLoading ? (
+              <><Loader2 className="h-3 w-3 animate-spin text-amber-500" /><span className="text-xs text-amber-600">Analyzing email quality...</span></>
+            ) : (
+              <><Sparkles className="h-3 w-3 text-amber-500 shrink-0" /><span className="text-xs text-amber-700">{aiFeedback}</span></>
+            )}
+            {aiFeedback && !aiFeedbackLoading && (
+              <button onClick={() => setAiFeedback('')} className="ml-auto p-0.5 hover:bg-amber-100 rounded">
+                <X className="h-3 w-3 text-amber-400" />
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Preview Dialog (still a dialog for overlay) */}
         <Dialog open={showPreview} onOpenChange={(open) => { setShowPreview(open); if (!open) setPreviewMode('desktop'); }}>
