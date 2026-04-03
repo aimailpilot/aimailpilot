@@ -27,32 +27,40 @@ function mapApiStatus(apiStatus: string): VerificationStatus {
   return 'risky';
 }
 
-/** Simple HTTPS GET that works on all Node versions, with proper headers to avoid Cloudflare blocks */
+/** Simple HTTPS GET that works on all Node versions, with proper headers */
 function httpsGet(url: string, timeoutMs = 30000): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
-    const parsed = new URL(url);
-    const options = {
-      hostname: parsed.hostname,
-      path: parsed.pathname + parsed.search,
-      method: 'GET',
-      headers: {
-        'Accept': 'text/plain, application/json',
-        'User-Agent': 'AImailPilot/1.0',
-      },
-    };
-    const req = https.request(options, (res) => {
-      // Follow redirects (301/302)
-      if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location) {
-        httpsGet(res.headers.location, timeoutMs).then(resolve).catch(reject);
-        return;
-      }
-      let data = '';
-      res.on('data', (chunk) => { data += chunk; });
-      res.on('end', () => resolve({ status: res.statusCode || 0, body: data }));
-    });
-    req.on('error', reject);
-    req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error('Request timeout')); });
-    req.end();
+    try {
+      const parsed = new URL(url);
+      const options = {
+        hostname: parsed.hostname,
+        port: 443,
+        path: parsed.pathname + parsed.search,
+        method: 'GET',
+        headers: {
+          'Accept': 'text/plain, application/json',
+          'User-Agent': 'AImailPilot/1.0',
+        },
+      };
+      const req = https.request(options, (res) => {
+        // Follow redirects (301/302)
+        if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location) {
+          const loc = res.headers.location;
+          // Handle relative redirects
+          const redirectUrl = loc.startsWith('http') ? loc : `https://${parsed.hostname}${loc}`;
+          httpsGet(redirectUrl, timeoutMs).then(resolve).catch(reject);
+          return;
+        }
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode || 0, body: data }));
+      });
+      req.on('error', reject);
+      req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error('Request timeout')); });
+      req.end();
+    } catch (e: any) {
+      reject(new Error(`Invalid URL or request error: ${e.message} — url=${url?.substring(0, 60)}`));
+    }
   });
 }
 

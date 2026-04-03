@@ -9360,6 +9360,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         }
       }
       if (!apiKey) return res.status(400).json({ message: 'API key not configured. Enter your key and save first.' });
+      console.log(`[EmailVerify] Testing with key: ${apiKey.substring(0, 4)}...${apiKey.substring(apiKey.length - 4)} (len=${apiKey.length})`);
       const result = await checkCredits(apiKey);
       if (result.valid) {
         res.json({ success: true, credits: result.credits });
@@ -9367,6 +9368,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         res.status(400).json({ message: result.raw || 'Invalid API key or connection failed' });
       }
     } catch (e: any) {
+      console.error(`[EmailVerify] Test error:`, e.message);
       res.status(500).json({ message: e.message || 'Connection test failed' });
     }
   });
