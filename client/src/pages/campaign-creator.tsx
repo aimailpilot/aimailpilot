@@ -472,6 +472,7 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
             delayBetweenEmails: autopilot.delayBetween * (autopilot.delayUnit === 'minutes' ? 60000 : 1000),
             autopilot: autopilot.enabled ? autopilot : null,
             timezoneOffset: new Date().getTimezoneOffset(),
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           }),
         });
         setSendResult({ scheduled: true, campaignId: campaign.id });
@@ -485,6 +486,7 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
             delayBetweenEmails: autopilot.delayBetween * (autopilot.delayUnit === 'minutes' ? 60000 : 1000),
             autopilot: autopilot.enabled ? autopilot : null,
             timezoneOffset: new Date().getTimezoneOffset(),
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           }),
         });
         setSendResult({ campaignId: campaign.id });

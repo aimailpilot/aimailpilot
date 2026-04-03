@@ -1583,6 +1583,10 @@ export class DatabaseStorage {
     return db.prepare("SELECT errorMessage FROM messages WHERE contactId = ? AND status = 'failed' AND errorMessage IS NOT NULL ORDER BY createdAt DESC LIMIT ?").all(contactId, limit) as any[];
   }
   async getCampaignMessageByTracking(trackingId: string) { return db.prepare('SELECT * FROM messages WHERE trackingId = ?').get(trackingId) || null; }
+  /** Find the most recent sent message for a contact in a campaign at a specific step number */
+  async getCampaignMessageByContactAndStep(campaignId: string, contactId: string, stepNumber: number) {
+    return db.prepare("SELECT * FROM messages WHERE campaignId = ? AND contactId = ? AND stepNumber = ? AND status = 'sent' ORDER BY sentAt DESC LIMIT 1").get(campaignId, contactId, stepNumber) || null;
+  }
   /** Find a sent campaign message by contact email and subject (for reply matching fallback) */
   async getCampaignMessageByContactEmailAndSubject(contactEmail: string, subject: string) {
     return db.prepare(`

@@ -254,6 +254,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
         delayBetweenEmails: autopilot.delayBetween * (autopilot.delayUnit === 'minutes' ? 60000 : 1000),
         autopilot,
         timezoneOffset: new Date().getTimezoneOffset(),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       } : (detail?.campaign?.sendingConfig || null);
       const res = await fetch(`/api/campaigns/${campaignId}`, {
         method: 'PUT',

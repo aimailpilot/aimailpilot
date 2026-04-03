@@ -434,11 +434,24 @@ export class FollowupEngine {
     if (!sendingConfig?.autopilot?.enabled) return { canSend: true };
 
     const autopilot = sendingConfig.autopilot;
-    const now = new Date();
-    const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
-    // timezoneOffset is browser's getTimezoneOffset() (minutes behind UTC, e.g. IST = -330)
-    const userLocalMs = utcMs - (sendingConfig.timezoneOffset || 0) * 60000;
-    const userLocal = new Date(userLocalMs);
+    // Prefer IANA timezone (DST-aware), fallback to numeric offset
+    let userLocal: Date;
+    if (sendingConfig.timezone) {
+      try {
+        const nowUtc = new Date();
+        const localStr = nowUtc.toLocaleString('en-US', { timeZone: sendingConfig.timezone });
+        userLocal = new Date(localStr);
+      } catch (e) {
+        // Invalid timezone — fall through to offset
+        const now = new Date();
+        const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
+        userLocal = new Date(utcMs - (sendingConfig.timezoneOffset || 0) * 60000);
+      }
+    } else {
+      const now = new Date();
+      const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
+      userLocal = new Date(utcMs - (sendingConfig.timezoneOffset || 0) * 60000);
+    }
 
     const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const dayName = dayNames[userLocal.getDay()];
@@ -461,6 +474,75 @@ export class FollowupEngine {
     }
 
     return { canSend: true };
+  }
+
+  /**
+   * Calculate the next valid send time based on campaign sending window.
+   * If we can send now, returns now. Otherwise finds the next enabled day+time slot.
+   */
+  private getNextValidSendTime(sendingConfig: any): Date {
+    if (!sendingConfig?.autopilot?.enabled) return new Date();
+
+    const autopilot = sendingConfig.autopilot;
+    const now = new Date();
+    const timezoneOffset = sendingConfig.timezoneOffset || 0;
+    // Prefer IANA timezone (DST-aware), fallback to numeric offset
+    let userLocal: Date;
+    if (sendingConfig.timezone) {
+      try {
+        const localStr = now.toLocaleString('en-US', { timeZone: sendingConfig.timezone });
+        userLocal = new Date(localStr);
+      } catch (e) {
+        const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
+        userLocal = new Date(utcMs - timezoneOffset * 60000);
+      }
+    } else {
+      const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
+      userLocal = new Date(utcMs - timezoneOffset * 60000);
+    }
+
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+    for (let daysAhead = 0; daysAhead <= 7; daysAhead++) {
+      const checkDate = new Date(userLocal);
+      if (daysAhead > 0) checkDate.setDate(checkDate.getDate() + daysAhead);
+      const dayName = dayNames[checkDate.getDay()];
+      const dayConfig = autopilot.days?.[dayName];
+
+      if (!dayConfig?.enabled || !dayConfig.startTime) continue;
+
+      const [sh, sm] = dayConfig.startTime.split(':').map(Number);
+
+      if (daysAhead === 0) {
+        // Today — check if we're within or before the window
+        const currentHH = String(userLocal.getHours()).padStart(2, '0');
+        const currentMM = String(userLocal.getMinutes()).padStart(2, '0');
+        const currentTime = `${currentHH}:${currentMM}`;
+
+        if (dayConfig.endTime && currentTime >= dayConfig.endTime) continue; // Window ended today
+
+        if (currentTime >= dayConfig.startTime) {
+          // Currently in the window — send now
+          return new Date();
+        }
+        // Before start — return start time today
+        const startToday = new Date(userLocal);
+        startToday.setHours(sh, sm, 0, 0);
+        // Convert user-local back to UTC
+        const utcStart = new Date(startToday.getTime() + timezoneOffset * 60000 - now.getTimezoneOffset() * 60000);
+        return utcStart;
+      } else {
+        // Future day — return that day's start time
+        const futureDay = new Date(userLocal);
+        futureDay.setDate(userLocal.getDate() + daysAhead);
+        futureDay.setHours(sh, sm, 0, 0);
+        const utcFuture = new Date(futureDay.getTime() + timezoneOffset * 60000 - now.getTimezoneOffset() * 60000);
+        return utcFuture;
+      }
+    }
+
+    // Fallback: send now (no enabled days found)
+    return new Date();
   }
 
   /**
@@ -555,22 +637,44 @@ export class FollowupEngine {
   }
 
   /**
-   * Evaluate if a follow-up should be triggered
+   * Evaluate if a follow-up should be triggered.
+   * Delays are RELATIVE TO THE PREVIOUS STEP — not step 0.
+   * Step 1 delay = time after step 0's sentAt.
+   * Step 2 delay = time after step 1's sentAt.
    */
   private async evaluateFollowupTrigger(message: any, step: any): Promise<boolean> {
     const now = new Date();
-    const sentAt = new Date(message.sentAt);
-    
+
     // Calculate delay in milliseconds - support days, hours, minutes
     const delayDays = parseInt(step.delayDays) || 0;
     const delayHours = parseInt(step.delayHours) || 0;
     const delayMinutes = parseInt(step.delayMinutes) || 0;
     const delayMs = (delayDays * 24 * 60 * 60 * 1000) + (delayHours * 60 * 60 * 1000) + (delayMinutes * 60 * 1000);
-    const triggerTime = new Date(sentAt.getTime() + delayMs);
 
-    // Debug logging — only log when time hasn't been reached yet (waiting) or when triggering
+    // Find the reference time: use the PREVIOUS step's sentAt (not step 0)
+    const currentStepNumber = parseInt(step.stepNumber) || 1;
+    const previousStepNumber = currentStepNumber - 1;
+    let referenceTime: Date;
+
+    if (previousStepNumber === 0) {
+      // Step 1 is relative to step 0 (the original message)
+      referenceTime = new Date(message.sentAt);
+    } else {
+      // Step 2+ is relative to the previous step's sentAt
+      const prevStepMsg = await storage.getCampaignMessageByContactAndStep(
+        message.campaignId, message.contactId, previousStepNumber
+      );
+      if (prevStepMsg && (prevStepMsg as any).sentAt) {
+        referenceTime = new Date((prevStepMsg as any).sentAt);
+      } else {
+        // Previous step not yet sent — can't trigger this step yet
+        return false;
+      }
+    }
+
+    const triggerTime = new Date(referenceTime.getTime() + delayMs);
+
     if (now < triggerTime) {
-      // Only log once per minute for waiting messages (skip noisy repeated logs)
       return false;
     }
 
@@ -646,17 +750,21 @@ export class FollowupEngine {
         }
       }
 
-      // Create follow-up execution record
+      // Calculate next valid send time (respects campaign sending window / blocked days)
+      const sendingConfig = (campaign as any).sendingConfig;
+      const nextValidTime = this.getNextValidSendTime(sendingConfig);
+
+      // Create follow-up execution record with proper scheduled time
       const execution = await storage.createFollowupExecution({
         campaignMessageId: message.id,
         stepId: step.id,
         contactId: contact.id,
         campaignId: campaign.id,
         status: "pending",
-        scheduledAt: new Date().toISOString(),
+        scheduledAt: nextValidTime.toISOString(),
       });
 
-      console.log(`Scheduled follow-up for contact ${contact.email}, step ${step.stepNumber}`);
+      console.log(`Scheduled follow-up for contact ${contact.email}, step ${step.stepNumber}, scheduledAt ${nextValidTime.toISOString()}`);
       
       // If the follow-up should be sent immediately (no delay configured), send it now
       const hasDelay = (parseInt(step.delayDays) || 0) > 0 || (parseInt(step.delayHours) || 0) > 0 || (parseInt(step.delayMinutes) || 0) > 0;

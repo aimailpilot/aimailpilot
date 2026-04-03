@@ -3208,9 +3208,11 @@ Which account should I use and why? If I need to split across accounts, provide 
         autopilot: req.body.autopilot || null,
         // Store the user's timezone offset so we can calculate their local time
         timezoneOffset: req.body.timezoneOffset ?? null,
+        // IANA timezone name (DST-aware, preferred over timezoneOffset)
+        timezone: req.body.timezone || null,
       };
-      
-      console.log(`[Campaign] SEND ${req.params.id}: delay=${delayBetweenEmails}ms, autopilot=${sendingConfig.autopilot?.enabled ? 'ON' : 'OFF'}, maxPerDay=${sendingConfig.autopilot?.maxPerDay || 'N/A'}, tz=${sendingConfig.timezoneOffset}`);
+
+      console.log(`[Campaign] SEND ${req.params.id}: delay=${delayBetweenEmails}ms, autopilot=${sendingConfig.autopilot?.enabled ? 'ON' : 'OFF'}, maxPerDay=${sendingConfig.autopilot?.maxPerDay || 'N/A'}, tz=${sendingConfig.timezone || sendingConfig.timezoneOffset}`);
       console.log(`[Campaign] Full sendingConfig: ${JSON.stringify(sendingConfig).slice(0, 500)}`);
       
       await storage.updateCampaign(req.params.id, { sendingConfig });
@@ -3407,6 +3409,7 @@ Which account should I use and why? If I need to split across accounts, provide 
         delayBetweenEmails: delayBetweenEmails || 2000,
         autopilot: autopilot || null,
         timezoneOffset: timezoneOffset || null,
+        timezone: req.body.timezone || null,
       };
       await storage.updateCampaign(req.params.id, { sendingConfig });
       

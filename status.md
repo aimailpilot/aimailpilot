@@ -26,11 +26,12 @@ This file tracks features that are confirmed working in production.
 - **Fix applied**: Route ordering — `/api/inbox/enhanced` and `/api/inbox/stats` must be registered before `/api/inbox/:id` in Express to avoid param matching conflict
 - **Do not touch**: route registration order of `/api/inbox/enhanced`, `/api/inbox/stats` relative to `/api/inbox/:id` in `server/routes.ts`
 
-### 4. Campaign Tracking
-- Email open tracking is working
-- Email click tracking is working
-- Email reply tracking is working
-- **Do not touch**: tracking-related routes and webhook handlers in `server/routes.ts` and `server/services/gmail-reply-tracker.ts`, `server/services/outlook-reply-tracker.ts`
+### 4. Campaign Tracking (Gmail + Outlook — LOCKED)
+- Email **open tracking** is working on both Gmail and Outlook campaigns
+- Email **click tracking** is working on both Gmail and Outlook campaigns
+- Email **reply tracking** is working on both Gmail and Outlook campaigns
+- All three tracking types are confirmed working in production for both providers — **any changes require explicit user approval**
+- **Do not touch**: tracking-related routes and webhook handlers in `server/routes.ts`, `server/services/gmail-reply-tracker.ts`, `server/services/outlook-reply-tracker.ts`, tracking pixel/click/reply logic in `server/services/campaign-engine.ts`, and `getCampaignMessageByContactEmailAndSubject` / `getCampaignMessageByProviderMessageId` in `server/storage.ts`
 
 ### 5. Contact Management
 - Contact upload via CSV is working

@@ -278,7 +278,8 @@ interface SendingConfig {
   delayBetweenEmails: number;
   batchSize?: number;
   autopilot?: AutopilotConfig | null;
-  timezoneOffset?: number | null; // minutes offset from UTC (e.g. -330 for IST)
+  timezoneOffset?: number | null; // minutes offset from UTC (e.g. -330 for IST) — legacy fallback
+  timezone?: string | null; // IANA timezone name (e.g. "Asia/Kolkata") — DST-aware, preferred over timezoneOffset
 }
 
 interface CampaignSendOptions {
@@ -299,6 +300,28 @@ interface PersonalizationData {
   [key: string]: any;
 }
 
+/**
+ * Get user's local time from sendingConfig. Prefers IANA timezone (DST-aware),
+ * falls back to numeric timezoneOffset for backward compatibility.
+ */
+function getUserLocalTime(sendingConfig: SendingConfig | any): Date {
+  // Prefer IANA timezone name (handles DST automatically)
+  if (sendingConfig?.timezone) {
+    try {
+      const nowUtc = new Date();
+      const localStr = nowUtc.toLocaleString('en-US', { timeZone: sendingConfig.timezone });
+      return new Date(localStr);
+    } catch (e) {
+      // Invalid timezone name — fall through to offset
+    }
+  }
+  // Fallback: numeric offset (legacy, no DST awareness)
+  const now = new Date();
+  const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
+  const userLocalMs = utcMs - (sendingConfig?.timezoneOffset || 0) * 60000;
+  return new Date(userLocalMs);
+}
+
 export class CampaignEngine {
   private activeCampaigns: Map<string, { timer: any; paused: boolean; progress: number; total: number }> = new Map();
   private _publicBaseUrl: string | null = null;
@@ -311,13 +334,8 @@ export class CampaignEngine {
     if (!sendingConfig?.autopilot?.enabled) return { canSend: true };
 
     const autopilot = sendingConfig.autopilot;
-    // Calculate user's local time using their timezone offset
-    const now = new Date();
-    const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
-    // timezoneOffset is browser's getTimezoneOffset() which is minutes behind UTC (e.g. IST = -330)
-    // So user's local time = UTC - timezoneOffset
-    const userLocalMs = utcMs - (sendingConfig.timezoneOffset || 0) * 60000;
-    const userLocal = new Date(userLocalMs);
+    // Calculate user's local time (prefers IANA timezone for DST awareness, falls back to offset)
+    const userLocal = getUserLocalTime(sendingConfig);
     
     const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const dayName = dayNames[userLocal.getDay()];
@@ -325,7 +343,7 @@ export class CampaignEngine {
 
     if (!dayConfig || !dayConfig.enabled) {
       // Find next enabled day
-      const pauseMs = this.msUntilNextSendWindow(autopilot, sendingConfig.timezoneOffset || 0);
+      const pauseMs = this.msUntilNextSendWindow(autopilot, sendingConfig.timezoneOffset || 0, sendingConfig.timezone);
       return { canSend: false, reason: `Sending disabled on ${dayName}`, pauseUntilMs: pauseMs };
     }
 
@@ -345,7 +363,7 @@ export class CampaignEngine {
 
     if (dayConfig.endTime && currentTime >= dayConfig.endTime) {
       // After end time — wait until next day's window
-      const pauseMs = this.msUntilNextSendWindow(autopilot, sendingConfig.timezoneOffset || 0);
+      const pauseMs = this.msUntilNextSendWindow(autopilot, sendingConfig.timezoneOffset || 0, sendingConfig.timezone);
       return { canSend: false, reason: `After sending hours (ended at ${dayConfig.endTime})`, pauseUntilMs: pauseMs };
     }
 
@@ -355,11 +373,8 @@ export class CampaignEngine {
   /**
    * Calculate how many ms until the next sending window opens.
    */
-  private msUntilNextSendWindow(autopilot: AutopilotConfig, timezoneOffset: number): number {
-    const now = new Date();
-    const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
-    const userLocalMs = utcMs - timezoneOffset * 60000;
-    const userLocal = new Date(userLocalMs);
+  private msUntilNextSendWindow(autopilot: AutopilotConfig, timezoneOffset: number, timezone?: string | null): number {
+    const userLocal = getUserLocalTime({ timezoneOffset, timezone });
     const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
     for (let daysAhead = 0; daysAhead <= 7; daysAhead++) {
@@ -625,6 +640,22 @@ export class CampaignEngine {
     console.log(`[CampaignEngine] Campaign ${campaignId} send loop starting: delay=${delay}ms, accountDailyLimit=${accountDailyLimit}, autopilotMaxPerDay=${autopilotMaxPerDay === Infinity ? 'unlimited' : autopilotMaxPerDay}, autopilotEnabled=${sendingConfig?.autopilot?.enabled || false}`);
     console.log(`[CampaignEngine] Campaign ${campaignId} sendingConfig: ${JSON.stringify(sendingConfig)?.slice(0, 500)}`);
 
+    // ===== PRE-LOAD REPLIED CONTACTS =====
+    // Build set of contactIds that already replied in this campaign (e.g. during pause)
+    // This prevents sending to contacts who replied while campaign was paused
+    const repliedContactIds = new Set<string>();
+    try {
+      const allMsgs = await storage.getCampaignMessages(campaignId, 100000, 0) as any[];
+      for (const m of allMsgs) {
+        if (m.repliedAt && m.contactId) repliedContactIds.add(m.contactId);
+      }
+      if (repliedContactIds.size > 0) {
+        console.log(`[CampaignEngine] Campaign ${campaignId}: ${repliedContactIds.size} contacts already replied, will skip them`);
+      }
+    } catch (e) {
+      // Non-fatal — proceed without reply check if this fails
+    }
+
     for (let i = 0; i < contacts.length; i++) {
       // Check if paused or stopped
       if (!tracker || tracker.paused) {
@@ -718,7 +749,7 @@ export class CampaignEngine {
         await storage.updateCampaign(campaignId, { status: 'paused' });
         if (tracker) tracker.paused = true;
         
-        const sleepMs = this.msUntilNextSendWindow(sendingConfig?.autopilot!, sendingConfig?.timezoneOffset || 0);
+        const sleepMs = this.msUntilNextSendWindow(sendingConfig?.autopilot!, sendingConfig?.timezoneOffset || 0, sendingConfig?.timezone);
         const sleepUntil = Date.now() + sleepMs;
         while (Date.now() < sleepUntil) {
           if (!this.activeCampaigns.has(campaignId)) return;
@@ -781,6 +812,13 @@ export class CampaignEngine {
           if (tracker) tracker.paused = false;
           await storage.updateCampaign(campaignId, { status: 'active' });
         }
+        // ===== REPLY RE-CHECK ON RESUME =====
+        // Skip contacts who replied during pause (checked via pre-loaded set)
+        if (repliedContactIds.has(contact.id)) {
+          console.log(`[CampaignEngine] Skipping contact ${contact.email} — replied during pause`);
+          continue;
+        }
+
         // Personalize
         const personalData: PersonalizationData = {
           firstName: contact.firstName || '',
@@ -1077,14 +1115,16 @@ export class CampaignEngine {
         tracker.progress = i + 1;
       }
 
-      // Throttle between emails using the configured delay
+      // Throttle between emails using the configured delay + random jitter (±30s) for human-like timing
       if (i < contacts.length - 1) {
+        const jitter = Math.floor(Math.random() * 60000) - 30000; // -30s to +30s
+        const jitteredDelay = Math.max(1000, delay + jitter); // minimum 1s
         if (i === 0) {
-          console.log(`[CampaignEngine] Campaign ${campaignId}: First email sent. Waiting ${delay}ms (${(delay / 1000).toFixed(0)}s) before next email.`);
+          console.log(`[CampaignEngine] Campaign ${campaignId}: First email sent. Waiting ${jitteredDelay}ms (${(jitteredDelay / 1000).toFixed(0)}s, base=${delay}ms, jitter=${jitter > 0 ? '+' : ''}${(jitter / 1000).toFixed(0)}s) before next email.`);
         } else if (i % 25 === 0) {
-          console.log(`[CampaignEngine] Campaign ${campaignId}: Progress ${i + 1}/${contacts.length}. Delay=${delay}ms between emails.`);
+          console.log(`[CampaignEngine] Campaign ${campaignId}: Progress ${i + 1}/${contacts.length}. Delay=${jitteredDelay}ms (base=${delay}ms ± jitter).`);
         }
-        await new Promise(resolve => setTimeout(resolve, delay));
+        await new Promise(resolve => setTimeout(resolve, jitteredDelay));
       }
     }
 
