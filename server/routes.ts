@@ -3197,7 +3197,7 @@ Which account should I use and why? If I need to split across accounts, provide 
       const campaign = await storage.getCampaign(req.params.id);
       if (!campaign) return res.status(404).json({ message: 'Campaign not found' });
       const contacts = await storage.getCampaignContacts(req.params.id);
-      const db = (storage as any).db || require('./db').db;
+      const db = (storage as any).db;
       const contactIds = contacts.map((c: any) => c.id);
       if (contactIds.length === 0) return res.json({ total: 0, unverified: 0, invalid: 0, risky: 0, valid: 0 });
       const placeholders = contactIds.map(() => '?').join(',');
@@ -4442,7 +4442,7 @@ Which account should I use and why? If I need to split across accounts, provide 
   app.get('/api/contacts/follow-ups', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.session.organizationId!;
-      const db = (storage as any).db || require('./db').db;
+      const db = (storage as any).db;
       const today = new Date().toISOString().split('T')[0];
       const contacts = db.prepare(`SELECT c.*,
         (SELECT ca.notes FROM contact_activities ca WHERE ca.contactId = c.id ORDER BY ca.createdAt DESC LIMIT 1) as lastRemark,
@@ -4461,7 +4461,7 @@ Which account should I use and why? If I need to split across accounts, provide 
   app.get('/api/contacts/pipeline-stats', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.session.organizationId!;
-      const db = (storage as any).db || require('./db').db;
+      const db = (storage as any).db;
       const stats = db.prepare(`SELECT pipelineStage, COUNT(*) as count FROM contacts WHERE organizationId = ? AND status NOT IN ('bounced', 'unsubscribed') GROUP BY pipelineStage`).all(orgId);
       res.json(stats);
     } catch (e: any) {
@@ -4474,7 +4474,7 @@ Which account should I use and why? If I need to split across accounts, provide 
     try {
       const orgId = req.session.organizationId!;
       const { pipelineStage, nextActionDate, nextActionType } = req.body;
-      const db = (storage as any).db || require('./db').db;
+      const db = (storage as any).db;
       const contact = db.prepare(`SELECT id FROM contacts WHERE id = ? AND organizationId = ?`).get(req.params.id, orgId);
       if (!contact) return res.status(404).json({ message: 'Contact not found' });
       const updates: string[] = [];
@@ -4495,7 +4495,7 @@ Which account should I use and why? If I need to split across accounts, provide 
   app.get('/api/contacts/:id/activities', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.session.organizationId!;
-      const db = (storage as any).db || require('./db').db;
+      const db = (storage as any).db;
       const activities = db.prepare(`SELECT ca.*, u.firstName as userFirstName, u.lastName as userLastName, u.email as userEmail
         FROM contact_activities ca LEFT JOIN users u ON ca.userId = u.id
         WHERE ca.contactId = ? AND ca.organizationId = ? ORDER BY ca.createdAt DESC LIMIT 100`).all(req.params.id, orgId);
@@ -4512,7 +4512,7 @@ Which account should I use and why? If I need to split across accounts, provide 
       const userId = req.session.userId;
       const { type, outcome, notes, nextActionDate, nextActionType } = req.body;
       if (!type) return res.status(400).json({ message: 'Activity type is required' });
-      const db = (storage as any).db || require('./db').db;
+      const db = (storage as any).db;
       const contact = db.prepare(`SELECT id, pipelineStage FROM contacts WHERE id = ? AND organizationId = ?`).get(req.params.id, orgId) as any;
       if (!contact) return res.status(404).json({ message: 'Contact not found' });
       const id = `act_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -9363,7 +9363,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   app.get('/api/email-verify/stats', requireAuth, async (req, res) => {
     try {
       const orgId = req.session.organizationId!;
-      const db = (storage as any).db || require('./db').db;
+      const db = (storage as any).db;
       const stats = db.prepare(`
         SELECT emailVerificationStatus, COUNT(*) as count
         FROM contacts WHERE organizationId = ?
@@ -9393,7 +9393,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       if (!apiKey) return res.status(400).json({ message: 'EmailListVerify API key not configured. Ask your admin to add it in SuperAdmin > Advanced Settings.' });
 
       // Fetch contacts
-      const db = (storage as any).db || require('./db').db;
+      const db = (storage as any).db;
       const placeholders = contactIds.map(() => '?').join(',');
       const contacts = db.prepare(`SELECT id, email FROM contacts WHERE id IN (${placeholders}) AND organizationId = ?`).all(...contactIds, orgId);
 
@@ -9429,7 +9429,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       const apiKey = await getEmailVerifyApiKey();
       if (!apiKey) return res.status(400).json({ message: 'EmailListVerify API key not configured. Ask your admin to add it in SuperAdmin > Advanced Settings.' });
 
-      const db = (storage as any).db || require('./db').db;
+      const db = (storage as any).db;
       let contacts;
       if (listId) {
         const filter = statusFilter === 'all' ? '' : "AND (emailVerificationStatus = 'unverified' OR emailVerificationStatus IS NULL)";
@@ -9465,7 +9465,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   app.get('/api/contacts/:id/verification', requireAuth, async (req, res) => {
     try {
       const orgId = req.session.organizationId!;
-      const db = (storage as any).db || require('./db').db;
+      const db = (storage as any).db;
       const contact = db.prepare(`SELECT emailVerificationStatus, emailVerifiedAt FROM contacts WHERE id = ? AND organizationId = ?`).get(req.params.id, orgId);
       if (!contact) return res.status(404).json({ message: 'Contact not found' });
       res.json(contact);
