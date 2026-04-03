@@ -4383,8 +4383,7 @@ Which account should I use and why? If I need to split across accounts, provide 
 
   app.get('/api/contacts', async (req: any, res) => {
     try {
-      const db = (storage as any).db;
-      const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+      const limit = parseInt(req.query.limit) || 50;
       const offset = parseInt(req.query.offset) || 0;
       const search = (req.query.search as string || '').trim();
       const status = req.query.status as string;
@@ -4394,77 +4393,150 @@ Which account should I use and why? If I need to split across accounts, provide 
       const company = req.query.company as string;
       const location = req.query.location as string;
       const designation = req.query.designation as string;
-      const sortBy = req.query.sortBy as string || 'createdAt';
+      const sortByParam = req.query.sortBy as string || 'createdAt';
       const sortOrder = (req.query.sortOrder as string || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
       const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
       const orgId = req.user.organizationId;
 
-      // Build WHERE clauses
-      const conditions: string[] = ['c.organizationId = ?'];
-      const params: any[] = [orgId];
+      // Build filters object for storage methods
+      const filters: { listId?: string; status?: string; assignedTo?: string } = {};
+      if (listId) filters.listId = listId;
+      if (status && status !== 'all') filters.status = status;
 
-      // Access control: non-admin can only see their assigned contacts
-      if (!isAdmin) {
-        conditions.push('c.assignedTo = ?');
-        params.push(req.user.id);
-      } else if (assignedTo) {
-        if (assignedTo === 'unassigned') {
-          conditions.push("(c.assignedTo IS NULL OR c.assignedTo = '')");
+      // Determine if we need advanced features (new SQL path) or can use safe storage methods
+      const hasAdvancedFilters = pipelineStage || company || location || designation || (sortByParam && sortByParam !== 'createdAt');
+
+      if (!hasAdvancedFilters && !search) {
+        // === SAFE PATH: Use existing storage methods (proven working) ===
+        let contacts;
+        let total;
+
+        if (isAdmin && assignedTo) {
+          if (assignedTo === 'unassigned') {
+            filters.assignedTo = 'unassigned';
+            contacts = await storage.getContacts(orgId, limit, offset, filters);
+            total = await storage.getContactsCount(orgId, filters);
+          } else {
+            contacts = await storage.getContactsForUser(orgId, assignedTo, limit, offset, filters);
+            total = await storage.getContactsCountForUser(orgId, assignedTo, filters);
+          }
+        } else if (!isAdmin) {
+          contacts = await storage.getContactsForUser(orgId, req.user.id, limit, offset, filters);
+          total = await storage.getContactsCountForUser(orgId, req.user.id, filters);
         } else {
-          conditions.push('c.assignedTo = ?');
-          params.push(assignedTo);
+          contacts = await storage.getContacts(orgId, limit, offset, filters);
+          total = await storage.getContactsCount(orgId, filters);
         }
+
+        // Add lastRemark if contact_activities table exists
+        try {
+          const db = (storage as any).db;
+          const contactIds = contacts.map((c: any) => c.id);
+          if (contactIds.length > 0) {
+            const placeholders = contactIds.map(() => '?').join(',');
+            const remarks = db.prepare(`SELECT ca.contactId, ca.notes FROM contact_activities ca
+              WHERE ca.contactId IN (${placeholders}) AND ca.id IN (
+                SELECT MAX(ca2.id) FROM contact_activities ca2 WHERE ca2.contactId IN (${placeholders}) GROUP BY ca2.contactId
+              )`).all(...contactIds, ...contactIds);
+            const remarkMap = new Map(remarks.map((r: any) => [r.contactId, r.notes]));
+            contacts.forEach((c: any) => { c.lastRemark = remarkMap.get(c.id) || null; });
+          }
+        } catch { /* contact_activities table may not exist yet — ignore */ }
+
+        res.json({ contacts, total, limit, offset });
+
+      } else if (search && !hasAdvancedFilters) {
+        // === SEARCH PATH: Use existing storage search methods ===
+        let contacts;
+        let total;
+
+        if (isAdmin && assignedTo) {
+          if (assignedTo === 'unassigned') {
+            filters.assignedTo = 'unassigned';
+            contacts = await storage.searchContacts(orgId, search, filters);
+          } else {
+            contacts = await storage.searchContactsForUser(orgId, assignedTo, search, filters);
+          }
+        } else if (!isAdmin) {
+          contacts = await storage.searchContactsForUser(orgId, req.user.id, search, filters);
+        } else {
+          contacts = await storage.searchContacts(orgId, search, filters);
+        }
+
+        total = (contacts as any[]).length;
+        const paged = (contacts as any[]).slice(offset, offset + limit);
+        res.json({ contacts: paged, total, limit, offset });
+
+      } else {
+        // === ADVANCED PATH: Raw SQL for filters, sorting, search ===
+        const db = (storage as any).db;
+
+        const conditions: string[] = ['c.organizationId = ?'];
+        const params: any[] = [orgId];
+
+        if (!isAdmin) {
+          conditions.push('c.assignedTo = ?');
+          params.push(req.user.id);
+        } else if (assignedTo) {
+          if (assignedTo === 'unassigned') {
+            conditions.push("(c.assignedTo IS NULL OR c.assignedTo = '')");
+          } else {
+            conditions.push('c.assignedTo = ?');
+            params.push(assignedTo);
+          }
+        }
+
+        if (listId) { conditions.push('c.listId = ?'); params.push(listId); }
+        if (status && status !== 'all') { conditions.push('c.status = ?'); params.push(status); }
+        if (pipelineStage && pipelineStage !== 'all') { conditions.push('c.pipelineStage = ?'); params.push(pipelineStage); }
+        if (company) { conditions.push('LOWER(c.company) LIKE ?'); params.push(`%${company.toLowerCase()}%`); }
+        if (location) {
+          conditions.push('(LOWER(c.city) LIKE ? OR LOWER(c.state) LIKE ? OR LOWER(c.country) LIKE ?)');
+          const loc = `%${location.toLowerCase()}%`;
+          params.push(loc, loc, loc);
+        }
+        if (designation) { conditions.push('LOWER(c.jobTitle) LIKE ?'); params.push(`%${designation.toLowerCase()}%`); }
+
+        if (search) {
+          const q = `%${search.toLowerCase()}%`;
+          conditions.push(`(LOWER(c.firstName) LIKE ? OR LOWER(c.lastName) LIKE ? OR LOWER(c.email) LIKE ? OR
+            LOWER(c.company) LIKE ? OR LOWER(c.jobTitle) LIKE ? OR LOWER(c.tags) LIKE ? OR
+            LOWER(c.phone) LIKE ? OR LOWER(c.city) LIKE ? OR LOWER(c.country) LIKE ? OR LOWER(c.industry) LIKE ?)`);
+          params.push(q, q, q, q, q, q, q, q, q, q);
+        }
+
+        const where = conditions.join(' AND ');
+
+        const allowedSorts: Record<string, string> = {
+          createdAt: 'c.createdAt', firstName: 'c.firstName', company: 'c.company',
+          pipelineStage: 'c.pipelineStage', nextActionDate: 'c.nextActionDate',
+          lastActivityDate: 'c.lastActivityDate', email: 'c.email', jobTitle: 'c.jobTitle',
+        };
+        const sortCol = allowedSorts[sortByParam] || 'c.createdAt';
+
+        const total = (db.prepare(`SELECT COUNT(*) as cnt FROM contacts c WHERE ${where}`).get(...params) as any).cnt;
+
+        // Try with lastRemark subquery, fall back to without
+        let contacts;
+        try {
+          contacts = db.prepare(`SELECT c.*,
+            (SELECT ca.notes FROM contact_activities ca WHERE ca.contactId = c.id ORDER BY ca.createdAt DESC LIMIT 1) as lastRemark
+            FROM contacts c WHERE ${where}
+            ORDER BY ${sortCol} ${sortOrder} LIMIT ? OFFSET ?`).all(...params, limit, offset);
+        } catch {
+          contacts = db.prepare(`SELECT c.* FROM contacts c WHERE ${where}
+            ORDER BY ${sortCol} ${sortOrder} LIMIT ? OFFSET ?`).all(...params, limit, offset);
+        }
+
+        const hydrated = contacts.map((row: any) => {
+          try { if (row.tags && typeof row.tags === 'string') row.tags = JSON.parse(row.tags); } catch { row.tags = []; }
+          try { if (row.customFields && typeof row.customFields === 'string') row.customFields = JSON.parse(row.customFields); } catch { row.customFields = {}; }
+          try { if (row.emailRatingDetails && typeof row.emailRatingDetails === 'string') row.emailRatingDetails = JSON.parse(row.emailRatingDetails); } catch { row.emailRatingDetails = null; }
+          return row;
+        });
+
+        res.json({ contacts: hydrated, total, limit, offset });
       }
-
-      // Filters
-      if (listId) { conditions.push('c.listId = ?'); params.push(listId); }
-      if (status && status !== 'all') { conditions.push('c.status = ?'); params.push(status); }
-      if (pipelineStage && pipelineStage !== 'all') { conditions.push('c.pipelineStage = ?'); params.push(pipelineStage); }
-      if (company) { conditions.push('LOWER(c.company) LIKE ?'); params.push(`%${company.toLowerCase()}%`); }
-      if (location) {
-        conditions.push('(LOWER(c.city) LIKE ? OR LOWER(c.state) LIKE ? OR LOWER(c.country) LIKE ?)');
-        const loc = `%${location.toLowerCase()}%`;
-        params.push(loc, loc, loc);
-      }
-      if (designation) { conditions.push('LOWER(c.jobTitle) LIKE ?'); params.push(`%${designation.toLowerCase()}%`); }
-
-      // Multi-field search
-      if (search) {
-        const q = `%${search.toLowerCase()}%`;
-        conditions.push(`(LOWER(c.firstName) LIKE ? OR LOWER(c.lastName) LIKE ? OR LOWER(c.email) LIKE ? OR
-          LOWER(c.company) LIKE ? OR LOWER(c.jobTitle) LIKE ? OR LOWER(c.tags) LIKE ? OR
-          LOWER(c.phone) LIKE ? OR LOWER(c.city) LIKE ? OR LOWER(c.country) LIKE ? OR LOWER(c.industry) LIKE ?)`);
-        params.push(q, q, q, q, q, q, q, q, q, q);
-      }
-
-      const where = conditions.join(' AND ');
-
-      // Validate sortBy to prevent SQL injection
-      const allowedSorts: Record<string, string> = {
-        createdAt: 'c.createdAt', firstName: 'c.firstName', company: 'c.company',
-        pipelineStage: 'c.pipelineStage', nextActionDate: 'c.nextActionDate',
-        lastActivityDate: 'c.lastActivityDate', email: 'c.email', jobTitle: 'c.jobTitle',
-      };
-      const sortCol = allowedSorts[sortBy] || 'c.createdAt';
-
-      // Count query
-      const total = (db.prepare(`SELECT COUNT(*) as c FROM contacts c WHERE ${where}`).get(...params) as any).c;
-
-      // Main query with lastRemark subquery
-      const contacts = db.prepare(`SELECT c.*,
-        (SELECT ca.notes FROM contact_activities ca WHERE ca.contactId = c.id ORDER BY ca.createdAt DESC LIMIT 1) as lastRemark
-        FROM contacts c WHERE ${where}
-        ORDER BY ${sortCol} ${sortOrder} LIMIT ? OFFSET ?`).all(...params, limit, offset);
-
-      // Hydrate JSON fields
-      const hydrated = contacts.map((row: any) => {
-        try { if (row.tags && typeof row.tags === 'string') row.tags = JSON.parse(row.tags); } catch { row.tags = []; }
-        try { if (row.customFields && typeof row.customFields === 'string') row.customFields = JSON.parse(row.customFields); } catch { row.customFields = {}; }
-        try { if (row.emailRatingDetails && typeof row.emailRatingDetails === 'string') row.emailRatingDetails = JSON.parse(row.emailRatingDetails); } catch { row.emailRatingDetails = null; }
-        return row;
-      });
-
-      res.json({ contacts: hydrated, total, limit, offset });
     } catch (error: any) {
       console.error('[Contacts] GET error:', error.message);
       res.status(500).json({ message: 'Failed to fetch contacts' });

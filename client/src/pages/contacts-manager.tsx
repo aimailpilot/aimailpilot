@@ -282,8 +282,11 @@ export default function ContactsManager() {
       const res = await fetch(`/api/contacts?${params}`, { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
-        setContacts(data.contacts || data);
-        setTotal(data.total || (data.contacts || data).length);
+        const list = Array.isArray(data) ? data : (data.contacts || []);
+        setContacts(list);
+        setTotal(data.total ?? list.length);
+      } else {
+        console.error('Failed to fetch contacts:', res.status, await res.text().catch(() => ''));
       }
     } catch (e) { console.error('Failed to fetch contacts:', e); }
     setLoading(false);
