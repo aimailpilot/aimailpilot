@@ -2400,7 +2400,7 @@ export default function ContactsManager() {
                         ref={sendEmailEditorRef}
                         contentEditable
                         onInput={() => { if (sendEmailEditorRef.current) setSendEmailContent(sendEmailEditorRef.current.innerHTML); }}
-                        className="w-full text-sm border border-gray-200 rounded-b-lg px-4 py-3 min-h-[200px] max-h-[300px] overflow-y-auto outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-100 transition-all leading-relaxed [&:empty]:before:content-[attr(data-placeholder)] [&:empty]:before:text-gray-300 [&:empty]:before:italic [&_a]:text-blue-600 [&_a]:underline"
+                        className="w-full text-sm border border-gray-200 rounded-b-lg px-4 py-3 min-h-[200px] max-h-[300px] overflow-y-auto outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-100 transition-all leading-relaxed [&:empty]:before:content-[attr(data-placeholder)] [&:empty]:before:text-gray-300 [&:empty]:before:italic [&_a]:text-blue-600 [&_a]:underline [&_ul]:list-disc [&_ul]:pl-6 [&_ul]:my-1 [&_ol]:list-decimal [&_ol]:pl-6 [&_ol]:my-1 [&_li]:my-0.5"
                         data-placeholder="Hi {{firstName}}, &#10;&#10;Write your email content here..."
                         suppressContentEditableWarning
                       />
