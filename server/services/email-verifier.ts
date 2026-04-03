@@ -27,16 +27,32 @@ function mapApiStatus(apiStatus: string): VerificationStatus {
   return 'risky';
 }
 
-/** Simple HTTPS GET that works on all Node versions */
+/** Simple HTTPS GET that works on all Node versions, with proper headers to avoid Cloudflare blocks */
 function httpsGet(url: string, timeoutMs = 30000): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
-    const req = https.get(url, (res) => {
+    const parsed = new URL(url);
+    const options = {
+      hostname: parsed.hostname,
+      path: parsed.pathname + parsed.search,
+      method: 'GET',
+      headers: {
+        'Accept': 'text/plain, application/json',
+        'User-Agent': 'AImailPilot/1.0',
+      },
+    };
+    const req = https.request(options, (res) => {
+      // Follow redirects (301/302)
+      if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location) {
+        httpsGet(res.headers.location, timeoutMs).then(resolve).catch(reject);
+        return;
+      }
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => resolve({ status: res.statusCode || 0, body: data }));
     });
     req.on('error', reject);
     req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error('Request timeout')); });
+    req.end();
   });
 }
 
@@ -112,15 +128,16 @@ export async function checkCredits(apiKey: string): Promise<{ credits: number | 
     const res = await httpsGet(url, 10000);
     const body = res.body.trim();
 
-    console.log(`[EmailVerify] checkCredits status=${res.status} body="${body}"`);
+    console.log(`[EmailVerify] checkCredits status=${res.status} body="${body.substring(0, 200)}"`);
 
-    if (res.status !== 200) return { credits: null, valid: false, raw: body };
+    if (res.status !== 200) return { credits: null, valid: false, raw: `HTTP ${res.status}` };
 
     // API returns plain number on success, or error string on failure
     const credits = parseInt(body, 10);
     if (isNaN(credits)) {
-      // Non-numeric response = error message from API (e.g. "Invalid API key")
-      return { credits: null, valid: false, raw: body };
+      // Non-numeric response = error message from API or Cloudflare HTML page
+      const hint = body.includes('<!DOCTYPE') ? 'API returned HTML instead of data — possible Cloudflare block' : body.substring(0, 100);
+      return { credits: null, valid: false, raw: hint };
     }
     return { credits, valid: true, raw: body };
   } catch (e: any) {
