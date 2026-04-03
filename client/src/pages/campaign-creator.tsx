@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import { queryClient } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -474,6 +475,7 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
           }),
         });
         setSendResult({ scheduled: true, campaignId: campaign.id });
+        queryClient.invalidateQueries({ queryKey: ['/api/campaigns'] });
       } else {
         await fetch(`/api/campaigns/${campaign.id}/send`, {
           method: 'POST',
@@ -486,6 +488,7 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
           }),
         });
         setSendResult({ campaignId: campaign.id });
+        queryClient.invalidateQueries({ queryKey: ['/api/campaigns'] });
       }
     } catch (e: any) {
       setError(e.message || 'Failed to send');
