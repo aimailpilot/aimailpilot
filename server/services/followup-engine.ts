@@ -246,13 +246,23 @@ class EmailService {
         const tokenResult = await this.getOutlookAccessToken(orgId, senderEmail);
         if (tokenResult) {
           const fromEmail = senderEmail || tokenResult.email || '';
-          console.log(`[Followup] Sending follow-up via Microsoft Graph to ${message.to} from ${fromEmail}`);
+          console.log(`[Followup] Sending follow-up via Microsoft Graph to ${message.to} from ${fromEmail}${message.inReplyTo ? ' (threaded)' : ''}`);
 
           const graphMessage: any = {
             subject: message.subject,
             body: { contentType: 'HTML', content: message.html },
             toRecipients: [{ emailAddress: { address: message.to } }],
           };
+
+          // Add threading headers (In-Reply-To, References) for email thread continuity
+          const threadingHeaders: { name: string; value: string }[] = [];
+          if (message.inReplyTo) threadingHeaders.push({ name: 'In-Reply-To', value: message.inReplyTo });
+          if (message.references) threadingHeaders.push({ name: 'References', value: message.references });
+
+          // Attempt 1: Send with threading headers
+          if (threadingHeaders.length > 0) {
+            graphMessage.internetMessageHeaders = threadingHeaders;
+          }
 
           const resp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
             method: 'POST',
@@ -265,7 +275,28 @@ class EmailService {
           }
 
           const errText = await resp.text();
-          console.error(`[Followup] Microsoft Graph send failed: ${resp.status} ${errText}`);
+
+          // Don't retry on auth errors — those need token refresh
+          if (resp.status === 401 || resp.status === 403) {
+            console.error(`[Followup] Microsoft Graph auth error: ${resp.status} ${errText}`);
+            // Fall through to SMTP fallback below
+          } else if (threadingHeaders.length > 0) {
+            // Attempt 2: Retry without threading headers (some accounts reject internetMessageHeaders)
+            console.log(`[Followup] Graph send failed with threading headers, retrying without for ${message.to}`);
+            delete graphMessage.internetMessageHeaders;
+            const retryResp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${tokenResult.token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ message: graphMessage, saveToSentItems: true }),
+            });
+            if (retryResp.ok) {
+              return { success: true, messageId: `graph-followup-${Date.now()}` };
+            }
+            const retryErr = await retryResp.text();
+            console.error(`[Followup] Microsoft Graph send failed (retry): ${retryResp.status} ${retryErr}`);
+          } else {
+            console.error(`[Followup] Microsoft Graph send failed: ${resp.status} ${errText}`);
+          }
           // Fall through to SMTP fallback below
         }
       }
@@ -963,50 +994,76 @@ export class FollowupEngine {
         .replace(/\{\{lastName\}\}/g, contact.lastName || '')
         .replace(/\{\{company\}\}/g, contact.company || '');
 
-      // Build threading headers
-      // Fetch the real threadId and Message-ID from Gmail for the original email
+      // Build threading headers — fetch the original message's real Message-ID from the provider
       let gmailThreadId: string | undefined;
       let originalMessageId = '';
-      
+
+      // Determine the email account provider for this campaign
+      let accountProvider: string | undefined;
+      let senderEmail: string | undefined;
+      if (campaign.emailAccountId) {
+        try {
+          const emailAccount = await storage.getEmailAccount(campaign.emailAccountId);
+          if (emailAccount?.email) senderEmail = emailAccount.email;
+          if ((emailAccount as any)?.provider) accountProvider = (emailAccount as any).provider;
+        } catch (e) {}
+      }
+      const isOutlookAccount = accountProvider === 'outlook' || accountProvider === 'microsoft';
+      const isGmailAccount = accountProvider === 'gmail' || accountProvider === 'google';
+
       if (originalMessage.providerMessageId && campaign.organizationId) {
         try {
-          // Use per-sender token resolution (same as EmailService)
-          // Resolve the correct Gmail account that sent the original email
-          let senderEmail: string | undefined;
-          if (campaign.emailAccountId) {
-            try {
-              const emailAccount = await storage.getEmailAccount(campaign.emailAccountId);
-              if (emailAccount?.email) senderEmail = emailAccount.email;
-            } catch (e) {}
-          }
-          
-          const tokenResult = await this.emailService.getGmailAccessToken(campaign.organizationId, senderEmail);
-          let accessToken = tokenResult?.token || null;
-          
-          if (accessToken) {
-            const msgResp = await fetch(
-              `https://gmail.googleapis.com/gmail/v1/users/me/messages/${originalMessage.providerMessageId}?format=metadata&metadataHeaders=Message-ID`,
-              { headers: { Authorization: `Bearer ${accessToken}` } }
-            );
-            if (msgResp.ok) {
-              const msgData = await msgResp.json() as any;
-              // Get the real Gmail threadId
-              gmailThreadId = msgData.threadId;
-              // Get the real Message-ID header
-              const msgIdHeader = (msgData.payload?.headers || []).find(
-                (h: any) => h.name.toLowerCase() === 'message-id'
+          if (isGmailAccount) {
+            // Gmail: fetch threadId and Message-ID from Gmail API
+            const tokenResult = await this.emailService.getGmailAccessToken(campaign.organizationId, senderEmail);
+            let accessToken = tokenResult?.token || null;
+
+            if (accessToken) {
+              const msgResp = await fetch(
+                `https://gmail.googleapis.com/gmail/v1/users/me/messages/${originalMessage.providerMessageId}?format=metadata&metadataHeaders=Message-ID`,
+                { headers: { Authorization: `Bearer ${accessToken}` } }
               );
-              if (msgIdHeader) {
-                originalMessageId = msgIdHeader.value;
+              if (msgResp.ok) {
+                const msgData = await msgResp.json() as any;
+                gmailThreadId = msgData.threadId;
+                const msgIdHeader = (msgData.payload?.headers || []).find(
+                  (h: any) => h.name.toLowerCase() === 'message-id'
+                );
+                if (msgIdHeader) {
+                  originalMessageId = msgIdHeader.value;
+                }
+              }
+            }
+          } else if (isOutlookAccount) {
+            // Outlook: fetch internetMessageId from Graph API for threading
+            const tokenResult = await this.getOutlookAccessToken(campaign.organizationId, senderEmail);
+            if (tokenResult) {
+              // The providerMessageId for Outlook messages is stored as "graph-{timestamp}"
+              // which is NOT a real Graph message ID. Instead, search for the original message
+              // by subject + recipient in Sent Items to get the real internetMessageId.
+              const originalSubjectClean = (originalMessage.subject || '').replace(/^(Re:\s*)+/i, '').trim();
+              const contactEmail = contact.email;
+              const filter = `subject eq '${originalSubjectClean.replace(/'/g, "''")}' and toRecipients/any(r:r/emailAddress/address eq '${contactEmail}')`;
+              const sentResp = await fetch(
+                `https://graph.microsoft.com/v1.0/me/mailFolders/sentItems/messages?$filter=${encodeURIComponent(filter)}&$select=internetMessageId,conversationId&$top=1&$orderby=sentDateTime desc`,
+                { headers: { Authorization: `Bearer ${tokenResult.token}` } }
+              );
+              if (sentResp.ok) {
+                const sentData = await sentResp.json() as any;
+                const sentMsg = sentData.value?.[0];
+                if (sentMsg?.internetMessageId) {
+                  originalMessageId = sentMsg.internetMessageId;
+                  console.log(`[Followup] Outlook threading: found original internetMessageId=${originalMessageId}`);
+                }
               }
             }
           }
         } catch (e) {
-          console.log(`[Followup] Could not fetch original Message-ID, will rely on threadId for threading`);
+          console.log(`[Followup] Could not fetch original Message-ID for threading: ${e}`);
         }
       }
 
-      console.log(`[Followup] Threading: subject="${personalizedSubject}", threadId=${gmailThreadId || 'none'}, inReplyTo=${originalMessageId || 'none'}`);
+      console.log(`[Followup] Threading: provider=${accountProvider}, subject="${personalizedSubject}", threadId=${gmailThreadId || 'none'}, inReplyTo=${originalMessageId || 'none'}`);
 
       const emailResult = await this.emailService.sendEmail(campaign.emailAccountId, {
         to: contact.email,
