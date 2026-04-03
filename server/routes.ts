@@ -9344,10 +9344,14 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   // ==================== EMAIL VERIFICATION ENDPOINTS ====================
 
   // Test EmailListVerify API connection
-  app.post('/api/email-verify/test', requireAuth, async (req, res) => {
+  app.post('/api/email-verify/test', requireAuth, async (req: any, res) => {
     try {
-      const apiKey = req.body.apiKey;
-      if (!apiKey) return res.status(400).json({ message: 'API key required' });
+      let apiKey = req.body.apiKey;
+      // If the frontend sent a masked value or empty, read the real key from superadmin org (where it's stored)
+      if (!apiKey || apiKey.startsWith('••••')) {
+        apiKey = await getEmailVerifyApiKey();
+      }
+      if (!apiKey) return res.status(400).json({ message: 'API key not configured. Enter your key and save first.' });
       const result = await checkCredits(apiKey);
       if (result.valid) {
         res.json({ success: true, credits: result.credits });
