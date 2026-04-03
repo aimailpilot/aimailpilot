@@ -9347,9 +9347,17 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   app.post('/api/email-verify/test', requireAuth, async (req: any, res) => {
     try {
       let apiKey = req.body.apiKey;
-      // If the frontend sent a masked value or empty, read the real key from superadmin org (where it's stored)
+      // If the frontend sent a masked value or empty, read the real key from DB
       if (!apiKey || apiKey.startsWith('••••')) {
+        // Try superadmin org first, then current user's org
         apiKey = await getEmailVerifyApiKey();
+        if (!apiKey) {
+          const orgId = req.user?.organizationId || req.session?.organizationId;
+          if (orgId) {
+            const settings = await storage.getApiSettings(orgId);
+            apiKey = settings.emaillistverify_api_key || null;
+          }
+        }
       }
       if (!apiKey) return res.status(400).json({ message: 'API key not configured. Enter your key and save first.' });
       const result = await checkCredits(apiKey);

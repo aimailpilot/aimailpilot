@@ -1,6 +1,6 @@
 /**
  * Email Verification Service — integrates with EmailListVerify API
- * API docs: https://app.emaillistverify.com/api
+ * API docs: https://apps.emaillistverify.com/api
  *
  * Stored as superadmin-level API key, shared across all orgs.
  */
@@ -59,12 +59,20 @@ function httpsGet(url: string, timeoutMs = 30000): Promise<{ status: number; bod
 /**
  * Get the EmailListVerify API key from superadmin org settings
  */
-export async function getEmailVerifyApiKey(): Promise<string | null> {
+export async function getEmailVerifyApiKey(orgId?: string): Promise<string | null> {
   try {
+    // Try superadmin org first
     const superAdminOrgId = await storage.getSuperAdminOrgId();
-    if (!superAdminOrgId) return null;
-    const settings = await storage.getApiSettings(superAdminOrgId);
-    return settings.emaillistverify_api_key || null;
+    if (superAdminOrgId) {
+      const settings = await storage.getApiSettings(superAdminOrgId);
+      if (settings.emaillistverify_api_key) return settings.emaillistverify_api_key;
+    }
+    // Fallback: try the provided org
+    if (orgId && orgId !== superAdminOrgId) {
+      const settings = await storage.getApiSettings(orgId);
+      if (settings.emaillistverify_api_key) return settings.emaillistverify_api_key;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -74,7 +82,7 @@ export async function getEmailVerifyApiKey(): Promise<string | null> {
  * Verify a single email address via EmailListVerify API
  */
 export async function verifySingleEmail(email: string, apiKey: string): Promise<VerifyResult> {
-  const url = `https://app.emaillistverify.com/api/verifyEmail?secret=${encodeURIComponent(apiKey)}&email=${encodeURIComponent(email)}`;
+  const url = `https://apps.emaillistverify.com/api/verifyEmail?secret=${encodeURIComponent(apiKey)}&email=${encodeURIComponent(email)}`;
   const res = await httpsGet(url);
 
   if (res.status !== 200) {
@@ -124,7 +132,7 @@ export async function verifyBatch(
  */
 export async function checkCredits(apiKey: string): Promise<{ credits: number | null; valid: boolean; raw?: string }> {
   try {
-    const url = `https://app.emaillistverify.com/api/getCredits?secret=${encodeURIComponent(apiKey)}`;
+    const url = `https://apps.emaillistverify.com/api/getCredits?secret=${encodeURIComponent(apiKey)}`;
     const res = await httpsGet(url, 10000);
     const body = res.body.trim();
 
