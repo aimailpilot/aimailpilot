@@ -16,8 +16,10 @@ import {
   Copy, ArrowRight, ChevronDown, Info, Sparkles, RefreshCw,
   Phone, Globe, MapPin, Linkedin, DollarSign, Hash, Calendar, Factory,
   Zap, BarChart3, Flame, Wand2, FileText, Bold, Italic, Underline, Link,
-  ListOrdered, AlignLeft, Code, Type, MailCheck, ShieldCheck
+  ListOrdered, AlignLeft, Code, Type, MailCheck, ShieldCheck,
+  Clock, MessageSquare, PhoneCall, Send, Target, Trophy, XOctagon, CalendarClock
 } from "lucide-react";
+import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 
@@ -68,6 +70,10 @@ interface Contact {
   // Email verification
   emailVerificationStatus?: string;
   emailVerifiedAt?: string;
+  // Pipeline
+  pipelineStage?: string;
+  nextActionDate?: string;
+  nextActionType?: string;
 }
 
 interface ContactList {
@@ -81,7 +87,7 @@ interface ContactList {
   createdAt: string;
 }
 
-type TabType = 'all' | 'unsubscribers' | 'blocklist' | 'lists';
+type TabType = 'all' | 'unsubscribers' | 'blocklist' | 'lists' | 'follow-ups';
 
 export default function ContactsManager() {
   const [contacts, setContacts] = useState<Contact[]>([]);
@@ -150,6 +156,16 @@ export default function ContactsManager() {
   const [assignListId, setAssignListId] = useState('');
   const [assignListTargetUserId, setAssignListTargetUserId] = useState('');
 
+  // Pipeline & Activity Log state
+  const [activities, setActivities] = useState<any[]>([]);
+  const [activitiesLoading, setActivitiesLoading] = useState(false);
+  const [showLogActivity, setShowLogActivity] = useState(false);
+  const [activityForm, setActivityForm] = useState({ type: 'call', outcome: '', notes: '', nextActionDate: '', nextActionType: '' });
+  const [activitySaving, setActivitySaving] = useState(false);
+  const [pipelineSaving, setPipelineSaving] = useState(false);
+  const [followUpContacts, setFollowUpContacts] = useState<any[]>([]);
+  const [followUpLoading, setFollowUpLoading] = useState(false);
+
   // Create list dialog state
   const [showCreateListDialog, setShowCreateListDialog] = useState(false);
   const [newListName, setNewListName] = useState('');
@@ -214,7 +230,7 @@ export default function ContactsManager() {
   }, []);
 
   useEffect(() => { fetchContacts(); }, [debouncedSearch, statusFilter, activeListId, activeTab, assignFilterUserId]);
-  useEffect(() => { fetchContactLists(); fetchTeamMembers(); }, []);
+  useEffect(() => { fetchContactLists(); fetchTeamMembers(); fetchFollowUps(); }, []);
 
   const fetchContacts = async () => {
     setLoading(true);
@@ -542,6 +558,80 @@ export default function ContactsManager() {
   const openDetail = (contact: Contact) => {
     setDetailContact(contact);
     setShowContactDetail(true);
+    fetchActivities(contact.id);
+  };
+
+  // Pipeline & Activity helpers
+  const PIPELINE_STAGES = [
+    { value: 'new', label: 'New', color: 'bg-gray-100 text-gray-700', icon: Target },
+    { value: 'contacted', label: 'Contacted', color: 'bg-blue-100 text-blue-700', icon: Send },
+    { value: 'interested', label: 'Interested', color: 'bg-cyan-100 text-cyan-700', icon: Flame },
+    { value: 'meeting_scheduled', label: 'Meeting Scheduled', color: 'bg-purple-100 text-purple-700', icon: CalendarClock },
+    { value: 'meeting_done', label: 'Meeting Done', color: 'bg-indigo-100 text-indigo-700', icon: CheckCircle },
+    { value: 'proposal_sent', label: 'Proposal Sent', color: 'bg-orange-100 text-orange-700', icon: FileText },
+    { value: 'won', label: 'Won', color: 'bg-emerald-100 text-emerald-700', icon: Trophy },
+    { value: 'lost', label: 'Lost', color: 'bg-red-100 text-red-700', icon: XOctagon },
+  ];
+
+  const ACTIVITY_TYPES = [
+    { value: 'call', label: 'Call', icon: PhoneCall },
+    { value: 'meeting', label: 'Meeting', icon: Users },
+    { value: 'email', label: 'Email', icon: Mail },
+    { value: 'whatsapp', label: 'WhatsApp', icon: MessageSquare },
+    { value: 'note', label: 'Note', icon: FileText },
+    { value: 'proposal', label: 'Proposal', icon: Send },
+  ];
+
+  const OUTCOMES = ['interested', 'not_interested', 'follow_up', 'no_answer', 'voicemail', 'converted', 'rejected'];
+
+  const fetchActivities = async (contactId: string) => {
+    setActivitiesLoading(true);
+    try {
+      const res = await fetch(`/api/contacts/${contactId}/activities`, { credentials: 'include' });
+      if (res.ok) setActivities(await res.json());
+    } catch { /* ignore */ }
+    setActivitiesLoading(false);
+  };
+
+  const updatePipeline = async (contactId: string, pipelineStage: string, nextActionDate?: string, nextActionType?: string) => {
+    setPipelineSaving(true);
+    try {
+      await fetch(`/api/contacts/${contactId}/pipeline`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ pipelineStage, nextActionDate: nextActionDate || undefined, nextActionType: nextActionType || undefined }),
+      });
+      if (detailContact) setDetailContact({ ...detailContact, pipelineStage, nextActionDate, nextActionType } as any);
+    } catch { /* ignore */ }
+    setPipelineSaving(false);
+  };
+
+  const logActivity = async () => {
+    if (!detailContact) return;
+    setActivitySaving(true);
+    try {
+      const res = await fetch(`/api/contacts/${detailContact.id}/activities`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify(activityForm),
+      });
+      if (res.ok) {
+        setShowLogActivity(false);
+        setActivityForm({ type: 'call', outcome: '', notes: '', nextActionDate: '', nextActionType: '' });
+        await fetchActivities(detailContact.id);
+        // Refresh contact to get updated pipeline stage
+        const cRes = await fetch(`/api/contacts/${detailContact.id}`, { credentials: 'include' });
+        if (cRes.ok) { const c = await cRes.json(); setDetailContact(c); }
+      }
+    } catch { /* ignore */ }
+    setActivitySaving(false);
+  };
+
+  const fetchFollowUps = async () => {
+    setFollowUpLoading(true);
+    try {
+      const res = await fetch('/api/contacts/follow-ups', { credentials: 'include' });
+      if (res.ok) setFollowUpContacts(await res.json());
+    } catch { /* ignore */ }
+    setFollowUpLoading(false);
   };
 
   const resetForm = () => {
@@ -1142,10 +1232,11 @@ export default function ContactsManager() {
             { key: 'unsubscribers' as TabType, label: 'Unsubscribers', count: tabCounts.unsubscribers, icon: ShieldX },
             { key: 'blocklist' as TabType, label: 'Blocklist', count: tabCounts.blocklist, icon: Ban },
             { key: 'lists' as TabType, label: 'Your lists', count: tabCounts.lists, icon: LayoutList },
+            { key: 'follow-ups' as TabType, label: 'Follow-ups', count: followUpContacts.length, icon: CalendarClock },
           ]).map((tab) => (
             <button
               key={tab.key}
-              onClick={() => { setActiveTab(tab.key); setActiveListId(null); setSelectedIds([]); setSearch(''); setStatusFilter('all'); }}
+              onClick={() => { setActiveTab(tab.key); setActiveListId(null); setSelectedIds([]); setSearch(''); setStatusFilter('all'); if (tab.key === 'follow-ups') fetchFollowUps(); }}
               className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-all -mb-[1px] ${
                 activeTab === tab.key
                   ? 'border-blue-600 text-blue-600'
@@ -1445,6 +1536,66 @@ export default function ContactsManager() {
             {renderContactsTable()}
           </div>
         )}
+
+        {/* ── Follow-ups tab ── */}
+        {activeTab === 'follow-ups' && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Today's Follow-ups</h3>
+                <p className="text-sm text-gray-500">Contacts with actions due today or overdue</p>
+              </div>
+              <Button size="sm" variant="outline" onClick={fetchFollowUps} disabled={followUpLoading}>
+                {followUpLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" /> : <RefreshCw className="h-3.5 w-3.5 mr-1.5" />}
+                Refresh
+              </Button>
+            </div>
+            {followUpLoading ? (
+              <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-gray-400" /></div>
+            ) : followUpContacts.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-20">
+                <div className="bg-gradient-to-br from-green-50 to-emerald-50 w-20 h-20 rounded-2xl flex items-center justify-center mb-5 shadow-sm">
+                  <CheckCircle className="h-10 w-10 text-emerald-400" />
+                </div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-1.5">All caught up!</h3>
+                <p className="text-sm text-gray-400">No follow-ups due today. Log activities on contacts to schedule follow-ups.</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {followUpContacts.map((c: any) => {
+                  const isOverdue = c.nextActionDate && new Date(c.nextActionDate) < new Date(new Date().toISOString().split('T')[0]);
+                  const stage = PIPELINE_STAGES.find(s => s.value === (c.pipelineStage || 'new'));
+                  return (
+                    <div key={c.id}
+                      onClick={() => openDetail(c)}
+                      className={`flex items-center gap-4 p-3 rounded-xl border cursor-pointer hover:shadow-sm transition ${isOverdue ? 'border-red-200 bg-red-50/50' : 'border-gray-200 bg-white'}`}>
+                      <Avatar className="h-9 w-9">
+                        <AvatarFallback className={`bg-gradient-to-br ${getAvatarColor(c.email)} text-white text-xs font-semibold`}>
+                          {getInitials(c.firstName, c.lastName)}
+                        </AvatarFallback>
+                      </Avatar>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium text-gray-900 truncate">{c.firstName} {c.lastName}</span>
+                          {stage && <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${stage.color}`}>{stage.label}</span>}
+                        </div>
+                        <div className="text-xs text-gray-500 truncate">{c.company ? `${c.company} · ` : ''}{c.email}</div>
+                        {c.lastRemark && <div className="text-xs text-gray-400 mt-0.5 truncate italic">"{c.lastRemark}"</div>}
+                      </div>
+                      <div className="text-right flex-shrink-0">
+                        <div className={`text-xs font-medium ${isOverdue ? 'text-red-600' : 'text-gray-600'}`}>
+                          {isOverdue ? 'Overdue' : 'Today'}
+                        </div>
+                        <div className="text-[10px] text-gray-400 capitalize">{c.nextActionType || 'follow-up'}</div>
+                        {c.nextActionDate && <div className="text-[10px] text-gray-300">{new Date(c.nextActionDate).toLocaleDateString()}</div>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* ====== DIALOGS ====== */}
@@ -1481,6 +1632,137 @@ export default function ContactsManager() {
                   </AlertDescription>
                 </Alert>
               )}
+
+              {/* Pipeline Stage */}
+              <div className="border border-gray-100 rounded-xl p-3 bg-gradient-to-br from-blue-50/30 to-white">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-[10px] text-gray-400 uppercase font-semibold tracking-wide flex items-center gap-1"><Target className="h-3 w-3" /> Pipeline Stage</div>
+                  {pipelineSaving && <Loader2 className="h-3 w-3 animate-spin text-blue-500" />}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {PIPELINE_STAGES.map(stage => (
+                    <button key={stage.value}
+                      onClick={() => updatePipeline(detailContact.id, stage.value)}
+                      className={`flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium border transition ${
+                        detailContact.pipelineStage === stage.value || (!(detailContact.pipelineStage) && stage.value === 'new')
+                          ? stage.color + ' border-current shadow-sm'
+                          : 'bg-white text-gray-400 border-gray-200 hover:bg-gray-50'
+                      }`}>
+                      <stage.icon className="h-3 w-3" />
+                      {stage.label}
+                    </button>
+                  ))}
+                </div>
+                {/* Next Action */}
+                <div className="flex items-center gap-2 mt-2 pt-2 border-t border-gray-100">
+                  <Clock className="h-3 w-3 text-gray-400" />
+                  <span className="text-[10px] text-gray-400 uppercase font-semibold">Next Action:</span>
+                  {detailContact.nextActionDate ? (
+                    <span className={`text-xs font-medium ${new Date(detailContact.nextActionDate) < new Date(new Date().toISOString().split('T')[0]) ? 'text-red-600' : 'text-gray-700'}`}>
+                      {new Date(detailContact.nextActionDate).toLocaleDateString()} — <span className="capitalize">{detailContact.nextActionType || 'follow-up'}</span>
+                    </span>
+                  ) : (
+                    <span className="text-xs text-gray-400">None scheduled</span>
+                  )}
+                </div>
+              </div>
+
+              {/* Activity Log */}
+              <div className="border border-gray-100 rounded-xl p-3 bg-gradient-to-br from-gray-50/50 to-white">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-[10px] text-gray-400 uppercase font-semibold tracking-wide flex items-center gap-1"><MessageSquare className="h-3 w-3" /> Activity Log</div>
+                  <Button variant="ghost" size="sm" className="h-6 text-[10px] px-2 text-blue-600 hover:text-blue-700"
+                    onClick={() => { setShowLogActivity(true); setActivityForm({ type: 'call', outcome: '', notes: '', nextActionDate: '', nextActionType: '' }); }}>
+                    <Plus className="h-3 w-3 mr-1" /> Log Activity
+                  </Button>
+                </div>
+
+                {/* Log Activity Form (inline) */}
+                {showLogActivity && (
+                  <div className="mb-3 p-2.5 bg-blue-50 rounded-lg border border-blue-100 space-y-2">
+                    <div className="flex gap-2">
+                      <Select value={activityForm.type} onValueChange={v => setActivityForm(f => ({ ...f, type: v }))}>
+                        <SelectTrigger className="h-8 text-xs flex-1"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {ACTIVITY_TYPES.map(t => (
+                            <SelectItem key={t.value} value={t.value} className="text-xs">{t.label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Select value={activityForm.outcome} onValueChange={v => setActivityForm(f => ({ ...f, outcome: v }))}>
+                        <SelectTrigger className="h-8 text-xs flex-1"><SelectValue placeholder="Outcome" /></SelectTrigger>
+                        <SelectContent>
+                          {OUTCOMES.map(o => (
+                            <SelectItem key={o} value={o} className="text-xs capitalize">{o.replace(/_/g, ' ')}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <Textarea
+                      placeholder="Notes / remarks..."
+                      value={activityForm.notes}
+                      onChange={e => setActivityForm(f => ({ ...f, notes: e.target.value }))}
+                      className="text-xs h-16 resize-none"
+                    />
+                    <div className="flex gap-2">
+                      <Input type="date" className="h-8 text-xs flex-1"
+                        value={activityForm.nextActionDate}
+                        onChange={e => setActivityForm(f => ({ ...f, nextActionDate: e.target.value }))}
+                        placeholder="Next follow-up date" />
+                      <Select value={activityForm.nextActionType} onValueChange={v => setActivityForm(f => ({ ...f, nextActionType: v }))}>
+                        <SelectTrigger className="h-8 text-xs flex-1"><SelectValue placeholder="Next action" /></SelectTrigger>
+                        <SelectContent>
+                          {ACTIVITY_TYPES.map(t => (
+                            <SelectItem key={t.value} value={t.value} className="text-xs">{t.label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="flex justify-end gap-2">
+                      <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setShowLogActivity(false)}>Cancel</Button>
+                      <Button size="sm" className="h-7 text-xs bg-blue-600 hover:bg-blue-700" disabled={activitySaving} onClick={logActivity}>
+                        {activitySaving ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}
+                        Save
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Activity Timeline */}
+                {activitiesLoading ? (
+                  <div className="flex justify-center py-4"><Loader2 className="h-4 w-4 animate-spin text-gray-400" /></div>
+                ) : activities.length === 0 ? (
+                  <div className="text-center py-4 text-xs text-gray-400">
+                    <MessageSquare className="h-5 w-5 mx-auto mb-1 text-gray-300" />
+                    No activities logged yet.
+                  </div>
+                ) : (
+                  <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                    {activities.slice(0, 10).map((a: any) => {
+                      const aType = ACTIVITY_TYPES.find(t => t.value === a.type);
+                      const Icon = aType?.icon || FileText;
+                      return (
+                        <div key={a.id} className="flex gap-2 p-2 rounded-lg hover:bg-gray-50 transition">
+                          <div className="flex-shrink-0 w-6 h-6 rounded-full bg-gray-100 flex items-center justify-center">
+                            <Icon className="h-3 w-3 text-gray-500" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-medium text-gray-700 capitalize">{a.type}</span>
+                              {a.outcome && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600 capitalize">{a.outcome.replace(/_/g, ' ')}</span>}
+                            </div>
+                            {a.notes && <div className="text-xs text-gray-500 mt-0.5 line-clamp-2">{a.notes}</div>}
+                            <div className="text-[10px] text-gray-300 mt-0.5">
+                              {new Date(a.createdAt).toLocaleDateString()} {new Date(a.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              {a.userFirstName && ` · ${a.userFirstName}`}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
 
               <div className="grid grid-cols-2 gap-3">
                 {[
