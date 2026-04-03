@@ -224,9 +224,10 @@ class EmailService {
 
   async sendEmail(emailAccountId: string, message: EmailMessage, orgId?: string): Promise<EmailResult> {
     try {
-      // Determine the actual sending email address and provider from the email account
+      // Determine the actual sending email address, display name, and provider from the email account
       let senderEmail: string | undefined;
       let accountProvider: string | undefined;
+      let senderDisplayName: string | undefined;
       try {
         const emailAccount = await storage.getEmailAccount(emailAccountId);
         if (emailAccount?.email) {
@@ -235,6 +236,9 @@ class EmailService {
         if ((emailAccount as any)?.provider) {
           accountProvider = (emailAccount as any).provider;
         }
+        // Get display name: smtpConfig.fromName > displayName > undefined
+        const smtpConf = emailAccount?.smtpConfig as any;
+        senderDisplayName = smtpConf?.fromName || (emailAccount as any)?.displayName || undefined;
       } catch (e) { /* ignore */ }
 
       // Route to the correct provider based on the email account's provider
@@ -307,7 +311,8 @@ class EmailService {
 
         if (tokenResult) {
           const fromEmail = senderEmail || tokenResult.email || '';
-          console.log(`[Followup] Sending follow-up via Gmail API to ${message.to} from ${fromEmail}${message.threadId ? ' (thread: ' + message.threadId + ')' : ''}`);
+          const fromFormatted = senderDisplayName ? `${senderDisplayName} <${fromEmail}>` : fromEmail;
+          console.log(`[Followup] Sending follow-up via Gmail API to ${message.to} from ${fromFormatted}${message.threadId ? ' (thread: ' + message.threadId + ')' : ''}`);
 
           // Build threading headers for in-reply-to
           const headers: Record<string, string> = {};
@@ -315,7 +320,7 @@ class EmailService {
           if (message.references) headers['References'] = message.references;
 
           const result = await sendViaGmailAPI(tokenResult.token, {
-            from: fromEmail,
+            from: fromFormatted,
             to: message.to,
             subject: message.subject,
             html: message.html,
@@ -333,11 +338,12 @@ class EmailService {
         const gmailToken = await this.getGmailAccessToken(orgId, senderEmail);
         if (gmailToken) {
           const fromEmail = senderEmail || gmailToken.email || '';
+          const fromFormatted = senderDisplayName ? `${senderDisplayName} <${fromEmail}>` : fromEmail;
           const headers: Record<string, string> = {};
           if (message.inReplyTo) headers['In-Reply-To'] = message.inReplyTo;
           if (message.references) headers['References'] = message.references;
           const result = await sendViaGmailAPI(gmailToken.token, {
-            from: fromEmail, to: message.to, subject: message.subject, html: message.html,
+            from: fromFormatted, to: message.to, subject: message.subject, html: message.html,
             headers: Object.keys(headers).length > 0 ? headers : undefined, threadId: message.threadId,
           });
           if (result.success) return result;
