@@ -121,6 +121,7 @@ export default function TemplateManager() {
   // AI email feedback state
   const [aiFeedback, setAiFeedback] = useState<string>('');
   const [aiFeedbackLoading, setAiFeedbackLoading] = useState(false);
+  const [aiFeedbackApplying, setAiFeedbackApplying] = useState(false);
   const aiFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const getAiFeedback = async (subj?: string, cont?: string) => {
@@ -144,6 +145,31 @@ export default function TemplateManager() {
       }
     } catch { /* ignore */ }
     setAiFeedbackLoading(false);
+  };
+
+  const applyAiFeedback = async () => {
+    if (!aiFeedback || aiFeedbackApplying) return;
+    setAiFeedbackApplying(true);
+    try {
+      const res = await fetch('/api/llm/generate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({
+          prompt: `You are an expert email copywriter. Rewrite this email applying the following suggestion. Return ONLY the improved HTML email body — no explanation, no markdown, no wrapping.\n\nSuggestion: ${aiFeedback}\n\nSubject: ${formSubject}\n\nCurrent email body:\n${formContent}`,
+          type: 'template', format: 'html',
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const html = data.htmlContent || data.content || '';
+        if (html) {
+          setFormContent(html);
+          pendingContentRef.current = html;
+          if (editorRef.current && editorMode === 'visual') editorRef.current.innerHTML = html;
+          setAiFeedback('');
+        }
+      }
+    } catch { /* ignore */ }
+    setAiFeedbackApplying(false);
   };
 
   // Debounced AI feedback when content changes (3s delay)
@@ -1094,12 +1120,18 @@ export default function TemplateManager() {
             {aiFeedbackLoading ? (
               <><Loader2 className="h-3 w-3 animate-spin text-amber-500" /><span className="text-xs text-amber-600">Analyzing email quality...</span></>
             ) : (
-              <><Sparkles className="h-3 w-3 text-amber-500 shrink-0" /><span className="text-xs text-amber-700">{aiFeedback}</span></>
-            )}
-            {aiFeedback && !aiFeedbackLoading && (
-              <button onClick={() => setAiFeedback('')} className="ml-auto p-0.5 hover:bg-amber-100 rounded">
-                <X className="h-3 w-3 text-amber-400" />
-              </button>
+              <>
+                <Sparkles className="h-3 w-3 text-amber-500 shrink-0" />
+                <span className="text-xs text-amber-700 flex-1">{aiFeedback}</span>
+                <button onClick={applyAiFeedback} disabled={aiFeedbackApplying}
+                  className="shrink-0 flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold bg-amber-500 hover:bg-amber-600 text-white rounded-md disabled:opacity-50 transition-colors">
+                  {aiFeedbackApplying ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wand2 className="h-3 w-3" />}
+                  Apply
+                </button>
+                <button onClick={() => setAiFeedback('')} className="shrink-0 p-0.5 hover:bg-amber-100 rounded">
+                  <X className="h-3 w-3 text-amber-400" />
+                </button>
+              </>
             )}
           </div>
         )}
