@@ -3150,19 +3150,23 @@ export default function ContactsManager() {
     const isSpecialTab = activeTab === 'unsubscribers' || activeTab === 'blocklist';
     const isAdmin = userRole === 'owner' || userRole === 'admin';
     const SortHeader = ({ col, label, icon: Icon }: { col: string; label: string; icon?: any }) => (
-      <button onClick={() => handleSort(col)} className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1 hover:text-gray-600 transition">
+      <button onClick={() => handleSort(col)} className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1 hover:text-gray-600 transition group">
         {Icon && <Icon className="h-2.5 w-2.5" />}
         {label}
-        {sortBy === col && <ArrowUpDown className={`h-2.5 w-2.5 text-blue-500 ${sortOrder === 'asc' ? '' : 'rotate-180'}`} />}
+        {sortBy === col ? (
+          <span className="text-blue-500 text-[10px] font-bold">{sortOrder === 'asc' ? '▲' : '▼'}</span>
+        ) : (
+          <ArrowUpDown className="h-2.5 w-2.5 opacity-0 group-hover:opacity-50 transition" />
+        )}
       </button>
     );
 
-    // Column layout: checkbox | contact | company+title | pipeline | phone | location | next action | last remark | assigned | actions
+    // Column layout: checkbox | contact | company | designation | pipeline | phone | location | next action | last remark | assigned | actions
     const gridCols = isSpecialTab
       ? 'grid-cols-[40px_1fr_160px_48px]'
       : isAdmin
-        ? 'grid-cols-[40px_minmax(180px,1.2fr)_minmax(140px,1fr)_110px_110px_110px_110px_minmax(100px,1fr)_70px_40px]'
-        : 'grid-cols-[40px_minmax(180px,1.2fr)_minmax(140px,1fr)_110px_110px_110px_110px_minmax(100px,1fr)_40px]';
+        ? 'grid-cols-[40px_minmax(150px,1.1fr)_minmax(120px,0.9fr)_minmax(120px,0.9fr)_100px_110px_110px_100px_minmax(90px,0.8fr)_50px_40px]'
+        : 'grid-cols-[40px_minmax(150px,1.1fr)_minmax(120px,0.9fr)_minmax(120px,0.9fr)_100px_110px_110px_100px_minmax(90px,0.8fr)_40px]';
 
     return (
       <div className="space-y-3">
@@ -3343,12 +3347,13 @@ export default function ContactsManager() {
         ) : (
           <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-x-auto">
             {/* Table Header */}
-            <div className={`grid ${gridCols} gap-2 px-4 py-2.5 border-b border-gray-100 bg-gray-50/60 min-w-[900px]`}>
+            <div className={`grid ${gridCols} gap-2 px-4 py-2.5 border-b border-gray-100 bg-gray-50/60 min-w-[1050px]`}>
               <div className="flex items-center">
                 <input type="checkbox" checked={selectedIds.length === contacts.length && contacts.length > 0} onChange={toggleSelectAll} className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600" />
               </div>
               <SortHeader col="firstName" label={isSpecialTab ? 'Email' : 'Contact'} />
               {!isSpecialTab && <SortHeader col="company" label="Company" icon={Building} />}
+              {!isSpecialTab && <SortHeader col="jobTitle" label="Designation" icon={Briefcase} />}
               {!isSpecialTab && <SortHeader col="pipelineStage" label="Pipeline" icon={Target} />}
               {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1"><Phone className="h-2.5 w-2.5" /> Phone</div>}
               {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1"><MapPin className="h-2.5 w-2.5" /> Location</div>}
@@ -3371,7 +3376,7 @@ export default function ContactsManager() {
                 <div
                   key={contact.id}
                   onClick={() => openDetail(contact)}
-                  className={`grid ${gridCols} gap-2 px-4 py-2.5 border-b border-gray-50 items-center transition-all group cursor-pointer min-w-[900px] ${
+                  className={`grid ${gridCols} gap-2 px-4 py-2.5 border-b border-gray-50 items-center transition-all group cursor-pointer min-w-[1050px] ${
                     isSelected ? 'bg-blue-50/50' : isFlagged ? 'bg-red-50/20' : 'hover:bg-gray-50/80'
                   }`}
                 >
@@ -3379,7 +3384,7 @@ export default function ContactsManager() {
                     <input type="checkbox" checked={isSelected} onChange={() => toggleSelect(contact.id)} className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600" />
                   </div>
 
-                  {/* Contact name + email */}
+                  {/* Contact name (no email — visible on click) */}
                   <div className="flex items-center gap-2.5 min-w-0">
                     {!isSpecialTab && (
                       <Avatar className="h-8 w-8 flex-shrink-0 shadow-sm">
@@ -3389,39 +3394,36 @@ export default function ContactsManager() {
                       </Avatar>
                     )}
                     <div className="min-w-0">
-                      {!isSpecialTab && (contact.firstName || contact.lastName) && (
+                      {!isSpecialTab && (contact.firstName || contact.lastName) ? (
                         <div className="text-sm font-semibold text-gray-900 truncate flex items-center gap-1.5">
                           {contact.firstName} {contact.lastName}
                           <Badge variant="outline" className={`text-[9px] font-semibold capitalize ${sc.bg} ${sc.text} border-0 shadow-none py-0 px-1.5`}>
                             <div className={`w-1 h-1 rounded-full ${sc.dot} mr-1`} />{contact.status}
                           </Badge>
+                          {contact.emailVerificationStatus && contact.emailVerificationStatus !== 'unverified' && (
+                            <span title={`Email: ${contact.emailVerificationStatus}`} className={`inline-block w-2 h-2 rounded-full shrink-0 ${
+                              contact.emailVerificationStatus === 'valid' ? 'bg-green-500' :
+                              contact.emailVerificationStatus === 'invalid' ? 'bg-red-500' :
+                              contact.emailVerificationStatus === 'risky' ? 'bg-amber-500' :
+                              contact.emailVerificationStatus === 'disposable' ? 'bg-orange-500' :
+                              contact.emailVerificationStatus === 'spamtrap' ? 'bg-red-700' : 'bg-gray-300'
+                            }`} />
+                          )}
                         </div>
+                      ) : (
+                        <div className="text-sm text-gray-900 truncate">{contact.email}</div>
                       )}
-                      <div className={`${isSpecialTab ? 'text-sm text-gray-900' : 'text-xs text-gray-400'} truncate flex items-center gap-1`}>
-                        {contact.email}
-                        {contact.emailVerificationStatus && contact.emailVerificationStatus !== 'unverified' && (
-                          <span title={`Email: ${contact.emailVerificationStatus}`} className={`inline-block w-2 h-2 rounded-full shrink-0 ${
-                            contact.emailVerificationStatus === 'valid' ? 'bg-green-500' :
-                            contact.emailVerificationStatus === 'invalid' ? 'bg-red-500' :
-                            contact.emailVerificationStatus === 'risky' ? 'bg-amber-500' :
-                            contact.emailVerificationStatus === 'disposable' ? 'bg-orange-500' :
-                            contact.emailVerificationStatus === 'spamtrap' ? 'bg-red-700' : 'bg-gray-300'
-                          }`} />
-                        )}
-                      </div>
                     </div>
                   </div>
 
-                  {/* Company + Designation */}
+                  {/* Company */}
                   {!isSpecialTab && (
-                    <div className="min-w-0">
-                      {contact.company ? (
-                        <>
-                          <div className="text-sm text-gray-700 truncate">{contact.company}</div>
-                          {contact.jobTitle && <div className="text-xs text-gray-400 truncate">{contact.jobTitle}</div>}
-                        </>
-                      ) : <span className="text-xs text-gray-300">--</span>}
-                    </div>
+                    <div className="text-sm text-gray-700 truncate min-w-0">{contact.company || <span className="text-xs text-gray-300">--</span>}</div>
+                  )}
+
+                  {/* Designation */}
+                  {!isSpecialTab && (
+                    <div className="text-xs text-gray-500 truncate min-w-0">{contact.jobTitle || <span className="text-gray-300">--</span>}</div>
                   )}
 
                   {/* Pipeline Stage (inline clickable) */}
