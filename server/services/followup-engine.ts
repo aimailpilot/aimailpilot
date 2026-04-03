@@ -2,6 +2,15 @@ import { storage } from "../storage";
 import { smtpEmailService } from "./smtp-email-service";
 import { OAuth2Client } from 'google-auth-library';
 
+/**
+ * RFC 2047 encode a subject line for MIME headers.
+ * Non-ASCII subjects must be encoded as =?UTF-8?B?<base64>?= for email headers.
+ */
+function mimeEncodeSubject(subject: string): string {
+  if (/^[\x00-\x7F]*$/.test(subject)) return subject; // All ASCII — no encoding needed
+  return '=?UTF-8?B?' + Buffer.from(subject, 'utf-8').toString('base64') + '?=';
+}
+
 // Simple email interface since we need to integrate with existing email providers
 interface EmailMessage {
   to: string;
@@ -322,7 +331,7 @@ class EmailService {
           const result = await sendViaGmailAPI(tokenResult.token, {
             from: fromFormatted,
             to: message.to,
-            subject: message.subject,
+            subject: mimeEncodeSubject(message.subject),
             html: message.html,
             headers: Object.keys(headers).length > 0 ? headers : undefined,
             threadId: message.threadId,
@@ -343,7 +352,7 @@ class EmailService {
           if (message.inReplyTo) headers['In-Reply-To'] = message.inReplyTo;
           if (message.references) headers['References'] = message.references;
           const result = await sendViaGmailAPI(gmailToken.token, {
-            from: fromFormatted, to: message.to, subject: message.subject, html: message.html,
+            from: fromFormatted, to: message.to, subject: mimeEncodeSubject(message.subject), html: message.html,
             headers: Object.keys(headers).length > 0 ? headers : undefined, threadId: message.threadId,
           });
           if (result.success) return result;

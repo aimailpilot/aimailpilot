@@ -2,6 +2,15 @@ import { storage } from '../storage';
 import { smtpEmailService, type SmtpConfig, type SendResult, getProviderDailyLimit } from './smtp-email-service';
 
 /**
+ * RFC 2047 encode a subject line for MIME headers.
+ * Non-ASCII subjects must be encoded as =?UTF-8?B?<base64>?= for email headers.
+ */
+function mimeEncodeSubject(subject: string): string {
+  if (/^[\x00-\x7F]*$/.test(subject)) return subject;
+  return '=?UTF-8?B?' + Buffer.from(subject, 'utf-8').toString('base64') + '?=';
+}
+
+/**
  * Send email via Gmail API using OAuth access token.
  * Returns SendResult compatible with SMTP service.
  */
@@ -906,7 +915,7 @@ export class CampaignEngine {
             result = await sendViaGmailAPI(accessToken, {
               from: smtpConfig?.fromName ? `${smtpConfig.fromName} <${fromEmail}>` : fromEmail,
               to: contact.email,
-              subject: personalizedSubject,
+              subject: mimeEncodeSubject(personalizedSubject),
               html: clickTrackedContent,
               headers: emailHeaders,
             });

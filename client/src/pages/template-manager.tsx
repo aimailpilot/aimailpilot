@@ -697,10 +697,33 @@ export default function TemplateManager() {
               <TbBtn icon={<Bold className="h-4 w-4" />} onClick={() => execCmd('bold')} title="Bold" />
               <TbBtn icon={<Italic className="h-4 w-4" />} onClick={() => execCmd('italic')} title="Italic" />
               <TbBtn icon={<Underline className="h-4 w-4" />} onClick={() => execCmd('underline')} title="Underline" />
+              {/* Font color */}
+              <div className="relative group">
+                <button className="p-1.5 rounded hover:bg-gray-200 text-gray-500 flex items-center gap-0" title="Font color">
+                  <span className="font-bold text-sm leading-none">A</span>
+                  <span className="block h-0.5 w-3 bg-red-500 -mt-0.5 ml-px"></span>
+                  <ChevronDown className="h-2.5 w-2.5 ml-0.5" />
+                </button>
+                <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg p-2 hidden group-hover:grid grid-cols-6 gap-1 z-50 w-36">
+                  {['#000000','#e53e3e','#dd6b20','#d69e2e','#38a169','#3182ce','#805ad5','#d53f8c','#718096','#e2e8f0'].map(color => (
+                    <button key={color} onClick={() => execCmd('foreColor', color)}
+                      className="w-5 h-5 rounded border border-gray-200 hover:scale-110 transition-transform"
+                      style={{ backgroundColor: color }} />
+                  ))}
+                </div>
+              </div>
               <TbBtn icon={<Strikethrough className="h-4 w-4" />} onClick={() => execCmd('strikeThrough')} title="Strikethrough" />
               <div className="w-px h-5 bg-gray-200 mx-1" />
               <TbBtn icon={<Link className="h-4 w-4" />} onClick={() => { const url = prompt('Enter URL:'); if (url) execCmd('createLink', url); }} title="Link" />
               <TbBtn icon={<Image className="h-4 w-4" />} onClick={() => { const url = prompt('Image URL:'); if (url) execCmd('insertImage', url); }} title="Image" />
+              <div className="w-px h-5 bg-gray-200 mx-1" />
+              {/* Font family */}
+              <select className="text-xs border-0 bg-transparent text-gray-500 cursor-pointer outline-none px-1"
+                onChange={e => execCmd('fontName', e.target.value)}>
+                <option>Sans Serif</option><option value="serif">Serif</option>
+                <option value="monospace">Monospace</option><option value="Georgia">Georgia</option>
+                <option value="Arial">Arial</option>
+              </select>
               <div className="w-px h-5 bg-gray-200 mx-1" />
               <TbBtn icon={<ListOrdered className="h-4 w-4" />} onClick={() => execCmd('insertOrderedList')} title="Numbered list" />
               <TbBtn icon={<List className="h-4 w-4" />} onClick={() => execCmd('insertUnorderedList')} title="Bullet list" />
