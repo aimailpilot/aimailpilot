@@ -512,7 +512,25 @@ export class CampaignEngine {
         console.log(`[CampaignEngine] Campaign ${campaignId} contact filtering: ${beforeFilterCount} loaded, ${bouncedContacts.length} bounced (${bouncedContacts.map(c => c.email).join(', ')}), ${unsubscribedContacts.length} unsubscribed, ${contacts.length} remaining`);
       }
 
-      if (contacts.length === 0) return { success: false, error: `No contacts to send to (${bouncedContacts.length} bounced, ${unsubscribedContacts.length} unsubscribed out of ${beforeFilterCount} total)` };
+      // Filter out contacts with invalid email verification status (if block_invalid is enabled)
+      let invalidEmailCount = 0;
+      try {
+        const superAdminOrgId = await storage.getSuperAdminOrgId();
+        if (superAdminOrgId) {
+          const elvSettings = await storage.getApiSettings(superAdminOrgId);
+          if (elvSettings.emaillistverify_block_invalid === 'true') {
+            const blockedStatuses = new Set(['invalid', 'disposable', 'spamtrap']);
+            const beforeVerifyFilter = contacts.length;
+            contacts = contacts.filter((c: any) => !blockedStatuses.has(c.emailVerificationStatus));
+            invalidEmailCount = beforeVerifyFilter - contacts.length;
+            if (invalidEmailCount > 0) {
+              console.log(`[CampaignEngine] Campaign ${campaignId}: skipped ${invalidEmailCount} contacts with invalid/disposable/spamtrap email verification status`);
+            }
+          }
+        }
+      } catch (e) { /* non-critical, continue sending */ }
+
+      if (contacts.length === 0) return { success: false, error: `No contacts to send to (${bouncedContacts.length} bounced, ${unsubscribedContacts.length} unsubscribed, ${invalidEmailCount} invalid email out of ${beforeFilterCount} total)` };
 
       // ===== CRITICAL FIX: Skip contacts that already have messages for this campaign/step =====
       // This prevents duplicate sends when resuming a paused campaign

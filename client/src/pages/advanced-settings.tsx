@@ -5,9 +5,9 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { 
-  Brain, Key, Zap, CheckCircle2, XCircle, Loader2, 
+  Brain, Key, Zap, CheckCircle2, XCircle, Loader2,
   Eye, EyeOff, Send, Sparkles, Server, Shield, ExternalLink,
-  AlertTriangle, Info, RefreshCw, Copy, Mail, LogIn, Globe
+  AlertTriangle, Info, RefreshCw, Copy, Mail, LogIn, Globe, MailCheck
 } from "lucide-react";
 import { FaGoogle, FaMicrosoft } from "react-icons/fa";
 
@@ -76,6 +76,15 @@ export default function AdvancedSettings() {
   const [elasticTesting, setElasticTesting] = useState(false);
   const [elasticSaving, setElasticSaving] = useState(false);
 
+  // EmailListVerify state
+  const [elvApiKey, setElvApiKey] = useState('');
+  const [showElvKey, setShowElvKey] = useState(false);
+  const [elvSaving, setElvSaving] = useState(false);
+  const [elvTesting, setElvTesting] = useState(false);
+  const [elvTestResult, setElvTestResult] = useState<{ success: boolean; message: string; credits?: number } | null>(null);
+  const [elvAutoVerify, setElvAutoVerify] = useState(false);
+  const [elvBlockInvalid, setElvBlockInvalid] = useState(true);
+
   // Loading state
   const [loading, setLoading] = useState(true);
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
@@ -114,6 +123,10 @@ export default function AdvancedSettings() {
           microsoft_oauth_client_id: data.microsoft_oauth_client_id || '',
           microsoft_oauth_client_secret: data.microsoft_oauth_client_secret || '',
         });
+        // EmailListVerify
+        setElvApiKey(data.emaillistverify_api_key || '');
+        setElvAutoVerify(data.emaillistverify_auto_verify === 'true');
+        setElvBlockInvalid(data.emaillistverify_block_invalid !== 'false');
         // Check if OAuth is configured
         if (data.google_oauth_client_id) {
           setGoogleOAuthConfigured(true);
@@ -268,6 +281,54 @@ export default function AdvancedSettings() {
       setElasticTestResult({ success: false, message: 'Failed to connect to server' });
     } finally {
       setElasticTesting(false);
+    }
+  };
+
+  const saveElvSettings = async () => {
+    setElvSaving(true);
+    setSaveSuccess(null);
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          emaillistverify_api_key: elvApiKey,
+          emaillistverify_auto_verify: elvAutoVerify ? 'true' : 'false',
+          emaillistverify_block_invalid: elvBlockInvalid ? 'true' : 'false',
+        }),
+      });
+      if (res.ok) {
+        setSaveSuccess('elv');
+        setTimeout(() => setSaveSuccess(null), 3000);
+      }
+    } catch (e) {
+      console.error('Failed to save EmailListVerify settings:', e);
+    } finally {
+      setElvSaving(false);
+    }
+  };
+
+  const testElvConnection = async () => {
+    setElvTesting(true);
+    setElvTestResult(null);
+    try {
+      const res = await fetch('/api/email-verify/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ apiKey: elvApiKey }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setElvTestResult({ success: true, message: `Connected! Credits remaining: ${data.credits ?? 'unknown'}`, credits: data.credits });
+      } else {
+        setElvTestResult({ success: false, message: data.message || 'Connection failed' });
+      }
+    } catch (e) {
+      setElvTestResult({ success: false, message: 'Failed to connect to server' });
+    } finally {
+      setElvTesting(false);
     }
   };
 
@@ -913,6 +974,91 @@ export default function AdvancedSettings() {
         </CardContent>
       </Card>
 
+      {/* ==================== EMAIL VERIFICATION ==================== */}
+      <Card className="border-gray-200 shadow-sm">
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <MailCheck className="h-5 w-5 text-emerald-600" /> Email Verification (EmailListVerify)
+          </CardTitle>
+          <CardDescription>
+            Verify email addresses before sending campaigns. API key is shared across all organizations.
+            <a href="https://app.emaillistverify.com/api" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline ml-1 inline-flex items-center gap-1">
+              API Docs <ExternalLink className="h-3 w-3" />
+            </a>
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* API Key */}
+          <div className="space-y-2">
+            <Label htmlFor="elv-api-key" className="text-sm font-medium">API Key</Label>
+            <div className="relative">
+              <Input
+                id="elv-api-key"
+                type={showElvKey ? 'text' : 'password'}
+                value={elvApiKey}
+                onChange={(e) => setElvApiKey(e.target.value)}
+                placeholder="Enter your EmailListVerify API key"
+                className="pr-10"
+              />
+              <button
+                onClick={() => setShowElvKey(!showElvKey)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+              >
+                {showElvKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+            </div>
+            <p className="text-xs text-gray-500">Get your API key from <a href="https://app.emaillistverify.com/api" target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">emaillistverify.com/api</a></p>
+          </div>
+
+          {/* Options */}
+          <div className="flex flex-col gap-3 p-3 bg-gray-50 rounded-lg border border-gray-100">
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input type="checkbox" checked={elvAutoVerify} onChange={(e) => setElvAutoVerify(e.target.checked)}
+                className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500" />
+              <div>
+                <span className="text-sm font-medium text-gray-700">Auto-verify on import</span>
+                <p className="text-xs text-gray-500">Automatically verify emails when contacts are imported (for lists under 500 contacts)</p>
+              </div>
+            </label>
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input type="checkbox" checked={elvBlockInvalid} onChange={(e) => setElvBlockInvalid(e.target.checked)}
+                className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500" />
+              <div>
+                <span className="text-sm font-medium text-gray-700">Block sending to invalid emails</span>
+                <p className="text-xs text-gray-500">Skip contacts with "invalid", "disposable", or "spamtrap" status during campaign send</p>
+              </div>
+            </label>
+          </div>
+
+          {/* Test Result */}
+          {elvTestResult && (
+            <div className={`flex items-center gap-2 p-3 rounded-lg border text-sm ${
+              elvTestResult.success ? 'bg-green-50 border-green-200 text-green-700' : 'bg-red-50 border-red-200 text-red-700'
+            }`}>
+              {elvTestResult.success ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
+              {elvTestResult.message}
+            </div>
+          )}
+
+          {/* Actions */}
+          <div className="flex items-center gap-3 pt-2">
+            <Button onClick={saveElvSettings} disabled={elvSaving} className="bg-emerald-600 hover:bg-emerald-700">
+              {elvSaving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Shield className="h-4 w-4 mr-2" />}
+              Save Settings
+            </Button>
+            <Button variant="outline" onClick={testElvConnection} disabled={elvTesting || !elvApiKey}>
+              {elvTesting ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Zap className="h-4 w-4 mr-2" />}
+              Test Connection
+            </Button>
+            {saveSuccess === 'elv' && (
+              <span className="text-sm text-green-600 flex items-center gap-1">
+                <CheckCircle2 className="h-4 w-4" /> Saved!
+              </span>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
       {/* ==================== INTEGRATION STATUS ==================== */}
       <Card className="border-gray-200 shadow-sm">
         <CardHeader>
@@ -965,6 +1111,25 @@ export default function AdvancedSettings() {
                   <span><strong>High Volume</strong> - Supports high-volume sending</span>
                 </li>
               </ul>
+            <div className="space-y-3">
+              <h4 className="font-medium text-gray-800 flex items-center gap-2">
+                <MailCheck className="h-4 w-4 text-emerald-600" /> EmailListVerify is used in:
+              </h4>
+              <ul className="space-y-2 text-sm text-gray-600">
+                <li className="flex items-center gap-2">
+                  <Shield className="h-3.5 w-3.5 text-emerald-500" />
+                  <span><strong>Contact Verification</strong> - Verify emails on import or on-demand</span>
+                </li>
+                <li className="flex items-center gap-2">
+                  <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />
+                  <span><strong>Campaign Protection</strong> - Block invalid/disposable emails from sending</span>
+                </li>
+                <li className="flex items-center gap-2">
+                  <MailCheck className="h-3.5 w-3.5 text-blue-500" />
+                  <span><strong>Contact Manager</strong> - Verification badges and bulk verify actions</span>
+                </li>
+              </ul>
+            </div>
             </div>
           </div>
         </CardContent>

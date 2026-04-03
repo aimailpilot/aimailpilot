@@ -16,7 +16,7 @@ import {
   Copy, ArrowRight, ChevronDown, Info, Sparkles, RefreshCw,
   Phone, Globe, MapPin, Linkedin, DollarSign, Hash, Calendar, Factory,
   Zap, BarChart3, Flame, Wand2, FileText, Bold, Italic, Underline, Link,
-  ListOrdered, AlignLeft, Code, Type
+  ListOrdered, AlignLeft, Code, Type, MailCheck, ShieldCheck
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -65,6 +65,9 @@ interface Contact {
   emailRatingGrade?: string;
   emailRatingDetails?: any;
   emailRatingUpdatedAt?: string;
+  // Email verification
+  emailVerificationStatus?: string;
+  emailVerifiedAt?: string;
 }
 
 interface ContactList {
@@ -100,6 +103,10 @@ export default function ContactsManager() {
   // Email rating state
   const [ratingLoading, setRatingLoading] = useState<string | null>(null); // contactId or 'batch'
   const [batchRatingProgress, setBatchRatingProgress] = useState<{ processed: number; total: number } | null>(null);
+
+  // Email verification state
+  const [verifyLoading, setVerifyLoading] = useState(false);
+  const [verifyResult, setVerifyResult] = useState<{ total: number; verified: number; invalid: number; risky: number } | null>(null);
 
   // Active tab
   const [activeTab, setActiveTab] = useState<TabType>('all');
@@ -392,6 +399,32 @@ export default function ContactsManager() {
     setSelectedIds([]);
     await fetchContacts();
     await fetchContactLists();
+  };
+
+  // Verify selected contacts or current list
+  const handleVerifyEmails = async (mode: 'selected' | 'list' | 'all') => {
+    if (verifyLoading) return;
+    setVerifyLoading(true);
+    setVerifyResult(null);
+    try {
+      if (mode === 'selected' && selectedIds.length > 0) {
+        const res = await fetch('/api/contacts/verify', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+          body: JSON.stringify({ contactIds: selectedIds }),
+        });
+        if (res.ok) { setVerifyResult(await res.json()); await fetchContacts(); }
+        else { const err = await res.json(); alert(err.message || 'Verification failed'); }
+      } else {
+        const res = await fetch('/api/contacts/verify-list', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+          body: JSON.stringify({ listId: mode === 'list' ? activeListId : null, statusFilter: 'unverified' }),
+        });
+        if (res.ok) { setVerifyResult(await res.json()); await fetchContacts(); }
+        else { const err = await res.json(); alert(err.message || 'Verification failed'); }
+      }
+    } catch (e) { alert('Failed to verify emails'); }
+    setVerifyLoading(false);
+    setTimeout(() => setVerifyResult(null), 5000);
   };
 
   // Quick Send Email
@@ -1065,6 +1098,11 @@ export default function ContactsManager() {
                 }}>
                   <Sparkles className="h-4 w-4 mr-2 text-purple-500" /> {ratingLoading === 'batch-ai' ? 'AI Scoring...' : 'AI Rate (Azure OpenAI)'}
                 </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={() => handleVerifyEmails(selectedIds.length > 0 ? 'selected' : activeListId ? 'list' : 'all')} disabled={verifyLoading}>
+                  <MailCheck className="h-4 w-4 mr-2 text-emerald-500" />
+                  {verifyLoading ? 'Verifying...' : selectedIds.length > 0 ? `Verify Selected (${selectedIds.length})` : activeListId ? 'Verify This List' : 'Verify All Unverified'}
+                </DropdownMenuItem>
                 {selectedIds.length > 0 && (
                   <>
                     <DropdownMenuSeparator />
@@ -1077,6 +1115,25 @@ export default function ContactsManager() {
             </DropdownMenu>
           </div>
         </div>
+
+        {/* Verification result/progress banner */}
+        {(verifyLoading || verifyResult) && (
+          <div className={`mx-4 mt-2 px-4 py-2 rounded-lg border text-sm flex items-center gap-2 ${
+            verifyLoading ? 'bg-blue-50 border-blue-200 text-blue-700' : 'bg-emerald-50 border-emerald-200 text-emerald-700'
+          }`}>
+            {verifyLoading ? (
+              <><Loader2 className="h-4 w-4 animate-spin" /> Verifying emails... This may take a while (1 email/sec)</>
+            ) : verifyResult && (
+              <>
+                <ShieldCheck className="h-4 w-4" />
+                Verified {verifyResult.total} emails: <strong className="text-green-600">{verifyResult.verified} valid</strong>,
+                <strong className="text-red-600">{verifyResult.invalid} invalid</strong>,
+                <strong className="text-amber-600">{verifyResult.risky} risky</strong>
+                <button onClick={() => setVerifyResult(null)} className="ml-auto text-emerald-400 hover:text-emerald-600"><X className="h-3.5 w-3.5" /></button>
+              </>
+            )}
+          </div>
+        )}
 
         {/* ── Tabs ── */}
         <div className="flex items-center border-b border-gray-200">
@@ -1439,6 +1496,7 @@ export default function ContactsManager() {
                   { label: 'Seniority', value: detailContact.seniority, icon: TrendingUp },
                   { label: 'Department', value: detailContact.department, icon: Users },
                   { label: 'Email Status', value: detailContact.emailStatus, icon: Mail },
+                  { label: 'Email Verified', value: detailContact.emailVerificationStatus && detailContact.emailVerificationStatus !== 'unverified' ? `${detailContact.emailVerificationStatus}${detailContact.emailVerifiedAt ? ' (' + new Date(detailContact.emailVerifiedAt).toLocaleDateString() + ')' : ''}` : null, icon: MailCheck },
                 ].filter(f => f.value).map((field, i) => (
                   <div key={i} className="flex items-start gap-2 p-2.5 bg-gray-50 rounded-lg">
                     <field.icon className="h-3.5 w-3.5 text-gray-400 mt-0.5" />
@@ -2965,8 +3023,17 @@ export default function ContactsManager() {
                           )}
                         </div>
                       )}
-                      <div className={`${isSpecialTab ? 'text-sm text-gray-900' : 'text-xs text-gray-400'} truncate`}>
+                      <div className={`${isSpecialTab ? 'text-sm text-gray-900' : 'text-xs text-gray-400'} truncate flex items-center gap-1`}>
                         {contact.email}
+                        {contact.emailVerificationStatus && contact.emailVerificationStatus !== 'unverified' && (
+                          <span title={`Email: ${contact.emailVerificationStatus}`} className={`inline-block w-2 h-2 rounded-full shrink-0 ${
+                            contact.emailVerificationStatus === 'valid' ? 'bg-green-500' :
+                            contact.emailVerificationStatus === 'invalid' ? 'bg-red-500' :
+                            contact.emailVerificationStatus === 'risky' ? 'bg-amber-500' :
+                            contact.emailVerificationStatus === 'disposable' ? 'bg-orange-500' :
+                            contact.emailVerificationStatus === 'spamtrap' ? 'bg-red-700' : 'bg-gray-300'
+                          }`} />
+                        )}
                       </div>
                     </div>
                   </div>

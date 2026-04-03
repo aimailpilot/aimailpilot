@@ -9,7 +9,8 @@
       "Bash(cmd.exe /c \"npm run check\")",
       "Bash(cmd.exe /c \"where npm\")",
       "Bash(powershell.exe -Command \"npx tsc --noEmit\")",
-      "Bash(powershell.exe -Command \"Get-Command node -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source\")"
+      "Bash(powershell.exe -Command \"Get-Command node -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source\")",
+      "WebFetch(domain:app.emaillistverify.com)"
     ]
   }
 }

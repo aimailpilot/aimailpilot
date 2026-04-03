@@ -806,6 +806,11 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_lead_status ON contacts(l
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_unsubscribed ON contacts(unsubscribed)`); } catch (e) {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_bounce ON contacts(bounceType)`); } catch (e) {}
 
+// Email verification columns
+try { db.exec(`ALTER TABLE contacts ADD COLUMN emailVerificationStatus TEXT DEFAULT 'unverified'`); } catch (e) {} // unverified, valid, invalid, risky, disposable, spamtrap
+try { db.exec(`ALTER TABLE contacts ADD COLUMN emailVerifiedAt TEXT`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_verification ON contacts(emailVerificationStatus)`); } catch (e) {}
+
 // Global Suppression List table
 db.exec(`
   CREATE TABLE IF NOT EXISTS suppression_list (

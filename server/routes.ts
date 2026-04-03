@@ -10,6 +10,7 @@ import { gmailReplyTracker } from "./services/gmail-reply-tracker";
 import { outlookReplyTracker } from "./services/outlook-reply-tracker";
 import { calculateContactRating, batchRecalculateRatings } from "./services/email-rating-engine";
 import { classifyReply, classifyBounce } from "./services/reply-classifier";
+import { verifySingleEmail, verifyBatch, checkCredits, getEmailVerifyApiKey } from "./services/email-verifier";
 import { OAuth2Client } from 'google-auth-library';
 
 
@@ -3190,6 +3191,43 @@ Which account should I use and why? If I need to split across accounts, provide 
   });
 
   // Campaign actions: send, pause, resume, stop, schedule
+  // Pre-send email verification check — returns counts of invalid/unverified contacts in a campaign
+  app.get('/api/campaigns/:id/verification-check', requireAuth, async (req: any, res) => {
+    try {
+      const campaign = await storage.getCampaign(req.params.id);
+      if (!campaign) return res.status(404).json({ message: 'Campaign not found' });
+      const contacts = await storage.getCampaignContacts(req.params.id);
+      const db = (storage as any).db || require('./db').db;
+      const contactIds = contacts.map((c: any) => c.id);
+      if (contactIds.length === 0) return res.json({ total: 0, unverified: 0, invalid: 0, risky: 0, valid: 0 });
+      const placeholders = contactIds.map(() => '?').join(',');
+      const rows = db.prepare(`SELECT emailVerificationStatus, COUNT(*) as count FROM contacts WHERE id IN (${placeholders}) GROUP BY emailVerificationStatus`).all(...contactIds);
+      const counts: Record<string, number> = {};
+      for (const row of rows) counts[row.emailVerificationStatus || 'unverified'] = row.count;
+      // Check if superadmin has block_invalid enabled
+      const apiKey = await getEmailVerifyApiKey();
+      let blockInvalid = false;
+      if (apiKey) {
+        const superAdminOrgId = await storage.getSuperAdminOrgId();
+        if (superAdminOrgId) {
+          const settings = await storage.getApiSettings(superAdminOrgId);
+          blockInvalid = settings.emaillistverify_block_invalid === 'true';
+        }
+      }
+      res.json({
+        total: contactIds.length,
+        unverified: counts['unverified'] || counts[''] || 0,
+        invalid: (counts['invalid'] || 0) + (counts['disposable'] || 0) + (counts['spamtrap'] || 0),
+        risky: counts['risky'] || 0,
+        valid: counts['valid'] || 0,
+        hasApiKey: !!apiKey,
+        blockInvalid,
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
   app.post('/api/campaigns/:id/send', async (req: any, res) => {
     try {
       // Detect public URL from the incoming request for tracking links
@@ -9195,6 +9233,139 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   } catch (e) {
     console.error('[ReplyTracker] Failed to start auto-check on startup:', e);
   }
+
+  // ==================== EMAIL VERIFICATION ENDPOINTS ====================
+
+  // Test EmailListVerify API connection
+  app.post('/api/email-verify/test', requireAuth, async (req, res) => {
+    try {
+      const apiKey = req.body.apiKey;
+      if (!apiKey) return res.status(400).json({ message: 'API key required' });
+      const result = await checkCredits(apiKey);
+      if (result.valid) {
+        res.json({ success: true, credits: result.credits });
+      } else {
+        res.status(400).json({ message: 'Invalid API key or connection failed' });
+      }
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || 'Connection test failed' });
+    }
+  });
+
+  // Get verification stats for current org
+  app.get('/api/email-verify/stats', requireAuth, async (req, res) => {
+    try {
+      const orgId = req.session.organizationId!;
+      const db = (storage as any).db || require('./db').db;
+      const stats = db.prepare(`
+        SELECT emailVerificationStatus, COUNT(*) as count
+        FROM contacts WHERE organizationId = ?
+        GROUP BY emailVerificationStatus
+      `).all(orgId);
+      const apiKey = await getEmailVerifyApiKey();
+      let credits = null;
+      if (apiKey) {
+        const creditResult = await checkCredits(apiKey);
+        credits = creditResult.credits;
+      }
+      res.json({ stats, credits, hasApiKey: !!apiKey });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Verify specific contacts (by IDs)
+  app.post('/api/contacts/verify', requireAuth, async (req, res) => {
+    try {
+      const orgId = req.session.organizationId!;
+      const { contactIds } = req.body;
+      if (!contactIds || !Array.isArray(contactIds) || contactIds.length === 0) {
+        return res.status(400).json({ message: 'contactIds array required' });
+      }
+      const apiKey = await getEmailVerifyApiKey();
+      if (!apiKey) return res.status(400).json({ message: 'EmailListVerify API key not configured. Ask your admin to add it in SuperAdmin > Advanced Settings.' });
+
+      // Fetch contacts
+      const db = (storage as any).db || require('./db').db;
+      const placeholders = contactIds.map(() => '?').join(',');
+      const contacts = db.prepare(`SELECT id, email FROM contacts WHERE id IN (${placeholders}) AND organizationId = ?`).all(...contactIds, orgId);
+
+      if (contacts.length === 0) return res.status(404).json({ message: 'No contacts found' });
+
+      const emails = contacts.map((c: any) => ({ contactId: c.id, email: c.email }));
+      const now = new Date().toISOString();
+
+      // Verify in batch with progress
+      const results = await verifyBatch(emails, apiKey);
+
+      // Update contacts in DB
+      const updateStmt = db.prepare(`UPDATE contacts SET emailVerificationStatus = ?, emailVerifiedAt = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`);
+      let verified = 0, invalid = 0, risky = 0;
+      for (const [contactId, result] of results) {
+        updateStmt.run(result.status, now, now, contactId, orgId);
+        if (result.status === 'valid') verified++;
+        else if (result.status === 'invalid' || result.status === 'disposable' || result.status === 'spamtrap') invalid++;
+        else if (result.status === 'risky') risky++;
+      }
+
+      res.json({ total: results.size, verified, invalid, risky });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || 'Verification failed' });
+    }
+  });
+
+  // Verify all contacts in a list
+  app.post('/api/contacts/verify-list', requireAuth, async (req, res) => {
+    try {
+      const orgId = req.session.organizationId!;
+      const { listId, statusFilter } = req.body; // statusFilter: 'unverified' | 'all'
+      const apiKey = await getEmailVerifyApiKey();
+      if (!apiKey) return res.status(400).json({ message: 'EmailListVerify API key not configured. Ask your admin to add it in SuperAdmin > Advanced Settings.' });
+
+      const db = (storage as any).db || require('./db').db;
+      let contacts;
+      if (listId) {
+        const filter = statusFilter === 'all' ? '' : "AND (emailVerificationStatus = 'unverified' OR emailVerificationStatus IS NULL)";
+        contacts = db.prepare(`SELECT id, email FROM contacts WHERE listId = ? AND organizationId = ? ${filter}`).all(listId, orgId);
+      } else {
+        const filter = statusFilter === 'all' ? '' : "AND (emailVerificationStatus = 'unverified' OR emailVerificationStatus IS NULL)";
+        contacts = db.prepare(`SELECT id, email FROM contacts WHERE organizationId = ? ${filter}`).all(orgId);
+      }
+
+      if (contacts.length === 0) return res.json({ total: 0, verified: 0, invalid: 0, risky: 0, message: 'No contacts to verify' });
+      if (contacts.length > 5000) return res.status(400).json({ message: `Too many contacts (${contacts.length}). Please verify by list or in smaller batches (max 5000).` });
+
+      const emails = contacts.map((c: any) => ({ contactId: c.id, email: c.email }));
+      const now = new Date().toISOString();
+      const results = await verifyBatch(emails, apiKey);
+
+      const updateStmt = db.prepare(`UPDATE contacts SET emailVerificationStatus = ?, emailVerifiedAt = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`);
+      let verified = 0, invalid = 0, risky = 0;
+      for (const [contactId, result] of results) {
+        updateStmt.run(result.status, now, now, contactId, orgId);
+        if (result.status === 'valid') verified++;
+        else if (result.status === 'invalid' || result.status === 'disposable' || result.status === 'spamtrap') invalid++;
+        else if (result.status === 'risky') risky++;
+      }
+
+      res.json({ total: results.size, verified, invalid, risky });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message || 'Verification failed' });
+    }
+  });
+
+  // Get verification status for a single contact
+  app.get('/api/contacts/:id/verification', requireAuth, async (req, res) => {
+    try {
+      const orgId = req.session.organizationId!;
+      const db = (storage as any).db || require('./db').db;
+      const contact = db.prepare(`SELECT emailVerificationStatus, emailVerifiedAt FROM contacts WHERE id = ? AND organizationId = ?`).get(req.params.id, orgId);
+      if (!contact) return res.status(404).json({ message: 'Contact not found' });
+      res.json(contact);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
 
   const httpServer = createServer(app);
   return httpServer;

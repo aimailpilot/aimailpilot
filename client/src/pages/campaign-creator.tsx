@@ -459,6 +459,21 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
         });
       }
 
+      // Pre-send verification check — warn about invalid emails
+      try {
+        const vCheckRes = await fetch(`/api/campaigns/${campaign.id}/verification-check`, { credentials: 'include' });
+        if (vCheckRes.ok) {
+          const vc = await vCheckRes.json();
+          if (vc.invalid > 0 && vc.blockInvalid) {
+            const proceed = confirm(`${vc.invalid} contacts have invalid/disposable emails and will be skipped during sending.\n\n${vc.unverified > 0 ? `${vc.unverified} contacts are unverified.\n` : ''}Continue?`);
+            if (!proceed) { setSending(false); return; }
+          } else if (vc.invalid > 0) {
+            const proceed = confirm(`Warning: ${vc.invalid} contacts have invalid/disposable emails.\n${vc.unverified > 0 ? `${vc.unverified} contacts are unverified.\n` : ''}\nContinue sending?`);
+            if (!proceed) { setSending(false); return; }
+          }
+        }
+      } catch { /* non-critical */ }
+
       if (schedule.enabled && schedule.date) {
         const dt = new Date(schedule.date);
         const [h, m] = schedule.time.split(':').map(Number);

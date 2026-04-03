@@ -137,6 +137,46 @@ This file tracks features that are confirmed working in production.
 - See `DATABASE-RECOVERY.md` for full restore procedure
 - **Do not touch**: database initialization code in `server/storage.ts` (lines 53–137), the `autoRestoreBackup` function, or the backup mechanism
 
+### 20. Campaign Engine Improvements
+- Step delays are now relative to previous step's sentAt (not step 0)
+- Schedule shifting via `getNextValidSendTime()` for blocked days/hours
+- Reply re-check on resume using pre-loaded `repliedContactIds` set
+- DST-aware timezone using IANA names with `toLocaleString()` fallback
+- ±30s jitter on delay between emails
+- **Do not touch**: `evaluateFollowupTrigger`, `getNextValidSendTime`, `checkSendingWindow` in `server/services/followup-engine.ts`; `getUserLocalTime`, `checkSendingWindow`, `msUntilNextSendWindow`, reply re-check logic in `server/services/campaign-engine.ts`
+
+### 21. Follow-up Email Threading (Outlook)
+- Follow-up emails on Outlook appear in the same thread using In-Reply-To/References headers via Graph API `internetMessageHeaders`
+- Retry-without-headers fallback for personal accounts that reject custom headers
+- Gmail threading was already working via existing thread support
+- **Do not touch**: Outlook threading block in `executeFollowup()` and `sendEmail()` in `server/services/followup-engine.ts`
+
+### 22. Follow-up Personalization Parity
+- Follow-up steps now have full 22+ personalization variables (same as Step 0)
+- Dynamic case-insensitive regex replacement including custom fields
+- Previously only 6 hardcoded variables were available in follow-ups
+- **Do not touch**: `personalData` object and `personalizeText()` function in `server/services/followup-engine.ts`
+
+### 23. Follow-up Sender Display Name
+- Follow-up emails show proper display name (e.g., "Bharat AI Innovation") not raw email address
+- Extracted from `smtpConfig.fromName` or `emailAccount.displayName`
+- **Do not touch**: `senderDisplayName` extraction in `sendEmail()` in `server/services/followup-engine.ts`
+
+### 24. Email Subject Encoding (RFC 2047)
+- Special characters (smart quotes, em dashes) in subjects no longer garble as "Ã¢Â€Â™"
+- `mimeEncodeSubject()` applies `=?UTF-8?B?<base64>?=` encoding at call sites
+- Applied in both `campaign-engine.ts` and `followup-engine.ts`
+- **Do not touch**: `mimeEncodeSubject()` in `server/services/campaign-engine.ts` and `server/services/followup-engine.ts`
+
+### 25. Template Editor Rich Text
+- Bullet points and numbered lists now work correctly in all editors
+- `onMouseDown={e => e.preventDefault()}` on toolbar buttons prevents focus loss from contentEditable
+- Tailwind list styling (`list-disc`, `list-decimal`, padding) applied to editor divs
+- Font color picker and font family selector added to template editor toolbar
+- AI email feedback bar with "Apply" button for one-click suggestion implementation
+- Clear editor boundary with rounded border on gray background
+- **Do not touch**: `TbBtn` component, `execCmd`, font color/family controls, AI feedback bar in `client/src/pages/template-manager.tsx`; same toolbar fixes in `campaign-creator.tsx`, `campaign-detail.tsx`, `contacts-manager.tsx`, `unified-inbox.tsx`
+
 ---
 
 ## General Rule
