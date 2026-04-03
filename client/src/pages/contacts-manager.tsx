@@ -166,6 +166,20 @@ export default function ContactsManager() {
   const [followUpContacts, setFollowUpContacts] = useState<any[]>([]);
   const [followUpLoading, setFollowUpLoading] = useState(false);
 
+  // Pagination & sorting
+  const [currentPage, setCurrentPage] = useState(1);
+  const [sortBy, setSortBy] = useState('createdAt');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+  const pageSize = 50;
+
+  // Advanced filters
+  const [pipelineFilter, setPipelineFilter] = useState('all');
+  const [companyFilter, setCompanyFilter] = useState('');
+  const [locationFilter, setLocationFilter] = useState('');
+  const [designationFilter, setDesignationFilter] = useState('');
+  const [filterOptions, setFilterOptions] = useState<{ companies: string[]; designations: string[]; cities: string[]; countries: string[] }>({ companies: [], designations: [], cities: [], countries: [] });
+  const [showFilters, setShowFilters] = useState(false);
+
   // Create list dialog state
   const [showCreateListDialog, setShowCreateListDialog] = useState(false);
   const [newListName, setNewListName] = useState('');
@@ -229,8 +243,8 @@ export default function ContactsManager() {
     }
   }, []);
 
-  useEffect(() => { fetchContacts(); }, [debouncedSearch, statusFilter, activeListId, activeTab, assignFilterUserId]);
-  useEffect(() => { fetchContactLists(); fetchTeamMembers(); fetchFollowUps(); }, []);
+  useEffect(() => { fetchContacts(); }, [debouncedSearch, statusFilter, activeListId, activeTab, assignFilterUserId, currentPage, sortBy, sortOrder, pipelineFilter, companyFilter, locationFilter, designationFilter]);
+  useEffect(() => { fetchContactLists(); fetchTeamMembers(); fetchFollowUps(); fetchFilterOptions(); }, []);
 
   const fetchContacts = async () => {
     setLoading(true);
@@ -253,7 +267,18 @@ export default function ContactsManager() {
       // Lead assignment filter (admin only)
       if (assignFilterUserId) params.set('assignedTo', assignFilterUserId);
 
-      params.set('limit', '200');
+      // Advanced filters
+      if (pipelineFilter && pipelineFilter !== 'all') params.set('pipelineStage', pipelineFilter);
+      if (companyFilter) params.set('company', companyFilter);
+      if (locationFilter) params.set('location', locationFilter);
+      if (designationFilter) params.set('designation', designationFilter);
+
+      // Pagination & sorting
+      params.set('limit', String(pageSize));
+      params.set('offset', String((currentPage - 1) * pageSize));
+      params.set('sortBy', sortBy);
+      params.set('sortOrder', sortOrder);
+
       const res = await fetch(`/api/contacts?${params}`, { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
@@ -601,6 +626,7 @@ export default function ContactsManager() {
         body: JSON.stringify({ pipelineStage, nextActionDate: nextActionDate || undefined, nextActionType: nextActionType || undefined }),
       });
       if (detailContact) setDetailContact({ ...detailContact, pipelineStage, nextActionDate, nextActionType } as any);
+      setContacts(prev => prev.map(c => c.id === contactId ? { ...c, pipelineStage, nextActionDate, nextActionType } as any : c));
     } catch { /* ignore */ }
     setPipelineSaving(false);
   };
@@ -633,6 +659,29 @@ export default function ContactsManager() {
     } catch { /* ignore */ }
     setFollowUpLoading(false);
   };
+
+  const fetchFilterOptions = async () => {
+    try {
+      const res = await fetch('/api/contacts/filter-options', { credentials: 'include' });
+      if (res.ok) setFilterOptions(await res.json());
+    } catch { /* ignore */ }
+  };
+
+  const handleSort = (col: string) => {
+    if (sortBy === col) { setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc'); }
+    else { setSortBy(col); setSortOrder('asc'); }
+    setCurrentPage(1);
+  };
+
+  const clearAllFilters = () => {
+    setSearch(''); setStatusFilter('all'); setPipelineFilter('all');
+    setCompanyFilter(''); setLocationFilter(''); setDesignationFilter('');
+    setAssignFilterUserId(''); setCurrentPage(1);
+  };
+
+  const hasActiveFilters = pipelineFilter !== 'all' || companyFilter || locationFilter || designationFilter;
+
+  const totalPages = Math.ceil(total / pageSize);
 
   const resetForm = () => {
     setFormEmail(''); setFormFirstName(''); setFormLastName('');
@@ -1236,7 +1285,7 @@ export default function ContactsManager() {
           ]).map((tab) => (
             <button
               key={tab.key}
-              onClick={() => { setActiveTab(tab.key); setActiveListId(null); setSelectedIds([]); setSearch(''); setStatusFilter('all'); if (tab.key === 'follow-ups') fetchFollowUps(); }}
+              onClick={() => { setActiveTab(tab.key); setActiveListId(null); setSelectedIds([]); setSearch(''); setStatusFilter('all'); setCurrentPage(1); if (tab.key === 'follow-ups') fetchFollowUps(); }}
               className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-all -mb-[1px] ${
                 activeTab === tab.key
                   ? 'border-blue-600 text-blue-600'
@@ -1310,7 +1359,7 @@ export default function ContactsManager() {
                   <div
                     key={list.id}
                     className="grid grid-cols-[1fr_100px_100px_100px_100px_48px] gap-4 px-5 py-3.5 border-b border-gray-50 items-center hover:bg-blue-50/30 cursor-pointer transition-all group"
-                    onClick={() => setActiveListId(list.id)}
+                    onClick={() => { setActiveListId(list.id); setCurrentPage(1); }}
                   >
                     <div className="flex items-center gap-3 min-w-0">
                       <div className="bg-violet-50 p-2 rounded-lg">
@@ -3096,65 +3145,70 @@ export default function ContactsManager() {
 
   function renderContactsTable() {
     const isSpecialTab = activeTab === 'unsubscribers' || activeTab === 'blocklist';
+    const isAdmin = userRole === 'owner' || userRole === 'admin';
+    const SortHeader = ({ col, label, icon: Icon }: { col: string; label: string; icon?: any }) => (
+      <button onClick={() => handleSort(col)} className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1 hover:text-gray-600 transition">
+        {Icon && <Icon className="h-2.5 w-2.5" />}
+        {label}
+        {sortBy === col && <ArrowUpDown className={`h-2.5 w-2.5 text-blue-500 ${sortOrder === 'asc' ? '' : 'rotate-180'}`} />}
+      </button>
+    );
+
+    // Column layout: checkbox | contact | company+title | pipeline | phone | location | next action | last remark | assigned | actions
+    const gridCols = isSpecialTab
+      ? 'grid-cols-[40px_1fr_160px_48px]'
+      : isAdmin
+        ? 'grid-cols-[40px_minmax(180px,1.2fr)_minmax(140px,1fr)_110px_110px_110px_110px_minmax(100px,1fr)_70px_40px]'
+        : 'grid-cols-[40px_minmax(180px,1.2fr)_minmax(140px,1fr)_110px_110px_110px_110px_minmax(100px,1fr)_40px]';
+
     return (
       <div className="space-y-3">
         {/* Search & Filter bar */}
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3 flex-1">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 flex-1">
             <div className="relative flex-1 max-w-md">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400" />
               <Input
-                placeholder="Search by name, email, company..."
-                value={search} onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search name, email, company, city, tags..."
+                value={search} onChange={(e) => { setSearch(e.target.value); setCurrentPage(1); }}
                 className="pl-9 h-9 text-sm bg-white border-gray-200"
               />
               {search && (
-                <button onClick={() => setSearch('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-300 hover:text-gray-500">
+                <button onClick={() => { setSearch(''); setCurrentPage(1); }} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-300 hover:text-gray-500">
                   <X className="h-3.5 w-3.5" />
                 </button>
               )}
             </div>
 
-            {/* Filter by Team Member (admin only) */}
-            {isAdmin && !isSpecialTab && teamMembers.length > 0 && (
-              <Select value={assignFilterUserId || '_all'} onValueChange={(v) => { setAssignFilterUserId(v === '_all' ? '' : v); setSelectedIds([]); }}>
-                <SelectTrigger className="h-9 w-[180px] text-xs border-gray-200 bg-white">
-                  <div className="flex items-center gap-1.5">
-                    <UserCheck className="h-3.5 w-3.5 text-gray-400" />
-                    <SelectValue placeholder="All Members" />
-                  </div>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="_all">All Members</SelectItem>
-                  <SelectItem value="unassigned">Unassigned</SelectItem>
-                  {teamMembers.map((m: any) => (
-                    <SelectItem key={m.userId} value={m.userId}>
-                      {m.firstName || m.email?.split('@')[0]} {m.lastName || ''}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
-
-            {/* Status Filter (for All and Lists tab only) */}
+            {/* Status Filter pills */}
             {!isSpecialTab && (
               <div className="flex items-center gap-0.5 bg-gray-100/80 rounded-lg p-0.5">
-                {(['all', 'cold', 'warm', 'hot', 'replied'] as const).map((status) => {
-                  const sc = status !== 'all' ? getStatusConfig(status) : null;
+                {(['all', 'cold', 'warm', 'hot', 'replied'] as const).map((s) => {
+                  const sc2 = s !== 'all' ? getStatusConfig(s) : null;
                   return (
-                    <button key={status} onClick={() => setStatusFilter(status)}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
-                        statusFilter === status ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                    <button key={s} onClick={() => { setStatusFilter(s); setCurrentPage(1); }}
+                      className={`flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-md transition-all ${
+                        statusFilter === s ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
                       }`}>
-                      {sc && <div className={`w-1.5 h-1.5 rounded-full ${sc.dot}`} />}
-                      <span className="capitalize">{status}</span>
+                      {sc2 && <div className={`w-1.5 h-1.5 rounded-full ${sc2.dot}`} />}
+                      <span className="capitalize">{s}</span>
                     </button>
                   );
                 })}
               </div>
             )}
+
+            {/* Filter toggle */}
+            {!isSpecialTab && (
+              <Button variant={showFilters || hasActiveFilters ? 'default' : 'outline'} size="sm" className={`h-9 text-xs ${hasActiveFilters ? 'bg-blue-600' : ''}`}
+                onClick={() => setShowFilters(!showFilters)}>
+                <Filter className="h-3.5 w-3.5 mr-1" /> Filters
+                {hasActiveFilters && <span className="ml-1 bg-white/20 px-1.5 rounded-full text-[10px]">ON</span>}
+              </Button>
+            )}
           </div>
 
+          {/* Batch actions */}
           {selectedIds.length > 0 && (
             <div className="flex items-center gap-2">
               {isAdmin && (
@@ -3171,17 +3225,69 @@ export default function ContactsManager() {
                 <Trash2 className="h-3.5 w-3.5 mr-1.5" /> Delete ({selectedIds.length})
               </Button>
               <Button variant="outline" size="sm" onClick={openSendEmailDialog} className="text-blue-600 border-blue-200 hover:bg-blue-50">
-                <Mail className="h-3.5 w-3.5 mr-1.5" /> Send Email ({selectedIds.length})
+                <Mail className="h-3.5 w-3.5 mr-1.5" /> Email ({selectedIds.length})
               </Button>
             </div>
           )}
         </div>
 
+        {/* Filter dropdowns row */}
+        {showFilters && !isSpecialTab && (
+          <div className="flex items-center gap-2 p-3 bg-gray-50 rounded-xl border border-gray-200">
+            <Select value={pipelineFilter} onValueChange={v => { setPipelineFilter(v); setCurrentPage(1); }}>
+              <SelectTrigger className="h-8 w-[140px] text-xs bg-white"><SelectValue placeholder="Pipeline" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Stages</SelectItem>
+                {PIPELINE_STAGES.map(s => <SelectItem key={s.value} value={s.value} className="text-xs">{s.label}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <Select value={companyFilter || '_all'} onValueChange={v => { setCompanyFilter(v === '_all' ? '' : v); setCurrentPage(1); }}>
+              <SelectTrigger className="h-8 w-[150px] text-xs bg-white"><SelectValue placeholder="Company" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="_all">All Companies</SelectItem>
+                {filterOptions.companies.slice(0, 50).map(c => <SelectItem key={c} value={c} className="text-xs">{c}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <Select value={designationFilter || '_all'} onValueChange={v => { setDesignationFilter(v === '_all' ? '' : v); setCurrentPage(1); }}>
+              <SelectTrigger className="h-8 w-[150px] text-xs bg-white"><SelectValue placeholder="Designation" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="_all">All Designations</SelectItem>
+                {filterOptions.designations.slice(0, 50).map(d => <SelectItem key={d} value={d} className="text-xs">{d}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <Select value={locationFilter || '_all'} onValueChange={v => { setLocationFilter(v === '_all' ? '' : v); setCurrentPage(1); }}>
+              <SelectTrigger className="h-8 w-[140px] text-xs bg-white"><SelectValue placeholder="Location" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="_all">All Locations</SelectItem>
+                {filterOptions.cities.slice(0, 30).map(c => <SelectItem key={c} value={c} className="text-xs">{c}</SelectItem>)}
+                {filterOptions.countries.slice(0, 30).map(c => <SelectItem key={`country-${c}`} value={c} className="text-xs font-medium">{c}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            {isAdmin && teamMembers.length > 0 && (
+              <Select value={assignFilterUserId || '_all'} onValueChange={(v) => { setAssignFilterUserId(v === '_all' ? '' : v); setCurrentPage(1); }}>
+                <SelectTrigger className="h-8 w-[140px] text-xs bg-white"><SelectValue placeholder="Assigned to" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="_all">All Members</SelectItem>
+                  <SelectItem value="unassigned">Unassigned</SelectItem>
+                  {teamMembers.map((m: any) => (
+                    <SelectItem key={m.userId} value={m.userId} className="text-xs">{m.firstName || m.email?.split('@')[0]}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+            {hasActiveFilters && (
+              <button onClick={clearAllFilters} className="text-xs text-red-500 hover:text-red-700 font-medium ml-auto flex items-center gap-1">
+                <X className="h-3 w-3" /> Clear all
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Search results indicator */}
         {debouncedSearch && (
           <div className="flex items-center gap-2 px-3 py-2 bg-amber-50/60 border border-amber-100 rounded-lg">
             <Search className="h-3.5 w-3.5 text-amber-500" />
-            <span className="text-xs text-amber-700">Found <strong>{contacts.length}</strong> results for "<strong>{debouncedSearch}</strong>"</span>
+            <span className="text-xs text-amber-700">Found <strong>{total}</strong> results for "<strong>{debouncedSearch}</strong>"</span>
             <button onClick={() => setSearch('')} className="ml-auto text-xs text-amber-500 hover:text-amber-700 font-medium">Clear</button>
           </div>
         )}
@@ -3206,16 +3312,16 @@ export default function ContactsManager() {
             <h3 className="text-lg font-semibold text-gray-900 mb-1.5">
               {isSpecialTab
                 ? `No ${activeTab === 'unsubscribers' ? 'unsubscribers' : 'blocked contacts'}`
-                : (debouncedSearch ? 'No matching contacts' : 'No contacts yet')
+                : (debouncedSearch || hasActiveFilters ? 'No matching contacts' : 'No contacts yet')
               }
             </h3>
             <p className="text-sm text-gray-400 mb-6 max-w-sm text-center">
               {isSpecialTab
                 ? `Great news! No contacts are ${activeTab === 'unsubscribers' ? 'unsubscribed' : 'on the blocklist'}.`
-                : (debouncedSearch ? `No contacts match "${debouncedSearch}"` : 'Import your contacts from a CSV file or add them manually')
+                : (debouncedSearch || hasActiveFilters ? 'Try adjusting your search or filters' : 'Import your contacts from a CSV file or add them manually')
               }
             </p>
-            {!isSpecialTab && !debouncedSearch && (
+            {!isSpecialTab && !debouncedSearch && !hasActiveFilters && (
               <div className="flex gap-3">
                 <Button variant="outline" onClick={() => { setShowImportDialog(true); setCsvData([]); setCsvHeaders([]); setImportResult(null); setImportListName(''); }}>
                   <Upload className="h-4 w-4 mr-2" /> Import CSV
@@ -3225,27 +3331,27 @@ export default function ContactsManager() {
                 </Button>
               </div>
             )}
+            {hasActiveFilters && (
+              <Button variant="outline" size="sm" onClick={clearAllFilters}>
+                <X className="h-3.5 w-3.5 mr-1.5" /> Clear Filters
+              </Button>
+            )}
           </div>
         ) : (
-          <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden">
+          <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-x-auto">
             {/* Table Header */}
-            <div className={`grid ${isSpecialTab
-              ? 'grid-cols-[40px_1fr_160px_48px]'
-              : isAdmin ? 'grid-cols-[40px_1fr_1fr_80px_100px_100px_100px_48px]' : 'grid-cols-[40px_1fr_1fr_80px_130px_100px_48px]'
-            } gap-3 px-4 py-2.5 border-b border-gray-100 bg-gray-50/60`}>
+            <div className={`grid ${gridCols} gap-2 px-4 py-2.5 border-b border-gray-100 bg-gray-50/60 min-w-[900px]`}>
               <div className="flex items-center">
                 <input type="checkbox" checked={selectedIds.length === contacts.length && contacts.length > 0} onChange={toggleSelectAll} className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600" />
               </div>
-              <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">
-                {isSpecialTab ? 'Email address' : 'Contact'}
-              </div>
-              {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Company</div>}
-              {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1"><BarChart3 className="h-2.5 w-2.5" /> Rating</div>}
-              {!isSpecialTab && isAdmin && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1"><UserCheck className="h-2.5 w-2.5" /> Assigned</div>}
-              {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Tags</div>}
-              <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1">
-                Created <ArrowUpDown className="h-2.5 w-2.5" />
-              </div>
+              <SortHeader col="firstName" label={isSpecialTab ? 'Email' : 'Contact'} />
+              {!isSpecialTab && <SortHeader col="company" label="Company" icon={Building} />}
+              {!isSpecialTab && <SortHeader col="pipelineStage" label="Pipeline" icon={Target} />}
+              {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1"><Phone className="h-2.5 w-2.5" /> Phone</div>}
+              {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1"><MapPin className="h-2.5 w-2.5" /> Location</div>}
+              {!isSpecialTab && <SortHeader col="nextActionDate" label="Next Action" icon={Clock} />}
+              {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1"><MessageSquare className="h-2.5 w-2.5" /> Last Remark</div>}
+              {!isSpecialTab && isAdmin && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400"><UserCheck className="h-2.5 w-2.5" /></div>}
               <div></div>
             </div>
 
@@ -3255,15 +3361,14 @@ export default function ContactsManager() {
               const isSelected = selectedIds.includes(contact.id);
               const isFlagged = contact.status === 'bounced' || contact.status === 'unsubscribed';
               const assignedMember = contact.assignedTo ? teamMembers.find((m: any) => m.userId === contact.assignedTo) : null;
+              const stage = PIPELINE_STAGES.find(s => s.value === (contact.pipelineStage || 'new'));
+              const isOverdue = contact.nextActionDate && new Date(contact.nextActionDate) < new Date(new Date().toISOString().split('T')[0]);
 
               return (
                 <div
                   key={contact.id}
                   onClick={() => openDetail(contact)}
-                  className={`grid ${isSpecialTab
-                    ? 'grid-cols-[40px_1fr_160px_48px]'
-                    : isAdmin ? 'grid-cols-[40px_1fr_1fr_80px_100px_100px_100px_48px]' : 'grid-cols-[40px_1fr_1fr_80px_130px_100px_48px]'
-                  } gap-3 px-4 py-3 border-b border-gray-50 items-center transition-all group cursor-pointer ${
+                  className={`grid ${gridCols} gap-2 px-4 py-2.5 border-b border-gray-50 items-center transition-all group cursor-pointer min-w-[900px] ${
                     isSelected ? 'bg-blue-50/50' : isFlagged ? 'bg-red-50/20' : 'hover:bg-gray-50/80'
                   }`}
                 >
@@ -3271,8 +3376,8 @@ export default function ContactsManager() {
                     <input type="checkbox" checked={isSelected} onChange={() => toggleSelect(contact.id)} className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600" />
                   </div>
 
-                  {/* Contact / Email column */}
-                  <div className="flex items-center gap-3 min-w-0">
+                  {/* Contact name + email */}
+                  <div className="flex items-center gap-2.5 min-w-0">
                     {!isSpecialTab && (
                       <Avatar className="h-8 w-8 flex-shrink-0 shadow-sm">
                         <AvatarFallback className={`bg-gradient-to-br ${getAvatarColor(contact.email)} text-white text-[11px] font-semibold`}>
@@ -3282,27 +3387,11 @@ export default function ContactsManager() {
                     )}
                     <div className="min-w-0">
                       {!isSpecialTab && (contact.firstName || contact.lastName) && (
-                        <div className="text-sm font-semibold text-gray-900 truncate flex items-center gap-2">
+                        <div className="text-sm font-semibold text-gray-900 truncate flex items-center gap-1.5">
                           {contact.firstName} {contact.lastName}
-                          {isFlagged && (
-                            <Tooltip>
-                              <TooltipTrigger>
-                                <Badge variant="outline" className={`text-[9px] font-semibold capitalize ${sc.bg} ${sc.text} border-0 shadow-none py-0 px-1.5`}>
-                                  <div className={`w-1 h-1 rounded-full ${sc.dot} mr-1`} />
-                                  {contact.status}
-                                </Badge>
-                              </TooltipTrigger>
-                              <TooltipContent>
-                                <p className="text-xs">This contact is {contact.status} and will be excluded from all campaigns</p>
-                              </TooltipContent>
-                            </Tooltip>
-                          )}
-                          {!isFlagged && (
-                            <Badge variant="outline" className={`text-[9px] font-semibold capitalize ${sc.bg} ${sc.text} border-0 shadow-none py-0 px-1.5`}>
-                              <div className={`w-1 h-1 rounded-full ${sc.dot} mr-1`} />
-                              {contact.status}
-                            </Badge>
-                          )}
+                          <Badge variant="outline" className={`text-[9px] font-semibold capitalize ${sc.bg} ${sc.text} border-0 shadow-none py-0 px-1.5`}>
+                            <div className={`w-1 h-1 rounded-full ${sc.dot} mr-1`} />{contact.status}
+                          </Badge>
                         </div>
                       )}
                       <div className={`${isSpecialTab ? 'text-sm text-gray-900' : 'text-xs text-gray-400'} truncate flex items-center gap-1`}>
@@ -3320,72 +3409,86 @@ export default function ContactsManager() {
                     </div>
                   </div>
 
-                  {/* Company (not in special tabs) */}
+                  {/* Company + Designation */}
                   {!isSpecialTab && (
                     <div className="min-w-0">
                       {contact.company ? (
                         <>
-                          <div className="text-sm text-gray-700 truncate flex items-center gap-1.5">
-                            <Building className="h-3 w-3 text-gray-400 flex-shrink-0" />
-                            {contact.company}
-                          </div>
-                          {contact.jobTitle && <div className="text-xs text-gray-400 truncate ml-4.5">{contact.jobTitle}</div>}
+                          <div className="text-sm text-gray-700 truncate">{contact.company}</div>
+                          {contact.jobTitle && <div className="text-xs text-gray-400 truncate">{contact.jobTitle}</div>}
                         </>
                       ) : <span className="text-xs text-gray-300">--</span>}
                     </div>
                   )}
 
-                  {/* Email Rating (not in special tabs) */}
+                  {/* Pipeline Stage (inline clickable) */}
                   {!isSpecialTab && (
-                    <div className="flex items-center">
-                      {contact.emailRating || contact.emailRatingGrade
-                        ? getRatingBadge(contact.emailRating, contact.emailRatingGrade)
-                        : <span className="text-[10px] text-gray-300">--</span>
-                      }
+                    <div className="flex items-center" onClick={e => e.stopPropagation()}>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <button className={`text-[10px] px-2 py-1 rounded-full font-medium ${stage?.color || 'bg-gray-100 text-gray-500'} hover:opacity-80 transition`}>
+                            {stage?.label || 'New'}
+                          </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="start" className="w-40">
+                          {PIPELINE_STAGES.map(s => (
+                            <DropdownMenuItem key={s.value} onClick={() => updatePipeline(contact.id, s.value)} className="text-xs">
+                              <s.icon className="h-3 w-3 mr-2" /> {s.label}
+                            </DropdownMenuItem>
+                          ))}
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     </div>
                   )}
 
-                  {/* Assigned To (admin only, not in special tabs) */}
+                  {/* Phone */}
+                  {!isSpecialTab && (
+                    <div className="text-xs text-gray-600 truncate">{contact.phone || contact.mobilePhone || <span className="text-gray-300">--</span>}</div>
+                  )}
+
+                  {/* Location */}
+                  {!isSpecialTab && (
+                    <div className="text-xs text-gray-600 truncate">
+                      {[contact.city, contact.country].filter(Boolean).join(', ') || <span className="text-gray-300">--</span>}
+                    </div>
+                  )}
+
+                  {/* Next Action */}
+                  {!isSpecialTab && (
+                    <div className="text-xs truncate">
+                      {contact.nextActionDate ? (
+                        <span className={`font-medium ${isOverdue ? 'text-red-600' : 'text-gray-600'}`}>
+                          {new Date(contact.nextActionDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
+                          <span className="text-gray-400 capitalize ml-1">{contact.nextActionType || ''}</span>
+                        </span>
+                      ) : <span className="text-gray-300">--</span>}
+                    </div>
+                  )}
+
+                  {/* Last Remark */}
+                  {!isSpecialTab && (
+                    <div className="text-xs text-gray-500 truncate italic" title={(contact as any).lastRemark || ''}>
+                      {(contact as any).lastRemark || <span className="text-gray-300 not-italic">--</span>}
+                    </div>
+                  )}
+
+                  {/* Assigned (admin only) */}
                   {!isSpecialTab && isAdmin && (
                     <div className="flex items-center">
                       {assignedMember ? (
                         <Tooltip>
                           <TooltipTrigger>
-                            <div className="flex items-center gap-1.5">
-                              <Avatar className="h-5 w-5">
-                                <AvatarFallback className="text-[8px] bg-gradient-to-br from-indigo-400 to-purple-500 text-white">
-                                  {(assignedMember.firstName || assignedMember.email?.charAt(0) || '?').charAt(0).toUpperCase()}
-                                </AvatarFallback>
-                              </Avatar>
-                              <span className="text-[10px] text-gray-600 truncate max-w-[60px]">
-                                {assignedMember.firstName || assignedMember.email?.split('@')[0]}
-                              </span>
-                            </div>
+                            <Avatar className="h-5 w-5">
+                              <AvatarFallback className="text-[8px] bg-gradient-to-br from-indigo-400 to-purple-500 text-white">
+                                {(assignedMember.firstName || assignedMember.email?.charAt(0) || '?').charAt(0).toUpperCase()}
+                              </AvatarFallback>
+                            </Avatar>
                           </TooltipTrigger>
-                          <TooltipContent><p className="text-xs">{assignedMember.email}</p></TooltipContent>
+                          <TooltipContent><p className="text-xs">{assignedMember.firstName || assignedMember.email?.split('@')[0]}</p></TooltipContent>
                         </Tooltip>
-                      ) : (
-                        <span className="text-[10px] text-gray-300">--</span>
-                      )}
+                      ) : <span className="text-[10px] text-gray-300">--</span>}
                     </div>
                   )}
-
-                  {/* Tags (not in special tabs) */}
-                  {!isSpecialTab && (
-                    <div className="flex flex-wrap gap-1">
-                      {contactLists.find(l => l.id === contact.listId) && (
-                        <span className="text-[10px] px-2 py-0.5 bg-violet-50 text-violet-500 rounded-full font-medium flex items-center gap-0.5">
-                          <List className="h-2.5 w-2.5" />{contactLists.find(l => l.id === contact.listId)?.name}
-                        </span>
-                      )}
-                      {(contact.tags || []).slice(0, 1).map((tag, i) => (
-                        <span key={i} className="text-[10px] px-2 py-0.5 bg-gray-100 text-gray-500 rounded-full font-medium">{tag}</span>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Created date */}
-                  <div className="text-xs text-gray-400">{fmtDate(contact.createdAt)}</div>
 
                   {/* Actions */}
                   <div className="flex justify-center" onClick={e => e.stopPropagation()}>
@@ -3404,14 +3507,14 @@ export default function ContactsManager() {
                         </DropdownMenuItem>
                         {contact.status !== 'bounced' && (
                           <DropdownMenuItem onClick={async () => {
-                            if (confirm(`Mark ${contact.email} as bounced? This will add them to the blocklist and exclude them from future campaigns.`)) {
+                            if (confirm(`Mark ${contact.email} as bounced?`)) {
                               try {
                                 await fetch('/api/contacts/mark-bounced', { method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'include', body: JSON.stringify({ contactId: contact.id }) });
                                 fetchContacts();
                               } catch (e) { console.error(e); }
                             }
                           }} className="text-amber-600">
-                            <Ban className="h-3.5 w-3.5 mr-2" /> Mark as Bounced
+                            <Ban className="h-3.5 w-3.5 mr-2" /> Mark Bounced
                           </DropdownMenuItem>
                         )}
                         <DropdownMenuSeparator />
@@ -3425,13 +3528,40 @@ export default function ContactsManager() {
               );
             })}
 
-            {/* Table Footer */}
+            {/* Pagination Footer */}
             <div className="px-4 py-3 bg-gray-50/40 border-t border-gray-100">
               <div className="flex items-center justify-between">
                 <span className="text-xs text-gray-400">
-                  Showing {contacts.length} of {total} contacts
+                  Showing {Math.min((currentPage - 1) * pageSize + 1, total)}–{Math.min(currentPage * pageSize, total)} of {total} contacts
                   {selectedIds.length > 0 && <span className="text-blue-600 font-medium ml-2">({selectedIds.length} selected)</span>}
                 </span>
+                {totalPages > 1 && (
+                  <div className="flex items-center gap-1">
+                    <Button variant="outline" size="sm" className="h-7 px-2 text-xs" disabled={currentPage === 1}
+                      onClick={() => { setCurrentPage(currentPage - 1); setSelectedIds([]); }}>
+                      Previous
+                    </Button>
+                    {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
+                      let page: number;
+                      if (totalPages <= 7) { page = i + 1; }
+                      else if (currentPage <= 4) { page = i + 1; }
+                      else if (currentPage >= totalPages - 3) { page = totalPages - 6 + i; }
+                      else { page = currentPage - 3 + i; }
+                      return (
+                        <button key={page} onClick={() => { setCurrentPage(page); setSelectedIds([]); }}
+                          className={`h-7 w-7 rounded text-xs font-medium transition ${
+                            currentPage === page ? 'bg-blue-600 text-white' : 'text-gray-500 hover:bg-gray-100'
+                          }`}>
+                          {page}
+                        </button>
+                      );
+                    })}
+                    <Button variant="outline" size="sm" className="h-7 px-2 text-xs" disabled={currentPage === totalPages}
+                      onClick={() => { setCurrentPage(currentPage + 1); setSelectedIds([]); }}>
+                      Next
+                    </Button>
+                  </div>
+                )}
               </div>
             </div>
           </div>

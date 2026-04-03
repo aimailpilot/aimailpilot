@@ -4383,56 +4383,106 @@ Which account should I use and why? If I need to split across accounts, provide 
 
   app.get('/api/contacts', async (req: any, res) => {
     try {
-      const limit = parseInt(req.query.limit) || 50;
+      const db = (storage as any).db;
+      const limit = Math.min(parseInt(req.query.limit) || 50, 200);
       const offset = parseInt(req.query.offset) || 0;
-      const search = req.query.search as string;
+      const search = (req.query.search as string || '').trim();
       const status = req.query.status as string;
       const listId = req.query.listId as string;
       const assignedTo = req.query.assignedTo as string;
+      const pipelineStage = req.query.pipelineStage as string;
+      const company = req.query.company as string;
+      const location = req.query.location as string;
+      const designation = req.query.designation as string;
+      const sortBy = req.query.sortBy as string || 'createdAt';
+      const sortOrder = (req.query.sortOrder as string || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
       const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      const orgId = req.user.organizationId;
 
-      // Build filters object with status — SQL handles filtering, no 100k row loads
-      const filters: { listId?: string; status?: string; assignedTo?: string } = {};
-      if (listId) filters.listId = listId;
-      if (status && status !== 'all') filters.status = status;
+      // Build WHERE clauses
+      const conditions: string[] = ['c.organizationId = ?'];
+      const params: any[] = [orgId];
 
-      let contacts;
-      let total;
-
-      // ACCESS RULES:
-      // - Owner/Admin: see all contacts (optionally filtered by assignedTo for assignment view)
-      // - Member/Viewer: only see contacts assigned to them, even within a specific list
-
-      if (isAdmin && assignedTo) {
+      // Access control: non-admin can only see their assigned contacts
+      if (!isAdmin) {
+        conditions.push('c.assignedTo = ?');
+        params.push(req.user.id);
+      } else if (assignedTo) {
         if (assignedTo === 'unassigned') {
-          filters.assignedTo = 'unassigned';
-          contacts = search
-            ? await storage.searchContacts(req.user.organizationId, search, filters)
-            : await storage.getContacts(req.user.organizationId, limit, offset, filters);
-          total = await storage.getContactsCount(req.user.organizationId, filters);
+          conditions.push("(c.assignedTo IS NULL OR c.assignedTo = '')");
         } else {
-          contacts = search
-            ? await storage.searchContactsForUser(req.user.organizationId, assignedTo, search, filters)
-            : await storage.getContactsForUser(req.user.organizationId, assignedTo, limit, offset, filters);
-          total = await storage.getContactsCountForUser(req.user.organizationId, assignedTo, filters);
+          conditions.push('c.assignedTo = ?');
+          params.push(assignedTo);
         }
-      } else if (!isAdmin) {
-        // Non-admin: only see contacts assigned to them (whether browsing All or a specific list)
-        contacts = search
-          ? await storage.searchContactsForUser(req.user.organizationId, req.user.id, search, filters)
-          : await storage.getContactsForUser(req.user.organizationId, req.user.id, limit, offset, filters);
-        total = await storage.getContactsCountForUser(req.user.organizationId, req.user.id, filters);
-      } else {
-        // Admin/Owner (no assignment filter): see all contacts in scope
-        contacts = search
-          ? await storage.searchContacts(req.user.organizationId, search, filters)
-          : await storage.getContacts(req.user.organizationId, limit, offset, filters);
-        total = await storage.getContactsCount(req.user.organizationId, filters);
       }
 
-      res.json({ contacts, total, limit, offset });
-    } catch (error) {
+      // Filters
+      if (listId) { conditions.push('c.listId = ?'); params.push(listId); }
+      if (status && status !== 'all') { conditions.push('c.status = ?'); params.push(status); }
+      if (pipelineStage && pipelineStage !== 'all') { conditions.push('c.pipelineStage = ?'); params.push(pipelineStage); }
+      if (company) { conditions.push('LOWER(c.company) LIKE ?'); params.push(`%${company.toLowerCase()}%`); }
+      if (location) {
+        conditions.push('(LOWER(c.city) LIKE ? OR LOWER(c.state) LIKE ? OR LOWER(c.country) LIKE ?)');
+        const loc = `%${location.toLowerCase()}%`;
+        params.push(loc, loc, loc);
+      }
+      if (designation) { conditions.push('LOWER(c.jobTitle) LIKE ?'); params.push(`%${designation.toLowerCase()}%`); }
+
+      // Multi-field search
+      if (search) {
+        const q = `%${search.toLowerCase()}%`;
+        conditions.push(`(LOWER(c.firstName) LIKE ? OR LOWER(c.lastName) LIKE ? OR LOWER(c.email) LIKE ? OR
+          LOWER(c.company) LIKE ? OR LOWER(c.jobTitle) LIKE ? OR LOWER(c.tags) LIKE ? OR
+          LOWER(c.phone) LIKE ? OR LOWER(c.city) LIKE ? OR LOWER(c.country) LIKE ? OR LOWER(c.industry) LIKE ?)`);
+        params.push(q, q, q, q, q, q, q, q, q, q);
+      }
+
+      const where = conditions.join(' AND ');
+
+      // Validate sortBy to prevent SQL injection
+      const allowedSorts: Record<string, string> = {
+        createdAt: 'c.createdAt', firstName: 'c.firstName', company: 'c.company',
+        pipelineStage: 'c.pipelineStage', nextActionDate: 'c.nextActionDate',
+        lastActivityDate: 'c.lastActivityDate', email: 'c.email', jobTitle: 'c.jobTitle',
+      };
+      const sortCol = allowedSorts[sortBy] || 'c.createdAt';
+
+      // Count query
+      const total = (db.prepare(`SELECT COUNT(*) as c FROM contacts c WHERE ${where}`).get(...params) as any).c;
+
+      // Main query with lastRemark subquery
+      const contacts = db.prepare(`SELECT c.*,
+        (SELECT ca.notes FROM contact_activities ca WHERE ca.contactId = c.id ORDER BY ca.createdAt DESC LIMIT 1) as lastRemark
+        FROM contacts c WHERE ${where}
+        ORDER BY ${sortCol} ${sortOrder} LIMIT ? OFFSET ?`).all(...params, limit, offset);
+
+      // Hydrate JSON fields
+      const hydrated = contacts.map((row: any) => {
+        try { if (row.tags && typeof row.tags === 'string') row.tags = JSON.parse(row.tags); } catch { row.tags = []; }
+        try { if (row.customFields && typeof row.customFields === 'string') row.customFields = JSON.parse(row.customFields); } catch { row.customFields = {}; }
+        try { if (row.emailRatingDetails && typeof row.emailRatingDetails === 'string') row.emailRatingDetails = JSON.parse(row.emailRatingDetails); } catch { row.emailRatingDetails = null; }
+        return row;
+      });
+
+      res.json({ contacts: hydrated, total, limit, offset });
+    } catch (error: any) {
+      console.error('[Contacts] GET error:', error.message);
       res.status(500).json({ message: 'Failed to fetch contacts' });
+    }
+  });
+
+  // Get unique filter options for contacts dropdowns
+  app.get('/api/contacts/filter-options', requireAuth, async (req: any, res) => {
+    try {
+      const db = (storage as any).db;
+      const orgId = req.session.organizationId!;
+      const companies = db.prepare(`SELECT DISTINCT company FROM contacts WHERE organizationId = ? AND company IS NOT NULL AND company != '' ORDER BY company LIMIT 200`).all(orgId).map((r: any) => r.company);
+      const designations = db.prepare(`SELECT DISTINCT jobTitle FROM contacts WHERE organizationId = ? AND jobTitle IS NOT NULL AND jobTitle != '' ORDER BY jobTitle LIMIT 200`).all(orgId).map((r: any) => r.jobTitle);
+      const cities = db.prepare(`SELECT DISTINCT city FROM contacts WHERE organizationId = ? AND city IS NOT NULL AND city != '' ORDER BY city LIMIT 200`).all(orgId).map((r: any) => r.city);
+      const countries = db.prepare(`SELECT DISTINCT country FROM contacts WHERE organizationId = ? AND country IS NOT NULL AND country != '' ORDER BY country LIMIT 100`).all(orgId).map((r: any) => r.country);
+      res.json({ companies, designations, cities, countries });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
     }
   });
 
