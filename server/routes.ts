@@ -9352,7 +9352,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       if (result.valid) {
         res.json({ success: true, credits: result.credits });
       } else {
-        res.status(400).json({ message: 'Invalid API key or connection failed' });
+        res.status(400).json({ message: result.raw || 'Invalid API key or connection failed' });
       }
     } catch (e: any) {
       res.status(500).json({ message: e.message || 'Connection test failed' });

@@ -106,16 +106,25 @@ export async function verifyBatch(
 /**
  * Check remaining API credits
  */
-export async function checkCredits(apiKey: string): Promise<{ credits: number | null; valid: boolean }> {
+export async function checkCredits(apiKey: string): Promise<{ credits: number | null; valid: boolean; raw?: string }> {
   try {
     const url = `https://app.emaillistverify.com/api/getCredits?secret=${encodeURIComponent(apiKey)}`;
     const res = await httpsGet(url, 10000);
+    const body = res.body.trim();
 
-    if (res.status !== 200) return { credits: null, valid: false };
+    console.log(`[EmailVerify] checkCredits status=${res.status} body="${body}"`);
 
-    const credits = parseInt(res.body.trim(), 10);
-    return { credits: isNaN(credits) ? null : credits, valid: true };
-  } catch {
-    return { credits: null, valid: false };
+    if (res.status !== 200) return { credits: null, valid: false, raw: body };
+
+    // API returns plain number on success, or error string on failure
+    const credits = parseInt(body, 10);
+    if (isNaN(credits)) {
+      // Non-numeric response = error message from API (e.g. "Invalid API key")
+      return { credits: null, valid: false, raw: body };
+    }
+    return { credits, valid: true, raw: body };
+  } catch (e: any) {
+    console.error(`[EmailVerify] checkCredits error:`, e.message);
+    return { credits: null, valid: false, raw: e.message };
   }
 }
