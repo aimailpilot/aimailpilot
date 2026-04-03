@@ -3540,6 +3540,15 @@ Which account should I use and why? If I need to split across accounts, provide 
           replyRate: sent > 0 ? ((row.replied / sent) * 100).toFixed(1) : '0',
         };
       });
+      // Always ensure Step 1 (stepNumber 0) exists — even if no emails sent yet
+      if (!stepAnalytics.find((s: any) => s.stepNumber === 0)) {
+        stepAnalytics.unshift({
+          stepNumber: 0, label: 'Step 1', description: 'Initial email',
+          sent: 0, opened: 0, clicked: 0, replied: 0, bounced: 0, unsubscribed: 0, spam: 0,
+          openRate: '0', clickRate: '0', replyRate: '0',
+          isPending: campaign.status === 'paused' || campaign.status === 'draft',
+        });
+      }
 
       // Get follow-up sequences for this campaign
       let followupSequences: any[] = [];

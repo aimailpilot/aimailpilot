@@ -345,14 +345,17 @@ export class CampaignEngine {
     const autopilot = sendingConfig.autopilot;
     // Calculate user's local time (prefers IANA timezone for DST awareness, falls back to offset)
     const userLocal = getUserLocalTime(sendingConfig);
-    
+
     const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const dayName = dayNames[userLocal.getDay()];
     const dayConfig = autopilot.days?.[dayName];
 
+    console.log(`[CampaignEngine] checkSendingWindow: serverUTC=${new Date().toISOString()}, userLocal=${userLocal.toISOString()}, day=${dayName}, tz=${sendingConfig.timezone || 'offset:' + sendingConfig.timezoneOffset}, dayEnabled=${dayConfig?.enabled}, startTime=${dayConfig?.startTime}, endTime=${dayConfig?.endTime}`);
+
     if (!dayConfig || !dayConfig.enabled) {
       // Find next enabled day
       const pauseMs = this.msUntilNextSendWindow(autopilot, sendingConfig.timezoneOffset || 0, sendingConfig.timezone);
+      console.log(`[CampaignEngine] checkSendingWindow: BLOCKED — ${dayName} is disabled. Pause ${Math.round(pauseMs / 60000)} min`);
       return { canSend: false, reason: `Sending disabled on ${dayName}`, pauseUntilMs: pauseMs };
     }
 
@@ -361,21 +364,26 @@ export class CampaignEngine {
     const currentMM = String(userLocal.getMinutes()).padStart(2, '0');
     const currentTime = `${currentHH}:${currentMM}`;
 
+    console.log(`[CampaignEngine] checkSendingWindow: currentTime=${currentTime}, window=${dayConfig.startTime}-${dayConfig.endTime}`);
+
     if (dayConfig.startTime && currentTime < dayConfig.startTime) {
       // Before start time — wait until start
       const [sh, sm] = dayConfig.startTime.split(':').map(Number);
       const startMs = new Date(userLocal);
       startMs.setHours(sh, sm, 0, 0);
       const waitMs = startMs.getTime() - userLocal.getTime();
+      console.log(`[CampaignEngine] checkSendingWindow: BLOCKED — before start (${currentTime} < ${dayConfig.startTime})`);
       return { canSend: false, reason: `Before sending hours (starts at ${dayConfig.startTime})`, pauseUntilMs: Math.max(waitMs, 60000) };
     }
 
     if (dayConfig.endTime && currentTime >= dayConfig.endTime) {
       // After end time — wait until next day's window
       const pauseMs = this.msUntilNextSendWindow(autopilot, sendingConfig.timezoneOffset || 0, sendingConfig.timezone);
+      console.log(`[CampaignEngine] checkSendingWindow: BLOCKED — after end (${currentTime} >= ${dayConfig.endTime})`);
       return { canSend: false, reason: `After sending hours (ended at ${dayConfig.endTime})`, pauseUntilMs: pauseMs };
     }
 
+    console.log(`[CampaignEngine] checkSendingWindow: OK — within window`);
     return { canSend: true };
   }
 
