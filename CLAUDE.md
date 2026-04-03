@@ -14,7 +14,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > 6. **NEVER** remove the `[DB-GUARDRAIL]` runtime protection in `server/storage.ts` — it blocks file deletion at runtime
 > 7. If you need to change database schema, use `ALTER TABLE ADD COLUMN` only — never drop/recreate tables
 > 8. Run `bash scripts/db-safety-check.sh` before deploying to verify no dangerous patterns exist
+> 9. **NEVER** use `require('./db')` or import `server/db.ts` anywhere — it imports `drizzle-orm/neon-serverless` which is NOT installed in production and crashes the app. To access the SQLite database directly, use `(storage as any).db` only.
 > See `DATABASE-RECOVERY.md` for the full incident history and recovery procedure.
+
+> **CRITICAL — IMPORT SAFETY (read this before adding ANY import to server code)**
+> The build uses `esbuild --packages=external` — all `node_modules` packages are left as external imports resolved at runtime on Azure. If you import a package that is NOT in `package.json` `dependencies`, the app will crash on startup with `ERR_MODULE_NOT_FOUND`.
+> 1. **NEVER** import or require `server/db.ts` — it pulls in `drizzle-orm` which is not a production dependency (caused 1 day of downtime)
+> 2. **NEVER** use `require('./db').db` as a fallback — even dead-code branches get bundled by esbuild and the import executes at module load
+> 3. To access the raw SQLite `better-sqlite3` instance, always use: `const db = (storage as any).db;`
+> 4. Before adding any new `import` from a package, verify it exists in `package.json` `dependencies` (not just `devDependencies`)
+> 5. Run `bash scripts/deploy-safety-check.sh` before deploying to catch forbidden imports
 
 ## Commands
 
@@ -37,7 +46,7 @@ server/          Express backend
   index.ts       Entry: mounts middleware, registers routes, starts follow-up engine
   routes.ts      All API routes (~250KB - primary place for new endpoints)
   storage.ts     SQLite database layer (~112KB - all CRUD via better-sqlite3)
-  db.ts          Database initialization and connection
+  db.ts          Drizzle/Neon config (NOT USED at runtime — DO NOT import this file, see Import Safety rules)
   auth/          OAuth helpers (Google, Microsoft)
   routes/        Modular route files (supplements routes.ts)
   services/      Business logic:

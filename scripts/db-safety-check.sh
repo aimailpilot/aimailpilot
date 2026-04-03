@@ -52,6 +52,16 @@ for FILE in $FILES; do
     echo -e "${RED}DANGER:${NC} $FILE — recursive delete on data directory"
     ISSUES=$((ISSUES + 1))
   fi
+
+  # Check for forbidden import of server/db.ts (drizzle-orm — not installed in production)
+  # Skip db.ts itself and shared/schema.ts (they define the schema, not used at runtime)
+  BASENAME=$(basename "$FILE")
+  if [ "$BASENAME" != "db.ts" ] && [ "$BASENAME" != "schema.ts" ] && [ "$BASENAME" != "drizzle.config.ts" ]; then
+    if grep -nE "require\(.*/db.\)|from ['\"]drizzle-orm" "$FILE" 2>/dev/null; then
+      echo -e "${RED}DANGER:${NC} $FILE — imports db.ts or drizzle-orm (crashes on Azure — not in production deps)"
+      ISSUES=$((ISSUES + 1))
+    fi
+  fi
 done
 
 echo ""
@@ -80,6 +90,18 @@ if grep -q "NEVER.*delete.*rename\|NEVER.*rename.*delete" server/storage.ts 2>/d
   echo -e "${GREEN}OK:${NC} Safety comments are present in storage.ts"
 else
   echo -e "${YELLOW}WARNING:${NC} Safety comments may be missing from storage.ts"
+fi
+
+echo ""
+echo "=== Import Safety Verification ==="
+# Check that no server file (except db.ts itself) imports drizzle or require('./db')
+IMPORT_ISSUES=$(grep -rnE "require\(.*/db.\)" --include="*.ts" server/ 2>/dev/null | grep -v "db.ts:" | grep -v "node_modules" | wc -l)
+if [ "$IMPORT_ISSUES" -eq 0 ]; then
+  echo -e "${GREEN}OK:${NC} No server files import db.ts (drizzle-orm safe)"
+else
+  echo -e "${RED}DANGER:${NC} Found $IMPORT_ISSUES file(s) importing db.ts — will crash on Azure!"
+  grep -rnE "require\(.*/db.\)" --include="*.ts" server/ 2>/dev/null | grep -v "db.ts:"
+  ISSUES=$((ISSUES + IMPORT_ISSUES))
 fi
 
 exit $ISSUES

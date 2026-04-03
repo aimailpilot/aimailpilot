@@ -177,6 +177,27 @@ This file tracks features that are confirmed working in production.
 - Clear editor boundary with rounded border on gray background
 - **Do not touch**: `TbBtn` component, `execCmd`, font color/family controls, AI feedback bar in `client/src/pages/template-manager.tsx`; same toolbar fixes in `campaign-creator.tsx`, `campaign-detail.tsx`, `contacts-manager.tsx`, `unified-inbox.tsx`
 
+### 26. Import Safety — No drizzle-orm / db.ts (CRITICAL)
+- `server/db.ts` imports `drizzle-orm/neon-serverless` which is NOT in `package.json` — importing it crashes the app on Azure with `ERR_MODULE_NOT_FOUND`
+- **Incident**: `require('./db').db` was used as a fallback in routes.ts — esbuild bundled the import even though it was dead code at runtime, causing 1 day of downtime
+- The only way to access the raw SQLite database is: `const db = (storage as any).db;`
+- **NEVER** import/require `server/db.ts` from any server file
+- **NEVER** use `require('./db')` as a fallback pattern
+- **Do not touch**: `server/db.ts` (it exists only for Drizzle type generation, not runtime use)
+
+### 27. Pipeline & Activity Log
+- Pipeline stages (new/contacted/interested/meeting_scheduled/meeting_done/proposal_sent/won/lost) on contacts
+- Contact activity log table (`contact_activities`) for call/meeting/email/note tracking
+- API endpoints: `/api/contacts/follow-ups`, `/api/contacts/pipeline-stats`, `/api/contacts/:id/pipeline`, `/api/contacts/:id/activities`
+- Routes registered BEFORE `/api/contacts/:id` to avoid Express param conflict
+- **Do not touch**: pipeline/activity routes in `server/routes.ts` (lines ~4438–4548); `contact_activities` table and pipeline columns in `server/storage.ts`
+
+### 28. EmailListVerify Integration
+- Email verification via EmailListVerify API (single + batch + credits check)
+- API key stored in superadmin org settings (`emaillistverify_api_key`)
+- Uses Node.js built-in `https` module (NOT `fetch` — fetch/AbortSignal.timeout crashed on older Node)
+- **Do not touch**: `server/services/email-verifier.ts`; email verification routes in `server/routes.ts` (lines ~9360–9480)
+
 ---
 
 ## General Rule
