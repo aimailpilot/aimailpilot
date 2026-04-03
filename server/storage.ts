@@ -811,6 +811,33 @@ try { db.exec(`ALTER TABLE contacts ADD COLUMN emailVerificationStatus TEXT DEFA
 try { db.exec(`ALTER TABLE contacts ADD COLUMN emailVerifiedAt TEXT`); } catch (e) {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_verification ON contacts(emailVerificationStatus)`); } catch (e) {}
 
+// Pipeline stage, follow-up tracking
+try { db.exec(`ALTER TABLE contacts ADD COLUMN pipelineStage TEXT DEFAULT 'new'`); } catch (e) {} // new, contacted, interested, meeting_scheduled, meeting_done, proposal_sent, won, lost
+try { db.exec(`ALTER TABLE contacts ADD COLUMN nextActionDate TEXT`); } catch (e) {}
+try { db.exec(`ALTER TABLE contacts ADD COLUMN nextActionType TEXT`); } catch (e) {} // call, meeting, email, whatsapp, proposal
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_pipeline ON contacts(pipelineStage)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_next_action ON contacts(nextActionDate)`); } catch (e) {}
+
+// Contact activities table (activity log / remarks)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS contact_activities (
+    id TEXT PRIMARY KEY,
+    contactId TEXT NOT NULL,
+    organizationId TEXT NOT NULL,
+    userId TEXT,
+    type TEXT NOT NULL DEFAULT 'note',
+    outcome TEXT,
+    notes TEXT,
+    nextActionDate TEXT,
+    nextActionType TEXT,
+    metadata TEXT DEFAULT '{}',
+    createdAt TEXT NOT NULL
+  )
+`);
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_activities_contact ON contact_activities(contactId)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_activities_org ON contact_activities(organizationId)`); } catch (e) {}
+try { db.exec(`CREATE INDEX IF NOT EXISTS idx_activities_next ON contact_activities(nextActionDate)`); } catch (e) {}
+
 // Global Suppression List table
 db.exec(`
   CREATE TABLE IF NOT EXISTS suppression_list (

@@ -6,6 +6,7 @@
  */
 
 import { storage } from '../storage';
+import https from 'https';
 
 export type VerificationStatus = 'unverified' | 'valid' | 'invalid' | 'risky' | 'disposable' | 'spamtrap';
 
@@ -22,19 +23,35 @@ function mapApiStatus(apiStatus: string): VerificationStatus {
   if (s === 'fail' || s === 'invalid' || s === 'error') return 'invalid';
   if (s === 'disposable') return 'disposable';
   if (s === 'spamtrap') return 'spamtrap';
-  // unknown, catch_all, role, accept_all — these are risky but not outright invalid
   if (s === 'unknown' || s === 'catch_all' || s === 'role' || s === 'accept_all') return 'risky';
-  return 'risky'; // default for unrecognized statuses
+  return 'risky';
+}
+
+/** Simple HTTPS GET that works on all Node versions */
+function httpsGet(url: string, timeoutMs = 30000): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode || 0, body: data }));
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error('Request timeout')); });
+  });
 }
 
 /**
  * Get the EmailListVerify API key from superadmin org settings
  */
 export async function getEmailVerifyApiKey(): Promise<string | null> {
-  const superAdminOrgId = await storage.getSuperAdminOrgId();
-  if (!superAdminOrgId) return null;
-  const settings = await storage.getApiSettings(superAdminOrgId);
-  return settings.emaillistverify_api_key || null;
+  try {
+    const superAdminOrgId = await storage.getSuperAdminOrgId();
+    if (!superAdminOrgId) return null;
+    const settings = await storage.getApiSettings(superAdminOrgId);
+    return settings.emaillistverify_api_key || null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -42,24 +59,21 @@ export async function getEmailVerifyApiKey(): Promise<string | null> {
  */
 export async function verifySingleEmail(email: string, apiKey: string): Promise<VerifyResult> {
   const url = `https://app.emaillistverify.com/api/verifyEmail?secret=${encodeURIComponent(apiKey)}&email=${encodeURIComponent(email)}`;
+  const res = await httpsGet(url);
 
-  const res = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(30000) });
-  const text = await res.text();
-
-  if (!res.ok) {
-    throw new Error(`EmailListVerify API error: ${res.status} ${text}`);
+  if (res.status !== 200) {
+    throw new Error(`EmailListVerify API error: ${res.status} ${res.body}`);
   }
 
   return {
     email,
-    status: mapApiStatus(text),
-    rawStatus: text.trim(),
+    status: mapApiStatus(res.body),
+    rawStatus: res.body.trim(),
   };
 }
 
 /**
  * Verify multiple emails with rate limiting (~1 per second)
- * Returns results as they complete, calls onProgress for each
  */
 export async function verifyBatch(
   emails: { contactId: string; email: string }[],
@@ -75,7 +89,6 @@ export async function verifyBatch(
       results.set(contactId, result);
       onProgress?.(contactId, result, i + 1, emails.length);
     } catch (err: any) {
-      // On API error, mark as unverified (don't fail the whole batch)
       const fallback: VerifyResult = { email, status: 'unverified', rawStatus: `error: ${err.message}` };
       results.set(contactId, fallback);
       onProgress?.(contactId, fallback, i + 1, emails.length);
@@ -91,17 +104,16 @@ export async function verifyBatch(
 }
 
 /**
- * Check remaining API credits (if supported by the API)
+ * Check remaining API credits
  */
 export async function checkCredits(apiKey: string): Promise<{ credits: number | null; valid: boolean }> {
   try {
     const url = `https://app.emaillistverify.com/api/getCredits?secret=${encodeURIComponent(apiKey)}`;
-    const res = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(10000) });
-    const text = await res.text();
+    const res = await httpsGet(url, 10000);
 
-    if (!res.ok) return { credits: null, valid: false };
+    if (res.status !== 200) return { credits: null, valid: false };
 
-    const credits = parseInt(text.trim(), 10);
+    const credits = parseInt(res.body.trim(), 10);
     return { credits: isNaN(credits) ? null : credits, valid: true };
   } catch {
     return { credits: null, valid: false };

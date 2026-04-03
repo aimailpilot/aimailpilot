@@ -4436,6 +4436,113 @@ Which account should I use and why? If I need to split across accounts, provide 
     }
   });
 
+  // ===== PIPELINE & ACTIVITY LOG (must be BEFORE /api/contacts/:id) =====
+
+  // Get today's follow-ups (contacts with nextActionDate = today or overdue)
+  app.get('/api/contacts/follow-ups', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.session.organizationId!;
+      const db = (storage as any).db || require('./db').db;
+      const today = new Date().toISOString().split('T')[0];
+      const contacts = db.prepare(`SELECT c.*,
+        (SELECT ca.notes FROM contact_activities ca WHERE ca.contactId = c.id ORDER BY ca.createdAt DESC LIMIT 1) as lastRemark,
+        (SELECT ca.type FROM contact_activities ca WHERE ca.contactId = c.id ORDER BY ca.createdAt DESC LIMIT 1) as lastActivityType,
+        (SELECT ca.createdAt FROM contact_activities ca WHERE ca.contactId = c.id ORDER BY ca.createdAt DESC LIMIT 1) as lastActivityDate
+        FROM contacts c WHERE c.organizationId = ? AND c.nextActionDate IS NOT NULL AND c.nextActionDate <= ?
+        AND c.pipelineStage NOT IN ('won', 'lost') AND c.status NOT IN ('bounced', 'unsubscribed')
+        ORDER BY c.nextActionDate ASC LIMIT 200`).all(orgId, today + 'T23:59:59');
+      res.json(contacts);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Get pipeline stats (count per stage)
+  app.get('/api/contacts/pipeline-stats', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.session.organizationId!;
+      const db = (storage as any).db || require('./db').db;
+      const stats = db.prepare(`SELECT pipelineStage, COUNT(*) as count FROM contacts WHERE organizationId = ? AND status NOT IN ('bounced', 'unsubscribed') GROUP BY pipelineStage`).all(orgId);
+      res.json(stats);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Update contact pipeline stage
+  app.put('/api/contacts/:id/pipeline', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.session.organizationId!;
+      const { pipelineStage, nextActionDate, nextActionType } = req.body;
+      const db = (storage as any).db || require('./db').db;
+      const contact = db.prepare(`SELECT id FROM contacts WHERE id = ? AND organizationId = ?`).get(req.params.id, orgId);
+      if (!contact) return res.status(404).json({ message: 'Contact not found' });
+      const updates: string[] = [];
+      const values: any[] = [];
+      if (pipelineStage) { updates.push('pipelineStage = ?'); values.push(pipelineStage); }
+      if (nextActionDate !== undefined) { updates.push('nextActionDate = ?'); values.push(nextActionDate || null); }
+      if (nextActionType !== undefined) { updates.push('nextActionType = ?'); values.push(nextActionType || null); }
+      updates.push('updatedAt = ?'); values.push(new Date().toISOString());
+      values.push(req.params.id, orgId);
+      db.prepare(`UPDATE contacts SET ${updates.join(', ')} WHERE id = ? AND organizationId = ?`).run(...values);
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Get activities for a contact
+  app.get('/api/contacts/:id/activities', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.session.organizationId!;
+      const db = (storage as any).db || require('./db').db;
+      const activities = db.prepare(`SELECT ca.*, u.firstName as userFirstName, u.lastName as userLastName, u.email as userEmail
+        FROM contact_activities ca LEFT JOIN users u ON ca.userId = u.id
+        WHERE ca.contactId = ? AND ca.organizationId = ? ORDER BY ca.createdAt DESC LIMIT 100`).all(req.params.id, orgId);
+      res.json(activities);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Log a new activity for a contact
+  app.post('/api/contacts/:id/activities', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.session.organizationId!;
+      const userId = req.session.userId;
+      const { type, outcome, notes, nextActionDate, nextActionType } = req.body;
+      if (!type) return res.status(400).json({ message: 'Activity type is required' });
+      const db = (storage as any).db || require('./db').db;
+      const contact = db.prepare(`SELECT id, pipelineStage FROM contacts WHERE id = ? AND organizationId = ?`).get(req.params.id, orgId) as any;
+      if (!contact) return res.status(404).json({ message: 'Contact not found' });
+      const id = `act_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const now = new Date().toISOString();
+      db.prepare(`INSERT INTO contact_activities (id, contactId, organizationId, userId, type, outcome, notes, nextActionDate, nextActionType, metadata, createdAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, req.params.id, orgId, userId, type, outcome || null, notes || null, nextActionDate || null, nextActionType || null, '{}', now);
+      // Update contact's nextActionDate if provided
+      if (nextActionDate) {
+        db.prepare(`UPDATE contacts SET nextActionDate = ?, nextActionType = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`).run(nextActionDate, nextActionType || null, now, req.params.id, orgId);
+      }
+      // Auto-advance pipeline stage (only forward, never backward)
+      const autoStageMap: Record<string, string> = { call: 'contacted', email: 'contacted', whatsapp: 'contacted', meeting_scheduled: 'meeting_scheduled', meeting: 'meeting_done', proposal: 'proposal_sent' };
+      const stageOrder = ['new', 'contacted', 'interested', 'meeting_scheduled', 'meeting_done', 'proposal_sent', 'won', 'lost'];
+      if (autoStageMap[type]) {
+        const currentIdx = stageOrder.indexOf(contact.pipelineStage || 'new');
+        const newIdx = stageOrder.indexOf(autoStageMap[type]);
+        if (newIdx > currentIdx) {
+          db.prepare(`UPDATE contacts SET pipelineStage = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`).run(autoStageMap[type], now, req.params.id, orgId);
+        }
+      }
+      if (outcome === 'converted') db.prepare(`UPDATE contacts SET pipelineStage = 'won', updatedAt = ? WHERE id = ? AND organizationId = ?`).run(now, req.params.id, orgId);
+      else if (outcome === 'rejected') db.prepare(`UPDATE contacts SET pipelineStage = 'lost', updatedAt = ? WHERE id = ? AND organizationId = ?`).run(now, req.params.id, orgId);
+      res.json({ id, success: true });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // ===== END PIPELINE & ACTIVITY LOG =====
+
   app.get('/api/contacts/:id', async (req: any, res) => {
     try {
       const contact = await storage.getContact(req.params.id);
