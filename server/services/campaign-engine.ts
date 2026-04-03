@@ -47,7 +47,8 @@ async function sendViaGmailAPI(
     }
 
     const data = await resp.json() as any;
-    return { success: true, messageId: data.id };
+    // Return both messageId AND threadId — threadId is needed for follow-up threading
+    return { success: true, messageId: data.id, threadId: data.threadId };
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) };
   }
@@ -1042,11 +1043,14 @@ export class CampaignEngine {
         const nowIso = new Date().toISOString();
 
         if (result.success) {
-          await storage.updateCampaignMessage(messageRecord.id, {
+          const msgUpdate: any = {
             status: 'sent',
             sentAt: nowIso,
             providerMessageId: result.messageId,
-          });
+          };
+          // Save Gmail threadId for follow-up threading (avoids extra API call later)
+          if (result.threadId) msgUpdate.gmailThreadId = result.threadId;
+          await storage.updateCampaignMessage(messageRecord.id, msgUpdate);
 
           localSentCount++;
           autopilotDailySent++;

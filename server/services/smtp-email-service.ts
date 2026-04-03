@@ -60,6 +60,7 @@ export interface EmailMessage {
 export interface SendResult {
   success: boolean;
   messageId?: string;
+  threadId?: string;
   error?: string;
   timestamp?: string;
 }

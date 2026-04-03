@@ -1056,6 +1056,14 @@ export class FollowupEngine {
       const isOutlookAccount = accountProvider === 'outlook' || accountProvider === 'microsoft';
       const isGmailAccount = accountProvider === 'gmail' || accountProvider === 'google';
 
+      console.log(`[Followup] Threading lookup: providerMessageId=${originalMessage.providerMessageId || 'MISSING'}, gmailThreadId=${originalMessage.gmailThreadId || 'MISSING'}, orgId=${campaign.organizationId}, provider=${accountProvider}, sender=${senderEmail}`);
+
+      // Use stored gmailThreadId if available (saved at step 0 send time — no API call needed)
+      if (isGmailAccount && originalMessage.gmailThreadId) {
+        gmailThreadId = originalMessage.gmailThreadId;
+        console.log(`[Followup] Gmail threading: using stored threadId=${gmailThreadId}`);
+      }
+
       if (originalMessage.providerMessageId && campaign.organizationId) {
         try {
           if (isGmailAccount) {
@@ -1063,14 +1071,23 @@ export class FollowupEngine {
             const tokenResult = await this.emailService.getGmailAccessToken(campaign.organizationId, senderEmail);
             let accessToken = tokenResult?.token || null;
 
+            if (!accessToken) {
+              console.warn(`[Followup] Gmail threading: no access token for ${senderEmail} — will use stored threadId if available`);
+            }
+
             if (accessToken) {
               const msgResp = await fetch(
                 `https://gmail.googleapis.com/gmail/v1/users/me/messages/${originalMessage.providerMessageId}?format=metadata&metadataHeaders=Message-ID`,
                 { headers: { Authorization: `Bearer ${accessToken}` } }
               );
+              if (!msgResp.ok) {
+                const errText = await msgResp.text().catch(() => '');
+                console.warn(`[Followup] Gmail threading API error: ${msgResp.status} ${errText.slice(0, 200)}`);
+              }
               if (msgResp.ok) {
                 const msgData = await msgResp.json() as any;
-                gmailThreadId = msgData.threadId;
+                // Use API threadId if we don't have a stored one
+                if (!gmailThreadId) gmailThreadId = msgData.threadId;
                 const msgIdHeader = (msgData.payload?.headers || []).find(
                   (h: any) => h.name.toLowerCase() === 'message-id'
                 );

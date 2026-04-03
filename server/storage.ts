@@ -703,6 +703,7 @@ try {
 // ========== Messages table migrations ==========
 try { db.exec(`ALTER TABLE messages ADD COLUMN providerMessageId TEXT`); } catch (e) { /* already exists */ }
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_provider_id ON messages(providerMessageId)`); } catch (e) {}
+try { db.exec(`ALTER TABLE messages ADD COLUMN gmailThreadId TEXT`); } catch (e) { /* already exists */ }
 try { db.exec(`ALTER TABLE messages ADD COLUMN bouncedAt TEXT`); } catch (e) { /* already exists */ }
 
 // ========== SuperAdmin migration ==========
@@ -1645,8 +1646,8 @@ export class DatabaseStorage {
     const existing = await this.getCampaignMessage(id);
     if (!existing) throw new Error('Message not found');
     const m = { ...existing as any, ...data };
-    db.prepare('UPDATE messages SET status=?, sentAt=?, openedAt=?, clickedAt=?, repliedAt=?, bouncedAt=?, errorMessage=?, providerMessageId=? WHERE id=?').run(
-      m.status, toSqlDate(m.sentAt), toSqlDate(m.openedAt), toSqlDate(m.clickedAt), toSqlDate(m.repliedAt), toSqlDate(m.bouncedAt), m.errorMessage || null, m.providerMessageId || null, id
+    db.prepare('UPDATE messages SET status=?, sentAt=?, openedAt=?, clickedAt=?, repliedAt=?, bouncedAt=?, errorMessage=?, providerMessageId=?, gmailThreadId=? WHERE id=?').run(
+      m.status, toSqlDate(m.sentAt), toSqlDate(m.openedAt), toSqlDate(m.clickedAt), toSqlDate(m.repliedAt), toSqlDate(m.bouncedAt), m.errorMessage || null, m.providerMessageId || null, m.gmailThreadId || null, id
     );
     return this.getCampaignMessage(id);
   }
