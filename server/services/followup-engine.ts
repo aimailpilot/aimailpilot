@@ -980,19 +980,49 @@ export class FollowupEngine {
         return;
       }
 
-      // Replace template variables in content
-      let personalizedContent = content
-        .replace(/\{\{firstName\}\}/g, contact.firstName || '')
-        .replace(/\{\{lastName\}\}/g, contact.lastName || '')
-        .replace(/\{\{email\}\}/g, contact.email || '')
-        .replace(/\{\{company\}\}/g, contact.company || '')
-        .replace(/\{\{jobTitle\}\}/g, contact.jobTitle || '')
-        .replace(/\{\{topic\}\}/g, campaign.subject || campaign.name || '');
-      
-      let personalizedSubject = followupSubject
-        .replace(/\{\{firstName\}\}/g, contact.firstName || '')
-        .replace(/\{\{lastName\}\}/g, contact.lastName || '')
-        .replace(/\{\{company\}\}/g, contact.company || '');
+      // Build full personalization data — same fields as campaign-engine Step 0
+      const personalData: Record<string, string> = {
+        firstName: contact.firstName || '',
+        lastName: contact.lastName || '',
+        email: contact.email || '',
+        company: contact.company || '',
+        jobTitle: contact.jobTitle || '',
+        fullName: `${contact.firstName || ''} ${contact.lastName || ''}`.trim(),
+        phone: contact.phone || '',
+        mobilePhone: contact.mobilePhone || '',
+        linkedinUrl: contact.linkedinUrl || '',
+        seniority: contact.seniority || '',
+        department: contact.department || '',
+        city: contact.city || '',
+        state: contact.state || '',
+        country: contact.country || '',
+        website: contact.website || '',
+        industry: contact.industry || '',
+        employeeCount: contact.employeeCount || '',
+        annualRevenue: contact.annualRevenue || '',
+        companyCity: contact.companyCity || '',
+        companyState: contact.companyState || '',
+        companyCountry: contact.companyCountry || '',
+        topic: campaign.subject || campaign.name || '',
+        // Spread any custom fields so {{customKey}} also works
+        ...((contact as any).customFields || {}),
+      };
+
+      // Dynamic replacement: case-insensitive, cleans up unresolved variables
+      function personalizeText(template: string): string {
+        let result = template;
+        for (const [key, value] of Object.entries(personalData)) {
+          if (value !== undefined && value !== null) {
+            const regex = new RegExp(`\\{\\{${key}\\}\\}`, 'gi');
+            result = result.replace(regex, String(value));
+          }
+        }
+        result = result.replace(/\{\{[^}]+\}\}/g, '');
+        return result;
+      }
+
+      let personalizedContent = personalizeText(content);
+      let personalizedSubject = personalizeText(followupSubject);
 
       // Build threading headers — fetch the original message's real Message-ID from the provider
       let gmailThreadId: string | undefined;
