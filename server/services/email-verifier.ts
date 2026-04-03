@@ -6,7 +6,7 @@
  */
 
 import { storage } from '../storage';
-import https from 'https';
+import { execSync } from 'child_process';
 
 export type VerificationStatus = 'unverified' | 'valid' | 'invalid' | 'risky' | 'disposable' | 'spamtrap';
 
@@ -27,41 +27,21 @@ function mapApiStatus(apiStatus: string): VerificationStatus {
   return 'risky';
 }
 
-/** Simple HTTPS GET that works on all Node versions, with proper headers */
-function httpsGet(url: string, timeoutMs = 30000): Promise<{ status: number; body: string }> {
-  return new Promise((resolve, reject) => {
-    try {
-      const parsed = new URL(url);
-      const options = {
-        hostname: parsed.hostname,
-        port: 443,
-        path: parsed.pathname + parsed.search,
-        method: 'GET',
-        headers: {
-          'Accept': 'text/plain, application/json',
-          'User-Agent': 'AImailPilot/1.0',
-        },
-      };
-      const req = https.request(options, (res) => {
-        // Follow redirects (301/302)
-        if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location) {
-          const loc = res.headers.location;
-          // Handle relative redirects
-          const redirectUrl = loc.startsWith('http') ? loc : `https://${parsed.hostname}${loc}`;
-          httpsGet(redirectUrl, timeoutMs).then(resolve).catch(reject);
-          return;
-        }
-        let data = '';
-        res.on('data', (chunk) => { data += chunk; });
-        res.on('end', () => resolve({ status: res.statusCode || 0, body: data }));
-      });
-      req.on('error', reject);
-      req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error('Request timeout')); });
-      req.end();
-    } catch (e: any) {
-      reject(new Error(`Invalid URL or request error: ${e.message} — url=${url?.substring(0, 60)}`));
-    }
-  });
+/**
+ * HTTP GET using curl (matches PHP sample from EmailListVerify docs).
+ * Azure Linux has curl pre-installed. Falls back to Node https if curl unavailable.
+ */
+function httpGet(url: string, timeoutSec = 30): string {
+  try {
+    // Use curl like the PHP sample: CURLOPT_SSL_VERIFYPEER=false, CURLOPT_FOLLOWLOCATION=true
+    const result = execSync(
+      `curl -s -L -k --max-time ${timeoutSec} "${url}"`,
+      { encoding: 'utf-8', timeout: (timeoutSec + 5) * 1000 }
+    );
+    return result.trim();
+  } catch (e: any) {
+    throw new Error(`HTTP request failed: ${e.message?.substring(0, 100)}`);
+  }
 }
 
 /**
@@ -90,17 +70,13 @@ export async function getEmailVerifyApiKey(orgId?: string): Promise<string | nul
  * Verify a single email address via EmailListVerify API
  */
 export async function verifySingleEmail(email: string, apiKey: string): Promise<VerifyResult> {
-  const url = `https://apps.emaillistverify.com/api/verifyEmail?secret=${encodeURIComponent(apiKey)}&email=${encodeURIComponent(email)}`;
-  const res = await httpsGet(url);
-
-  if (res.status !== 200) {
-    throw new Error(`EmailListVerify API error: ${res.status} ${res.body}`);
-  }
+  const url = `https://apps.emaillistverify.com/api/verifyEmail?secret=${encodeURIComponent(apiKey)}&email=${encodeURIComponent(email)}&timeout=15`;
+  const body = httpGet(url, 30);
 
   return {
     email,
-    status: mapApiStatus(res.body),
-    rawStatus: res.body.trim(),
+    status: mapApiStatus(body),
+    rawStatus: body,
   };
 }
 
@@ -141,17 +117,13 @@ export async function verifyBatch(
 export async function checkCredits(apiKey: string): Promise<{ credits: number | null; valid: boolean; raw?: string }> {
   try {
     const url = `https://apps.emaillistverify.com/api/getCredits?secret=${encodeURIComponent(apiKey)}`;
-    const res = await httpsGet(url, 10000);
-    const body = res.body.trim();
+    const body = httpGet(url, 10);
 
-    console.log(`[EmailVerify] checkCredits status=${res.status} body="${body.substring(0, 200)}"`);
-
-    if (res.status !== 200) return { credits: null, valid: false, raw: `HTTP ${res.status}` };
+    console.log(`[EmailVerify] checkCredits body="${body.substring(0, 200)}"`);
 
     // API returns plain number on success, or error string on failure
     const credits = parseInt(body, 10);
     if (isNaN(credits)) {
-      // Non-numeric response = error message from API or Cloudflare HTML page
       const hint = body.includes('<!DOCTYPE') ? 'API returned HTML instead of data — possible Cloudflare block' : body.substring(0, 100);
       return { credits: null, valid: false, raw: hint };
     }
