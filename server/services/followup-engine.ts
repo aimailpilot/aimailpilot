@@ -123,8 +123,9 @@ class EmailService {
       } catch (e) { /* ignore */ }
     }
 
-    // Refresh token if expired (5-minute buffer)
-    if (tokenExpiry && Date.now() > parseInt(tokenExpiry) - 300000) {
+    // Refresh token if expired (5-minute buffer) or if no expiry recorded (treat as expired)
+    const expiry = parseInt(tokenExpiry || '0');
+    if (!tokenExpiry || Date.now() > expiry - 300000) {
       if (refreshToken && clientId && clientSecret) {
         try {
           const oauth2Client = new OAuth2Client(clientId, clientSecret);
@@ -328,15 +329,38 @@ class EmailService {
           if (message.inReplyTo) headers['In-Reply-To'] = message.inReplyTo;
           if (message.references) headers['References'] = message.references;
 
-          const result = await sendViaGmailAPI(tokenResult.token, {
+          const gmailOpts = {
             from: fromFormatted,
             to: message.to,
             subject: mimeEncodeSubject(message.subject),
             html: message.html,
             headers: Object.keys(headers).length > 0 ? headers : undefined,
             threadId: message.threadId,
-          });
+          };
+          const result = await sendViaGmailAPI(tokenResult.token, gmailOpts);
           if (result.success) return result;
+
+          // If 401 (expired token), force-refresh and retry once — do NOT fall through to SMTP
+          // SMTP has no threadId support and will break Gmail threading
+          if (result.error?.includes('401')) {
+            console.log(`[Followup] Gmail API 401 for ${fromEmail}, force-refreshing token and retrying...`);
+            // Clear token expiry to force a refresh
+            const senderPrefix = senderEmail ? `gmail_sender_${senderEmail}_` : '';
+            try {
+              if (senderEmail) {
+                await storage.setApiSetting(orgId, `${senderPrefix}token_expiry`, '0');
+              } else {
+                await storage.setApiSetting(orgId, 'gmail_token_expiry', '0');
+              }
+            } catch (e) { /* ignore */ }
+            const retryToken = await this.getGmailAccessToken(orgId, senderEmail);
+            if (retryToken && retryToken.token !== tokenResult.token) {
+              console.log(`[Followup] Token refreshed, retrying Gmail API for ${message.to}${message.threadId ? ' (thread: ' + message.threadId + ')' : ''}`);
+              const retryResult = await sendViaGmailAPI(retryToken.token, gmailOpts);
+              if (retryResult.success) return retryResult;
+              console.log(`[Followup] Gmail API retry also failed: ${retryResult.error}`);
+            }
+          }
           console.log(`[Followup] Gmail API failed, trying SMTP: ${result.error}`);
         }
       }
@@ -359,15 +383,19 @@ class EmailService {
         }
       }
 
-      // Try SMTP as fallback
+      // Try SMTP as fallback (include threading headers so replies still thread in non-Gmail clients)
       const account = await storage.getEmailAccount(emailAccountId);
       if (account?.smtpConfig) {
-        console.log(`[Followup] Sending email via SMTP account ${emailAccountId} to ${message.to}`);
+        console.log(`[Followup] Sending email via SMTP account ${emailAccountId} to ${message.to}${message.threadId ? ' (WARNING: SMTP cannot use Gmail threadId — threading may break)' : ''}`);
+        const smtpHeaders: Record<string, string> = {};
+        if (message.inReplyTo) smtpHeaders['In-Reply-To'] = message.inReplyTo;
+        if (message.references) smtpHeaders['References'] = message.references;
         const result = await smtpEmailService.sendEmail(emailAccountId, account.smtpConfig, {
           to: message.to,
           subject: message.subject,
           html: message.html,
           text: message.text || message.html.replace(/<[^>]*>/g, ''),
+          headers: Object.keys(smtpHeaders).length > 0 ? smtpHeaders : undefined,
         });
         return {
           success: result.success,
@@ -1076,10 +1104,26 @@ export class FollowupEngine {
             }
 
             if (accessToken) {
-              const msgResp = await fetch(
+              let msgResp = await fetch(
                 `https://gmail.googleapis.com/gmail/v1/users/me/messages/${originalMessage.providerMessageId}?format=metadata&metadataHeaders=Message-ID`,
                 { headers: { Authorization: `Bearer ${accessToken}` } }
               );
+              // If 401, force-refresh token and retry once
+              if (msgResp.status === 401) {
+                console.log(`[Followup] Gmail metadata fetch 401, refreshing token...`);
+                const senderPrefix = senderEmail ? `gmail_sender_${senderEmail}_` : '';
+                try {
+                  await storage.setApiSetting(campaign.organizationId, senderEmail ? `${senderPrefix}token_expiry` : 'gmail_token_expiry', '0');
+                } catch (e) { /* ignore */ }
+                const retryToken = await this.emailService.getGmailAccessToken(campaign.organizationId, senderEmail);
+                if (retryToken) {
+                  accessToken = retryToken.token;
+                  msgResp = await fetch(
+                    `https://gmail.googleapis.com/gmail/v1/users/me/messages/${originalMessage.providerMessageId}?format=metadata&metadataHeaders=Message-ID`,
+                    { headers: { Authorization: `Bearer ${accessToken}` } }
+                  );
+                }
+              }
               if (!msgResp.ok) {
                 const errText = await msgResp.text().catch(() => '');
                 console.warn(`[Followup] Gmail threading API error: ${msgResp.status} ${errText.slice(0, 200)}`);
@@ -1125,6 +1169,9 @@ export class FollowupEngine {
         }
       }
 
+      if (isGmailAccount && !gmailThreadId) {
+        console.error(`[Followup] ⚠ THREADING BROKEN: Gmail account but no threadId found! Original msg id=${originalMessage.id}, providerMessageId=${originalMessage.providerMessageId || 'NULL'}, gmailThreadId=${originalMessage.gmailThreadId || 'NULL'}. Follow-up will create a NEW thread instead of replying.`);
+      }
       console.log(`[Followup] Threading: provider=${accountProvider}, subject="${personalizedSubject}", threadId=${gmailThreadId || 'none'}, inReplyTo=${originalMessageId || 'none'}`);
 
       const emailResult = await this.emailService.sendEmail(campaign.emailAccountId, {
