@@ -999,17 +999,18 @@ export class FollowupEngine {
         }
       }
       
-      // Determine subject: if step has no subject or same subject, use "Re: <original>"
+      // Determine subject: if step has no subject, use exact subject from step 1 (no "Re:" prefix)
+      // Gmail threads via threadId (not subject), Outlook threads via In-Reply-To/References headers
       const stepSubject = (execution.subject || step.subject || '').trim();
       const originalSubject = (originalMessage.subject || campaign.subject || '').trim();
       let followupSubject: string;
-      
+
       if (!stepSubject || stepSubject === originalSubject) {
-        // No custom subject or same subject → thread as reply
+        // No custom subject → reuse original subject exactly (strip any existing "Re:" for clean display)
         const cleanSubject = originalSubject.replace(/^(Re:\s*)+/i, '').trim();
-        followupSubject = cleanSubject ? `Re: ${cleanSubject}` : 'Follow-up';
+        followupSubject = cleanSubject || 'Follow-up';
       } else {
-        // Different subject specified → use it (will create new thread)
+        // Different subject specified → use it
         followupSubject = stepSubject;
       }
       
@@ -1169,10 +1170,21 @@ export class FollowupEngine {
         }
       }
 
+      // Fallback: if threading is broken (no threadId for Gmail, no In-Reply-To for Outlook),
+      // add "Re:" prefix so email clients can still group by subject as a last resort
+      const threadLinked = (isGmailAccount && !!gmailThreadId) || (!isGmailAccount && !!originalMessageId);
+      if (!threadLinked && (!stepSubject || stepSubject === originalSubject)) {
+        const cleanSubject = originalSubject.replace(/^(Re:\s*)+/i, '').trim();
+        if (cleanSubject) {
+          personalizedSubject = personalizeText(`Re: ${cleanSubject}`);
+          console.log(`[Followup] Threading not linked — adding "Re:" prefix as fallback for subject grouping`);
+        }
+      }
+
       if (isGmailAccount && !gmailThreadId) {
         console.error(`[Followup] ⚠ THREADING BROKEN: Gmail account but no threadId found! Original msg id=${originalMessage.id}, providerMessageId=${originalMessage.providerMessageId || 'NULL'}, gmailThreadId=${originalMessage.gmailThreadId || 'NULL'}. Follow-up will create a NEW thread instead of replying.`);
       }
-      console.log(`[Followup] Threading: provider=${accountProvider}, subject="${personalizedSubject}", threadId=${gmailThreadId || 'none'}, inReplyTo=${originalMessageId || 'none'}`);
+      console.log(`[Followup] Threading: provider=${accountProvider}, subject="${personalizedSubject}", threadLinked=${threadLinked}, threadId=${gmailThreadId || 'none'}, inReplyTo=${originalMessageId || 'none'}`);
 
       const emailResult = await this.emailService.sendEmail(campaign.emailAccountId, {
         to: contact.email,
