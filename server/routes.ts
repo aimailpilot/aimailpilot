@@ -4521,8 +4521,13 @@ Which account should I use and why? If I need to split across accounts, provide 
           createdAt: 'c.createdAt', firstName: 'c.firstName', company: 'c.company',
           pipelineStage: 'c.pipelineStage', nextActionDate: 'c.nextActionDate',
           lastActivityDate: 'c.lastActivityDate', email: 'c.email', jobTitle: 'c.jobTitle',
+          phone: 'c.phone', mobilePhone: 'c.mobilePhone', city: 'c.city',
         };
         const sortCol = allowedSorts[sortByParam] || 'c.createdAt';
+        console.log(`[Contacts] Advanced SQL sort: sortBy=${sortByParam}, sortCol=${sortCol}, order=${sortOrder}, listId=${listId || 'none'}`);
+        // Text columns need case-insensitive sort
+        const textSortCols = new Set(['c.firstName', 'c.company', 'c.jobTitle', 'c.email', 'c.phone', 'c.mobilePhone', 'c.city']);
+        const collate = textSortCols.has(sortCol) ? ' COLLATE NOCASE' : '';
 
         const total = (db.prepare(`SELECT COUNT(*) as cnt FROM contacts c WHERE ${where}`).get(...params) as any).cnt;
 
@@ -4532,10 +4537,10 @@ Which account should I use and why? If I need to split across accounts, provide 
           contacts = db.prepare(`SELECT c.*,
             (SELECT ca.notes FROM contact_activities ca WHERE ca.contactId = c.id ORDER BY ca.createdAt DESC LIMIT 1) as lastRemark
             FROM contacts c WHERE ${where}
-            ORDER BY ${sortCol} ${sortOrder} LIMIT ? OFFSET ?`).all(...params, limit, offset);
+            ORDER BY ${sortCol}${collate} ${sortOrder} LIMIT ? OFFSET ?`).all(...params, limit, offset);
         } catch {
           contacts = db.prepare(`SELECT c.* FROM contacts c WHERE ${where}
-            ORDER BY ${sortCol} ${sortOrder} LIMIT ? OFFSET ?`).all(...params, limit, offset);
+            ORDER BY ${sortCol}${collate} ${sortOrder} LIMIT ? OFFSET ?`).all(...params, limit, offset);
         }
 
         const hydrated = contacts.map((row: any) => {

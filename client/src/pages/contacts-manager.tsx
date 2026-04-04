@@ -14,7 +14,7 @@ import {
   MoreHorizontal, Star, TrendingUp, ArrowUpDown, FileSpreadsheet, List, FolderOpen, X, Eye, Tag,
   AlertTriangle, Ban, Link2, Sheet, Pencil, ExternalLink, ShieldX, ListX, LayoutList,
   Copy, ArrowRight, ChevronDown, Info, Sparkles, RefreshCw,
-  Phone, Globe, MapPin, Linkedin, DollarSign, Hash, Calendar, Factory,
+  Phone, Smartphone, Globe, MapPin, Linkedin, DollarSign, Hash, Calendar, Factory,
   Zap, BarChart3, Flame, Wand2, FileText, Bold, Italic, Underline, Link,
   ListOrdered, AlignLeft, Code, Type, MailCheck, ShieldCheck,
   Clock, MessageSquare, PhoneCall, Send, Target, Trophy, XOctagon, CalendarClock
@@ -3161,12 +3161,12 @@ export default function ContactsManager() {
       </button>
     );
 
-    // Column layout: checkbox | contact | company | designation | pipeline | phone | location | next action | last remark | assigned | actions
+    // Column layout: checkbox | contact | company | designation | pipeline | mobile | phone | linkedin | location | next action | last remark | assigned | actions
     const gridCols = isSpecialTab
       ? 'grid-cols-[40px_1fr_160px_48px]'
       : isAdmin
-        ? 'grid-cols-[40px_minmax(150px,1.1fr)_minmax(120px,0.9fr)_minmax(120px,0.9fr)_100px_110px_110px_100px_minmax(90px,0.8fr)_50px_40px]'
-        : 'grid-cols-[40px_minmax(150px,1.1fr)_minmax(120px,0.9fr)_minmax(120px,0.9fr)_100px_110px_110px_100px_minmax(90px,0.8fr)_40px]';
+        ? 'grid-cols-[40px_minmax(140px,1.1fr)_minmax(110px,0.85fr)_minmax(110px,0.85fr)_90px_105px_105px_30px_105px_90px_minmax(80px,0.7fr)_50px_40px]'
+        : 'grid-cols-[40px_minmax(140px,1.1fr)_minmax(110px,0.85fr)_minmax(110px,0.85fr)_90px_105px_105px_30px_105px_90px_minmax(80px,0.7fr)_40px]';
 
     return (
       <div className="space-y-3">
@@ -3347,7 +3347,7 @@ export default function ContactsManager() {
         ) : (
           <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-x-auto">
             {/* Table Header */}
-            <div className={`grid ${gridCols} gap-2 px-4 py-2.5 border-b border-gray-100 bg-gray-50/60 min-w-[1050px]`}>
+            <div className={`grid ${gridCols} gap-2 px-4 py-2.5 border-b border-gray-100 bg-gray-50/60 min-w-[1200px]`}>
               <div className="flex items-center">
                 <input type="checkbox" checked={selectedIds.length === contacts.length && contacts.length > 0} onChange={toggleSelectAll} className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600" />
               </div>
@@ -3355,8 +3355,10 @@ export default function ContactsManager() {
               {!isSpecialTab && <SortHeader col="company" label="Company" icon={Building} />}
               {!isSpecialTab && <SortHeader col="jobTitle" label="Designation" icon={Briefcase} />}
               {!isSpecialTab && <SortHeader col="pipelineStage" label="Pipeline" icon={Target} />}
-              {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1"><Phone className="h-2.5 w-2.5" /> Phone</div>}
-              {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1"><MapPin className="h-2.5 w-2.5" /> Location</div>}
+              {!isSpecialTab && <SortHeader col="mobilePhone" label="Mobile" icon={Smartphone} />}
+              {!isSpecialTab && <SortHeader col="phone" label="Phone" icon={Phone} />}
+              {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1" title="LinkedIn"><Linkedin className="h-2.5 w-2.5" /></div>}
+              {!isSpecialTab && <SortHeader col="city" label="Location" icon={MapPin} />}
               {!isSpecialTab && <SortHeader col="nextActionDate" label="Next Action" icon={Clock} />}
               {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1"><MessageSquare className="h-2.5 w-2.5" /> Last Remark</div>}
               {!isSpecialTab && isAdmin && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400"><UserCheck className="h-2.5 w-2.5" /></div>}
@@ -3376,7 +3378,7 @@ export default function ContactsManager() {
                 <div
                   key={contact.id}
                   onClick={() => openDetail(contact)}
-                  className={`grid ${gridCols} gap-2 px-4 py-2.5 border-b border-gray-50 items-center transition-all group cursor-pointer min-w-[1050px] ${
+                  className={`grid ${gridCols} gap-2 px-4 py-2.5 border-b border-gray-50 items-center transition-all group cursor-pointer min-w-[1200px] ${
                     isSelected ? 'bg-blue-50/50' : isFlagged ? 'bg-red-50/20' : 'hover:bg-gray-50/80'
                   }`}
                 >
@@ -3446,9 +3448,25 @@ export default function ContactsManager() {
                     </div>
                   )}
 
+                  {/* Mobile */}
+                  {!isSpecialTab && (
+                    <div className="text-xs text-gray-600 truncate">{contact.mobilePhone || <span className="text-gray-300">--</span>}</div>
+                  )}
+
                   {/* Phone */}
                   {!isSpecialTab && (
-                    <div className="text-xs text-gray-600 truncate">{contact.phone || contact.mobilePhone || <span className="text-gray-300">--</span>}</div>
+                    <div className="text-xs text-gray-600 truncate">{contact.phone || <span className="text-gray-300">--</span>}</div>
+                  )}
+
+                  {/* LinkedIn */}
+                  {!isSpecialTab && (
+                    <div className="flex items-center justify-center">
+                      {contact.linkedinUrl ? (
+                        <a href={contact.linkedinUrl} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="text-blue-600 hover:text-blue-800 transition" title={contact.linkedinUrl}>
+                          <Linkedin className="h-3.5 w-3.5" />
+                        </a>
+                      ) : <span className="text-gray-300 text-xs">--</span>}
+                    </div>
                   )}
 
                   {/* Location */}

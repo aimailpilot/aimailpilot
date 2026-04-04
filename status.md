@@ -153,7 +153,11 @@ This file tracks features that are confirmed working in production.
 - `sendViaGmailAPI` in `campaign-engine.ts` returns `{ success, messageId, threadId }` — threadId comes from Gmail API send response
 - `updateCampaignMessage` in `storage.ts` saves `gmailThreadId` column on the `messages` table
 - Follow-up subject: if step has no subject or same subject → `Re: <original>` (threads). Different subject → new thread.
-- **Do not touch**: `sendViaGmailAPI` return value in `server/services/campaign-engine.ts`; `gmailThreadId` save logic in `sendBatched()`; threading lookup and `gmailThreadId` usage in `executeFollowup()` and `sendEmail()` in `server/services/followup-engine.ts`; `gmailThreadId` column migration and `updateCampaignMessage` SQL in `server/storage.ts`
+- **Fix applied (2026-04-04)**: Token expiry null bug — `getGmailAccessToken` skipped refresh when `tokenExpiry` was null in DB, sending expired tokens. Now treats missing expiry as expired.
+- **Fix applied (2026-04-04)**: Gmail API 401 retry — follow-ups falling through to SMTP (no threadId support) on expired token. Now force-refreshes and retries on Gmail API path, same as campaign-engine.
+- **Fix applied (2026-04-04)**: Gmail metadata fetch 401 retry — `In-Reply-To` header lookup now also retries on expired token.
+- **Fix applied (2026-04-04)**: SMTP fallback now passes `In-Reply-To` and `References` headers for threading in non-Gmail clients.
+- **Do not touch**: `sendViaGmailAPI` return value in `server/services/campaign-engine.ts`; `gmailThreadId` save logic in `sendBatched()`; threading lookup, `gmailThreadId` usage, and 401 retry logic in `executeFollowup()` and `sendEmail()` in `server/services/followup-engine.ts`; `gmailThreadId` column migration and `updateCampaignMessage` SQL in `server/storage.ts`; `getGmailAccessToken` token refresh logic in `server/services/followup-engine.ts`
 
 ### 22. Follow-up Personalization Parity
 - Follow-up steps now have full 22+ personalization variables (same as Step 0)
@@ -201,6 +205,30 @@ This file tracks features that are confirmed working in production.
 - API key stored in superadmin org settings (`emaillistverify_api_key`)
 - Uses Node.js built-in `https` module (NOT `fetch` — fetch/AbortSignal.timeout crashed on older Node)
 - **Do not touch**: `server/services/email-verifier.ts`; email verification routes in `server/routes.ts` (lines ~9360–9480)
+
+### 29. Warmup Engine
+- Self-warmup between connected org accounts using real email templates
+- Auto-engagement: open, star, mark important, auto-reply via Gmail API / Microsoft Graph API
+- Volume ramp by phase: Phase 1 (10-30%), Phase 2 (30-60%), Phase 3 (60-90%), Phase 4 (100%)
+- 30-minute scheduler via `startWarmupEngine()` called on server boot
+- Template selection: users can select specific templates for warmup via warmup monitoring page
+- Template IDs stored as `warmup_template_ids` in `api_settings`
+- Run Now button triggers `runOrgWarmupDirect(orgId)` for immediate execution
+- Own token helpers with refresh for both Gmail and Outlook — independent of followup-engine tokens
+- **Do not touch**: `server/services/warmup-engine.ts`; warmup routes (`/api/warmup/settings`, `/api/warmup/run-now`) in `server/routes.ts`; `startWarmupEngine()` call in `server/index.ts`
+
+### 30. Inbox Reply with Token Refresh
+- Inbox reply endpoint (`POST /api/inbox/:id/reply`) now has per-sender token lookup + 401 refresh + retry for both Gmail and Outlook
+- Previously used raw `settings.gmail_access_token` without refresh — caused 401 UNAUTHENTICATED errors
+- Auto-saves reply as draft (`PUT /api/inbox/:id/draft`) on send failure
+- **Do not touch**: token refresh + retry logic in `POST /api/inbox/:id/reply` in `server/routes.ts`; `PUT /api/inbox/:id/draft` route in `server/routes.ts`; draft save logic in `client/src/pages/unified-inbox.tsx`
+
+### 31. Reply Tracker Per-Org Locking
+- Gmail and Outlook reply trackers now use per-org `Set<string>` instead of single `isChecking` boolean
+- Prevents one slow org from blocking all other orgs' reply checks
+- `lastCheckedAt` per-org timestamps in `getStatus()`
+- Outlook reply tracker lookback increased from 120 to 1440 minutes (24h) to match Gmail
+- **Do not touch**: `checkingOrgs` Set and per-org lock logic in `server/services/gmail-reply-tracker.ts` and `server/services/outlook-reply-tracker.ts`
 
 ---
 

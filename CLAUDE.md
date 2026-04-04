@@ -9,7 +9,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > - No changes to Gmail auth, Outlook auth, or OAuth routes
 > - No changes to database init, backup, or guardrail code in storage.ts
 > - No changes to `sendViaMicrosoftGraph` or `sendViaGmailAPI` functions
-> - No changes to `gmail-reply-tracker.ts` or `outlook-reply-tracker.ts`
+> - No changes to `gmail-reply-tracker.ts` or `outlook-reply-tracker.ts` (including per-org `checkingOrgs` lock logic)
+> - No changes to `warmup-engine.ts` — self-contained warmup service with own token helpers
 > - No changes to Gmail/Outlook threading logic (`gmailThreadId` storage, `executeFollowup` threading block, `sendEmail` threading headers)
 > - No changes to `checkSendingWindow`, `getUserLocalTime`, `msUntilNextSendWindow` in campaign-engine.ts
 > - No changes to `updateCampaignMessage` SQL in storage.ts — must include `gmailThreadId` column
@@ -50,6 +51,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > 4. **NEVER** remove the `gmailThreadId` column from the `messages` table migration in `storage.ts`
 > 5. **NEVER** remove `gmailThreadId` from `updateCampaignMessage` SQL in `storage.ts`
 > 6. The subject logic in `executeFollowup()` uses `Re: <original>` for threading — do not change this without testing Gmail threading end-to-end
+> 7. **NEVER** remove the 401 retry + force-refresh logic in `sendEmail()` Gmail path in `followup-engine.ts` — without it, expired tokens cause fallthrough to SMTP which breaks threading
+> 8. **NEVER** remove the token expiry null handling (`parseInt(tokenExpiry || '0')`) in `getGmailAccessToken` in `followup-engine.ts` — treats missing expiry as expired to ensure refresh happens
 
 ## Commands
 
@@ -84,6 +87,7 @@ server/          Express backend
     personalization-engine.ts Variable substitution in emails
     llm.ts                  AI/LLM integration (OpenAI, Gemini, Anthropic, Llama)
     oauth-service.ts        OAuth credential management
+    warmup-engine.ts        Email warmup between org accounts (auto-open/star/reply)
     email-rating-engine.ts  Contact scoring
     scheduler.ts            Task scheduling
 shared/schema.ts  Drizzle ORM schema (PostgreSQL dialect, used for type definitions)
@@ -101,7 +105,9 @@ shared/schema.ts  Drizzle ORM schema (PostgreSQL dialect, used for type definiti
 
 **Campaign sending**: `campaign-engine.ts` handles throttling, scheduling, and per-email-account daily send limits. Daily counters reset via a polling interval in `server/index.ts`.
 
-**Follow-up engine**: Starts automatically on server boot (`startFollowupEngine()`), runs background polling to send scheduled follow-ups.
+**Follow-up engine**: Starts automatically on server boot (`startFollowupEngine()`), runs background polling to send scheduled follow-ups. Gmail follow-ups use stored `gmailThreadId` + 401 retry to stay on Gmail API path (SMTP fallback breaks threading).
+
+**Warmup engine**: Starts automatically on server boot (`startWarmupEngine()`), runs every 30 minutes. Sends emails between connected org accounts using selected templates, then performs engagement actions (open, star, mark important, auto-reply) via Gmail API / Microsoft Graph. Volume ramps by phase.
 
 **Frontend data fetching**: TanStack Query (`@tanstack/react-query`) with a shared `queryClient` in `client/src/lib/queryClient.ts`. All API calls go through fetch wrappers in that file.
 
