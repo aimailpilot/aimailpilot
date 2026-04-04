@@ -645,3 +645,9 @@ export async function runWarmupNow(): Promise<WarmupRunResult[]> {
   console.log('[Warmup] Manual trigger — running warmup cycle now');
   return runWarmupCycle();
 }
+
+/** Run warmup for a specific org (called from the run-now API) */
+export async function runOrgWarmupDirect(orgId: string): Promise<WarmupRunResult> {
+  console.log(`[Warmup] Manual trigger for org ${orgId}`);
+  return runOrgWarmup(orgId);
+}

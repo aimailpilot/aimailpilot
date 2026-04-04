@@ -12,7 +12,7 @@ import { calculateContactRating, batchRecalculateRatings } from "./services/emai
 import { classifyReply, classifyBounce } from "./services/reply-classifier";
 import { verifySingleEmail, verifyBatch, checkCredits, getEmailVerifyApiKey } from "./services/email-verifier";
 import { OAuth2Client } from 'google-auth-library';
-import { runWarmupNow } from "./services/warmup-engine";
+import { runWarmupNow, runOrgWarmupDirect } from "./services/warmup-engine";
 
 
 // In-memory user store for simplified authentication
@@ -8377,14 +8377,13 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   // Manual warmup trigger — run one cycle now (must be before :id routes)
   app.post('/api/warmup/run-now', requireAuth, async (req: any, res) => {
     try {
-      const results = await runWarmupNow();
-      const orgResult = results.find((r: any) => r.orgId === req.user.organizationId);
-      res.json({
-        success: true,
-        result: orgResult || { sent: 0, received: 0, opened: 0, replied: 0, errors: ['No active warmup accounts or need at least 2 accounts'] },
-      });
+      const orgId = req.user.organizationId;
+      // Run warmup for this specific org directly
+      const orgResult = await runOrgWarmupDirect(orgId);
+      res.json({ success: true, result: orgResult });
     } catch (error) {
-      res.status(500).json({ message: 'Failed to run warmup cycle' });
+      console.error('[Warmup] Run-now error:', error);
+      res.status(500).json({ message: 'Failed to run warmup cycle', error: error instanceof Error ? error.message : String(error) });
     }
   });
 
