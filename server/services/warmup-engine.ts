@@ -69,8 +69,9 @@ async function getGmailAccessToken(orgId: string, senderEmail: string): Promise<
     } catch (e) { /* ignore */ }
   }
 
-  // Refresh if expired (5-min buffer)
-  if (tokenExpiry && Date.now() > parseInt(tokenExpiry) - 300000) {
+  // Refresh if expired (5-min buffer) — also refresh when tokenExpiry is null/missing
+  const expiry = parseInt(tokenExpiry || '0');
+  if (!tokenExpiry || Date.now() > expiry - 300000) {
     if (refreshToken && clientId && clientSecret) {
       try {
         const oauth2 = new OAuth2Client(clientId, clientSecret);
@@ -456,12 +457,45 @@ async function runOrgWarmup(orgId: string): Promise<WarmupRunResult> {
         const subject = (template as any).subject || 'Quick update';
         const html = (template as any).content || (template as any).htmlContent || '<p>Hello</p>';
 
-        // Send email
+        // Send email (with 401 retry — force-refresh token on auth failure)
         let sendResult: { success: boolean; messageId?: string; error?: string };
         if (resolvedProvider === 'gmail') {
           sendResult = await sendViaGmailAPI(senderToken, email, recipient.accountEmail, subject, html);
+          // Retry on 401 — token may have expired mid-cycle
+          if (!sendResult.success && sendResult.error && sendResult.error.includes('401')) {
+            console.log(`[Warmup] Gmail 401 for ${email}, force-refreshing token...`);
+            // Clear expiry to force refresh
+            const prefix = `gmail_sender_${email}_`;
+            const settings = await storage.getApiSettings(orgId);
+            if (settings[`${prefix}token_expiry`]) {
+              await storage.setApiSetting(orgId, `${prefix}token_expiry`, '0');
+            } else {
+              await storage.setApiSetting(orgId, 'gmail_token_expiry', '0');
+            }
+            const freshToken = await getGmailAccessToken(orgId, email);
+            if (freshToken) {
+              senderToken = freshToken;
+              sendResult = await sendViaGmailAPI(freshToken, email, recipient.accountEmail, subject, html);
+            }
+          }
         } else {
           sendResult = await sendViaMicrosoftGraph(senderToken, recipient.accountEmail, subject, html);
+          // Retry on 401 for Outlook
+          if (!sendResult.success && sendResult.error && sendResult.error.includes('401')) {
+            console.log(`[Warmup] Outlook 401 for ${email}, force-refreshing token...`);
+            const prefix = `outlook_sender_${email}_`;
+            const settings = await storage.getApiSettings(orgId);
+            if (settings[`${prefix}token_expiry`]) {
+              await storage.setApiSetting(orgId, `${prefix}token_expiry`, '0');
+            } else {
+              await storage.setApiSetting(orgId, 'microsoft_token_expiry', '0');
+            }
+            const freshToken = await getOutlookAccessToken(orgId, email);
+            if (freshToken) {
+              senderToken = freshToken;
+              sendResult = await sendViaMicrosoftGraph(freshToken, recipient.accountEmail, subject, html);
+            }
+          }
         }
 
         if (sendResult.success) {

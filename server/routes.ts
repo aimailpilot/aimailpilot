@@ -4490,8 +4490,10 @@ Which account should I use and why? If I need to split across accounts, provide 
           const collate = textSortCols.has(sortCol) ? ' COLLATE NOCASE' : '';
 
           const countSql = `SELECT COUNT(*) as cnt FROM contacts c WHERE ${where}`;
-          console.log(`[Contacts] SQL: ${countSql.substring(0, 200)}, params=${params.length}, sort=${sortCol} ${sortOrder}`);
-          total = (db.prepare(countSql).get(...params) as any).cnt;
+          console.log(`[Contacts] Advanced SQL: sort=${sortCol} ${sortOrder}, params=${params.length}, search="${search}"`);
+          const countRow = db.prepare(countSql).get(...params) as any;
+          if (!countRow) throw new Error('COUNT query returned null');
+          total = countRow.cnt;
 
           const selectSql = `SELECT c.* FROM contacts c WHERE ${where} ORDER BY ${sortCol}${collate} ${sortOrder} LIMIT ? OFFSET ?`;
           const advContacts = db.prepare(selectSql).all(...params, limit, offset);
@@ -4514,10 +4516,10 @@ Which account should I use and why? If I need to split across accounts, provide 
             try { if (row.emailRatingDetails && typeof row.emailRatingDetails === 'string') row.emailRatingDetails = JSON.parse(row.emailRatingDetails); } catch { row.emailRatingDetails = null; }
             return row;
           });
-          console.log(`[Contacts] Advanced SQL success: ${contacts.length} contacts, total=${total}`);
+          console.log(`[Contacts] Advanced SQL success: ${contacts.length} contacts, total=${total}, sort=${sortCol} ${sortOrder}`);
         } catch (sqlErr: any) {
           // Advanced SQL failed — keep the storage-fetched contacts (already assigned above)
-          console.error('[Contacts] Advanced SQL FAILED:', sqlErr.message);
+          console.error('[Contacts] Advanced SQL FAILED:', sqlErr.message, '\nSQL sort:', sortByParam, '\nSearch:', search, '\nStack:', sqlErr.stack?.substring(0, 300));
         }
       }
 
@@ -8483,7 +8485,18 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   app.get('/api/warmup', requireAuth, async (req: any, res) => {
     try {
       const accounts = await storage.getWarmupAccounts(req.user.organizationId);
-      res.json(accounts);
+      // Add effective daily volume (accounts for warmup phase ramp-up)
+      const enriched = accounts.map((a: any) => {
+        const daysSinceStart = Math.max(0, Math.floor((Date.now() - new Date(a.startDate).getTime()) / (1000 * 60 * 60 * 24)));
+        let ratio: number;
+        if (daysSinceStart < 7) ratio = 0.1 + (daysSinceStart / 7) * 0.2;
+        else if (daysSinceStart < 21) ratio = 0.3 + ((daysSinceStart - 7) / 14) * 0.3;
+        else if (daysSinceStart < 45) ratio = 0.6 + ((daysSinceStart - 21) / 24) * 0.3;
+        else ratio = 1.0;
+        const effectiveDailyTarget = Math.max(1, Math.round((a.dailyTarget || 5) * ratio));
+        return { ...a, effectiveDailyTarget, daysSinceStart };
+      });
+      res.json(enriched);
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch warmup accounts' });
     }

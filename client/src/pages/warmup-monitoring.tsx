@@ -448,7 +448,7 @@ export default function WarmupMonitoring() {
                         </div>
                         <div className="flex items-center gap-4 text-xs text-gray-500">
                           <span>Day {phase.days} of warmup</span>
-                          <span>Daily: {account.currentDaily}/{account.dailyTarget}</span>
+                          <span>Daily: {account.currentDaily}/{account.effectiveDailyTarget || account.dailyTarget} (max {account.dailyTarget})</span>
                           <span>Total: {account.totalSent} sent / {account.totalReceived} received</span>
                         </div>
                       </div>
