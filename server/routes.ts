@@ -4413,72 +4413,8 @@ Which account should I use and why? If I need to split across accounts, provide 
       if (listId) filters.listId = listId;
       if (status && status !== 'all') filters.status = status;
 
-      // Determine if we need advanced features (new SQL path) or can use safe storage methods
-      const hasAdvancedFilters = pipelineStage || company || location || designation || (sortByParam && sortByParam !== 'createdAt');
-
-      if (!hasAdvancedFilters && !search) {
-        // === SAFE PATH: Use existing storage methods (proven working) ===
-        let contacts;
-        let total;
-
-        if (isAdmin && assignedTo) {
-          if (assignedTo === 'unassigned') {
-            filters.assignedTo = 'unassigned';
-            contacts = await storage.getContacts(orgId, limit, offset, filters);
-            total = await storage.getContactsCount(orgId, filters);
-          } else {
-            contacts = await storage.getContactsForUser(orgId, assignedTo, limit, offset, filters);
-            total = await storage.getContactsCountForUser(orgId, assignedTo, filters);
-          }
-        } else if (!isAdmin) {
-          contacts = await storage.getContactsForUser(orgId, req.user.id, limit, offset, filters);
-          total = await storage.getContactsCountForUser(orgId, req.user.id, filters);
-        } else {
-          contacts = await storage.getContacts(orgId, limit, offset, filters);
-          total = await storage.getContactsCount(orgId, filters);
-        }
-
-        // Add lastRemark if contact_activities table exists
-        try {
-          const db = (storage as any).db;
-          const contactIds = contacts.map((c: any) => c.id);
-          if (contactIds.length > 0) {
-            const placeholders = contactIds.map(() => '?').join(',');
-            const remarks = db.prepare(`SELECT ca.contactId, ca.notes FROM contact_activities ca
-              WHERE ca.contactId IN (${placeholders}) AND ca.id IN (
-                SELECT MAX(ca2.id) FROM contact_activities ca2 WHERE ca2.contactId IN (${placeholders}) GROUP BY ca2.contactId
-              )`).all(...contactIds, ...contactIds);
-            const remarkMap = new Map(remarks.map((r: any) => [r.contactId, r.notes]));
-            contacts.forEach((c: any) => { c.lastRemark = remarkMap.get(c.id) || null; });
-          }
-        } catch { /* contact_activities table may not exist yet — ignore */ }
-
-        res.json({ contacts, total, limit, offset });
-
-      } else if (search && !hasAdvancedFilters) {
-        // === SEARCH PATH: Use existing storage search methods ===
-        let contacts;
-        let total;
-
-        if (isAdmin && assignedTo) {
-          if (assignedTo === 'unassigned') {
-            filters.assignedTo = 'unassigned';
-            contacts = await storage.searchContacts(orgId, search, filters);
-          } else {
-            contacts = await storage.searchContactsForUser(orgId, assignedTo, search, filters);
-          }
-        } else if (!isAdmin) {
-          contacts = await storage.searchContactsForUser(orgId, req.user.id, search, filters);
-        } else {
-          contacts = await storage.searchContacts(orgId, search, filters);
-        }
-
-        total = (contacts as any[]).length;
-        const paged = (contacts as any[]).slice(offset, offset + limit);
-        res.json({ contacts: paged, total, limit, offset });
-
-      } else {
-        // === ADVANCED PATH: Raw SQL for filters, sorting, search ===
+      // === UNIFIED SQL PATH: Handles sorting, pagination, filtering, and search in one query ===
+      {
         const db = (storage as any).db;
 
         const conditions: string[] = ['c.organizationId = ?'];
@@ -4511,8 +4447,9 @@ Which account should I use and why? If I need to split across accounts, provide 
           const q = `%${search.toLowerCase()}%`;
           conditions.push(`(LOWER(c.firstName) LIKE ? OR LOWER(c.lastName) LIKE ? OR LOWER(c.email) LIKE ? OR
             LOWER(c.company) LIKE ? OR LOWER(c.jobTitle) LIKE ? OR LOWER(c.tags) LIKE ? OR
-            LOWER(c.phone) LIKE ? OR LOWER(c.city) LIKE ? OR LOWER(c.country) LIKE ? OR LOWER(c.industry) LIKE ?)`);
-          params.push(q, q, q, q, q, q, q, q, q, q);
+            LOWER(c.phone) LIKE ? OR LOWER(c.mobilePhone) LIKE ? OR LOWER(c.linkedinUrl) LIKE ? OR
+            LOWER(c.city) LIKE ? OR LOWER(c.country) LIKE ? OR LOWER(c.industry) LIKE ?)`);
+          params.push(q, q, q, q, q, q, q, q, q, q, q, q);
         }
 
         const where = conditions.join(' AND ');
@@ -4553,8 +4490,18 @@ Which account should I use and why? If I need to split across accounts, provide 
         res.json({ contacts: hydrated, total, limit, offset });
       }
     } catch (error: any) {
-      console.error('[Contacts] GET error:', error.message);
-      res.status(500).json({ message: 'Failed to fetch contacts' });
+      console.error('[Contacts] GET error:', error.message, error.stack);
+      // FALLBACK: If the advanced SQL path fails, fall back to safe storage method
+      // so the user still gets data (even if unsorted)
+      try {
+        const fallbackContacts = await storage.getContacts(req.user.organizationId, limit, offset, filters);
+        const fallbackTotal = await storage.getContactsCount(req.user.organizationId, filters);
+        console.log(`[Contacts] Fallback: returned ${fallbackContacts.length} contacts (total=${fallbackTotal})`);
+        res.json({ contacts: fallbackContacts, total: fallbackTotal, limit, offset });
+      } catch (fallbackErr: any) {
+        console.error('[Contacts] Fallback also failed:', fallbackErr.message);
+        res.status(500).json({ message: 'Failed to fetch contacts' });
+      }
     }
   });
 
