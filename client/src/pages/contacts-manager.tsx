@@ -17,7 +17,7 @@ import {
   Phone, Smartphone, Globe, MapPin, Linkedin, DollarSign, Hash, Calendar, Factory,
   Zap, BarChart3, Flame, Wand2, FileText, Bold, Italic, Underline, Link,
   ListOrdered, AlignLeft, Code, Type, MailCheck, ShieldCheck,
-  Clock, MessageSquare, PhoneCall, Send, Target, Trophy, XOctagon, CalendarClock
+  Clock, MessageSquare, PhoneCall, Send, Target, Trophy, XOctagon, CalendarClock, CheckCircle2
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";

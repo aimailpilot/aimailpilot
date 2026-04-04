@@ -8799,24 +8799,49 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         const proposalsSent = activityMap['proposal'] || 0;
 
         // Pipeline stats (contacts assigned to this user)
-        const pipelineStats = db.prepare(`
-          SELECT pipelineStage, COUNT(*) as cnt, SUM(COALESCE(dealValue, 0)) as totalValue
-          FROM contacts WHERE organizationId = ? AND assignedTo = ?
-          AND pipelineStage IN ('interested', 'meeting_scheduled', 'meeting_done', 'proposal_sent', 'won', 'lost')
-          GROUP BY pipelineStage
-        `).all(orgId, userId) as any[];
+        // dealValue column may not exist yet on older deployments — use try/catch
+        let pipelineStats: any[] = [];
+        try {
+          pipelineStats = db.prepare(`
+            SELECT pipelineStage, COUNT(*) as cnt, SUM(COALESCE(dealValue, 0)) as totalValue
+            FROM contacts WHERE organizationId = ? AND assignedTo = ?
+            AND pipelineStage IN ('interested', 'meeting_scheduled', 'meeting_done', 'proposal_sent', 'won', 'lost')
+            GROUP BY pipelineStage
+          `).all(orgId, userId) as any[];
+        } catch {
+          pipelineStats = db.prepare(`
+            SELECT pipelineStage, COUNT(*) as cnt, 0 as totalValue
+            FROM contacts WHERE organizationId = ? AND assignedTo = ?
+            AND pipelineStage IN ('interested', 'meeting_scheduled', 'meeting_done', 'proposal_sent', 'won', 'lost')
+            GROUP BY pipelineStage
+          `).all(orgId, userId) as any[];
+        }
         const pipeMap: Record<string, { count: number; value: number }> = {};
         for (const p of pipelineStats) pipeMap[p.pipelineStage] = { count: p.cnt, value: p.totalValue || 0 };
 
         // Deals won/lost in this period
-        const dealsWon = (db.prepare(`
-          SELECT COUNT(*) as cnt, SUM(COALESCE(dealValue, 0)) as totalValue
-          FROM contacts WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'won' AND dealClosedAt >= ?
-        `).get(orgId, userId, startDate) as any) || { cnt: 0, totalValue: 0 };
-        const dealsLost = (db.prepare(`
-          SELECT COUNT(*) as cnt FROM contacts
-          WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'lost' AND dealClosedAt >= ?
-        `).get(orgId, userId, startDate) as any)?.cnt || 0;
+        let dealsWon = { cnt: 0, totalValue: 0 };
+        let dealsLost = 0;
+        try {
+          dealsWon = (db.prepare(`
+            SELECT COUNT(*) as cnt, SUM(COALESCE(dealValue, 0)) as totalValue
+            FROM contacts WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'won' AND dealClosedAt >= ?
+          `).get(orgId, userId, startDate) as any) || { cnt: 0, totalValue: 0 };
+          dealsLost = (db.prepare(`
+            SELECT COUNT(*) as cnt FROM contacts
+            WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'lost' AND dealClosedAt >= ?
+          `).get(orgId, userId, startDate) as any)?.cnt || 0;
+        } catch {
+          // dealClosedAt column may not exist — fall back to counting all won/lost
+          dealsWon = (db.prepare(`
+            SELECT COUNT(*) as cnt, 0 as totalValue
+            FROM contacts WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'won'
+          `).get(orgId, userId) as any) || { cnt: 0, totalValue: 0 };
+          dealsLost = (db.prepare(`
+            SELECT COUNT(*) as cnt FROM contacts
+            WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'lost'
+          `).get(orgId, userId) as any)?.cnt || 0;
+        }
 
         // Hot leads (interested + meeting_scheduled + meeting_done)
         const hotLeads = (pipeMap['interested']?.count || 0) + (pipeMap['meeting_scheduled']?.count || 0) + (pipeMap['meeting_done']?.count || 0);
@@ -8859,21 +8884,27 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         revenue: scorecard.reduce((s, m) => s + m.revenue, 0),
       };
 
-      // Overdue actions (team-wide)
-      const overdueActions = (db.prepare(`
-        SELECT COUNT(*) as cnt FROM contacts
-        WHERE organizationId = ? AND nextActionDate < ? AND nextActionDate IS NOT NULL
-        AND pipelineStage NOT IN ('won', 'lost')
-      `).get(orgId, now.toISOString().split('T')[0]) as any)?.cnt || 0;
+      // Overdue actions (team-wide) — safe if nextActionDate column missing
+      let overdueActions = 0;
+      try {
+        overdueActions = (db.prepare(`
+          SELECT COUNT(*) as cnt FROM contacts
+          WHERE organizationId = ? AND nextActionDate < ? AND nextActionDate IS NOT NULL
+          AND pipelineStage NOT IN ('won', 'lost')
+        `).get(orgId, now.toISOString().split('T')[0]) as any)?.cnt || 0;
+      } catch { /* column may not exist */ }
 
-      // Unactioned replies (replied but no activity logged after reply)
-      const unactionedReplies = (db.prepare(`
-        SELECT COUNT(DISTINCT m.contactId) as cnt
-        FROM messages m
-        LEFT JOIN contact_activities ca ON ca.contactId = m.contactId AND ca.createdAt > m.repliedAt
-        WHERE m.campaignId IN (SELECT id FROM campaigns WHERE organizationId = ?)
-        AND m.repliedAt IS NOT NULL AND m.repliedAt >= ? AND ca.id IS NULL
-      `).get(orgId, startDate) as any)?.cnt || 0;
+      // Unactioned replies — safe if repliedAt column missing
+      let unactionedReplies = 0;
+      try {
+        unactionedReplies = (db.prepare(`
+          SELECT COUNT(DISTINCT m.contactId) as cnt
+          FROM messages m
+          LEFT JOIN contact_activities ca ON ca.contactId = m.contactId AND ca.createdAt > m.repliedAt
+          WHERE m.campaignId IN (SELECT id FROM campaigns WHERE organizationId = ?)
+          AND m.repliedAt IS NOT NULL AND m.repliedAt >= ? AND ca.id IS NULL
+        `).get(orgId, startDate) as any)?.cnt || 0;
+      } catch { /* column may not exist */ }
 
       res.json({ scorecard, teamTotals, overdueActions, unactionedReplies, period });
     } catch (error: any) {
