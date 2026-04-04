@@ -3606,21 +3606,28 @@ Which account should I use and why? If I need to split across accounts, provide 
         } catch (e) { /* ignore */ }
       }
 
-      // Get contact list info — find the most common listId among campaign contacts
+      // Get contact list info — find the most common listId among campaign's selected contacts
       let contactList: any = null;
       try {
         const db = (storage as any).db;
-        const listRow = db.prepare(`
-          SELECT c.listId, cl.name as listName, COUNT(*) as cnt
-          FROM messages m
-          JOIN contacts c ON c.id = m.contactId
-          LEFT JOIN contact_lists cl ON cl.id = c.listId
-          WHERE m.campaignId = ? AND c.listId IS NOT NULL AND c.listId != ''
-          GROUP BY c.listId
-          ORDER BY cnt DESC LIMIT 1
-        `).get(req.params.id) as any;
-        if (listRow && listRow.listId) {
-          contactList = { id: listRow.listId, name: listRow.listName || 'Unnamed list' };
+        // Campaign stores all selected contactIds as JSON array — use that (not messages table which may be partial)
+        const contactIdsJson = (campaign as any).contactIds;
+        const contactIds: string[] = contactIdsJson ? (typeof contactIdsJson === 'string' ? JSON.parse(contactIdsJson) : contactIdsJson) : [];
+        if (contactIds.length > 0) {
+          // Sample first 50 contacts to find the most common list (efficient enough)
+          const sample = contactIds.slice(0, 50);
+          const ph = sample.map(() => '?').join(',');
+          const listRow = db.prepare(`
+            SELECT c.listId, cl.name as listName, COUNT(*) as cnt
+            FROM contacts c
+            LEFT JOIN contact_lists cl ON cl.id = c.listId
+            WHERE c.id IN (${ph}) AND c.listId IS NOT NULL AND c.listId != ''
+            GROUP BY c.listId
+            ORDER BY cnt DESC LIMIT 1
+          `).get(...sample) as any;
+          if (listRow && listRow.listId) {
+            contactList = { id: listRow.listId, name: listRow.listName || 'Unnamed list' };
+          }
         }
       } catch (e) { /* ignore */ }
 
