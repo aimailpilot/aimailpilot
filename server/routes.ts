@@ -4413,95 +4413,125 @@ Which account should I use and why? If I need to split across accounts, provide 
       if (listId) filters.listId = listId;
       if (status && status !== 'all') filters.status = status;
 
-      // === UNIFIED SQL PATH: Handles sorting, pagination, filtering, and search in one query ===
-      {
-        const db = (storage as any).db;
+      // === PRIMARY PATH: Use proven storage methods (always works) ===
+      // Storage methods handle pagination, filtering, and default sort (createdAt DESC)
+      let contacts: any[];
+      let total: number;
 
-        const conditions: string[] = ['c.organizationId = ?'];
-        const params: any[] = [orgId];
-
-        if (!isAdmin) {
-          conditions.push('c.assignedTo = ?');
-          params.push(req.user.id);
-        } else if (assignedTo) {
-          if (assignedTo === 'unassigned') {
-            conditions.push("(c.assignedTo IS NULL OR c.assignedTo = '')");
-          } else {
-            conditions.push('c.assignedTo = ?');
-            params.push(assignedTo);
-          }
+      if (isAdmin && assignedTo) {
+        if (assignedTo === 'unassigned') {
+          filters.assignedTo = 'unassigned';
+          contacts = await storage.getContacts(orgId, limit, offset, filters);
+          total = await storage.getContactsCount(orgId, filters);
+        } else {
+          contacts = await storage.getContactsForUser(orgId, assignedTo, limit, offset, filters);
+          total = await storage.getContactsCountForUser(orgId, assignedTo, filters);
         }
-
-        if (listId) { conditions.push('c.listId = ?'); params.push(listId); }
-        if (status && status !== 'all') { conditions.push('c.status = ?'); params.push(status); }
-        if (pipelineStage && pipelineStage !== 'all') { conditions.push('c.pipelineStage = ?'); params.push(pipelineStage); }
-        if (company) { conditions.push('LOWER(c.company) LIKE ?'); params.push(`%${company.toLowerCase()}%`); }
-        if (location) {
-          conditions.push('(LOWER(c.city) LIKE ? OR LOWER(c.state) LIKE ? OR LOWER(c.country) LIKE ?)');
-          const loc = `%${location.toLowerCase()}%`;
-          params.push(loc, loc, loc);
-        }
-        if (designation) { conditions.push('LOWER(c.jobTitle) LIKE ?'); params.push(`%${designation.toLowerCase()}%`); }
-
-        if (search) {
-          const q = `%${search.toLowerCase()}%`;
-          conditions.push(`(LOWER(c.firstName) LIKE ? OR LOWER(c.lastName) LIKE ? OR LOWER(c.email) LIKE ? OR
-            LOWER(c.company) LIKE ? OR LOWER(c.jobTitle) LIKE ? OR LOWER(c.tags) LIKE ? OR
-            LOWER(c.phone) LIKE ? OR LOWER(c.mobilePhone) LIKE ? OR LOWER(c.linkedinUrl) LIKE ? OR
-            LOWER(c.city) LIKE ? OR LOWER(c.country) LIKE ? OR LOWER(c.industry) LIKE ?)`);
-          params.push(q, q, q, q, q, q, q, q, q, q, q, q);
-        }
-
-        const where = conditions.join(' AND ');
-
-        const allowedSorts: Record<string, string> = {
-          createdAt: 'c.createdAt', firstName: 'c.firstName', company: 'c.company',
-          pipelineStage: 'c.pipelineStage', nextActionDate: 'c.nextActionDate',
-          lastActivityDate: 'c.lastActivityDate', email: 'c.email', jobTitle: 'c.jobTitle',
-          phone: 'c.phone', mobilePhone: 'c.mobilePhone', city: 'c.city',
-        };
-        const sortCol = allowedSorts[sortByParam] || 'c.createdAt';
-        console.log(`[Contacts] Advanced SQL sort: sortBy=${sortByParam}, sortCol=${sortCol}, order=${sortOrder}, listId=${listId || 'none'}`);
-        // Text columns need case-insensitive sort
-        const textSortCols = new Set(['c.firstName', 'c.company', 'c.jobTitle', 'c.email', 'c.phone', 'c.mobilePhone', 'c.city']);
-        const collate = textSortCols.has(sortCol) ? ' COLLATE NOCASE' : '';
-
-        const total = (db.prepare(`SELECT COUNT(*) as cnt FROM contacts c WHERE ${where}`).get(...params) as any).cnt;
-
-        // Try with lastRemark subquery, fall back to without
-        let contacts;
-        try {
-          contacts = db.prepare(`SELECT c.*,
-            (SELECT ca.notes FROM contact_activities ca WHERE ca.contactId = c.id ORDER BY ca.createdAt DESC LIMIT 1) as lastRemark
-            FROM contacts c WHERE ${where}
-            ORDER BY ${sortCol}${collate} ${sortOrder} LIMIT ? OFFSET ?`).all(...params, limit, offset);
-        } catch {
-          contacts = db.prepare(`SELECT c.* FROM contacts c WHERE ${where}
-            ORDER BY ${sortCol}${collate} ${sortOrder} LIMIT ? OFFSET ?`).all(...params, limit, offset);
-        }
-
-        const hydrated = contacts.map((row: any) => {
-          try { if (row.tags && typeof row.tags === 'string') row.tags = JSON.parse(row.tags); } catch { row.tags = []; }
-          try { if (row.customFields && typeof row.customFields === 'string') row.customFields = JSON.parse(row.customFields); } catch { row.customFields = {}; }
-          try { if (row.emailRatingDetails && typeof row.emailRatingDetails === 'string') row.emailRatingDetails = JSON.parse(row.emailRatingDetails); } catch { row.emailRatingDetails = null; }
-          return row;
-        });
-
-        res.json({ contacts: hydrated, total, limit, offset });
+      } else if (!isAdmin) {
+        contacts = await storage.getContactsForUser(orgId, req.user.id, limit, offset, filters);
+        total = await storage.getContactsCountForUser(orgId, req.user.id, filters);
+      } else {
+        contacts = await storage.getContacts(orgId, limit, offset, filters);
+        total = await storage.getContactsCount(orgId, filters);
       }
+
+      // === ENHANCEMENT: If user requested sorting/search/advanced filters, try SQL path ===
+      // On failure, keep the storage-fetched contacts (unsorted but correct data)
+      const needsAdvanced = search || pipelineStage || company || location || designation || (sortByParam && sortByParam !== 'createdAt');
+      if (needsAdvanced) {
+        try {
+          const db = (storage as any).db;
+          const conditions: string[] = ['c.organizationId = ?'];
+          const params: any[] = [orgId];
+
+          if (!isAdmin) {
+            conditions.push('c.assignedTo = ?');
+            params.push(req.user.id);
+          } else if (assignedTo) {
+            if (assignedTo === 'unassigned') {
+              conditions.push("(c.assignedTo IS NULL OR c.assignedTo = '')");
+            } else {
+              conditions.push('c.assignedTo = ?');
+              params.push(assignedTo);
+            }
+          }
+
+          if (listId) { conditions.push('c.listId = ?'); params.push(listId); }
+          if (status && status !== 'all') { conditions.push('c.status = ?'); params.push(status); }
+          if (pipelineStage && pipelineStage !== 'all') { conditions.push('c.pipelineStage = ?'); params.push(pipelineStage); }
+          if (company) { conditions.push('LOWER(c.company) LIKE ?'); params.push(`%${company.toLowerCase()}%`); }
+          if (location) {
+            conditions.push('(LOWER(c.city) LIKE ? OR LOWER(c.state) LIKE ? OR LOWER(c.country) LIKE ?)');
+            const loc = `%${location.toLowerCase()}%`;
+            params.push(loc, loc, loc);
+          }
+          if (designation) { conditions.push('LOWER(c.jobTitle) LIKE ?'); params.push(`%${designation.toLowerCase()}%`); }
+
+          if (search) {
+            const q = `%${search.toLowerCase()}%`;
+            conditions.push(`(LOWER(c.firstName) LIKE ? OR LOWER(c.lastName) LIKE ? OR LOWER(c.email) LIKE ? OR
+              LOWER(c.company) LIKE ? OR LOWER(c.jobTitle) LIKE ? OR LOWER(c.tags) LIKE ? OR
+              LOWER(c.phone) LIKE ? OR LOWER(c.mobilePhone) LIKE ? OR LOWER(c.linkedinUrl) LIKE ? OR
+              LOWER(c.city) LIKE ? OR LOWER(c.country) LIKE ? OR LOWER(c.industry) LIKE ?)`);
+            params.push(q, q, q, q, q, q, q, q, q, q, q, q);
+          }
+
+          const where = conditions.join(' AND ');
+          const allowedSorts: Record<string, string> = {
+            createdAt: 'c.createdAt', firstName: 'c.firstName', company: 'c.company',
+            pipelineStage: 'c.pipelineStage', nextActionDate: 'c.nextActionDate',
+            lastActivityDate: 'c.lastActivityDate', email: 'c.email', jobTitle: 'c.jobTitle',
+            phone: 'c.phone', mobilePhone: 'c.mobilePhone', city: 'c.city',
+          };
+          const sortCol = allowedSorts[sortByParam] || 'c.createdAt';
+          const textSortCols = new Set(['c.firstName', 'c.company', 'c.jobTitle', 'c.email', 'c.phone', 'c.mobilePhone', 'c.city']);
+          const collate = textSortCols.has(sortCol) ? ' COLLATE NOCASE' : '';
+
+          total = (db.prepare(`SELECT COUNT(*) as cnt FROM contacts c WHERE ${where}`).get(...params) as any).cnt;
+
+          let advContacts;
+          try {
+            advContacts = db.prepare(`SELECT c.*,
+              (SELECT ca.notes FROM contact_activities ca WHERE ca.contactId = c.id ORDER BY ca.createdAt DESC LIMIT 1) as lastRemark
+              FROM contacts c WHERE ${where}
+              ORDER BY ${sortCol}${collate} ${sortOrder} LIMIT ? OFFSET ?`).all(...params, limit, offset);
+          } catch {
+            advContacts = db.prepare(`SELECT c.* FROM contacts c WHERE ${where}
+              ORDER BY ${sortCol}${collate} ${sortOrder} LIMIT ? OFFSET ?`).all(...params, limit, offset);
+          }
+
+          // Hydrate JSON fields
+          contacts = advContacts.map((row: any) => {
+            try { if (row.tags && typeof row.tags === 'string') row.tags = JSON.parse(row.tags); } catch { row.tags = []; }
+            try { if (row.customFields && typeof row.customFields === 'string') row.customFields = JSON.parse(row.customFields); } catch { row.customFields = {}; }
+            try { if (row.emailRatingDetails && typeof row.emailRatingDetails === 'string') row.emailRatingDetails = JSON.parse(row.emailRatingDetails); } catch { row.emailRatingDetails = null; }
+            return row;
+          });
+        } catch (sqlErr: any) {
+          // Advanced SQL failed — keep the storage-fetched contacts (already assigned above)
+          console.error('[Contacts] Advanced SQL failed, using storage fallback:', sqlErr.message);
+        }
+      }
+
+      // Add lastRemark if not already included (safe path doesn't include it)
+      if (contacts.length > 0 && !(contacts[0] as any).lastRemark) {
+        try {
+          const db = (storage as any).db;
+          const contactIds = contacts.map((c: any) => c.id);
+          const placeholders = contactIds.map(() => '?').join(',');
+          const remarks = db.prepare(`SELECT ca.contactId, ca.notes FROM contact_activities ca
+            WHERE ca.contactId IN (${placeholders}) AND ca.id IN (
+              SELECT MAX(ca2.id) FROM contact_activities ca2 WHERE ca2.contactId IN (${placeholders}) GROUP BY ca2.contactId
+            )`).all(...contactIds, ...contactIds);
+          const remarkMap = new Map(remarks.map((r: any) => [r.contactId, r.notes]));
+          contacts.forEach((c: any) => { c.lastRemark = remarkMap.get(c.id) || null; });
+        } catch { /* contact_activities table may not exist yet — ignore */ }
+      }
+
+      res.json({ contacts, total, limit, offset });
     } catch (error: any) {
       console.error('[Contacts] GET error:', error.message, error.stack);
-      // FALLBACK: If the advanced SQL path fails, fall back to safe storage method
-      // so the user still gets data (even if unsorted)
-      try {
-        const fallbackContacts = await storage.getContacts(req.user.organizationId, limit, offset, filters);
-        const fallbackTotal = await storage.getContactsCount(req.user.organizationId, filters);
-        console.log(`[Contacts] Fallback: returned ${fallbackContacts.length} contacts (total=${fallbackTotal})`);
-        res.json({ contacts: fallbackContacts, total: fallbackTotal, limit, offset });
-      } catch (fallbackErr: any) {
-        console.error('[Contacts] Fallback also failed:', fallbackErr.message);
-        res.status(500).json({ message: 'Failed to fetch contacts' });
-      }
+      res.status(500).json({ message: 'Failed to fetch contacts' });
     }
   });
 

@@ -286,17 +286,9 @@ export default function ContactsManager() {
         setContacts(list);
         setTotal(data.total ?? list.length);
       } else {
-        const errText = await res.text().catch(() => '');
-        console.error('Failed to fetch contacts:', res.status, errText);
-        // Don't keep stale data — clear contacts on error so user sees the issue
-        setContacts([]);
-        setTotal(0);
+        console.error('Failed to fetch contacts:', res.status, await res.text().catch(() => ''));
       }
-    } catch (e) {
-      console.error('Failed to fetch contacts:', e);
-      setContacts([]);
-      setTotal(0);
-    }
+    } catch (e) { console.error('Failed to fetch contacts:', e); }
     setLoading(false);
   };
 
