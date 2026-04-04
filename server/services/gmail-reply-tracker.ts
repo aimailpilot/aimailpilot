@@ -51,7 +51,11 @@ interface ReplyCheckResult {
 export class GmailReplyTracker {
   // Support multiple orgs — each org gets its own interval
   private checkIntervals: Map<string, NodeJS.Timeout> = new Map();
-  private isChecking = false;
+  // Per-org lock: prevents overlapping checks for the SAME org while allowing different orgs to check in parallel
+  private checkingOrgs: Set<string> = new Set();
+  private lastCheckedAt: Map<string, string> = new Map();
+  // Keep backward compat for getStatus()
+  private get isChecking(): boolean { return this.checkingOrgs.size > 0; }
 
   /**
    * Refresh access token using refresh token
@@ -883,11 +887,16 @@ export class GmailReplyTracker {
    * Run a single check (with lock to prevent overlapping)
    */
   private async runCheck(orgId: string): Promise<void> {
-    if (this.isChecking) return;
-    this.isChecking = true;
+    // Per-org lock: skip only if THIS org is already being checked, not other orgs
+    if (this.checkingOrgs.has(orgId)) {
+      console.log(`[GmailReplyTracker] Skipping org ${orgId.substring(0, 8)} — previous check still running`);
+      return;
+    }
+    this.checkingOrgs.add(orgId);
 
     try {
       const result = await this.checkForReplies(orgId, 1440); // Check last 24 hours
+      this.lastCheckedAt.set(orgId, new Date().toISOString());
       if (result.newReplies > 0) {
         console.log(`[GmailReplyTracker] Auto-check found ${result.newReplies} new replies`);
       }
@@ -900,7 +909,7 @@ export class GmailReplyTracker {
       // CRITICAL: Never let an error stop the auto-checker — it must keep running
       console.error('[GmailReplyTracker] Auto-check error (will retry next cycle):', error instanceof Error ? error.message : error);
     } finally {
-      this.isChecking = false;
+      this.checkingOrgs.delete(orgId);
     }
   }
 
@@ -1029,11 +1038,16 @@ export class GmailReplyTracker {
   /**
    * Get reply tracking status (is polling active, last check time, etc.)
    */
-  getStatus(): { active: boolean; checking: boolean; trackedOrgs: number } {
+  getStatus(): { active: boolean; checking: boolean; trackedOrgs: number; lastCheckedAt?: Record<string, string> } {
+    const lastChecked: Record<string, string> = {};
+    for (const [orgId, ts] of this.lastCheckedAt) {
+      lastChecked[orgId.substring(0, 8)] = ts;
+    }
     return {
       active: this.checkIntervals.size > 0,
       checking: this.isChecking,
       trackedOrgs: this.checkIntervals.size,
+      lastCheckedAt: Object.keys(lastChecked).length > 0 ? lastChecked : undefined,
     };
   }
 }

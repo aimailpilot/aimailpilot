@@ -38,7 +38,10 @@ const OUTLOOK_SCOPES = 'openid profile email offline_access https://graph.micros
 
 export class OutlookReplyTracker {
   private checkIntervals: Map<string, NodeJS.Timeout> = new Map();
-  private isChecking = false;
+  // Per-org lock: prevents overlapping checks for the SAME org while allowing different orgs to check in parallel
+  private checkingOrgs: Set<string> = new Set();
+  private lastCheckedAt: Map<string, string> = new Map();
+  private get isChecking(): boolean { return this.checkingOrgs.size > 0; }
 
   /** Get OAuth client credentials for Microsoft */
   private async getOAuthCredentials(orgId: string): Promise<{ clientId: string; clientSecret: string } | null> {
@@ -636,22 +639,36 @@ export class OutlookReplyTracker {
   }
 
   private async runCheck(orgId: string): Promise<void> {
-    if (this.isChecking) return;
-    this.isChecking = true;
+    // Per-org lock: skip only if THIS org is already being checked
+    if (this.checkingOrgs.has(orgId)) {
+      console.log(`[OutlookReplyTracker] Skipping org ${orgId.substring(0, 8)} — previous check still running`);
+      return;
+    }
+    this.checkingOrgs.add(orgId);
     try {
-      const result = await this.checkForReplies(orgId, 120);
+      const result = await this.checkForReplies(orgId, 1440); // Increased from 120 to 1440 (24h) to match Gmail and avoid missed replies
+      this.lastCheckedAt.set(orgId, new Date().toISOString());
       if (result.newReplies > 0) {
         console.log(`[OutlookReplyTracker] Auto-check found ${result.newReplies} new messages for org ${orgId.substring(0, 8)}`);
       }
     } catch (error) {
       console.error('[OutlookReplyTracker] Auto-check error:', error);
     } finally {
-      this.isChecking = false;
+      this.checkingOrgs.delete(orgId);
     }
   }
 
-  getStatus(): { active: boolean; checking: boolean; trackedOrgs: number } {
-    return { active: this.checkIntervals.size > 0, checking: this.isChecking, trackedOrgs: this.checkIntervals.size };
+  getStatus(): { active: boolean; checking: boolean; trackedOrgs: number; lastCheckedAt?: Record<string, string> } {
+    const lastChecked: Record<string, string> = {};
+    for (const [orgId, ts] of this.lastCheckedAt) {
+      lastChecked[orgId.substring(0, 8)] = ts;
+    }
+    return {
+      active: this.checkIntervals.size > 0,
+      checking: this.isChecking,
+      trackedOrgs: this.checkIntervals.size,
+      lastCheckedAt: Object.keys(lastChecked).length > 0 ? lastChecked : undefined,
+    };
   }
 }
 
