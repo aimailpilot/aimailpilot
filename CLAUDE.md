@@ -17,8 +17,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > - No changes to Step 0 guarantee block in `/api/campaigns/:id/detail` route
 > - No changes to campaign sending/pause/resume flow in routes.ts or campaign-engine.ts
 > - **NEVER** use `require('./db')` or import `server/db.ts` — caused 1 day of server crash (drizzle-orm not in production deps)
-> - **NEVER** replace working `storage.getContacts()` calls with raw SQL unless the raw SQL has try/catch fallback — caused contacts page to show 0 contacts
+> - **NEVER** replace working `storage.getContacts()` calls with raw SQL as the primary path — caused contacts page to show 0 contacts TWICE (2026-04-04). Raw SQL may ONLY be used as an enhancement after `storage.getContacts()` has already fetched data. If raw SQL fails, the storage-fetched data must remain.
 > - **NEVER** bypass `storage` methods for GET endpoints that work — if you must use raw SQL, always keep the working storage method as primary path and raw SQL as enhancement only
+> - **NEVER** clear contacts/data on API error in the frontend (e.g., `setContacts([])` on fetch failure) — this causes "No contacts yet" display. Keep stale data visible on error; it's better UX than empty state.
 > - **NEVER** modify the return value of `sendViaGmailAPI` — it must return `{ success, messageId, threadId }` for threading to work
 > - When adding new SQL columns, always use `ALTER TABLE ADD COLUMN` with try/catch and update ALL relevant SQL statements (INSERT, UPDATE, SELECT) that touch that table
 

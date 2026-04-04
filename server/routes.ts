@@ -4441,6 +4441,8 @@ Which account should I use and why? If I need to split across accounts, provide 
       if (needsAdvanced) {
         try {
           const db = (storage as any).db;
+          if (!db) throw new Error('db is null/undefined');
+
           const conditions: string[] = ['c.organizationId = ?'];
           const params: any[] = [orgId];
 
@@ -4487,18 +4489,23 @@ Which account should I use and why? If I need to split across accounts, provide 
           const textSortCols = new Set(['c.firstName', 'c.company', 'c.jobTitle', 'c.email', 'c.phone', 'c.mobilePhone', 'c.city']);
           const collate = textSortCols.has(sortCol) ? ' COLLATE NOCASE' : '';
 
-          total = (db.prepare(`SELECT COUNT(*) as cnt FROM contacts c WHERE ${where}`).get(...params) as any).cnt;
+          const countSql = `SELECT COUNT(*) as cnt FROM contacts c WHERE ${where}`;
+          console.log(`[Contacts] SQL: ${countSql.substring(0, 200)}, params=${params.length}, sort=${sortCol} ${sortOrder}`);
+          total = (db.prepare(countSql).get(...params) as any).cnt;
 
-          let advContacts;
+          const selectSql = `SELECT c.* FROM contacts c WHERE ${where} ORDER BY ${sortCol}${collate} ${sortOrder} LIMIT ? OFFSET ?`;
+          const advContacts = db.prepare(selectSql).all(...params, limit, offset);
+
+          // Add lastRemark separately (safe — won't break if table missing)
           try {
-            advContacts = db.prepare(`SELECT c.*,
-              (SELECT ca.notes FROM contact_activities ca WHERE ca.contactId = c.id ORDER BY ca.createdAt DESC LIMIT 1) as lastRemark
-              FROM contacts c WHERE ${where}
-              ORDER BY ${sortCol}${collate} ${sortOrder} LIMIT ? OFFSET ?`).all(...params, limit, offset);
-          } catch {
-            advContacts = db.prepare(`SELECT c.* FROM contacts c WHERE ${where}
-              ORDER BY ${sortCol}${collate} ${sortOrder} LIMIT ? OFFSET ?`).all(...params, limit, offset);
-          }
+            const ids = advContacts.map((c: any) => c.id);
+            if (ids.length > 0) {
+              const ph = ids.map(() => '?').join(',');
+              const remarks = db.prepare(`SELECT contactId, notes FROM contact_activities WHERE contactId IN (${ph}) AND id IN (SELECT MAX(id) FROM contact_activities WHERE contactId IN (${ph}) GROUP BY contactId)`).all(...ids, ...ids);
+              const map = new Map(remarks.map((r: any) => [r.contactId, r.notes]));
+              advContacts.forEach((c: any) => { c.lastRemark = map.get(c.id) || null; });
+            }
+          } catch { /* ignore */ }
 
           // Hydrate JSON fields
           contacts = advContacts.map((row: any) => {
@@ -4507,9 +4514,10 @@ Which account should I use and why? If I need to split across accounts, provide 
             try { if (row.emailRatingDetails && typeof row.emailRatingDetails === 'string') row.emailRatingDetails = JSON.parse(row.emailRatingDetails); } catch { row.emailRatingDetails = null; }
             return row;
           });
+          console.log(`[Contacts] Advanced SQL success: ${contacts.length} contacts, total=${total}`);
         } catch (sqlErr: any) {
           // Advanced SQL failed — keep the storage-fetched contacts (already assigned above)
-          console.error('[Contacts] Advanced SQL failed, using storage fallback:', sqlErr.message);
+          console.error('[Contacts] Advanced SQL FAILED:', sqlErr.message);
         }
       }
 
@@ -4532,6 +4540,38 @@ Which account should I use and why? If I need to split across accounts, provide 
     } catch (error: any) {
       console.error('[Contacts] GET error:', error.message, error.stack);
       res.status(500).json({ message: 'Failed to fetch contacts' });
+    }
+  });
+
+  // DEBUG: Test SQL sort/search directly (temporary — remove after fixing)
+  app.get('/api/contacts/debug-sql', requireAuth, async (req: any, res) => {
+    try {
+      const db = (storage as any).db;
+      const orgId = req.user.organizationId;
+      const search = (req.query.q as string || '').trim();
+      const sortBy = req.query.sort as string || 'createdAt';
+
+      const conditions: string[] = ['c.organizationId = ?'];
+      const params: any[] = [orgId];
+
+      if (search) {
+        const q = `%${search.toLowerCase()}%`;
+        conditions.push(`(LOWER(c.firstName) LIKE ? OR LOWER(c.lastName) LIKE ? OR LOWER(c.email) LIKE ? OR LOWER(c.company) LIKE ?)`);
+        params.push(q, q, q, q);
+      }
+
+      const where = conditions.join(' AND ');
+      const allowedSorts: Record<string, string> = {
+        createdAt: 'c.createdAt', firstName: 'c.firstName', company: 'c.company', jobTitle: 'c.jobTitle', city: 'c.city',
+      };
+      const sortCol = allowedSorts[sortBy] || 'c.createdAt';
+
+      const total = (db.prepare(`SELECT COUNT(*) as cnt FROM contacts c WHERE ${where}`).get(...params) as any).cnt;
+      const rows = db.prepare(`SELECT c.id, c.firstName, c.lastName, c.company, c.email FROM contacts c WHERE ${where} ORDER BY ${sortCol} COLLATE NOCASE ASC LIMIT 5`).all(...params);
+
+      res.json({ success: true, total, sortCol, where, paramCount: params.length, rows });
+    } catch (e: any) {
+      res.json({ success: false, error: e.message, stack: e.stack?.split('\n').slice(0, 5) });
     }
   });
 
