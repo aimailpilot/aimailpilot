@@ -365,6 +365,17 @@ export default function UnifiedInbox() {
     replyEditorRef.current?.focus();
   };
 
+  const saveDraft = async (messageId: string, body: string) => {
+    try {
+      await fetch(`/api/inbox/${messageId}/draft`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ body }),
+      });
+    } catch { /* silent */ }
+  };
+
   const sendReply = async () => {
     if (!selectedMessage) return;
     const replyHtml = replyEditorRef.current?.innerHTML || '';
@@ -384,10 +395,15 @@ export default function UnifiedInbox() {
         setSelectedMessage(prev => prev ? { ...prev, status: 'replied' } : null);
       } else {
         const err = await resp.json();
-        alert(err.message || 'Failed to send reply');
+        // Auto-save as draft on failure
+        await saveDraft(selectedMessage.id, replyHtml);
+        alert((err.message || 'Failed to send reply') + '\n\nYour reply has been saved as a draft.');
       }
     } catch {
-      alert('Failed to send reply');
+      // Auto-save as draft on failure
+      const replyHtml = replyEditorRef.current?.innerHTML || '';
+      if (replyHtml && selectedMessage) await saveDraft(selectedMessage.id, replyHtml);
+      alert('Failed to send reply. Your reply has been saved as a draft.');
     } finally {
       setSendingReply(false);
     }
@@ -756,8 +772,18 @@ export default function UnifiedInbox() {
               {/* Action buttons */}
               <div className="px-6 pb-3">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <Button size="sm" onClick={() => { setShowReplyBox(true); setShowAiPanel(false); }} className="gap-1.5 bg-blue-600 hover:bg-blue-700">
-                    <Reply className="h-3.5 w-3.5" /> Reply
+                  <Button size="sm" onClick={() => {
+                    setShowReplyBox(true); setShowAiPanel(false);
+                    // Load saved draft if available
+                    if (selectedMessage?.replyContent && selectedMessage.status !== 'replied') {
+                      setTimeout(() => {
+                        if (replyEditorRef.current && !replyEditorRef.current.innerHTML.trim()) {
+                          replyEditorRef.current.innerHTML = selectedMessage.replyContent || '';
+                        }
+                      }, 100);
+                    }
+                  }} className="gap-1.5 bg-blue-600 hover:bg-blue-700">
+                    <Reply className="h-3.5 w-3.5" /> Reply{selectedMessage?.replyContent && selectedMessage.status !== 'replied' ? ' (Draft)' : ''}
                   </Button>
                   <Button size="sm" variant="outline" onClick={() => setShowAiPanel(!showAiPanel)} className="gap-1.5 border-purple-200 text-purple-700 hover:bg-purple-50">
                     <Sparkles className="h-3.5 w-3.5" /> AI Draft

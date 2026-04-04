@@ -7840,11 +7840,13 @@ Respond with ONLY a JSON object in this format:
       const provider = msg.provider;
 
       if (provider === 'gmail') {
-        // Send reply via Gmail API
-        const accessToken = settings.gmail_access_token;
-        if (!accessToken) return res.status(400).json({ message: 'Gmail not connected. Please re-authenticate.' });
+        // Send reply via Gmail API with token refresh
+        const senderEmail = msg.toEmail || settings.gmail_email || '';
+        const senderPrefix = `gmail_sender_${senderEmail}_`;
+        let accessToken = settings[`${senderPrefix}access_token`] || settings.gmail_access_token;
+        const refreshToken = settings[`${senderPrefix}refresh_token`] || settings.gmail_refresh_token;
+        if (!accessToken && !refreshToken) return res.status(400).json({ message: 'Gmail not connected. Please re-authenticate.' });
 
-        const senderEmail = settings.gmail_email || msg.toEmail;
         const rawMessage = createRawEmail({
           from: senderEmail,
           to: msg.fromEmail,
@@ -7854,11 +7856,53 @@ Respond with ONLY a JSON object in this format:
           threadId: msg.gmailThreadId,
         });
 
-        const sendResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+        let sendResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
           method: 'POST',
           headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ raw: rawMessage, threadId: msg.gmailThreadId }),
         });
+
+        // 401 → refresh token and retry once
+        if (sendResp.status === 401 && refreshToken) {
+          console.log('[Inbox Reply] Gmail 401, refreshing token...');
+          let clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID || '';
+          let clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET || '';
+          if (!clientId || !clientSecret) {
+            try {
+              const superAdminOrgId = await storage.getSuperAdminOrgId();
+              if (superAdminOrgId) {
+                const ss = await storage.getApiSettings(superAdminOrgId);
+                if (ss.google_oauth_client_id) { clientId = ss.google_oauth_client_id; clientSecret = ss.google_oauth_client_secret || ''; }
+              }
+            } catch (e) { /* ignore */ }
+          }
+          if (clientId && clientSecret) {
+            try {
+              const oauth2 = createOAuth2Client({ clientId, clientSecret, redirectUri: '' });
+              oauth2.setCredentials({ refresh_token: refreshToken });
+              const { credentials } = await oauth2.refreshAccessToken();
+              if (credentials.access_token) {
+                accessToken = credentials.access_token;
+                // Save refreshed token
+                if (settings[`${senderPrefix}refresh_token`]) {
+                  await storage.setApiSetting(req.user.organizationId, `${senderPrefix}access_token`, accessToken);
+                  if (credentials.expiry_date) await storage.setApiSetting(req.user.organizationId, `${senderPrefix}token_expiry`, String(credentials.expiry_date));
+                } else {
+                  await storage.setApiSetting(req.user.organizationId, 'gmail_access_token', accessToken);
+                  if (credentials.expiry_date) await storage.setApiSetting(req.user.organizationId, 'gmail_token_expiry', String(credentials.expiry_date));
+                }
+                // Retry send
+                sendResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+                  method: 'POST',
+                  headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ raw: rawMessage, threadId: msg.gmailThreadId }),
+                });
+              }
+            } catch (refreshErr) {
+              console.error('[Inbox Reply] Gmail token refresh failed:', refreshErr);
+            }
+          }
+        }
 
         if (!sendResp.ok) {
           const errText = await sendResp.text();
@@ -7904,16 +7948,70 @@ Respond with ONLY a JSON object in this format:
         res.json({ success: true, provider: 'gmail' });
 
       } else if (provider === 'outlook') {
-        // Send reply via Microsoft Graph
-        const accessToken = settings.microsoft_access_token;
-        if (!accessToken) return res.status(400).json({ message: 'Outlook not connected. Please re-authenticate.' });
+        // Send reply via Microsoft Graph with token refresh
+        const senderEmail = msg.toEmail || settings.microsoft_user_email || '';
+        const outlookPrefix = `outlook_sender_${senderEmail}_`;
+        let accessToken = settings[`${outlookPrefix}access_token`] || settings.microsoft_access_token;
+        const refreshToken = settings[`${outlookPrefix}refresh_token`] || settings.microsoft_refresh_token;
+        if (!accessToken && !refreshToken) return res.status(400).json({ message: 'Outlook not connected. Please re-authenticate.' });
 
-        // Create a reply
-        const replyResp = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${msg.outlookMessageId}/reply`, {
+        let replyResp = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${msg.outlookMessageId}/reply`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ comment: replyBody }),
         });
+
+        // 401 → refresh token and retry once
+        if (replyResp.status === 401 && refreshToken) {
+          console.log('[Inbox Reply] Outlook 401, refreshing token...');
+          let clientId = settings.microsoft_oauth_client_id || process.env.MICROSOFT_CLIENT_ID || '';
+          let clientSecret = settings.microsoft_oauth_client_secret || process.env.MICROSOFT_CLIENT_SECRET || '';
+          if (!clientId || !clientSecret) {
+            try {
+              const superAdminOrgId = await storage.getSuperAdminOrgId();
+              if (superAdminOrgId) {
+                const ss = await storage.getApiSettings(superAdminOrgId);
+                if (ss.microsoft_oauth_client_id) { clientId = ss.microsoft_oauth_client_id; clientSecret = ss.microsoft_oauth_client_secret || ''; }
+              }
+            } catch (e) { /* ignore */ }
+          }
+          if (clientId && clientSecret) {
+            try {
+              const body = new URLSearchParams({
+                client_id: clientId, client_secret: clientSecret,
+                refresh_token: refreshToken, grant_type: 'refresh_token',
+                scope: 'openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/SMTP.Send',
+              });
+              const tokenResp = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+                method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString(),
+              });
+              if (tokenResp.ok) {
+                const tokens = await tokenResp.json() as any;
+                if (tokens.access_token) {
+                  accessToken = tokens.access_token;
+                  const exp = Date.now() + (tokens.expires_in || 3600) * 1000;
+                  if (settings[`${outlookPrefix}refresh_token`]) {
+                    await storage.setApiSetting(req.user.organizationId, `${outlookPrefix}access_token`, accessToken);
+                    if (tokens.refresh_token) await storage.setApiSetting(req.user.organizationId, `${outlookPrefix}refresh_token`, tokens.refresh_token);
+                    await storage.setApiSetting(req.user.organizationId, `${outlookPrefix}token_expiry`, String(exp));
+                  } else {
+                    await storage.setApiSetting(req.user.organizationId, 'microsoft_access_token', accessToken);
+                    if (tokens.refresh_token) await storage.setApiSetting(req.user.organizationId, 'microsoft_refresh_token', tokens.refresh_token);
+                    await storage.setApiSetting(req.user.organizationId, 'microsoft_token_expiry', String(exp));
+                  }
+                  // Retry send
+                  replyResp = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${msg.outlookMessageId}/reply`, {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ comment: replyBody }),
+                  });
+                }
+              }
+            } catch (refreshErr) {
+              console.error('[Inbox Reply] Outlook token refresh failed:', refreshErr);
+            }
+          }
+        }
 
         if (!replyResp.ok) {
           const errText = await replyResp.text();
@@ -7930,7 +8028,7 @@ Respond with ONLY a JSON object in this format:
 
         // Store the sent reply as a new inbox message for conversation trail
         try {
-          const senderEmail = settings.microsoft_user_email || msg.toEmail;
+          const replySenderEmail = senderEmail || settings.microsoft_user_email || msg.toEmail;
           const senderName = req.user.name || req.user.email || 'Me';
           await storage.createInboxMessage({
             organizationId: req.user.organizationId,
@@ -7939,7 +8037,7 @@ Respond with ONLY a JSON object in this format:
             messageId: msg.messageId,
             contactId: msg.contactId,
             outlookMessageId: null,
-            fromEmail: senderEmail,
+            fromEmail: replySenderEmail,
             fromName: senderName,
             toEmail: msg.fromEmail,
             subject: msg.subject?.startsWith('Re:') ? msg.subject : `Re: ${msg.subject}`,
@@ -7963,6 +8061,17 @@ Respond with ONLY a JSON object in this format:
     } catch (error) {
       console.error('Reply error:', error);
       res.status(500).json({ message: 'Failed to send reply' });
+    }
+  });
+
+  // Save reply draft
+  app.put('/api/inbox/:id/draft', requireAuth, async (req: any, res) => {
+    try {
+      const { body: draftBody } = req.body;
+      await storage.updateInboxMessage(req.params.id, { replyContent: draftBody || '' });
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to save draft' });
     }
   });
 
