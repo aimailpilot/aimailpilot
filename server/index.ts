@@ -3,6 +3,7 @@ import compression from "compression";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { startFollowupEngine } from "./services/followup-engine";
+import { startWarmupEngine } from "./services/warmup-engine";
 import { campaignEngine } from "./services/campaign-engine";
 import { storage } from "./storage";
 
@@ -59,6 +60,8 @@ app.use((req, res, next) => {
     log(`AImailPilot serving on port ${port}`);
     // Start the follow-up engine after server is ready
     startFollowupEngine();
+    // Start the warmup engine (self-warmup between connected accounts)
+    startWarmupEngine();
     
     // Auto-resume active campaigns that were interrupted by server restart
     // Delay by 10 seconds to let the server fully initialize (OAuth, DB, etc.)

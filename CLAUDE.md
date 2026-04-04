@@ -4,6 +4,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > **IMPORTANT**: Before making any changes, read `status.md`. It lists features that are confirmed working in production and **must not be broken**. Do not modify code for those features unless explicitly asked to fix a bug in them.
 
+> **DO NOT TOUCH — PROTECTED CODE (violating these rules has caused production outages)**
+> - No changes to tracking code (open/click/reply) in routes.ts, campaign-engine.ts, followup-engine.ts
+> - No changes to Gmail auth, Outlook auth, or OAuth routes
+> - No changes to database init, backup, or guardrail code in storage.ts
+> - No changes to `sendViaMicrosoftGraph` or `sendViaGmailAPI` functions
+> - No changes to `gmail-reply-tracker.ts` or `outlook-reply-tracker.ts`
+> - No changes to Gmail/Outlook threading logic (`gmailThreadId` storage, `executeFollowup` threading block, `sendEmail` threading headers)
+> - No changes to `checkSendingWindow`, `getUserLocalTime`, `msUntilNextSendWindow` in campaign-engine.ts
+> - No changes to `updateCampaignMessage` SQL in storage.ts — must include `gmailThreadId` column
+> - No changes to Step 0 guarantee block in `/api/campaigns/:id/detail` route
+> - No changes to campaign sending/pause/resume flow in routes.ts or campaign-engine.ts
+> - **NEVER** use `require('./db')` or import `server/db.ts` — caused 1 day of server crash (drizzle-orm not in production deps)
+> - **NEVER** replace working `storage.getContacts()` calls with raw SQL unless the raw SQL has try/catch fallback — caused contacts page to show 0 contacts
+> - **NEVER** bypass `storage` methods for GET endpoints that work — if you must use raw SQL, always keep the working storage method as primary path and raw SQL as enhancement only
+> - **NEVER** modify the return value of `sendViaGmailAPI` — it must return `{ success, messageId, threadId }` for threading to work
+> - When adding new SQL columns, always use `ALTER TABLE ADD COLUMN` with try/catch and update ALL relevant SQL statements (INSERT, UPDATE, SELECT) that touch that table
+
 > **CRITICAL — DATABASE PROTECTION (read this before writing ANY server code)**
 > The production database has been accidentally deleted **4 times**. The following rules are NON-NEGOTIABLE:
 > 1. **NEVER** add `fs.unlinkSync`, `fs.renameSync`, `fs.rmSync`, or `fs.writeFileSync` targeting the database file or `DB_PATH`
@@ -24,6 +41,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > 3. To access the raw SQLite `better-sqlite3` instance, always use: `const db = (storage as any).db;`
 > 4. Before adding any new `import` from a package, verify it exists in `package.json` `dependencies` (not just `devDependencies`)
 > 5. Run `bash scripts/deploy-safety-check.sh` before deploying to catch forbidden imports
+
+> **CRITICAL — EMAIL THREADING PROTECTION (read this before touching campaign/followup code)**
+> Gmail follow-up threading works by storing `gmailThreadId` at Step 1 send time and reusing it for follow-ups. This avoids fragile API calls that can fail due to token expiry. The following are NON-NEGOTIABLE:
+> 1. **NEVER** remove the `threadId: data.threadId` return from `sendViaGmailAPI` in `campaign-engine.ts` — this is how threadId gets captured
+> 2. **NEVER** remove the `gmailThreadId` save in `sendBatched()` in `campaign-engine.ts` — this stores it to the DB
+> 3. **NEVER** remove the stored `gmailThreadId` lookup in `executeFollowup()` in `followup-engine.ts` — this is the primary threading path
+> 4. **NEVER** remove the `gmailThreadId` column from the `messages` table migration in `storage.ts`
+> 5. **NEVER** remove `gmailThreadId` from `updateCampaignMessage` SQL in `storage.ts`
+> 6. The subject logic in `executeFollowup()` uses `Re: <original>` for threading — do not change this without testing Gmail threading end-to-end
 
 ## Commands
 

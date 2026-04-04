@@ -54,6 +54,8 @@ export default function WarmupMonitoring() {
   const [newTarget, setNewTarget] = useState('5');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [logs, setLogs] = useState<Record<string, WarmupLog[]>>({});
+  const [runningNow, setRunningNow] = useState(false);
+  const [lastRunResult, setLastRunResult] = useState<any>(null);
 
   useEffect(() => {
     fetchData();
@@ -102,6 +104,26 @@ export default function WarmupMonitoring() {
       setWarmupAccounts(prev => prev.filter(a => a.id !== id));
     } catch (e) {
       console.error('Failed to delete warmup account:', e);
+    }
+  };
+
+  const runNow = async () => {
+    setRunningNow(true);
+    setLastRunResult(null);
+    try {
+      const resp = await fetch('/api/warmup/run-now', {
+        method: 'POST',
+        credentials: 'include',
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        setLastRunResult(data.result);
+        fetchData(); // refresh accounts to show updated stats
+      }
+    } catch (e) {
+      console.error('Failed to run warmup:', e);
+    } finally {
+      setRunningNow(false);
     }
   };
 
@@ -186,6 +208,10 @@ export default function WarmupMonitoring() {
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={fetchData} className="gap-1.5">
               <RefreshCw className="h-3.5 w-3.5" /> Refresh
+            </Button>
+            <Button variant="outline" size="sm" onClick={runNow} disabled={runningNow || warmupAccounts.length < 2} className="gap-1.5">
+              {runningNow ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
+              {runningNow ? 'Running...' : 'Run Now'}
             </Button>
             <Button size="sm" onClick={() => setShowAddDialog(true)} className="gap-1.5 bg-gradient-to-r from-orange-500 to-red-600 hover:from-orange-600 hover:to-red-700">
               <Plus className="h-3.5 w-3.5" /> Add Account
@@ -281,6 +307,18 @@ export default function WarmupMonitoring() {
               </CardContent>
             </Card>
           </div>
+        )}
+
+        {/* Run Result Banner */}
+        {lastRunResult && (
+          <Alert className="mb-6 bg-blue-50 border-blue-200">
+            <Zap className="h-4 w-4 text-blue-600" />
+            <AlertDescription className="text-xs text-blue-800">
+              <strong>Warmup cycle completed:</strong> {lastRunResult.sent} sent, {lastRunResult.received} received, {lastRunResult.opened} opened, {lastRunResult.replied} replied
+              {lastRunResult.errors?.length > 0 && <span className="text-red-600 ml-2">({lastRunResult.errors.length} errors)</span>}
+              <button className="ml-2 underline" onClick={() => setLastRunResult(null)}>dismiss</button>
+            </AlertDescription>
+          </Alert>
         )}
 
         {/* Account List */}

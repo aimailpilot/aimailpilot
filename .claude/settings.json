@@ -10,7 +10,16 @@
       "Bash(cmd.exe /c \"where npm\")",
       "Bash(powershell.exe -Command \"npx tsc --noEmit\")",
       "Bash(powershell.exe -Command \"Get-Command node -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source\")",
-      "WebFetch(domain:app.emaillistverify.com)"
+      "WebFetch(domain:app.emaillistverify.com)",
+      "Read(//c/Program Files/**)",
+      "Read(//mnt/c/Program Files/**)",
+      "Bash(cmd.exe /c \"where node && where npm\")",
+      "Bash(cmd.exe /c \"echo %PATH%\")",
+      "Bash(tr ';' '\\\\n')",
+      "Read(//c/Users/Bhupesh/AppData/Local/fnm/**)",
+      "Read(//c/Users/Bhupesh/.nvm/**)",
+      "Read(//c//**)",
+      "Read(//c/Users/Bhupesh/**)"
     ]
   }
 }

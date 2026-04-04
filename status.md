@@ -58,7 +58,8 @@ This file tracks features that are confirmed working in production.
 - **Fix applied**: Added `getCampaignMessageStats` (single SQL aggregation) and `getCampaignStepStats` (GROUP BY) for lightweight stats
 - **Fix applied**: Capped messages loaded on detail page to 500 to prevent timeout
 - **Fix applied**: Renamed `getRecentCampaignTrackingEvents` to avoid conflict with existing `getRecentTrackingEvents` method
-- **Do not touch**: `getCampaignMessagesEnriched`, `getCampaignMessageStats`, `getCampaignStepStats`, `getRecentCampaignTrackingEvents` in `server/storage.ts`; `/api/campaigns/:id/detail` route in `server/routes.ts`
+- **Fix applied**: Step 1 (stepNumber 0) always shows in stepAnalytics even if no emails sent yet — prevents "missing step" display bug
+- **Do not touch**: `getCampaignMessagesEnriched`, `getCampaignMessageStats`, `getCampaignStepStats`, `getRecentCampaignTrackingEvents` in `server/storage.ts`; `/api/campaigns/:id/detail` route in `server/routes.ts`; Step 0 guarantee block in `/api/campaigns/:id/detail`
 
 ### 10. Template Deliverability Analysis
 - Deliverability scoring, spam word detection, and issue analysis are working in the template editor
@@ -145,11 +146,14 @@ This file tracks features that are confirmed working in production.
 - ±30s jitter on delay between emails
 - **Do not touch**: `evaluateFollowupTrigger`, `getNextValidSendTime`, `checkSendingWindow` in `server/services/followup-engine.ts`; `getUserLocalTime`, `checkSendingWindow`, `msUntilNextSendWindow`, reply re-check logic in `server/services/campaign-engine.ts`
 
-### 21. Follow-up Email Threading (Outlook)
-- Follow-up emails on Outlook appear in the same thread using In-Reply-To/References headers via Graph API `internetMessageHeaders`
-- Retry-without-headers fallback for personal accounts that reject custom headers
-- Gmail threading was already working via existing thread support
-- **Do not touch**: Outlook threading block in `executeFollowup()` and `sendEmail()` in `server/services/followup-engine.ts`
+### 21. Follow-up Email Threading (Gmail + Outlook — LOCKED)
+- Follow-up emails appear in the **same thread** as the original email on both Gmail and Outlook
+- **Gmail threading**: `gmailThreadId` is saved to the `messages` table when Step 1 sends via Gmail API. Follow-up engine reads stored `threadId` directly — no extra API call needed. Falls back to API lookup if stored value is missing (old campaigns).
+- **Outlook threading**: In-Reply-To/References headers via Graph API `internetMessageHeaders`, retry-without-headers fallback for personal accounts
+- `sendViaGmailAPI` in `campaign-engine.ts` returns `{ success, messageId, threadId }` — threadId comes from Gmail API send response
+- `updateCampaignMessage` in `storage.ts` saves `gmailThreadId` column on the `messages` table
+- Follow-up subject: if step has no subject or same subject → `Re: <original>` (threads). Different subject → new thread.
+- **Do not touch**: `sendViaGmailAPI` return value in `server/services/campaign-engine.ts`; `gmailThreadId` save logic in `sendBatched()`; threading lookup and `gmailThreadId` usage in `executeFollowup()` and `sendEmail()` in `server/services/followup-engine.ts`; `gmailThreadId` column migration and `updateCampaignMessage` SQL in `server/storage.ts`
 
 ### 22. Follow-up Personalization Parity
 - Follow-up steps now have full 22+ personalization variables (same as Step 0)
