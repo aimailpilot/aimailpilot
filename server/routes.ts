@@ -8374,6 +8374,29 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     }
   });
 
+  // Warmup settings — get/save selected template IDs (must be before :id routes)
+  app.get('/api/warmup/settings', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const settings = await storage.getApiSettings(orgId);
+      const templateIds = settings.warmup_template_ids ? JSON.parse(settings.warmup_template_ids) : [];
+      res.json({ templateIds });
+    } catch (error) {
+      res.json({ templateIds: [] });
+    }
+  });
+
+  app.put('/api/warmup/settings', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const { templateIds } = req.body;
+      await storage.setApiSetting(orgId, 'warmup_template_ids', JSON.stringify(templateIds || []));
+      res.json({ success: true, templateIds: templateIds || [] });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to save warmup settings' });
+    }
+  });
+
   // Manual warmup trigger — run one cycle now (must be before :id routes)
   app.post('/api/warmup/run-now', requireAuth, async (req: any, res) => {
     try {

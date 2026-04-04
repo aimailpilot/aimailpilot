@@ -9,7 +9,7 @@ import {
   Flame, Snowflake, TrendingUp, Mail, AlertTriangle, Check,
   Plus, Trash2, RefreshCw, Loader2, BarChart3, Shield,
   ArrowUp, ArrowDown, Minus, Target, Inbox, XCircle, ThumbsUp,
-  ChevronDown, ChevronUp, Zap, Activity
+  ChevronDown, ChevronUp, Zap, Activity, FileText, X
 } from "lucide-react";
 
 interface WarmupAccount {
@@ -56,6 +56,9 @@ export default function WarmupMonitoring() {
   const [logs, setLogs] = useState<Record<string, WarmupLog[]>>({});
   const [runningNow, setRunningNow] = useState(false);
   const [lastRunResult, setLastRunResult] = useState<any>(null);
+  const [templates, setTemplates] = useState<any[]>([]);
+  const [selectedTemplateIds, setSelectedTemplateIds] = useState<string[]>([]);
+  const [savingTemplates, setSavingTemplates] = useState(false);
 
   useEffect(() => {
     fetchData();
@@ -64,12 +67,19 @@ export default function WarmupMonitoring() {
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [warmupRes, accountsRes] = await Promise.all([
+      const [warmupRes, accountsRes, templatesRes, settingsRes] = await Promise.all([
         fetch('/api/warmup', { credentials: 'include' }),
         fetch('/api/email-accounts', { credentials: 'include' }),
+        fetch('/api/templates', { credentials: 'include' }),
+        fetch('/api/warmup/settings', { credentials: 'include' }),
       ]);
       if (warmupRes.ok) setWarmupAccounts(await warmupRes.json());
       if (accountsRes.ok) setEmailAccounts(await accountsRes.json());
+      if (templatesRes.ok) setTemplates(await templatesRes.json());
+      if (settingsRes.ok) {
+        const s = await settingsRes.json();
+        if (s.templateIds?.length) setSelectedTemplateIds(s.templateIds);
+      }
     } catch (e) {
       console.error('Failed to load warmup data:', e);
     } finally {
@@ -126,6 +136,33 @@ export default function WarmupMonitoring() {
       setRunningNow(false);
     }
   };
+
+  const toggleTemplate = (id: string) => {
+    setSelectedTemplateIds(prev =>
+      prev.includes(id) ? prev.filter(t => t !== id) : [...prev, id]
+    );
+  };
+
+  const saveTemplateSelection = async (ids: string[]) => {
+    setSavingTemplates(true);
+    try {
+      await fetch('/api/warmup/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ templateIds: ids }),
+      });
+    } catch (e) { /* ignore */ }
+    finally { setSavingTemplates(false); }
+  };
+
+  // Auto-save when template selection changes (debounced via useEffect)
+  useEffect(() => {
+    if (!loading && templates.length > 0) {
+      const timer = setTimeout(() => saveTemplateSelection(selectedTemplateIds), 500);
+      return () => clearTimeout(timer);
+    }
+  }, [selectedTemplateIds]);
 
   const toggleExpanded = async (id: string) => {
     if (expandedId === id) {
@@ -307,6 +344,49 @@ export default function WarmupMonitoring() {
               </CardContent>
             </Card>
           </div>
+        )}
+
+        {/* Template Selection */}
+        {warmupAccounts.length > 0 && templates.length > 0 && (
+          <Card className="mb-6">
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <FileText className="h-4 w-4 text-indigo-500" />
+                <h3 className="text-sm font-semibold text-gray-800">Warmup Templates</h3>
+                <span className="text-[10px] text-gray-400">
+                  {selectedTemplateIds.length === 0 ? 'All templates will be used' : `${selectedTemplateIds.length} selected`}
+                  {savingTemplates && <Loader2 className="inline h-3 w-3 ml-1 animate-spin" />}
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {templates.map((t: any) => {
+                  const isSelected = selectedTemplateIds.includes(t.id);
+                  return (
+                    <button
+                      key={t.id}
+                      onClick={() => toggleTemplate(t.id)}
+                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs border transition-all ${
+                        isSelected
+                          ? 'bg-indigo-50 border-indigo-300 text-indigo-700 font-medium'
+                          : 'bg-white border-gray-200 text-gray-500 hover:border-gray-300'
+                      }`}
+                    >
+                      {isSelected && <Check className="h-3 w-3" />}
+                      {t.name || t.subject || 'Untitled'}
+                    </button>
+                  );
+                })}
+              </div>
+              {selectedTemplateIds.length > 0 && (
+                <button
+                  onClick={() => setSelectedTemplateIds([])}
+                  className="text-[10px] text-gray-400 hover:text-gray-600 mt-2 underline"
+                >
+                  Clear selection (use all templates)
+                </button>
+              )}
+            </CardContent>
+          </Card>
         )}
 
         {/* Run Result Banner */}

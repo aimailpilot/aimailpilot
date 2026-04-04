@@ -379,8 +379,20 @@ async function runOrgWarmup(orgId: string): Promise<WarmupRunResult> {
       return result;
     }
 
-    // Get real templates from org
-    const templates = await storage.getEmailTemplates(orgId);
+    // Get templates — use selected warmup templates if configured, otherwise all
+    let templates = await storage.getEmailTemplates(orgId);
+    try {
+      const settings = await storage.getApiSettings(orgId);
+      const savedIds = settings.warmup_template_ids ? JSON.parse(settings.warmup_template_ids) : [];
+      if (savedIds.length > 0) {
+        const filtered = templates.filter((t: any) => savedIds.includes(t.id));
+        if (filtered.length > 0) {
+          templates = filtered;
+          console.log(`[Warmup] Org ${orgId}: using ${filtered.length} selected warmup templates`);
+        }
+      }
+    } catch (e) { /* ignore parse errors, use all templates */ }
+
     if (templates.length === 0) {
       console.log(`[Warmup] Org ${orgId}: no templates available`);
       result.errors.push('No templates available');
