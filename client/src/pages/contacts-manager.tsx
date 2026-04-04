@@ -621,17 +621,37 @@ export default function ContactsManager() {
     setActivitiesLoading(false);
   };
 
-  const updatePipeline = async (contactId: string, pipelineStage: string, nextActionDate?: string, nextActionType?: string) => {
+  // Deal dialog state (shown when moving to 'won')
+  const [showDealDialog, setShowDealDialog] = useState(false);
+  const [dealFormContactId, setDealFormContactId] = useState('');
+  const [dealFormValue, setDealFormValue] = useState('');
+  const [dealFormNotes, setDealFormNotes] = useState('');
+
+  const updatePipeline = async (contactId: string, pipelineStage: string, nextActionDate?: string, nextActionType?: string, dealValue?: number, dealNotes?: string) => {
+    // If moving to 'won' and no deal value provided, show dialog first
+    if (pipelineStage === 'won' && dealValue === undefined) {
+      setDealFormContactId(contactId);
+      setDealFormValue('');
+      setDealFormNotes('');
+      setShowDealDialog(true);
+      return;
+    }
     setPipelineSaving(true);
     try {
       await fetch(`/api/contacts/${contactId}/pipeline`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-        body: JSON.stringify({ pipelineStage, nextActionDate: nextActionDate || undefined, nextActionType: nextActionType || undefined }),
+        body: JSON.stringify({ pipelineStage, nextActionDate: nextActionDate || undefined, nextActionType: nextActionType || undefined, dealValue, dealNotes }),
       });
-      if (detailContact) setDetailContact({ ...detailContact, pipelineStage, nextActionDate, nextActionType } as any);
-      setContacts(prev => prev.map(c => c.id === contactId ? { ...c, pipelineStage, nextActionDate, nextActionType } as any : c));
+      if (detailContact) setDetailContact({ ...detailContact, pipelineStage, nextActionDate, nextActionType, dealValue: dealValue || detailContact.dealValue, dealNotes: dealNotes || detailContact.dealNotes } as any);
+      setContacts(prev => prev.map(c => c.id === contactId ? { ...c, pipelineStage, nextActionDate, nextActionType, dealValue: dealValue ?? (c as any).dealValue, dealNotes: dealNotes ?? (c as any).dealNotes } as any : c));
     } catch { /* ignore */ }
     setPipelineSaving(false);
+  };
+
+  const submitDealAndClose = () => {
+    const val = parseFloat(dealFormValue) || 0;
+    updatePipeline(dealFormContactId, 'won', undefined, undefined, val, dealFormNotes);
+    setShowDealDialog(false);
   };
 
   const logActivity = async () => {
@@ -1717,6 +1737,17 @@ export default function ContactsManager() {
                     <span className="text-xs text-gray-400">None scheduled</span>
                   )}
                 </div>
+                {/* Deal Value — shown for won/lost contacts */}
+                {(detailContact.pipelineStage === 'won' || detailContact.pipelineStage === 'lost') && (
+                  <div className="flex items-center gap-2 mt-2 pt-2 border-t border-gray-100">
+                    <span className="text-[10px] text-gray-400 uppercase font-semibold">Deal:</span>
+                    <span className={`text-xs font-bold ${detailContact.pipelineStage === 'won' ? 'text-green-700' : 'text-red-500'}`}>
+                      {(detailContact as any).dealValue ? `₹${Number((detailContact as any).dealValue).toLocaleString('en-IN')}` : 'No value set'}
+                    </span>
+                    {(detailContact as any).dealNotes && <span className="text-[10px] text-gray-500">— {(detailContact as any).dealNotes}</span>}
+                    {(detailContact as any).dealClosedAt && <span className="text-[10px] text-gray-400 ml-auto">{new Date((detailContact as any).dealClosedAt).toLocaleDateString()}</span>}
+                  </div>
+                )}
               </div>
 
               {/* Activity Log */}
@@ -2832,6 +2863,46 @@ export default function ContactsManager() {
               className="bg-blue-600 hover:bg-blue-700 text-white"
             >
               {sendEmailLoading ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Sending...</> : <><Mail className="h-3.5 w-3.5 mr-1.5" /> Send to {selectedIds.length} Contact{selectedIds.length !== 1 ? 's' : ''}</>}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Deal Value Dialog — shown when moving contact to 'Won' */}
+      <Dialog open={showDealDialog} onOpenChange={setShowDealDialog}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-green-700">
+              <CheckCircle2 className="h-5 w-5" /> Deal Won
+            </DialogTitle>
+            <DialogDescription className="text-sm text-gray-500">Enter the deal details for this closed sale</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">Deal Value (₹)</label>
+              <Input
+                type="number"
+                placeholder="e.g. 50000"
+                value={dealFormValue}
+                onChange={e => setDealFormValue(e.target.value)}
+                autoFocus
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">Deal Notes (optional)</label>
+              <Input
+                placeholder="What was sold? e.g. Annual subscription"
+                value={dealFormNotes}
+                onChange={e => setDealFormNotes(e.target.value)}
+              />
+            </div>
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button variant="outline" size="sm" onClick={() => { setShowDealDialog(false); updatePipeline(dealFormContactId, 'won', undefined, undefined, 0, ''); }}>
+              Skip
+            </Button>
+            <Button size="sm" className="bg-green-600 hover:bg-green-700" onClick={submitDealAndClose}>
+              Save Deal
             </Button>
           </DialogFooter>
         </DialogContent>

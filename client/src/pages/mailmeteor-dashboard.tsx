@@ -12,7 +12,7 @@ import {
   Bell, Activity, Inbox, MoreHorizontal, Pause, Play, Trash2,
   ArrowUp, ArrowDown, Calendar, Sparkles, CreditCard, Lightbulb,
   Wrench, PieChart, Link2, Globe, RefreshCw, ExternalLink, XCircle,
-  AlertTriangle, Building2, Shield, Flame, Loader2
+  AlertTriangle, Building2, Shield, Flame, Loader2, Trophy
 } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -36,6 +36,7 @@ const UnifiedInbox = lazy(() => import("./unified-inbox"));
 const TeamManagement = lazy(() => import("./team-management"));
 const SuperAdminDashboard = lazy(() => import("./superadmin-dashboard"));
 const WarmupMonitoring = lazy(() => import("./warmup-monitoring"));
+const TeamScorecard = lazy(() => import("./team-scorecard"));
 
 // Loading fallback for lazy-loaded pages
 function PageLoader() {
@@ -46,7 +47,7 @@ function PageLoader() {
   );
 }
 
-type ViewType = 'campaigns' | 'templates' | 'contacts' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings' | 'team' | 'superadmin' | 'warmup';
+type ViewType = 'campaigns' | 'templates' | 'contacts' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings' | 'team' | 'superadmin' | 'warmup' | 'scorecard';
 
 // Live Tracking Feed component - fetches real tracking events
 function LiveTrackingFeed({ dashStats }: { dashStats: any }) {
@@ -201,7 +202,7 @@ export default function MailMeteorDashboard() {
   const [currentView, setCurrentViewRaw] = useState<ViewType>(() => {
     // Restore view from URL hash on initial load (e.g. #contacts, #campaign-detail/abc123)
     const hash = window.location.hash.replace('#', '');
-    const validViews = ['campaigns', 'templates', 'contacts', 'inbox', 'setup', 'analytics', 'verification', 'tracking', 'account', 'billing', 'followups', 'insights', 'tools', 'advanced-settings', 'team', 'superadmin', 'warmup', 'campaign-detail'];
+    const validViews = ['campaigns', 'templates', 'contacts', 'inbox', 'setup', 'analytics', 'verification', 'tracking', 'account', 'billing', 'followups', 'insights', 'tools', 'advanced-settings', 'team', 'superadmin', 'warmup', 'scorecard', 'campaign-detail'];
     if (hash.startsWith('campaign-detail/')) return 'campaign-detail' as ViewType;
     return validViews.includes(hash) ? hash as ViewType : 'campaigns';
   });
@@ -278,7 +279,7 @@ export default function MailMeteorDashboard() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const viewParam = params.get('view');
-    if (viewParam && ['campaigns', 'templates', 'contacts', 'inbox', 'setup', 'analytics', 'verification', 'tracking', 'account', 'billing', 'followups', 'insights', 'tools', 'advanced-settings', 'team', 'superadmin', 'warmup'].includes(viewParam)) {
+    if (viewParam && ['campaigns', 'templates', 'contacts', 'inbox', 'setup', 'analytics', 'verification', 'tracking', 'account', 'billing', 'followups', 'insights', 'tools', 'advanced-settings', 'team', 'superadmin', 'warmup', 'scorecard'].includes(viewParam)) {
       setCurrentView(viewParam as ViewType);
     }
     // Clean URL params after processing (but keep gmail_connected/error for child components)
@@ -376,6 +377,7 @@ export default function MailMeteorDashboard() {
   const insightsSubItems = [
     { key: 'analytics' as ViewType, label: 'Analytics', icon: BarChart3 },
     { key: 'tracking' as ViewType, label: 'Live Feed', icon: Activity },
+    ...(isAdminOrOwner ? [{ key: 'scorecard' as ViewType, label: 'Scorecard', icon: Trophy }] : []),
   ];
 
   const toolsSubItems = [
@@ -402,6 +404,7 @@ export default function MailMeteorDashboard() {
       'campaign-detail': 'Campaign Detail',
       'advanced-settings': 'Advanced Settings',
       team: 'Team Management',
+      scorecard: 'Team Scorecard',
       superadmin: 'SuperAdmin Console',
       warmup: 'Warmup Monitoring',
     };
@@ -427,6 +430,7 @@ export default function MailMeteorDashboard() {
       'campaign-detail': 'Campaign tracking details',
       'advanced-settings': 'Configure API integrations and advanced options',
       team: 'Manage your team members, roles, and invitations',
+      scorecard: 'Sales performance, leaderboard, and team activity tracking',
       superadmin: 'Platform-wide management, monitoring, and user administration',
     };
     return descs[currentView] || '';
@@ -1015,6 +1019,10 @@ export default function MailMeteorDashboard() {
           {/* Warmup Monitoring */}
           {viewMode === 'dashboard' && currentView === 'warmup' && (
             <WarmupMonitoring />
+          )}
+
+          {viewMode === 'dashboard' && currentView === 'scorecard' && (
+            <TeamScorecard />
           )}
          </Suspense>
         </main>

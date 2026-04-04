@@ -819,6 +819,11 @@ try { db.exec(`ALTER TABLE contacts ADD COLUMN nextActionType TEXT`); } catch (e
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_pipeline ON contacts(pipelineStage)`); } catch (e) {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_next_action ON contacts(nextActionDate)`); } catch (e) {}
 
+// Deal tracking columns
+try { db.exec(`ALTER TABLE contacts ADD COLUMN dealValue REAL DEFAULT 0`); } catch (e) {} // deal amount in currency
+try { db.exec(`ALTER TABLE contacts ADD COLUMN dealClosedAt TEXT`); } catch (e) {} // when deal was won/lost
+try { db.exec(`ALTER TABLE contacts ADD COLUMN dealNotes TEXT DEFAULT ''`); } catch (e) {} // what was sold / deal description
+
 // Contact activities table (activity log / remarks)
 db.exec(`
   CREATE TABLE IF NOT EXISTS contact_activities (

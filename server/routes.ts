@@ -4655,7 +4655,7 @@ Which account should I use and why? If I need to split across accounts, provide 
   app.put('/api/contacts/:id/pipeline', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.session.organizationId!;
-      const { pipelineStage, nextActionDate, nextActionType } = req.body;
+      const { pipelineStage, nextActionDate, nextActionType, dealValue, dealNotes } = req.body;
       const db = (storage as any).db;
       const contact = db.prepare(`SELECT id FROM contacts WHERE id = ? AND organizationId = ?`).get(req.params.id, orgId);
       if (!contact) return res.status(404).json({ message: 'Contact not found' });
@@ -4664,6 +4664,15 @@ Which account should I use and why? If I need to split across accounts, provide 
       if (pipelineStage) { updates.push('pipelineStage = ?'); values.push(pipelineStage); }
       if (nextActionDate !== undefined) { updates.push('nextActionDate = ?'); values.push(nextActionDate || null); }
       if (nextActionType !== undefined) { updates.push('nextActionType = ?'); values.push(nextActionType || null); }
+      if (dealValue !== undefined) { updates.push('dealValue = ?'); values.push(dealValue || 0); }
+      if (dealNotes !== undefined) { updates.push('dealNotes = ?'); values.push(dealNotes || ''); }
+      // Auto-set dealClosedAt when stage changes to won/lost
+      if (pipelineStage === 'won' || pipelineStage === 'lost') {
+        updates.push('dealClosedAt = ?'); values.push(new Date().toISOString());
+      } else if (pipelineStage && pipelineStage !== 'won' && pipelineStage !== 'lost') {
+        // Clear dealClosedAt if moved back from won/lost
+        updates.push('dealClosedAt = ?'); values.push(null);
+      }
       updates.push('updatedAt = ?'); values.push(new Date().toISOString());
       values.push(req.params.id, orgId);
       db.prepare(`UPDATE contacts SET ${updates.join(', ')} WHERE id = ? AND organizationId = ?`).run(...values);
@@ -4715,8 +4724,8 @@ Which account should I use and why? If I need to split across accounts, provide 
           db.prepare(`UPDATE contacts SET pipelineStage = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`).run(autoStageMap[type], now, req.params.id, orgId);
         }
       }
-      if (outcome === 'converted') db.prepare(`UPDATE contacts SET pipelineStage = 'won', updatedAt = ? WHERE id = ? AND organizationId = ?`).run(now, req.params.id, orgId);
-      else if (outcome === 'rejected') db.prepare(`UPDATE contacts SET pipelineStage = 'lost', updatedAt = ? WHERE id = ? AND organizationId = ?`).run(now, req.params.id, orgId);
+      if (outcome === 'converted') db.prepare(`UPDATE contacts SET pipelineStage = 'won', dealClosedAt = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`).run(now, now, req.params.id, orgId);
+      else if (outcome === 'rejected') db.prepare(`UPDATE contacts SET pipelineStage = 'lost', dealClosedAt = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`).run(now, now, req.params.id, orgId);
       res.json({ id, success: true });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
@@ -8738,7 +8747,142 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   });
 
   // Get team members of current org
-  app.get('/api/team/members', async (req: any, res) => {
+  // ========== TEAM SCORECARD & LEADERBOARD ==========
+
+  app.get('/api/team/scorecard', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const db = (storage as any).db;
+      const period = (req.query.period as string) || 'today'; // today, week, month, all
+
+      // Calculate date range
+      const now = new Date();
+      let startDate: string;
+      if (period === 'today') {
+        startDate = now.toISOString().split('T')[0]; // YYYY-MM-DD
+      } else if (period === 'week') {
+        const d = new Date(now); d.setDate(d.getDate() - 7);
+        startDate = d.toISOString().split('T')[0];
+      } else if (period === 'month') {
+        const d = new Date(now); d.setMonth(d.getMonth() - 1);
+        startDate = d.toISOString().split('T')[0];
+      } else {
+        startDate = '2000-01-01';
+      }
+
+      // Get all org members
+      const members = await storage.getOrgMembers(orgId);
+
+      const scorecard = [];
+      for (const member of members) {
+        const userId = (member as any).userId;
+        const userName = `${(member as any).firstName || ''} ${(member as any).lastName || ''}`.trim() || (member as any).email || 'Unknown';
+
+        // Emails sent (messages table — campaigns assigned to this user's email account or contacts assigned to them)
+        const emailsSent = (db.prepare(`
+          SELECT COUNT(*) as cnt FROM messages m
+          JOIN contacts c ON c.id = m.contactId
+          WHERE c.organizationId = ? AND c.assignedTo = ? AND m.status = 'sent' AND m.sentAt >= ?
+        `).get(orgId, userId, startDate) as any)?.cnt || 0;
+
+        // Activities by type
+        const activities = db.prepare(`
+          SELECT type, COUNT(*) as cnt FROM contact_activities
+          WHERE organizationId = ? AND userId = ? AND createdAt >= ?
+          GROUP BY type
+        `).all(orgId, userId, startDate) as any[];
+        const activityMap: Record<string, number> = {};
+        for (const a of activities) activityMap[a.type] = a.cnt;
+
+        const callsMade = activityMap['call'] || 0;
+        const meetingsDone = activityMap['meeting'] || 0;
+        const proposalsSent = activityMap['proposal'] || 0;
+
+        // Pipeline stats (contacts assigned to this user)
+        const pipelineStats = db.prepare(`
+          SELECT pipelineStage, COUNT(*) as cnt, SUM(COALESCE(dealValue, 0)) as totalValue
+          FROM contacts WHERE organizationId = ? AND assignedTo = ?
+          AND pipelineStage IN ('interested', 'meeting_scheduled', 'meeting_done', 'proposal_sent', 'won', 'lost')
+          GROUP BY pipelineStage
+        `).all(orgId, userId) as any[];
+        const pipeMap: Record<string, { count: number; value: number }> = {};
+        for (const p of pipelineStats) pipeMap[p.pipelineStage] = { count: p.cnt, value: p.totalValue || 0 };
+
+        // Deals won/lost in this period
+        const dealsWon = (db.prepare(`
+          SELECT COUNT(*) as cnt, SUM(COALESCE(dealValue, 0)) as totalValue
+          FROM contacts WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'won' AND dealClosedAt >= ?
+        `).get(orgId, userId, startDate) as any) || { cnt: 0, totalValue: 0 };
+        const dealsLost = (db.prepare(`
+          SELECT COUNT(*) as cnt FROM contacts
+          WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'lost' AND dealClosedAt >= ?
+        `).get(orgId, userId, startDate) as any)?.cnt || 0;
+
+        // Hot leads (interested + meeting_scheduled + meeting_done)
+        const hotLeads = (pipeMap['interested']?.count || 0) + (pipeMap['meeting_scheduled']?.count || 0) + (pipeMap['meeting_done']?.count || 0);
+
+        const revenue = dealsWon.totalValue || 0;
+        const wonCount = dealsWon.cnt || 0;
+        const winRate = (wonCount + dealsLost) > 0 ? Math.round((wonCount / (wonCount + dealsLost)) * 100) : 0;
+
+        scorecard.push({
+          userId,
+          userName,
+          email: (member as any).email,
+          role: (member as any).role,
+          emailsSent,
+          callsMade,
+          meetingsDone,
+          proposalsSent,
+          hotLeads,
+          dealsWon: wonCount,
+          dealsLost,
+          revenue,
+          winRate,
+          totalActivities: callsMade + meetingsDone + proposalsSent + (activityMap['email'] || 0) + (activityMap['whatsapp'] || 0) + (activityMap['note'] || 0),
+          pipeline: pipeMap,
+        });
+      }
+
+      // Sort by revenue descending (leaderboard order)
+      scorecard.sort((a, b) => b.revenue - a.revenue || b.dealsWon - a.dealsWon || b.emailsSent - a.emailsSent);
+
+      // Team totals
+      const teamTotals = {
+        emailsSent: scorecard.reduce((s, m) => s + m.emailsSent, 0),
+        callsMade: scorecard.reduce((s, m) => s + m.callsMade, 0),
+        meetingsDone: scorecard.reduce((s, m) => s + m.meetingsDone, 0),
+        proposalsSent: scorecard.reduce((s, m) => s + m.proposalsSent, 0),
+        hotLeads: scorecard.reduce((s, m) => s + m.hotLeads, 0),
+        dealsWon: scorecard.reduce((s, m) => s + m.dealsWon, 0),
+        dealsLost: scorecard.reduce((s, m) => s + m.dealsLost, 0),
+        revenue: scorecard.reduce((s, m) => s + m.revenue, 0),
+      };
+
+      // Overdue actions (team-wide)
+      const overdueActions = (db.prepare(`
+        SELECT COUNT(*) as cnt FROM contacts
+        WHERE organizationId = ? AND nextActionDate < ? AND nextActionDate IS NOT NULL
+        AND pipelineStage NOT IN ('won', 'lost')
+      `).get(orgId, now.toISOString().split('T')[0]) as any)?.cnt || 0;
+
+      // Unactioned replies (replied but no activity logged after reply)
+      const unactionedReplies = (db.prepare(`
+        SELECT COUNT(DISTINCT m.contactId) as cnt
+        FROM messages m
+        LEFT JOIN contact_activities ca ON ca.contactId = m.contactId AND ca.createdAt > m.repliedAt
+        WHERE m.campaignId IN (SELECT id FROM campaigns WHERE organizationId = ?)
+        AND m.repliedAt IS NOT NULL AND m.repliedAt >= ? AND ca.id IS NULL
+      `).get(orgId, startDate) as any)?.cnt || 0;
+
+      res.json({ scorecard, teamTotals, overdueActions, unactionedReplies, period });
+    } catch (error: any) {
+      console.error('[Scorecard] Error:', error.message);
+      res.status(500).json({ message: 'Failed to fetch scorecard' });
+    }
+  });
+
+  app.get('/api/team/members', requireAuth, async (req: any, res) => {
     try {
       const members = await storage.getOrgMembers(req.user.organizationId);
       res.json(members);
