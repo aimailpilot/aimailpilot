@@ -315,7 +315,9 @@ export default function WarmupMonitoring() {
             <Zap className="h-4 w-4 text-blue-600" />
             <AlertDescription className="text-xs text-blue-800">
               <strong>Warmup cycle completed:</strong> {lastRunResult.sent} sent, {lastRunResult.received} received, {lastRunResult.opened} opened, {lastRunResult.replied} replied
-              {lastRunResult.errors?.length > 0 && <span className="text-red-600 ml-2">({lastRunResult.errors.length} errors)</span>}
+              {lastRunResult.errors?.length > 0 && (
+                <span className="text-red-600 block mt-1">Errors: {lastRunResult.errors.join(' | ')}</span>
+              )}
               <button className="ml-2 underline" onClick={() => setLastRunResult(null)}>dismiss</button>
             </AlertDescription>
           </Alert>

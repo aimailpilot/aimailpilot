@@ -405,17 +405,30 @@ async function runOrgWarmup(orgId: string): Promise<WarmupRunResult> {
       const isGmail = provider === 'gmail' || provider === 'google';
       const isOutlook = provider === 'outlook' || provider === 'microsoft';
 
-      // Get sender token
+      console.log(`[Warmup] Account ${email}: provider="${account.provider}", isGmail=${isGmail}, isOutlook=${isOutlook}, daysSinceStart=${daysSinceStart}, todayVolume=${todayVolume}, remaining=${remaining}`);
+
+      // Get sender token — try Gmail first, then Outlook, to handle unknown providers
       let senderToken: string | null = null;
+      let resolvedProvider: 'gmail' | 'outlook' | 'unknown' = 'unknown';
       if (isGmail) {
         senderToken = await getGmailAccessToken(orgId, email);
+        if (senderToken) resolvedProvider = 'gmail';
       } else if (isOutlook) {
         senderToken = await getOutlookAccessToken(orgId, email);
+        if (senderToken) resolvedProvider = 'outlook';
+      } else {
+        // Unknown provider — try both
+        senderToken = await getGmailAccessToken(orgId, email);
+        if (senderToken) { resolvedProvider = 'gmail'; }
+        else {
+          senderToken = await getOutlookAccessToken(orgId, email);
+          if (senderToken) resolvedProvider = 'outlook';
+        }
       }
 
       if (!senderToken) {
-        console.log(`[Warmup] No token for ${email}, skipping`);
-        result.errors.push(`No token: ${email}`);
+        console.log(`[Warmup] No token for ${email} (provider=${provider}), skipping`);
+        result.errors.push(`No OAuth token for ${email} (provider: ${provider || 'unknown'}). Re-connect the account.`);
         continue;
       }
 
@@ -433,7 +446,7 @@ async function runOrgWarmup(orgId: string): Promise<WarmupRunResult> {
 
         // Send email
         let sendResult: { success: boolean; messageId?: string; error?: string };
-        if (isGmail) {
+        if (resolvedProvider === 'gmail') {
           sendResult = await sendViaGmailAPI(senderToken, email, recipient.accountEmail, subject, html);
         } else {
           sendResult = await sendViaMicrosoftGraph(senderToken, recipient.accountEmail, subject, html);
@@ -469,14 +482,23 @@ async function runOrgWarmup(orgId: string): Promise<WarmupRunResult> {
     for (const account of activeAccounts) {
       const email = account.accountEmail;
       const provider = (account.provider || '').toLowerCase();
-      const isGmail = provider === 'gmail' || provider === 'google';
-      const isOutlook = provider === 'outlook' || provider === 'microsoft';
 
+      // Resolve token — try matching provider first, then both
       let recipientToken: string | null = null;
-      if (isGmail) {
+      let engageProvider: 'gmail' | 'outlook' | 'unknown' = 'unknown';
+      if (provider === 'gmail' || provider === 'google') {
         recipientToken = await getGmailAccessToken(orgId, email);
-      } else if (isOutlook) {
+        if (recipientToken) engageProvider = 'gmail';
+      } else if (provider === 'outlook' || provider === 'microsoft') {
         recipientToken = await getOutlookAccessToken(orgId, email);
+        if (recipientToken) engageProvider = 'outlook';
+      } else {
+        recipientToken = await getGmailAccessToken(orgId, email);
+        if (recipientToken) { engageProvider = 'gmail'; }
+        else {
+          recipientToken = await getOutlookAccessToken(orgId, email);
+          if (recipientToken) engageProvider = 'outlook';
+        }
       }
       if (!recipientToken) continue;
 
@@ -486,7 +508,7 @@ async function runOrgWarmup(orgId: string): Promise<WarmupRunResult> {
       let repliedCount = 0;
 
       for (const sender of senders) {
-        if (isGmail) {
+        if (engageProvider === 'gmail') {
           const stats = await gmailEngage(recipientToken, sender.accountEmail);
           engagedCount += stats.opened;
 
@@ -497,7 +519,7 @@ async function runOrgWarmup(orgId: string): Promise<WarmupRunResult> {
             const replied = await gmailReply(recipientToken, email, sender.accountEmail, origSubject);
             if (replied) { repliedCount++; result.replied++; }
           }
-        } else if (isOutlook) {
+        } else if (engageProvider === 'outlook') {
           const stats = await outlookEngage(recipientToken, sender.accountEmail);
           engagedCount += stats.opened;
 
