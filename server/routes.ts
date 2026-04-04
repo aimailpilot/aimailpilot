@@ -3606,6 +3606,24 @@ Which account should I use and why? If I need to split across accounts, provide 
         } catch (e) { /* ignore */ }
       }
 
+      // Get contact list info — find the most common listId among campaign contacts
+      let contactList: any = null;
+      try {
+        const db = (storage as any).db;
+        const listRow = db.prepare(`
+          SELECT c.listId, cl.name as listName, COUNT(*) as cnt
+          FROM messages m
+          JOIN contacts c ON c.id = m.contactId
+          LEFT JOIN contact_lists cl ON cl.id = c.listId
+          WHERE m.campaignId = ? AND c.listId IS NOT NULL AND c.listId != ''
+          GROUP BY c.listId
+          ORDER BY cnt DESC LIMIT 1
+        `).get(req.params.id) as any;
+        if (listRow && listRow.listId) {
+          contactList = { id: listRow.listId, name: listRow.listName || 'Unnamed list' };
+        }
+      } catch (e) { /* ignore */ }
+
       // Build activity timeline from tracking events + campaign timestamps
       const activityTimeline: any[] = [];
       if (campaign.status === 'completed' || campaign.status === 'archived') {
@@ -3632,6 +3650,7 @@ Which account should I use and why? If I need to split across accounts, provide 
         followupSequences,
         hasActiveFollowups: followupSequences.length > 0 && followupSequences.some((s: any) => s.steps && s.steps.length > 0),
         emailAccount,
+        contactList,
         activityTimeline,
         trackingBaseUrl: campaignEngine.getBaseUrl(),
       });

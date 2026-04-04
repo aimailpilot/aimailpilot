@@ -432,7 +432,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
     );
   }
 
-  const { campaign, analytics, messages, totalMessages, recentEvents, stepAnalytics, emailAccount, activityTimeline, hasActiveFollowups } = detail;
+  const { campaign, analytics, messages, totalMessages, recentEvents, stepAnalytics, emailAccount, contactList, activityTimeline, hasActiveFollowups } = detail;
 
   // ========== COMPUTED VALUES ==========
   const getStatusConfig = (status: string) => {
@@ -598,6 +598,24 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
 
             {/* Metadata */}
             <div className="flex items-center gap-2 mt-2 flex-wrap">
+              {emailAccount && (
+                <>
+                  <span className="text-xs text-gray-400">
+                    <Mail className="h-3 w-3 inline mr-0.5" />
+                    <span className="text-gray-500 font-medium">{emailAccount.email}</span>
+                  </span>
+                  <span className="text-gray-300">·</span>
+                </>
+              )}
+              {contactList && (
+                <>
+                  <span className="text-xs text-gray-400">
+                    <Users className="h-3 w-3 inline mr-0.5" />
+                    <span className="text-gray-500 font-medium">{contactList.name}</span>
+                  </span>
+                  <span className="text-gray-300">·</span>
+                </>
+              )}
               <span className="text-xs text-gray-400">
                 Created <span className="text-gray-500 font-medium">{formatDateTime(campaign.createdAt)}</span>
               </span>
