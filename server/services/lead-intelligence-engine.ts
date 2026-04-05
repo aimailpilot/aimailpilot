@@ -389,11 +389,16 @@ export interface ScanResult {
   errors: string[];
 }
 
-export async function scanOrgEmailHistory(orgId: string, monthsBack: number = 6): Promise<ScanResult> {
+export async function scanOrgEmailHistory(orgId: string, monthsBack: number = 6, emailAccountIds?: string[]): Promise<ScanResult> {
   const scanResult: ScanResult = { orgId, accountsScanned: 0, totalEmailsFetched: 0, results: [], errors: [] };
 
   try {
-    const emailAccounts = await storage.getEmailAccounts(orgId);
+    let emailAccounts = await storage.getEmailAccounts(orgId);
+
+    // Filter to selected accounts if specified
+    if (emailAccountIds && emailAccountIds.length > 0) {
+      emailAccounts = emailAccounts.filter((a: any) => emailAccountIds.includes(String(a.id)));
+    }
 
     for (const account of emailAccounts) {
       const email = (account as any).email;
@@ -874,11 +879,11 @@ export async function analyzeOrgLeads(orgId: string): Promise<AnalysisResult> {
 
 // ── Full Pipeline: Scan + Analyze ──────────────────────────────────────
 
-export async function runFullLeadIntelligence(orgId: string, monthsBack: number = 6): Promise<{ scan: ScanResult; analysis: AnalysisResult }> {
+export async function runFullLeadIntelligence(orgId: string, monthsBack: number = 6, emailAccountIds?: string[]): Promise<{ scan: ScanResult; analysis: AnalysisResult }> {
   console.log(`[LeadIntel] Starting full pipeline for org ${orgId} (${monthsBack} months back)...`);
 
   // Step 1: Scan email history
-  const scan = await scanOrgEmailHistory(orgId, monthsBack);
+  const scan = await scanOrgEmailHistory(orgId, monthsBack, emailAccountIds);
 
   // Step 2: Analyze and classify
   const analysis = await analyzeOrgLeads(orgId);

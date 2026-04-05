@@ -54,6 +54,13 @@ interface SyncStatus {
   newest: string;
 }
 
+interface EmailAccount {
+  id: string;
+  email: string;
+  provider: string;
+  displayName?: string;
+}
+
 const BUCKET_CONFIG: Record<string, { label: string; icon: any; color: string; bgColor: string; priority: number }> = {
   past_customer: { label: 'Past Customers', icon: Star, color: 'text-amber-700', bgColor: 'bg-amber-50 border-amber-200', priority: 1 },
   hot_lead: { label: 'Hot Leads', icon: Flame, color: 'text-red-700', bgColor: 'bg-red-50 border-red-200', priority: 2 },
@@ -83,16 +90,19 @@ export default function LeadOpportunities() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<any>(null);
   const [monthsBack, setMonthsBack] = useState('6');
+  const [emailAccounts, setEmailAccounts] = useState<EmailAccount[]>([]);
+  const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
 
   useEffect(() => { fetchAll(); }, []);
 
   const fetchAll = async () => {
     setLoading(true);
     try {
-      const [oppsRes, summaryRes, syncRes] = await Promise.all([
+      const [oppsRes, summaryRes, syncRes, accountsRes] = await Promise.all([
         fetch('/api/lead-intelligence/opportunities', { credentials: 'include' }),
         fetch('/api/lead-intelligence/summary', { credentials: 'include' }),
         fetch('/api/lead-intelligence/sync-status', { credentials: 'include' }),
+        fetch('/api/email-accounts', { credentials: 'include' }),
       ]);
       if (oppsRes.ok) setOpportunities(await oppsRes.json());
       if (summaryRes.ok) {
@@ -103,6 +113,10 @@ export default function LeadOpportunities() {
         const data = await syncRes.json();
         setSyncStatus(data.syncStatus || []);
         setStats(data.stats || null);
+      }
+      if (accountsRes.ok) {
+        const accounts = await accountsRes.json();
+        setEmailAccounts(Array.isArray(accounts) ? accounts : []);
       }
     } catch (e) {
       console.error('Failed to load lead intelligence:', e);
@@ -119,7 +133,10 @@ export default function LeadOpportunities() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ monthsBack: parseInt(monthsBack) || 6 }),
+        body: JSON.stringify({
+          monthsBack: parseInt(monthsBack) || 6,
+          emailAccountIds: selectedAccountIds.length > 0 ? selectedAccountIds : undefined,
+        }),
       });
       if (resp.ok) {
         const data = await resp.json();
@@ -161,7 +178,10 @@ export default function LeadOpportunities() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ monthsBack: parseInt(monthsBack) || 6 }),
+        body: JSON.stringify({
+          monthsBack: parseInt(monthsBack) || 6,
+          emailAccountIds: selectedAccountIds.length > 0 ? selectedAccountIds : undefined,
+        }),
       });
       if (resp.ok) {
         const data = await resp.json();
@@ -259,6 +279,54 @@ export default function LeadOpportunities() {
             </Button>
           </div>
         </div>
+
+        {/* Email Account Selection */}
+        {emailAccounts.length > 0 && (
+          <div className="mb-4 p-3 bg-white rounded-lg border">
+            <div className="flex items-center gap-2 mb-2">
+              <Mail className="h-3.5 w-3.5 text-gray-500" />
+              <span className="text-xs font-medium text-gray-700">Select accounts to scan</span>
+              <span className="text-[10px] text-gray-400">
+                {selectedAccountIds.length === 0 ? '(all accounts)' : `(${selectedAccountIds.length} selected)`}
+              </span>
+              {selectedAccountIds.length > 0 && (
+                <button
+                  onClick={() => setSelectedAccountIds([])}
+                  className="text-[10px] text-indigo-600 hover:text-indigo-800 underline ml-1"
+                >
+                  clear selection
+                </button>
+              )}
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              {emailAccounts.map(account => {
+                const isSelected = selectedAccountIds.includes(String(account.id));
+                const providerIcon = (account.provider || '').toLowerCase().includes('gmail') || (account.provider || '').toLowerCase().includes('google')
+                  ? '📧' : (account.provider || '').toLowerCase().includes('outlook') || (account.provider || '').toLowerCase().includes('microsoft')
+                  ? '📨' : '✉️';
+                return (
+                  <button
+                    key={account.id}
+                    onClick={() => {
+                      setSelectedAccountIds(prev =>
+                        isSelected ? prev.filter(id => id !== String(account.id)) : [...prev, String(account.id)]
+                      );
+                    }}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs border transition-all ${
+                      isSelected
+                        ? 'bg-indigo-50 border-indigo-300 text-indigo-700 font-medium ring-1 ring-indigo-200'
+                        : 'bg-white border-gray-200 text-gray-600 hover:border-gray-300 hover:bg-gray-50'
+                    }`}
+                  >
+                    <span>{providerIcon}</span>
+                    <span>{account.email}</span>
+                    {isSelected && <CheckCircle2 className="h-3 w-3 text-indigo-500" />}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Sync Status */}
         {syncStatus.length > 0 && stats && (

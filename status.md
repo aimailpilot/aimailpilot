@@ -265,6 +265,30 @@ This file tracks features that are confirmed working in production.
 - All raw SQL queries in routes.ts use `(storage as any).db` to access it
 - **Do not touch**: `get db()` getter in `server/storage.ts`; this is the ONLY safe way to access raw SQLite
 
+### 37. Warmup Engine Improvements (Inbox/Spam Detection, Labels, Per-Pair Tracking)
+- Gmail: creates `AImailPilot-Warmup` label per account, moves warmup emails from INBOX to label (keeps inbox clean)
+- Gmail spam detection: searches `in:spam` for warmup emails, moves spam→INBOX→warmup label (trains Gmail sender is safe)
+- Outlook: creates `AImailPilot-Warmup` folder, same inbox/junk detection and move logic via Graph API
+- Real reputation score: weighted average — 60% historical rate + 40% today's detection (inboxRate, spamRate)
+- Reputation formula: `inboxRate * 0.7 + replyBonus(20) + activityBonus(10)`
+- Per-pair send tracking: `SendPair { from, to, subject, status, timestamp }` stored in `warmup_logs.sendPairs` (JSON column)
+- Warmup monitoring UI shows send details per day (expandable rows) and in Run Now result banner
+- Daily target adjustment already works via `PUT /api/warmup/:id`
+- **Do not touch**: `server/services/warmup-engine.ts`; warmup label/folder functions (`getOrCreateGmailLabel`, `getOrCreateOutlookFolder`); spam detection in `gmailEngage`/`outlookEngage`; `sendPairs` column in `warmup_logs`; `client/src/pages/warmup-monitoring.tsx` LogRow component
+
+### 38. AI Lead Intelligence (Email History Analysis + Opportunity Classification)
+- Deep email history scanner: pulls 6-12 months of Gmail (via messages.list + messages.get) and Outlook (via Graph API mailFolders) history
+- Stores in `email_history` table with dedup via `externalId`, direction tracking (sent/received), thread grouping
+- AI lead classifier using Azure OpenAI: classifies contacts into 11 buckets (past_customer, hot_lead, warm_lead, almost_closed, interested_stalled, meeting_no_deal, went_silent, not_interested, no_response, referral_potential, converted)
+- Rule-based fallback when Azure OpenAI not configured (keyword/pattern matching on snippets)
+- Aggregates data from 3 sources: email_history (scanned), unified_inbox (campaign replies), contacts table (engagement stats)
+- Stores results in `lead_opportunities` table with confidence scores, AI reasoning, suggested actions
+- Opportunity status workflow: new → reviewed → actioned / dismissed
+- API endpoints: `GET /api/lead-intelligence/opportunities`, `GET /api/lead-intelligence/summary`, `POST /api/lead-intelligence/scan`, `POST /api/lead-intelligence/analyze`, `POST /api/lead-intelligence/run` (full pipeline)
+- UI page with summary cards, bucket filter chips, search, expandable detail (AI reasoning + email samples + actions)
+- Available to all roles in sidebar: Insights > Lead Intelligence
+- **Do not touch**: `server/services/lead-intelligence-engine.ts`; `email_history` and `lead_opportunities` tables in `server/storage.ts`; lead intelligence routes in `server/routes.ts`; `client/src/pages/lead-opportunities.tsx`
+
 ---
 
 ## General Rule

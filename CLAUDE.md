@@ -11,6 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > - No changes to `sendViaMicrosoftGraph` or `sendViaGmailAPI` functions
 > - No changes to `gmail-reply-tracker.ts` or `outlook-reply-tracker.ts` (including per-org `checkingOrgs` lock logic)
 > - No changes to `warmup-engine.ts` — self-contained warmup service with own token helpers
+> - No changes to `lead-intelligence-engine.ts` — self-contained email history scanner + AI classifier with own token helpers
 > - No changes to Gmail/Outlook threading logic (`gmailThreadId` storage, `executeFollowup` threading block, `sendEmail` threading headers)
 > - No changes to `checkSendingWindow`, `getUserLocalTime`, `msUntilNextSendWindow` in campaign-engine.ts
 > - No changes to `updateCampaignMessage` SQL in storage.ts — must include `gmailThreadId` column
@@ -90,6 +91,7 @@ server/          Express backend
     oauth-service.ts        OAuth credential management
     warmup-engine.ts        Email warmup between org accounts (auto-open/star/reply)
     email-rating-engine.ts  Contact scoring
+    lead-intelligence-engine.ts  Deep email history scan + AI lead classification
     scheduler.ts            Task scheduling
 shared/schema.ts  Drizzle ORM schema (PostgreSQL dialect, used for type definitions)
 ```
@@ -110,7 +112,9 @@ shared/schema.ts  Drizzle ORM schema (PostgreSQL dialect, used for type definiti
 
 **Warmup engine**: Starts automatically on server boot (`startWarmupEngine()`), runs every 30 minutes. Sends emails between connected org accounts using selected templates, then performs engagement actions (open, star, mark important, auto-reply) via Gmail API / Microsoft Graph. Volume ramps by phase. **Important**: Warmup emails must be excluded from inbox counts, nudges, and lead pipeline — filter at query time by excluding emails where `fromEmail` matches a warmup account email.
 
-**Azure OpenAI**: Integrated via `email-rating-engine.ts`. Settings in `api_settings`: `azure_openai_endpoint`, `azure_openai_api_key`, `azure_openai_deployment`, `azure_openai_api_version`. Can be extended for lead prioritization, auto-draft replies, weekly summaries, deal prediction.
+**Azure OpenAI**: Integrated via `email-rating-engine.ts` and `lead-intelligence-engine.ts`. Settings in `api_settings`: `azure_openai_endpoint`, `azure_openai_api_key`, `azure_openai_deployment`, `azure_openai_api_version`. Used for: contact reply quality scoring, lead classification (11 buckets), AI draft suggestions.
+
+**Lead Intelligence Engine**: `lead-intelligence-engine.ts` scans linked Gmail/Outlook accounts for 6-12 months of email history, stores in `email_history` table, then uses Azure OpenAI (or rule-based fallback) to classify contacts into opportunity buckets (past_customer, hot_lead, warm_lead, etc.) stored in `lead_opportunities` table. API: `/api/lead-intelligence/scan` (fetch emails), `/api/lead-intelligence/analyze` (classify), `/api/lead-intelligence/run` (both). Has own token helpers independent of other engines.
 
 **Raw SQLite access**: `DatabaseStorage` exposes `get db()` getter. Use `const db = (storage as any).db;` in routes. Never import `server/db.ts`.
 

@@ -10322,8 +10322,9 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     try {
       const orgId = req.user.organizationId;
       const monthsBack = parseInt(req.body.monthsBack as string) || 6;
-      console.log(`[LeadIntel] Manual scan triggered for org ${orgId} (${monthsBack} months)`);
-      const result = await scanOrgEmailHistory(orgId, monthsBack);
+      const emailAccountIds = Array.isArray(req.body.emailAccountIds) ? req.body.emailAccountIds.map(String) : undefined;
+      console.log(`[LeadIntel] Manual scan triggered for org ${orgId} (${monthsBack} months)${emailAccountIds ? ` accounts: ${emailAccountIds.join(',')}` : ' (all accounts)'}`);
+      const result = await scanOrgEmailHistory(orgId, monthsBack, emailAccountIds);
       res.json({ success: true, result });
     } catch (error) {
       console.error('[LeadIntel] Scan error:', error);
@@ -10349,8 +10350,9 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     try {
       const orgId = req.user.organizationId;
       const monthsBack = parseInt(req.body.monthsBack as string) || 6;
-      console.log(`[LeadIntel] Full pipeline triggered for org ${orgId}`);
-      const result = await runFullLeadIntelligence(orgId, monthsBack);
+      const emailAccountIds = Array.isArray(req.body.emailAccountIds) ? req.body.emailAccountIds.map(String) : undefined;
+      console.log(`[LeadIntel] Full pipeline triggered for org ${orgId}${emailAccountIds ? ` accounts: ${emailAccountIds.join(',')}` : ' (all accounts)'}`);
+      const result = await runFullLeadIntelligence(orgId, monthsBack, emailAccountIds);
       res.json({ success: true, ...result });
     } catch (error) {
       console.error('[LeadIntel] Pipeline error:', error);
