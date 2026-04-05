@@ -635,7 +635,8 @@ async function buildContactSummaries(orgId: string, emailAccountIds?: string[]):
     console.error('[LeadIntel] Error building campaign summaries:', e instanceof Error ? e.message : e);
   }
 
-  // 3. Also check contacts with engagement data but no replies in unified_inbox
+  // 3. Enrich existing summaries with contact table data (name, company, engagement stats)
+  // Only enriches — does NOT add sent-only contacts (those are outreach noise, not leads)
   try {
     const contactRows = db.prepare(`
       SELECT email, firstName, lastName, company,
@@ -651,27 +652,17 @@ async function buildContactSummaries(orgId: string, emailAccountIds?: string[]):
       if (!c.email) continue;
       const existing = summaries.find(s => s.contactEmail === c.email.toLowerCase());
       if (existing) {
-        // Enrich with contact data
+        // Enrich with contact data (name, sent count)
         if (!existing.contactName && (c.firstName || c.lastName)) {
           existing.contactName = `${c.firstName || ''} ${c.lastName || ''}`.trim();
         }
         existing.totalSent = Math.max(existing.totalSent, c.totalSent || 0);
-      } else {
-        // Add as no-reply contact
-        summaries.push({
-          contactEmail: c.email.toLowerCase(),
-          contactName: `${c.firstName || ''} ${c.lastName || ''}`.trim(),
-          totalEmails: (c.totalSent || 0) + (c.totalReplied || 0),
-          totalSent: c.totalSent || 0,
-          totalReceived: c.totalReplied || 0,
-          lastEmailDate: c.lastRepliedAt || c.lastOpenedAt || c.lastClickedAt || '',
-          subjects: [],
-          snippets: [],
-        });
+        existing.totalEmails = existing.totalSent + existing.totalReceived;
       }
+      // Contacts who only received outreach but never replied are NOT added
     }
   } catch (e) {
-    console.error('[LeadIntel] Error building contact summaries:', e instanceof Error ? e.message : e);
+    console.error('[LeadIntel] Error enriching contact summaries:', e instanceof Error ? e.message : e);
   }
 
   return summaries;
