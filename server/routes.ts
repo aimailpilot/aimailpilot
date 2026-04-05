@@ -9143,8 +9143,8 @@ Generate an appropriate reply to the LATEST email above, considering the full co
 
       res.json({ stats, nudges, recentActivities, period, orgCreatedAt });
     } catch (error: any) {
-      console.error('[MyDashboard] Error:', error.message);
-      res.status(500).json({ message: 'Failed to fetch dashboard' });
+      console.error('[MyDashboard] Error:', error.message, error.stack);
+      res.status(500).json({ message: 'Failed to fetch dashboard', error: error.message });
     }
   });
 

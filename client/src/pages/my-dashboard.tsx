@@ -81,13 +81,23 @@ export default function MyDashboard() {
   const [replyEmailsTotal, setReplyEmailsTotal] = useState(0);
   const [loadingEmails, setLoadingEmails] = useState(false);
   const [selectedEmail, setSelectedEmail] = useState<EmailNeedingReply | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string>('');
 
   const fetchDashboard = async () => {
     setLoading(true);
+    setErrorMsg('');
     try {
       const res = await fetch(`/api/my/dashboard?period=${period}`, { credentials: "include" });
-      if (res.ok) setData(await res.json());
-    } catch (e) { console.error("Dashboard fetch failed:", e); }
+      if (res.ok) {
+        setData(await res.json());
+      } else {
+        const err = await res.json().catch(() => ({}));
+        setErrorMsg(err.error || err.message || `HTTP ${res.status}`);
+      }
+    } catch (e: any) {
+      console.error("Dashboard fetch failed:", e);
+      setErrorMsg(e.message || 'Network error');
+    }
     setLoading(false);
   };
 
@@ -192,7 +202,12 @@ export default function MyDashboard() {
     );
   }
 
-  if (!data) return <div className="text-center py-12 text-gray-500">Failed to load dashboard</div>;
+  if (!data) return (
+    <div className="text-center py-12">
+      <div className="text-gray-500">Failed to load dashboard</div>
+      {errorMsg && <div className="text-xs text-red-400 mt-2">{errorMsg}</div>}
+    </div>
+  );
 
   const { stats, nudges, recentActivities } = data;
 
