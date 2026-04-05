@@ -8775,28 +8775,34 @@ Generate an appropriate reply to the LATEST email above, considering the full co
 
       const scorecard = [];
       for (const member of members) {
+       try {
         const userId = (member as any).userId;
         const userName = `${(member as any).firstName || ''} ${(member as any).lastName || ''}`.trim() || (member as any).email || 'Unknown';
 
-        // Emails sent (messages table — campaigns assigned to this user's email account or contacts assigned to them)
-        const emailsSent = (db.prepare(`
-          SELECT COUNT(*) as cnt FROM messages m
-          JOIN contacts c ON c.id = m.contactId
-          WHERE c.organizationId = ? AND c.assignedTo = ? AND m.status = 'sent' AND m.sentAt >= ?
-        `).get(orgId, userId, startDate) as any)?.cnt || 0;
+        // Emails sent — count messages for contacts assigned to this user
+        let emailsSent = 0;
+        try {
+          emailsSent = (db.prepare(`
+            SELECT COUNT(*) as cnt FROM messages m
+            JOIN contacts c ON c.id = m.contactId
+            WHERE c.organizationId = ? AND c.assignedTo = ? AND m.status = 'sent' AND m.sentAt >= ?
+          `).get(orgId, userId, startDate) as any)?.cnt || 0;
+        } catch { /* messages table schema mismatch — skip */ }
 
         // Activities by type
-        const activities = db.prepare(`
-          SELECT type, COUNT(*) as cnt FROM contact_activities
-          WHERE organizationId = ? AND userId = ? AND createdAt >= ?
-          GROUP BY type
-        `).all(orgId, userId, startDate) as any[];
+        let callsMade = 0, meetingsDone = 0, proposalsSent = 0;
         const activityMap: Record<string, number> = {};
-        for (const a of activities) activityMap[a.type] = a.cnt;
-
-        const callsMade = activityMap['call'] || 0;
-        const meetingsDone = activityMap['meeting'] || 0;
-        const proposalsSent = activityMap['proposal'] || 0;
+        try {
+          const activities = db.prepare(`
+            SELECT type, COUNT(*) as cnt FROM contact_activities
+            WHERE organizationId = ? AND userId = ? AND createdAt >= ?
+            GROUP BY type
+          `).all(orgId, userId, startDate) as any[];
+          for (const a of activities) activityMap[a.type] = a.cnt;
+          callsMade = activityMap['call'] || 0;
+          meetingsDone = activityMap['meeting'] || 0;
+          proposalsSent = activityMap['proposal'] || 0;
+        } catch { /* contact_activities may not exist */ }
 
         // Pipeline stats (contacts assigned to this user)
         // dealValue column may not exist yet on older deployments — use try/catch
@@ -8867,6 +8873,9 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           totalActivities: callsMade + meetingsDone + proposalsSent + (activityMap['email'] || 0) + (activityMap['whatsapp'] || 0) + (activityMap['note'] || 0),
           pipeline: pipeMap,
         });
+      } catch (memberErr: any) {
+        console.error(`[Scorecard] Error processing member ${(member as any).email}:`, memberErr.message);
+      }
       }
 
       // Sort by revenue descending (leaderboard order)
