@@ -108,7 +108,11 @@ shared/schema.ts  Drizzle ORM schema (PostgreSQL dialect, used for type definiti
 
 **Follow-up engine**: Starts automatically on server boot (`startFollowupEngine()`), runs background polling to send scheduled follow-ups. Gmail follow-ups use stored `gmailThreadId` + 401 retry to stay on Gmail API path (SMTP fallback breaks threading).
 
-**Warmup engine**: Starts automatically on server boot (`startWarmupEngine()`), runs every 30 minutes. Sends emails between connected org accounts using selected templates, then performs engagement actions (open, star, mark important, auto-reply) via Gmail API / Microsoft Graph. Volume ramps by phase.
+**Warmup engine**: Starts automatically on server boot (`startWarmupEngine()`), runs every 30 minutes. Sends emails between connected org accounts using selected templates, then performs engagement actions (open, star, mark important, auto-reply) via Gmail API / Microsoft Graph. Volume ramps by phase. **Important**: Warmup emails must be excluded from inbox counts, nudges, and lead pipeline — filter at query time by excluding emails where `fromEmail` matches a warmup account email.
+
+**Azure OpenAI**: Integrated via `email-rating-engine.ts`. Settings in `api_settings`: `azure_openai_endpoint`, `azure_openai_api_key`, `azure_openai_deployment`, `azure_openai_api_version`. Can be extended for lead prioritization, auto-draft replies, weekly summaries, deal prediction.
+
+**Raw SQLite access**: `DatabaseStorage` exposes `get db()` getter. Use `const db = (storage as any).db;` in routes. Never import `server/db.ts`.
 
 **Frontend data fetching**: TanStack Query (`@tanstack/react-query`) with a shared `queryClient` in `client/src/lib/queryClient.ts`. All API calls go through fetch wrappers in that file.
 

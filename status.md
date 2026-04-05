@@ -230,6 +230,41 @@ This file tracks features that are confirmed working in production.
 - Outlook reply tracker lookback increased from 120 to 1440 minutes (24h) to match Gmail
 - **Do not touch**: `checkingOrgs` Set and per-org lock logic in `server/services/gmail-reply-tracker.ts` and `server/services/outlook-reply-tracker.ts`
 
+### 32. Team Scorecard & Leaderboard
+- Team scorecard page showing per-member stats: emails sent, calls, meetings, proposals, hot leads, deals won/lost, revenue, win rate
+- Leaderboard sorted by revenue with rank icons (crown/medal/award)
+- Period selector with month names (Jan, Feb, Mar...) from org creation date + Today/Week/All Time
+- Nudge alerts for overdue actions and unactioned replies
+- Admin/owner only (sidebar: Insights > Scorecard)
+- API endpoint: `GET /api/team/scorecard?period=today|week|2026-04|all`
+- **Do not touch**: `/api/team/scorecard` route in `server/routes.ts`; `client/src/pages/team-scorecard.tsx`
+
+### 33. My Dashboard (Individual Member View)
+- Personal sales dashboard with stats, pipeline funnel, recent activity feed
+- Smart nudges: overdue follow-ups, emails needing reply, unactioned campaign replies, stale hot leads, pending proposals, no calls today, deal celebrations
+- Emails needing reply nudge is expandable — click to see full email list with inline body viewer
+- Period selector with month names from org creation date
+- Available to all roles (sidebar: Insights > My Dashboard)
+- API endpoints: `GET /api/my/dashboard`, `GET /api/my/emails-needing-reply`
+- **Do not touch**: `/api/my/dashboard` and `/api/my/emails-needing-reply` routes in `server/routes.ts`; `client/src/pages/my-dashboard.tsx`
+
+### 34. Deal Tracking
+- `dealValue`, `dealClosedAt`, `dealNotes` columns on contacts table
+- Auto-set `dealClosedAt` when pipeline stage changes to won/lost
+- Deal dialog on "Won" stage transition to capture deal value and notes
+- Deal value displayed in contact detail panel for won/lost contacts
+- **Do not touch**: deal columns in `server/storage.ts` (ALTER TABLE); deal dialog in `client/src/pages/contacts-manager.tsx`; dealValue/dealClosedAt in `PUT /api/contacts/:id/pipeline` route
+
+### 35. Follow-up Email Subject (No Re: When Threaded)
+- Follow-up steps use exact Step 1 subject (no "Re:" prefix) when Gmail threadId or Outlook In-Reply-To is linked
+- "Re:" prefix added as safety net ONLY when threading is not linked (fallback for broken threading)
+- **Do not touch**: subject logic in `executeFollowup()` in `server/services/followup-engine.ts`; threading fallback subject logic
+
+### 36. Raw SQLite Access via storage.db
+- `DatabaseStorage` class exposes `get db()` getter returning the raw `better-sqlite3` instance
+- All raw SQL queries in routes.ts use `(storage as any).db` to access it
+- **Do not touch**: `get db()` getter in `server/storage.ts`; this is the ONLY safe way to access raw SQLite
+
 ---
 
 ## General Rule
