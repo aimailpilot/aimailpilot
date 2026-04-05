@@ -13,6 +13,7 @@ import { classifyReply, classifyBounce } from "./services/reply-classifier";
 import { verifySingleEmail, verifyBatch, checkCredits, getEmailVerifyApiKey } from "./services/email-verifier";
 import { OAuth2Client } from 'google-auth-library';
 import { runWarmupNow, runOrgWarmupDirect } from "./services/warmup-engine";
+import { scanOrgEmailHistory, analyzeOrgLeads, runFullLeadIntelligence, BUCKET_LABELS } from "./services/lead-intelligence-engine";
 
 
 // In-memory user store for simplified authentication
@@ -10273,6 +10274,114 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       res.json(contact);
     } catch (e: any) {
       res.status(500).json({ message: e.message });
+    }
+  });
+
+  // ========== LEAD INTELLIGENCE ==========
+
+  // Get opportunities (AI-classified leads)
+  app.get('/api/lead-intelligence/opportunities', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const bucket = req.query.bucket as string | undefined;
+      const status = req.query.status as string | undefined;
+      const limit = parseInt(req.query.limit as string) || undefined;
+      const opportunities = await storage.getLeadOpportunities(orgId, { bucket, status, limit });
+      res.json(opportunities);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch opportunities' });
+    }
+  });
+
+  // Get opportunity summary (bucket counts)
+  app.get('/api/lead-intelligence/summary', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const summary = await storage.getLeadOpportunitySummary(orgId);
+      const bucketLabels = BUCKET_LABELS;
+      res.json({ summary, bucketLabels });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch summary' });
+    }
+  });
+
+  // Get email history sync status
+  app.get('/api/lead-intelligence/sync-status', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const syncStatus = await storage.getEmailHistorySyncStatus(orgId);
+      const stats = await storage.getEmailHistoryStats(orgId);
+      res.json({ syncStatus, stats });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch sync status' });
+    }
+  });
+
+  // Trigger email history scan (deep scan)
+  app.post('/api/lead-intelligence/scan', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const monthsBack = parseInt(req.body.monthsBack as string) || 6;
+      console.log(`[LeadIntel] Manual scan triggered for org ${orgId} (${monthsBack} months)`);
+      const result = await scanOrgEmailHistory(orgId, monthsBack);
+      res.json({ success: true, result });
+    } catch (error) {
+      console.error('[LeadIntel] Scan error:', error);
+      res.status(500).json({ message: 'Failed to scan email history', error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  // Trigger AI analysis (classify contacts)
+  app.post('/api/lead-intelligence/analyze', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      console.log(`[LeadIntel] Manual analysis triggered for org ${orgId}`);
+      const result = await analyzeOrgLeads(orgId);
+      res.json({ success: true, result });
+    } catch (error) {
+      console.error('[LeadIntel] Analysis error:', error);
+      res.status(500).json({ message: 'Failed to analyze leads', error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  // Full pipeline: scan + analyze
+  app.post('/api/lead-intelligence/run', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const monthsBack = parseInt(req.body.monthsBack as string) || 6;
+      console.log(`[LeadIntel] Full pipeline triggered for org ${orgId}`);
+      const result = await runFullLeadIntelligence(orgId, monthsBack);
+      res.json({ success: true, ...result });
+    } catch (error) {
+      console.error('[LeadIntel] Pipeline error:', error);
+      res.status(500).json({ message: 'Failed to run lead intelligence', error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  // Update opportunity status (reviewed, actioned, dismissed)
+  app.patch('/api/lead-intelligence/opportunities/:id', requireAuth, async (req: any, res) => {
+    try {
+      const { status, reviewedBy } = req.body;
+      await storage.updateLeadOpportunity(req.params.id, {
+        status,
+        reviewedAt: new Date().toISOString(),
+        reviewedBy: reviewedBy || req.user.id,
+      });
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to update opportunity' });
+    }
+  });
+
+  // Get single opportunity detail
+  app.get('/api/lead-intelligence/opportunities/:email', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const opp = await storage.getLeadOpportunityByEmail(orgId, req.params.email);
+      if (!opp) return res.status(404).json({ message: 'Opportunity not found' });
+      res.json(opp);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch opportunity' });
     }
   });
 

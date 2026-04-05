@@ -907,6 +907,62 @@ db.exec(`
 // v: Add sendPairs column to warmup_logs for per-pair tracking
 try { db.exec(`ALTER TABLE warmup_logs ADD COLUMN sendPairs TEXT DEFAULT '[]'`); } catch (e) { /* already exists */ }
 
+// Email History — deep scan of linked account email history
+db.exec(`
+  CREATE TABLE IF NOT EXISTS email_history (
+    id TEXT PRIMARY KEY,
+    organizationId TEXT NOT NULL,
+    emailAccountId TEXT NOT NULL,
+    accountEmail TEXT NOT NULL,
+    provider TEXT,
+    externalId TEXT,
+    threadId TEXT,
+    fromEmail TEXT NOT NULL,
+    fromName TEXT,
+    toEmail TEXT,
+    subject TEXT,
+    snippet TEXT,
+    direction TEXT NOT NULL DEFAULT 'received',
+    receivedAt TEXT NOT NULL,
+    createdAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_email_history_org ON email_history(organizationId, receivedAt);
+  CREATE INDEX IF NOT EXISTS idx_email_history_account ON email_history(emailAccountId, receivedAt);
+  CREATE INDEX IF NOT EXISTS idx_email_history_thread ON email_history(threadId);
+  CREATE INDEX IF NOT EXISTS idx_email_history_external ON email_history(externalId);
+  CREATE INDEX IF NOT EXISTS idx_email_history_from ON email_history(fromEmail);
+`);
+
+// Lead Opportunities — AI-classified leads from email history analysis
+db.exec(`
+  CREATE TABLE IF NOT EXISTS lead_opportunities (
+    id TEXT PRIMARY KEY,
+    organizationId TEXT NOT NULL,
+    emailAccountId TEXT,
+    contactEmail TEXT NOT NULL,
+    contactName TEXT,
+    company TEXT,
+    bucket TEXT NOT NULL DEFAULT 'unknown',
+    confidence INTEGER DEFAULT 0,
+    aiReasoning TEXT,
+    suggestedAction TEXT,
+    lastEmailDate TEXT,
+    totalEmails INTEGER DEFAULT 0,
+    totalSent INTEGER DEFAULT 0,
+    totalReceived INTEGER DEFAULT 0,
+    sampleSubjects TEXT DEFAULT '[]',
+    sampleSnippets TEXT DEFAULT '[]',
+    status TEXT DEFAULT 'new',
+    reviewedAt TEXT,
+    reviewedBy TEXT,
+    createdAt TEXT NOT NULL,
+    updatedAt TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_lead_opps_org ON lead_opportunities(organizationId, bucket);
+  CREATE INDEX IF NOT EXISTS idx_lead_opps_email ON lead_opportunities(contactEmail);
+  CREATE INDEX IF NOT EXISTS idx_lead_opps_status ON lead_opportunities(organizationId, status);
+`);
+
 // Contact Activity Timeline
 db.exec(`
   CREATE TABLE IF NOT EXISTS contact_activity (
@@ -3015,6 +3071,114 @@ export class DatabaseStorage {
 
   async getWarmupLogs(warmupAccountId: string, limit = 30) {
     return db.prepare('SELECT * FROM warmup_logs WHERE warmupAccountId = ? ORDER BY date DESC LIMIT ?').all(warmupAccountId, limit);
+  }
+
+  // ========== Email History & Lead Opportunities ==========
+
+  async addEmailHistory(data: { organizationId: string; emailAccountId: string; accountEmail: string; provider?: string; externalId?: string; threadId?: string; fromEmail: string; fromName?: string; toEmail?: string; subject?: string; snippet?: string; direction: string; receivedAt: string }) {
+    const id = genId();
+    db.prepare('INSERT OR IGNORE INTO email_history (id, organizationId, emailAccountId, accountEmail, provider, externalId, threadId, fromEmail, fromName, toEmail, subject, snippet, direction, receivedAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, data.organizationId, data.emailAccountId, data.accountEmail, data.provider || null,
+      data.externalId || null, data.threadId || null, data.fromEmail, data.fromName || null,
+      data.toEmail || null, data.subject || null, data.snippet || null, data.direction, data.receivedAt, now()
+    );
+    return id;
+  }
+
+  async getEmailHistoryByThread(threadId: string) {
+    return db.prepare('SELECT * FROM email_history WHERE threadId = ? ORDER BY receivedAt ASC').all(threadId);
+  }
+
+  async getEmailHistoryContacts(orgId: string, emailAccountId?: string) {
+    const q = emailAccountId
+      ? `SELECT fromEmail, fromName, COUNT(*) as totalEmails,
+           SUM(CASE WHEN direction = 'sent' THEN 1 ELSE 0 END) as totalSent,
+           SUM(CASE WHEN direction = 'received' THEN 1 ELSE 0 END) as totalReceived,
+           MAX(receivedAt) as lastEmailDate,
+           GROUP_CONCAT(DISTINCT subject) as subjects
+         FROM email_history WHERE organizationId = ? AND emailAccountId = ?
+         GROUP BY fromEmail ORDER BY lastEmailDate DESC`
+      : `SELECT fromEmail, fromName, COUNT(*) as totalEmails,
+           SUM(CASE WHEN direction = 'sent' THEN 1 ELSE 0 END) as totalSent,
+           SUM(CASE WHEN direction = 'received' THEN 1 ELSE 0 END) as totalReceived,
+           MAX(receivedAt) as lastEmailDate,
+           GROUP_CONCAT(DISTINCT subject) as subjects
+         FROM email_history WHERE organizationId = ?
+         GROUP BY fromEmail ORDER BY lastEmailDate DESC`;
+    return emailAccountId
+      ? db.prepare(q).all(orgId, emailAccountId)
+      : db.prepare(q).all(orgId);
+  }
+
+  async getEmailHistoryStats(orgId: string) {
+    return db.prepare(`SELECT COUNT(*) as totalEmails, COUNT(DISTINCT fromEmail) as uniqueContacts,
+      COUNT(DISTINCT threadId) as totalThreads, COUNT(DISTINCT emailAccountId) as accountsScanned,
+      MIN(receivedAt) as oldestEmail, MAX(receivedAt) as newestEmail
+      FROM email_history WHERE organizationId = ?`).get(orgId);
+  }
+
+  async emailHistoryExists(externalId: string) {
+    const row = db.prepare('SELECT id FROM email_history WHERE externalId = ? LIMIT 1').get(externalId) as any;
+    return !!row;
+  }
+
+  async getEmailHistorySyncStatus(orgId: string) {
+    return db.prepare(`SELECT emailAccountId, accountEmail, provider, COUNT(*) as emailCount, MIN(receivedAt) as oldest, MAX(receivedAt) as newest
+      FROM email_history WHERE organizationId = ? GROUP BY emailAccountId`).all(orgId);
+  }
+
+  // Lead Opportunities
+  async addLeadOpportunity(data: { organizationId: string; emailAccountId?: string; contactEmail: string; contactName?: string; company?: string; bucket: string; confidence: number; aiReasoning?: string; suggestedAction?: string; lastEmailDate?: string; totalEmails?: number; totalSent?: number; totalReceived?: number; sampleSubjects?: string[]; sampleSnippets?: string[] }) {
+    const id = genId();
+    const ts = now();
+    db.prepare(`INSERT INTO lead_opportunities (id, organizationId, emailAccountId, contactEmail, contactName, company, bucket, confidence, aiReasoning, suggestedAction, lastEmailDate, totalEmails, totalSent, totalReceived, sampleSubjects, sampleSnippets, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)`).run(
+      id, data.organizationId, data.emailAccountId || null, data.contactEmail, data.contactName || null,
+      data.company || null, data.bucket, data.confidence, data.aiReasoning || null, data.suggestedAction || null,
+      data.lastEmailDate || null, data.totalEmails || 0, data.totalSent || 0, data.totalReceived || 0,
+      JSON.stringify(data.sampleSubjects || []), JSON.stringify(data.sampleSnippets || []), ts, ts
+    );
+    return id;
+  }
+
+  async updateLeadOpportunity(id: string, data: any) {
+    const sets: string[] = [];
+    const vals: any[] = [];
+    for (const [k, v] of Object.entries(data)) {
+      if (k === 'id') continue;
+      sets.push(`${k} = ?`);
+      vals.push(k === 'sampleSubjects' || k === 'sampleSnippets' ? JSON.stringify(v) : v);
+    }
+    sets.push('updatedAt = ?');
+    vals.push(now());
+    vals.push(id);
+    db.prepare(`UPDATE lead_opportunities SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+  }
+
+  async getLeadOpportunities(orgId: string, filters?: { bucket?: string; status?: string; limit?: number }) {
+    let q = 'SELECT * FROM lead_opportunities WHERE organizationId = ?';
+    const params: any[] = [orgId];
+    if (filters?.bucket) { q += ' AND bucket = ?'; params.push(filters.bucket); }
+    if (filters?.status) { q += ' AND status = ?'; params.push(filters.status); }
+    q += ' ORDER BY confidence DESC, lastEmailDate DESC';
+    if (filters?.limit) { q += ' LIMIT ?'; params.push(filters.limit); }
+    return db.prepare(q).all(...params);
+  }
+
+  async getLeadOpportunitySummary(orgId: string) {
+    return db.prepare(`SELECT bucket, COUNT(*) as count, AVG(confidence) as avgConfidence,
+      SUM(CASE WHEN status = 'new' THEN 1 ELSE 0 END) as newCount,
+      SUM(CASE WHEN status = 'reviewed' THEN 1 ELSE 0 END) as reviewedCount,
+      SUM(CASE WHEN status = 'actioned' THEN 1 ELSE 0 END) as actionedCount,
+      SUM(CASE WHEN status = 'dismissed' THEN 1 ELSE 0 END) as dismissedCount
+      FROM lead_opportunities WHERE organizationId = ? GROUP BY bucket`).all(orgId);
+  }
+
+  async deleteLeadOpportunitiesByOrg(orgId: string) {
+    db.prepare('DELETE FROM lead_opportunities WHERE organizationId = ?').run(orgId);
+  }
+
+  async getLeadOpportunityByEmail(orgId: string, contactEmail: string) {
+    return db.prepare('SELECT * FROM lead_opportunities WHERE organizationId = ? AND contactEmail = ? LIMIT 1').get(orgId, contactEmail);
   }
 
   // ========== v12: Notifications ==========
