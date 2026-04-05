@@ -211,33 +211,147 @@ async function sendViaMicrosoftGraph(
   }
 }
 
-// ── Engagement Actions ──────────────────────────────────────────────────
+// ── Label / Folder Management ──────────────────────────────────────────
 
-/** Gmail: star + mark important + mark as read on recent messages from sender */
-async function gmailEngage(token: string, fromEmail: string): Promise<{ opened: number; starred: number; important: number }> {
-  const stats = { opened: 0, starred: 0, important: 0 };
+const WARMUP_LABEL_NAME = 'AImailPilot-Warmup';
+
+// Cache label/folder IDs per token to avoid repeated API calls
+const labelCache = new Map<string, string>();
+
+/** Gmail: get or create the warmup label */
+async function getOrCreateGmailLabel(token: string): Promise<string | null> {
+  const cacheKey = `gmail:${token.substring(0, 20)}`;
+  if (labelCache.has(cacheKey)) return labelCache.get(cacheKey)!;
+
   try {
-    // Search for recent unread messages from the sender
-    const q = encodeURIComponent(`from:${fromEmail} is:unread newer_than:1d`);
+    // Check if label exists
+    const listResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/labels', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!listResp.ok) return null;
+    const listData = await listResp.json() as any;
+    const existing = (listData.labels || []).find((l: any) => l.name === WARMUP_LABEL_NAME);
+    if (existing) {
+      labelCache.set(cacheKey, existing.id);
+      return existing.id;
+    }
+
+    // Create label
+    const createResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/labels', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: WARMUP_LABEL_NAME,
+        labelListVisibility: 'labelShow',
+        messageListVisibility: 'show',
+      }),
+    });
+    if (!createResp.ok) return null;
+    const created = await createResp.json() as any;
+    labelCache.set(cacheKey, created.id);
+    console.log(`[Warmup] Created Gmail label "${WARMUP_LABEL_NAME}" (${created.id})`);
+    return created.id;
+  } catch (e) {
+    console.error('[Warmup] Gmail label error:', e instanceof Error ? e.message : e);
+    return null;
+  }
+}
+
+/** Outlook: get or create the warmup folder */
+async function getOrCreateOutlookFolder(token: string): Promise<string | null> {
+  const cacheKey = `outlook:${token.substring(0, 20)}`;
+  if (labelCache.has(cacheKey)) return labelCache.get(cacheKey)!;
+
+  try {
+    // Check if folder exists
     const listResp = await fetch(
-      `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${q}&maxResults=10`,
+      `https://graph.microsoft.com/v1.0/me/mailFolders?$filter=displayName eq '${WARMUP_LABEL_NAME}'`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
-    if (!listResp.ok) return stats;
-    const listData = await listResp.json() as any;
-    const messages = listData.messages || [];
-    if (messages.length === 0) return stats;
+    if (listResp.ok) {
+      const listData = await listResp.json() as any;
+      if (listData.value?.length > 0) {
+        labelCache.set(cacheKey, listData.value[0].id);
+        return listData.value[0].id;
+      }
+    }
 
-    for (const msg of messages) {
-      // Mark as read (remove UNREAD) + star (add STARRED) + mark important (add IMPORTANT)
+    // Create folder
+    const createResp = await fetch('https://graph.microsoft.com/v1.0/me/mailFolders', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ displayName: WARMUP_LABEL_NAME }),
+    });
+    if (!createResp.ok) return null;
+    const created = await createResp.json() as any;
+    labelCache.set(cacheKey, created.id);
+    console.log(`[Warmup] Created Outlook folder "${WARMUP_LABEL_NAME}" (${created.id})`);
+    return created.id;
+  } catch (e) {
+    console.error('[Warmup] Outlook folder error:', e instanceof Error ? e.message : e);
+    return null;
+  }
+}
+
+// ── Engagement Actions ──────────────────────────────────────────────────
+
+/** Gmail: detect inbox/spam, move spam→inbox, apply warmup label, star + mark important */
+async function gmailEngage(token: string, fromEmail: string): Promise<{ opened: number; starred: number; important: number; inboxCount: number; spamCount: number; movedFromSpam: number }> {
+  const stats = { opened: 0, starred: 0, important: 0, inboxCount: 0, spamCount: 0, movedFromSpam: 0 };
+  try {
+    const warmupLabelId = await getOrCreateGmailLabel(token);
+
+    // 1. Search INBOX for warmup emails from this sender
+    const inboxQ = encodeURIComponent(`from:${fromEmail} is:unread newer_than:1d in:inbox`);
+    const inboxResp = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${inboxQ}&maxResults=20`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    const inboxMessages = inboxResp.ok ? ((await inboxResp.json() as any).messages || []) : [];
+    stats.inboxCount = inboxMessages.length;
+
+    // 2. Search SPAM for warmup emails from this sender
+    const spamQ = encodeURIComponent(`from:${fromEmail} newer_than:1d in:spam`);
+    const spamResp = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${spamQ}&maxResults=20`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    const spamMessages = spamResp.ok ? ((await spamResp.json() as any).messages || []) : [];
+    stats.spamCount = spamMessages.length;
+
+    // 3. Move spam emails → inbox + apply warmup label (trains Gmail this sender is safe)
+    for (const msg of spamMessages) {
+      const addLabels = ['INBOX'];
+      if (warmupLabelId) addLabels.push(warmupLabelId);
       const modResp = await fetch(
         `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}/modify`,
         {
           method: 'POST',
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            addLabelIds: ['STARRED', 'IMPORTANT'],
-            removeLabelIds: ['UNREAD'],
+            addLabelIds: addLabels,
+            removeLabelIds: ['SPAM', 'UNREAD'],
+          }),
+        }
+      );
+      if (modResp.ok) {
+        stats.movedFromSpam++;
+        console.log(`[Warmup] Moved email from SPAM → Inbox+Label (from: ${fromEmail})`);
+      }
+    }
+
+    // 4. Process inbox emails: star, mark important, apply warmup label, remove from inbox view
+    for (const msg of inboxMessages) {
+      const addLabels = ['STARRED', 'IMPORTANT'];
+      if (warmupLabelId) addLabels.push(warmupLabelId);
+      const modResp = await fetch(
+        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}/modify`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            addLabelIds: addLabels,
+            removeLabelIds: ['UNREAD', 'INBOX'], // remove from INBOX so it only lives under the warmup label
           }),
         }
       );
@@ -253,36 +367,71 @@ async function gmailEngage(token: string, fromEmail: string): Promise<{ opened: 
   return stats;
 }
 
-/** Outlook: mark as read + flag on recent messages from sender */
-async function outlookEngage(token: string, fromEmail: string): Promise<{ opened: number; flagged: number }> {
-  const stats = { opened: 0, flagged: 0 };
+/** Outlook: detect inbox/junk, move junk→warmup folder, move inbox→warmup folder */
+async function outlookEngage(token: string, fromEmail: string): Promise<{ opened: number; flagged: number; inboxCount: number; spamCount: number; movedFromSpam: number }> {
+  const stats = { opened: 0, flagged: 0, inboxCount: 0, spamCount: 0, movedFromSpam: 0 };
   try {
-    // Get recent unread messages from the sender
-    const filter = encodeURIComponent(`from/emailAddress/address eq '${fromEmail}' and isRead eq false`);
-    const listResp = await fetch(
-      `https://graph.microsoft.com/v1.0/me/messages?$filter=${filter}&$top=10&$select=id`,
+    const warmupFolderId = await getOrCreateOutlookFolder(token);
+
+    // 1. Search Inbox for warmup emails
+    const inboxFilter = encodeURIComponent(`from/emailAddress/address eq '${fromEmail}' and isRead eq false`);
+    const inboxResp = await fetch(
+      `https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$filter=${inboxFilter}&$top=20&$select=id`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
-    if (!listResp.ok) return stats;
-    const listData = await listResp.json() as any;
-    const messages = listData.value || [];
+    const inboxMessages = inboxResp.ok ? ((await inboxResp.json() as any).value || []) : [];
+    stats.inboxCount = inboxMessages.length;
 
-    for (const msg of messages) {
+    // 2. Search JunkEmail for warmup emails
+    const junkFilter = encodeURIComponent(`from/emailAddress/address eq '${fromEmail}'`);
+    const junkResp = await fetch(
+      `https://graph.microsoft.com/v1.0/me/mailFolders/junkemail/messages?$filter=${junkFilter}&$top=20&$select=id`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    const junkMessages = junkResp.ok ? ((await junkResp.json() as any).value || []) : [];
+    stats.spamCount = junkMessages.length;
+
+    // 3. Move junk emails → warmup folder (trains Outlook that sender is safe)
+    for (const msg of junkMessages) {
+      const destId = warmupFolderId || 'inbox';
+      const moveResp = await fetch(
+        `https://graph.microsoft.com/v1.0/me/messages/${msg.id}/move`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ destinationId: destId }),
+        }
+      );
+      if (moveResp.ok) {
+        stats.movedFromSpam++;
+        console.log(`[Warmup] Moved email from Junk → ${warmupFolderId ? 'Warmup folder' : 'Inbox'} (from: ${fromEmail})`);
+      }
+    }
+
+    // 4. Process inbox emails: mark read, flag, move to warmup folder
+    for (const msg of inboxMessages) {
       // Mark as read + flag
-      const patchResp = await fetch(
+      await fetch(
         `https://graph.microsoft.com/v1.0/me/messages/${msg.id}`,
         {
           method: 'PATCH',
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            isRead: true,
-            flag: { flagStatus: 'flagged' },
-          }),
+          body: JSON.stringify({ isRead: true, flag: { flagStatus: 'flagged' } }),
         }
       );
-      if (patchResp.ok) {
-        stats.opened++;
-        stats.flagged++;
+      stats.opened++;
+      stats.flagged++;
+
+      // Move to warmup folder to keep inbox clean
+      if (warmupFolderId) {
+        await fetch(
+          `https://graph.microsoft.com/v1.0/me/messages/${msg.id}/move`,
+          {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ destinationId: warmupFolderId }),
+          }
+        );
       }
     }
   } catch (e) {
@@ -338,6 +487,14 @@ function getDailyVolume(daysSinceStart: number, dailyTarget: number): number {
 
 // ── Main Warmup Cycle ───────────────────────────────────────────────────
 
+interface SendPair {
+  from: string;
+  to: string;
+  subject: string;
+  status: 'sent' | 'failed';
+  timestamp: string;
+}
+
 interface WarmupRunResult {
   orgId: string;
   sent: number;
@@ -345,6 +502,7 @@ interface WarmupRunResult {
   opened: number;
   replied: number;
   errors: string[];
+  sendPairs: SendPair[];
 }
 
 async function runWarmupCycle(): Promise<WarmupRunResult[]> {
@@ -367,7 +525,7 @@ async function runWarmupCycle(): Promise<WarmupRunResult[]> {
 }
 
 async function runOrgWarmup(orgId: string): Promise<WarmupRunResult> {
-  const result: WarmupRunResult = { orgId, sent: 0, received: 0, opened: 0, replied: 0, errors: [] };
+  const result: WarmupRunResult = { orgId, sent: 0, received: 0, opened: 0, replied: 0, errors: [], sendPairs: [] };
   const today = new Date().toISOString().split('T')[0];
 
   try {
@@ -501,13 +659,15 @@ async function runOrgWarmup(orgId: string): Promise<WarmupRunResult> {
         if (sendResult.success) {
           sentThisBatch++;
           result.sent++;
-          console.log(`[Warmup] Sent: ${email} → ${recipient.accountEmail} (${subject.substring(0, 40)})`);
+          result.sendPairs.push({ from: email, to: (recipient as any).accountEmail, subject: subject.substring(0, 60), status: 'sent', timestamp: new Date().toISOString() });
+          console.log(`[Warmup] Sent: ${email} → ${(recipient as any).accountEmail} (${subject.substring(0, 40)})`);
 
           // Small delay between sends (2-5 seconds)
           await new Promise(r => setTimeout(r, randomInt(2000, 5000)));
         } else {
-          console.error(`[Warmup] Send failed ${email} → ${recipient.accountEmail}: ${sendResult.error}`);
-          result.errors.push(`Send fail: ${email} → ${recipient.accountEmail}`);
+          result.sendPairs.push({ from: email, to: (recipient as any).accountEmail, subject: subject.substring(0, 60), status: 'failed', timestamp: new Date().toISOString() });
+          console.error(`[Warmup] Send failed ${email} → ${(recipient as any).accountEmail}: ${sendResult.error}`);
+          result.errors.push(`Send fail: ${email} → ${(recipient as any).accountEmail}`);
         }
       }
 
@@ -552,11 +712,17 @@ async function runOrgWarmup(orgId: string): Promise<WarmupRunResult> {
       const senders = activeAccounts.filter((a: any) => a.id !== account.id);
       let engagedCount = 0;
       let repliedCount = 0;
+      let totalInbox = 0;
+      let totalSpam = 0;
+      let totalMovedFromSpam = 0;
 
       for (const sender of senders) {
         if (engageProvider === 'gmail') {
           const stats = await gmailEngage(recipientToken, sender.accountEmail);
           engagedCount += stats.opened;
+          totalInbox += stats.inboxCount;
+          totalSpam += stats.spamCount;
+          totalMovedFromSpam += stats.movedFromSpam;
 
           // Auto-reply ~30% of the time
           if (stats.opened > 0 && Math.random() < 0.3) {
@@ -568,6 +734,9 @@ async function runOrgWarmup(orgId: string): Promise<WarmupRunResult> {
         } else if (engageProvider === 'outlook') {
           const stats = await outlookEngage(recipientToken, sender.accountEmail);
           engagedCount += stats.opened;
+          totalInbox += stats.inboxCount;
+          totalSpam += stats.spamCount;
+          totalMovedFromSpam += stats.movedFromSpam;
 
           if (stats.opened > 0 && Math.random() < 0.3) {
             const template = randomPick(await storage.getEmailTemplates(orgId));
@@ -581,48 +750,88 @@ async function runOrgWarmup(orgId: string): Promise<WarmupRunResult> {
       result.received += engagedCount;
       result.opened += engagedCount;
 
-      // Update recipient account stats
-      if (engagedCount > 0 || repliedCount > 0) {
-        const totalReceived = (account.totalReceived || 0) + engagedCount;
-        const totalSent = account.totalSent || 0;
-        // Calculate inbox rate (received/sent ratio capped at 100)
-        const inboxRate = totalSent > 0 ? Math.min(100, Math.round((totalReceived / totalSent) * 100)) : 0;
-        // Reputation score: combination of inbox rate and engagement
-        const reputationScore = Math.min(100, Math.round(inboxRate * 0.7 + (repliedCount > 0 ? 20 : 0) + Math.min(10, engagedCount * 2)));
+      // Update recipient account stats with REAL inbox/spam data
+      const totalFound = totalInbox + totalSpam;
+      if (totalFound > 0 || engagedCount > 0 || repliedCount > 0) {
+        const totalReceived = (account.totalReceived || 0) + engagedCount + totalMovedFromSpam;
+
+        // Real inbox rate: based on actual placement detection
+        let inboxRate = account.inboxRate || 0;
+        if (totalFound > 0) {
+          // Weighted: blend historical rate with today's detection
+          const todayInboxRate = Math.round((totalInbox / totalFound) * 100);
+          inboxRate = Math.round(inboxRate * 0.6 + todayInboxRate * 0.4); // 60% history, 40% today
+        }
+
+        // Real spam rate
+        let spamRate = account.spamRate || 0;
+        if (totalFound > 0) {
+          const todaySpamRate = Math.round((totalSpam / totalFound) * 100);
+          spamRate = Math.round(spamRate * 0.6 + todaySpamRate * 0.4);
+        }
+
+        // Reputation = inbox rate (70%) + reply engagement (20%) + activity (10%)
+        const reputationScore = Math.min(100, Math.round(
+          inboxRate * 0.7 +
+          (repliedCount > 0 ? 20 : 0) +
+          Math.min(10, engagedCount * 2)
+        ));
 
         await storage.updateWarmupAccount(account.id, {
           totalReceived,
           inboxRate,
-          reputationScore: Math.max(account.reputationScore || 50, reputationScore),
+          spamRate,
+          reputationScore,
         });
+
+        if (totalSpam > 0) {
+          console.log(`[Warmup] ${email}: ${totalInbox} inbox, ${totalSpam} spam (${totalMovedFromSpam} rescued), rate=${inboxRate}%`);
+        }
       }
     }
 
-    // ── Log daily stats ──
+    // ── Log daily stats with real inbox/spam counts ──
+    // Per-account tracking for accurate logs
     for (const account of activeAccounts) {
       try {
-        // Upsert: check if today's log exists
         const db = (storage as any).db;
         const existingLog = db.prepare('SELECT * FROM warmup_logs WHERE warmupAccountId = ? AND date = ?').get(account.id, today) as any;
 
+        // Re-fetch account to get latest stats
+        const latest = await storage.getWarmupAccount(account.id) as any;
+
+        // Build send pairs for this specific account (sent FROM this account)
+        const accountPairs = result.sendPairs.filter(p => p.from === account.accountEmail);
+
         if (existingLog) {
-          // Update existing log
-          db.prepare('UPDATE warmup_logs SET sent = sent + ?, received = received + ?, openCount = openCount + ?, replyCount = replyCount + ? WHERE id = ?').run(
-            result.sent > 0 ? 1 : 0, // approximate per-account
+          // Merge new pairs with existing pairs
+          let existingPairs: SendPair[] = [];
+          try { existingPairs = JSON.parse(existingLog.sendPairs || '[]'); } catch (e) { /* ignore */ }
+          const mergedPairs = [...existingPairs, ...accountPairs];
+
+          db.prepare(`UPDATE warmup_logs SET sent = ?, received = received + ?,
+            inboxCount = inboxCount + ?, spamCount = spamCount + ?,
+            openCount = openCount + ?, replyCount = replyCount + ?,
+            sendPairs = ? WHERE id = ?`).run(
+            latest?.currentDaily || existingLog.sent,
             result.received > 0 ? 1 : 0,
+            result.received > 0 ? 1 : 0, // inbox (after rescue)
+            0, // spam count already rescued
             result.opened > 0 ? 1 : 0,
             result.replied > 0 ? 1 : 0,
+            JSON.stringify(mergedPairs),
             existingLog.id
           );
         } else {
           await storage.addWarmupLog(account.id, today, {
-            sent: account.currentDaily || 0,
+            sent: latest?.currentDaily || 0,
             received: 0,
             inboxCount: 0,
             spamCount: 0,
             bounceCount: 0,
             openCount: 0,
             replyCount: 0,
+            sendPairs: accountPairs,
           });
         }
       } catch (e) {

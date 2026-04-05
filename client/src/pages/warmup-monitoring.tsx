@@ -9,7 +9,7 @@ import {
   Flame, Snowflake, TrendingUp, Mail, AlertTriangle, Check,
   Plus, Trash2, RefreshCw, Loader2, BarChart3, Shield,
   ArrowUp, ArrowDown, Minus, Target, Inbox, XCircle, ThumbsUp,
-  ChevronDown, ChevronUp, Zap, Activity, FileText, X
+  ChevronDown, ChevronUp, Zap, Activity, FileText, X, ArrowRight, Send
 } from "lucide-react";
 
 interface WarmupAccount {
@@ -32,6 +32,14 @@ interface WarmupAccount {
   createdAt: string;
 }
 
+interface SendPair {
+  from: string;
+  to: string;
+  subject: string;
+  status: 'sent' | 'failed';
+  timestamp: string;
+}
+
 interface WarmupLog {
   id: string;
   warmupAccountId: string;
@@ -43,6 +51,63 @@ interface WarmupLog {
   bounceCount: number;
   openCount: number;
   replyCount: number;
+  sendPairs?: string; // JSON string of SendPair[]
+}
+
+function LogRow({ log }: { log: WarmupLog }) {
+  const [showPairs, setShowPairs] = useState(false);
+  let pairs: SendPair[] = [];
+  try { pairs = JSON.parse(log.sendPairs || '[]'); } catch (e) { /* ignore */ }
+
+  return (
+    <React.Fragment>
+      <tr className="hover:bg-gray-50">
+        <td className="px-3 py-2 font-medium text-gray-700">{new Date(log.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</td>
+        <td className="px-3 py-2 text-right">{log.sent}</td>
+        <td className="px-3 py-2 text-right">{log.received}</td>
+        <td className="px-3 py-2 text-right text-emerald-600 font-medium">{log.inboxCount}</td>
+        <td className="px-3 py-2 text-right text-red-600 font-medium">{log.spamCount}</td>
+        <td className="px-3 py-2 text-right text-amber-600">{log.bounceCount}</td>
+        <td className="px-3 py-2 text-right text-blue-600">{log.openCount}</td>
+        <td className="px-3 py-2 text-right text-green-600">{log.replyCount}</td>
+        <td className="px-3 py-2 text-center">
+          {pairs.length > 0 ? (
+            <button onClick={() => setShowPairs(!showPairs)} className="text-indigo-500 hover:text-indigo-700">
+              <Send className="h-3.5 w-3.5 inline" />
+              <span className="ml-1">{pairs.length}</span>
+            </button>
+          ) : (
+            <span className="text-gray-300">—</span>
+          )}
+        </td>
+      </tr>
+      {showPairs && pairs.length > 0 && (
+        <tr>
+          <td colSpan={9} className="bg-indigo-50/50 px-4 py-2">
+            <div className="text-[11px] space-y-1">
+              <div className="font-medium text-indigo-700 mb-1 flex items-center gap-1">
+                <Send className="h-3 w-3" /> Send Details for {new Date(log.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+              </div>
+              {pairs.map((p, i) => (
+                <div key={i} className="flex items-center gap-1.5 text-gray-700">
+                  <span className={p.status === 'sent' ? 'text-emerald-600' : 'text-red-500'}>
+                    {p.status === 'sent' ? <Check className="inline h-3 w-3" /> : <XCircle className="inline h-3 w-3" />}
+                  </span>
+                  <span className="font-medium">{p.from}</span>
+                  <ArrowRight className="h-3 w-3 text-indigo-400 flex-shrink-0" />
+                  <span className="font-medium">{p.to}</span>
+                  <span className="text-gray-400 truncate">— {p.subject}</span>
+                  <span className="text-gray-300 text-[10px] ml-auto flex-shrink-0">
+                    {new Date(p.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </td>
+        </tr>
+      )}
+    </React.Fragment>
+  );
 }
 
 export default function WarmupMonitoring() {
@@ -395,10 +460,26 @@ export default function WarmupMonitoring() {
             <Zap className="h-4 w-4 text-blue-600" />
             <AlertDescription className="text-xs text-blue-800">
               <strong>Warmup cycle completed:</strong> {lastRunResult.sent} sent, {lastRunResult.received} received, {lastRunResult.opened} opened, {lastRunResult.replied} replied
+              {lastRunResult.sendPairs?.length > 0 && (
+                <div className="mt-2 space-y-1">
+                  <strong>Send details:</strong>
+                  {lastRunResult.sendPairs.map((p: any, i: number) => (
+                    <div key={i} className="flex items-center gap-1.5 ml-2">
+                      <span className={p.status === 'sent' ? 'text-emerald-700' : 'text-red-600'}>
+                        {p.status === 'sent' ? <Check className="inline h-3 w-3" /> : <XCircle className="inline h-3 w-3" />}
+                      </span>
+                      <span className="font-medium">{p.from}</span>
+                      <ArrowRight className="h-3 w-3 text-blue-400" />
+                      <span className="font-medium">{p.to}</span>
+                      <span className="text-blue-400">— {p.subject}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
               {lastRunResult.errors?.length > 0 && (
                 <span className="text-red-600 block mt-1">Errors: {lastRunResult.errors.join(' | ')}</span>
               )}
-              <button className="ml-2 underline" onClick={() => setLastRunResult(null)}>dismiss</button>
+              <button className="ml-2 underline mt-1" onClick={() => setLastRunResult(null)}>dismiss</button>
             </AlertDescription>
           </Alert>
         )}
@@ -537,20 +618,12 @@ export default function WarmupMonitoring() {
                                   <th className="px-3 py-2 text-right text-amber-600 font-medium">Bounce</th>
                                   <th className="px-3 py-2 text-right text-blue-600 font-medium">Opens</th>
                                   <th className="px-3 py-2 text-right text-green-600 font-medium">Replies</th>
+                                  <th className="px-3 py-2 text-center text-gray-500 font-medium">Details</th>
                                 </tr>
                               </thead>
                               <tbody className="divide-y">
                                 {accountLogs.map(log => (
-                                  <tr key={log.id} className="hover:bg-gray-50">
-                                    <td className="px-3 py-2 font-medium text-gray-700">{new Date(log.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</td>
-                                    <td className="px-3 py-2 text-right">{log.sent}</td>
-                                    <td className="px-3 py-2 text-right">{log.received}</td>
-                                    <td className="px-3 py-2 text-right text-emerald-600 font-medium">{log.inboxCount}</td>
-                                    <td className="px-3 py-2 text-right text-red-600 font-medium">{log.spamCount}</td>
-                                    <td className="px-3 py-2 text-right text-amber-600">{log.bounceCount}</td>
-                                    <td className="px-3 py-2 text-right text-blue-600">{log.openCount}</td>
-                                    <td className="px-3 py-2 text-right text-green-600">{log.replyCount}</td>
-                                  </tr>
+                                  <LogRow key={log.id} log={log} />
                                 ))}
                               </tbody>
                             </table>

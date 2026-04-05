@@ -904,6 +904,9 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_warmup_logs_acct ON warmup_logs(warmupAccountId, date);
 `);
 
+// v: Add sendPairs column to warmup_logs for per-pair tracking
+try { db.exec(`ALTER TABLE warmup_logs ADD COLUMN sendPairs TEXT DEFAULT '[]'`); } catch (e) { /* already exists */ }
+
 // Contact Activity Timeline
 db.exec(`
   CREATE TABLE IF NOT EXISTS contact_activity (
@@ -3002,9 +3005,10 @@ export class DatabaseStorage {
 
   async addWarmupLog(warmupAccountId: string, date: string, data: any) {
     const id = genId();
-    db.prepare('INSERT INTO warmup_logs (id, warmupAccountId, date, sent, received, inboxCount, spamCount, bounceCount, openCount, replyCount, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+    db.prepare('INSERT INTO warmup_logs (id, warmupAccountId, date, sent, received, inboxCount, spamCount, bounceCount, openCount, replyCount, sendPairs, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
       id, warmupAccountId, date, data.sent || 0, data.received || 0, data.inboxCount || 0,
-      data.spamCount || 0, data.bounceCount || 0, data.openCount || 0, data.replyCount || 0, now()
+      data.spamCount || 0, data.bounceCount || 0, data.openCount || 0, data.replyCount || 0,
+      JSON.stringify(data.sendPairs || []), now()
     );
     return id;
   }
