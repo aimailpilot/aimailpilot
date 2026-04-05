@@ -37,6 +37,7 @@ const TeamManagement = lazy(() => import("./team-management"));
 const SuperAdminDashboard = lazy(() => import("./superadmin-dashboard"));
 const WarmupMonitoring = lazy(() => import("./warmup-monitoring"));
 const TeamScorecard = lazy(() => import("./team-scorecard"));
+const MyDashboard = lazy(() => import("./my-dashboard"));
 
 // Loading fallback for lazy-loaded pages
 function PageLoader() {
@@ -47,7 +48,7 @@ function PageLoader() {
   );
 }
 
-type ViewType = 'campaigns' | 'templates' | 'contacts' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings' | 'team' | 'superadmin' | 'warmup' | 'scorecard';
+type ViewType = 'campaigns' | 'templates' | 'contacts' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings' | 'team' | 'superadmin' | 'warmup' | 'scorecard' | 'my-dashboard';
 
 // Live Tracking Feed component - fetches real tracking events
 function LiveTrackingFeed({ dashStats }: { dashStats: any }) {
@@ -202,7 +203,7 @@ export default function MailMeteorDashboard() {
   const [currentView, setCurrentViewRaw] = useState<ViewType>(() => {
     // Restore view from URL hash on initial load (e.g. #contacts, #campaign-detail/abc123)
     const hash = window.location.hash.replace('#', '');
-    const validViews = ['campaigns', 'templates', 'contacts', 'inbox', 'setup', 'analytics', 'verification', 'tracking', 'account', 'billing', 'followups', 'insights', 'tools', 'advanced-settings', 'team', 'superadmin', 'warmup', 'scorecard', 'campaign-detail'];
+    const validViews = ['campaigns', 'templates', 'contacts', 'inbox', 'setup', 'analytics', 'verification', 'tracking', 'account', 'billing', 'followups', 'insights', 'tools', 'advanced-settings', 'team', 'superadmin', 'warmup', 'scorecard', 'my-dashboard', 'campaign-detail'];
     if (hash.startsWith('campaign-detail/')) return 'campaign-detail' as ViewType;
     return validViews.includes(hash) ? hash as ViewType : 'campaigns';
   });
@@ -375,6 +376,7 @@ export default function MailMeteorDashboard() {
   ];
 
   const insightsSubItems = [
+    { key: 'my-dashboard' as ViewType, label: 'My Dashboard', icon: Lightbulb },
     { key: 'analytics' as ViewType, label: 'Analytics', icon: BarChart3 },
     { key: 'tracking' as ViewType, label: 'Live Feed', icon: Activity },
     ...(isAdminOrOwner ? [{ key: 'scorecard' as ViewType, label: 'Scorecard', icon: Trophy }] : []),
@@ -405,6 +407,7 @@ export default function MailMeteorDashboard() {
       'advanced-settings': 'Advanced Settings',
       team: 'Team Management',
       scorecard: 'Team Scorecard',
+      'my-dashboard': 'My Dashboard',
       superadmin: 'SuperAdmin Console',
       warmup: 'Warmup Monitoring',
     };
@@ -431,6 +434,7 @@ export default function MailMeteorDashboard() {
       'advanced-settings': 'Configure API integrations and advanced options',
       team: 'Manage your team members, roles, and invitations',
       scorecard: 'Sales performance, leaderboard, and team activity tracking',
+      'my-dashboard': 'Your personal sales performance, action items, and emails to reply',
       superadmin: 'Platform-wide management, monitoring, and user administration',
     };
     return descs[currentView] || '';
@@ -1023,6 +1027,10 @@ export default function MailMeteorDashboard() {
 
           {viewMode === 'dashboard' && currentView === 'scorecard' && (
             <TeamScorecard />
+          )}
+
+          {viewMode === 'dashboard' && currentView === 'my-dashboard' && (
+            <MyDashboard />
           )}
          </Suspense>
         </main>

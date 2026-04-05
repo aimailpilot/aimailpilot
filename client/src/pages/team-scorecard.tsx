@@ -40,6 +40,7 @@ interface ScorecardData {
   overdueActions: number;
   unactionedReplies: number;
   period: string;
+  orgCreatedAt?: string;
 }
 
 interface TeamScorecardProps {
@@ -76,7 +77,43 @@ export default function TeamScorecard({ onBack }: TeamScorecardProps) {
     return <span className="text-sm font-bold text-gray-400 w-5 text-center">{idx + 1}</span>;
   };
 
-  const periodLabels: Record<string, string> = { today: "Today", week: "This Week", month: "This Month", all: "All Time" };
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  // Generate month options from org creation date to now
+  const getMonthOptions = () => {
+    const options: { key: string; label: string }[] = [];
+    const createdAt = data?.orgCreatedAt ? new Date(data.orgCreatedAt) : new Date();
+    const now = new Date();
+    const startYear = createdAt.getFullYear();
+    const startMonth = createdAt.getMonth();
+    const endYear = now.getFullYear();
+    const endMonth = now.getMonth();
+
+    for (let y = startYear; y <= endYear; y++) {
+      const mStart = y === startYear ? startMonth : 0;
+      const mEnd = y === endYear ? endMonth : 11;
+      for (let m = mStart; m <= mEnd; m++) {
+        const key = `${y}-${String(m + 1).padStart(2, '0')}`;
+        const label = y === endYear && y === startYear ? monthNames[m] : `${monthNames[m]} ${y}`;
+        options.push({ key, label });
+      }
+    }
+    return options;
+  };
+
+  const monthOptions = getMonthOptions();
+
+  const getPeriodLabel = (p: string) => {
+    if (p === 'today') return 'Today';
+    if (p === 'week') return 'This Week';
+    if (p === 'all') return 'All Time';
+    const match = p.match(/^(\d{4})-(\d{2})$/);
+    if (match) {
+      const m = parseInt(match[2]) - 1;
+      return `${monthNames[m]} ${match[1]}`;
+    }
+    return p;
+  };
 
   if (loading && !data) {
     return (
@@ -107,14 +144,28 @@ export default function TeamScorecard({ onBack }: TeamScorecardProps) {
             <p className="text-sm text-gray-500 mt-0.5">Sales performance & leaderboard</p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          {["today", "week", "month", "all"].map(p => (
+        <div className="flex items-center gap-1 flex-wrap">
+          {["today", "week"].map(p => (
             <button key={p}
               onClick={() => setPeriod(p)}
               className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${period === p ? "bg-blue-600 text-white shadow-sm" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>
-              {periodLabels[p]}
+              {p === 'today' ? 'Today' : 'This Week'}
             </button>
           ))}
+          <span className="text-gray-300 mx-1">|</span>
+          {monthOptions.map(({ key, label }) => (
+            <button key={key}
+              onClick={() => setPeriod(key)}
+              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition ${period === key ? "bg-blue-600 text-white shadow-sm" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>
+              {label}
+            </button>
+          ))}
+          <span className="text-gray-300 mx-1">|</span>
+          <button
+            onClick={() => setPeriod('all')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${period === 'all' ? "bg-blue-600 text-white shadow-sm" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>
+            All Time
+          </button>
           <Button variant="outline" size="sm" onClick={fetchScorecard} className="ml-2">
             <RefreshCw className={`h-3.5 w-3.5 mr-1 ${loading ? "animate-spin" : ""}`} /> Refresh
           </Button>
@@ -165,7 +216,7 @@ export default function TeamScorecard({ onBack }: TeamScorecardProps) {
         <div className="px-5 py-4 border-b border-gray-100 flex items-center gap-2">
           <Trophy className="h-5 w-5 text-yellow-500" />
           <h2 className="text-lg font-bold text-gray-900">Leaderboard</h2>
-          <Badge variant="outline" className="ml-2 text-xs">{periodLabels[period]}</Badge>
+          <Badge variant="outline" className="ml-2 text-xs">{getPeriodLabel(period)}</Badge>
         </div>
 
         <div className="overflow-x-auto">

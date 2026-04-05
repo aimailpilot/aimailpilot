@@ -8753,19 +8753,24 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     try {
       const orgId = req.user.organizationId;
       const db = (storage as any).db;
-      const period = (req.query.period as string) || 'today'; // today, week, month, all
+      const period = (req.query.period as string) || 'today'; // today, week, YYYY-MM, all
 
-      // Calculate date range
+      // Calculate date range — supports month names like "2026-01", "2026-04"
       const now = new Date();
       let startDate: string;
+      let endDate: string = '9999-12-31'; // default: no upper bound
+      const monthMatch = period.match(/^(\d{4})-(\d{2})$/);
       if (period === 'today') {
-        startDate = now.toISOString().split('T')[0]; // YYYY-MM-DD
+        startDate = now.toISOString().split('T')[0];
       } else if (period === 'week') {
         const d = new Date(now); d.setDate(d.getDate() - 7);
         startDate = d.toISOString().split('T')[0];
-      } else if (period === 'month') {
-        const d = new Date(now); d.setMonth(d.getMonth() - 1);
-        startDate = d.toISOString().split('T')[0];
+      } else if (monthMatch) {
+        const year = parseInt(monthMatch[1]);
+        const month = parseInt(monthMatch[2]);
+        startDate = `${year}-${String(month).padStart(2, '0')}-01`;
+        const nextMonth = month === 12 ? new Date(year + 1, 0, 1) : new Date(year, month, 1);
+        endDate = nextMonth.toISOString().split('T')[0];
       } else {
         startDate = '2000-01-01';
       }
@@ -8785,8 +8790,8 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           emailsSent = (db.prepare(`
             SELECT COUNT(*) as cnt FROM messages m
             JOIN contacts c ON c.id = m.contactId
-            WHERE c.organizationId = ? AND c.assignedTo = ? AND m.status = 'sent' AND m.sentAt >= ?
-          `).get(orgId, userId, startDate) as any)?.cnt || 0;
+            WHERE c.organizationId = ? AND c.assignedTo = ? AND m.status = 'sent' AND m.sentAt >= ? AND m.sentAt < ?
+          `).get(orgId, userId, startDate, endDate) as any)?.cnt || 0;
         } catch { /* messages table schema mismatch — skip */ }
 
         // Activities by type
@@ -8795,9 +8800,9 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         try {
           const activities = db.prepare(`
             SELECT type, COUNT(*) as cnt FROM contact_activities
-            WHERE organizationId = ? AND userId = ? AND createdAt >= ?
+            WHERE organizationId = ? AND userId = ? AND createdAt >= ? AND createdAt < ?
             GROUP BY type
-          `).all(orgId, userId, startDate) as any[];
+          `).all(orgId, userId, startDate, endDate) as any[];
           for (const a of activities) activityMap[a.type] = a.cnt;
           callsMade = activityMap['call'] || 0;
           meetingsDone = activityMap['meeting'] || 0;
@@ -8831,12 +8836,12 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         try {
           dealsWon = (db.prepare(`
             SELECT COUNT(*) as cnt, SUM(COALESCE(dealValue, 0)) as totalValue
-            FROM contacts WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'won' AND dealClosedAt >= ?
-          `).get(orgId, userId, startDate) as any) || { cnt: 0, totalValue: 0 };
+            FROM contacts WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'won' AND dealClosedAt >= ? AND dealClosedAt < ?
+          `).get(orgId, userId, startDate, endDate) as any) || { cnt: 0, totalValue: 0 };
           dealsLost = (db.prepare(`
             SELECT COUNT(*) as cnt FROM contacts
-            WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'lost' AND dealClosedAt >= ?
-          `).get(orgId, userId, startDate) as any)?.cnt || 0;
+            WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'lost' AND dealClosedAt >= ? AND dealClosedAt < ?
+          `).get(orgId, userId, startDate, endDate) as any)?.cnt || 0;
         } catch {
           // dealClosedAt column may not exist — fall back to counting all won/lost
           dealsWon = (db.prepare(`
@@ -8911,14 +8916,275 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           FROM messages m
           LEFT JOIN contact_activities ca ON ca.contactId = m.contactId AND ca.createdAt > m.repliedAt
           WHERE m.campaignId IN (SELECT id FROM campaigns WHERE organizationId = ?)
-          AND m.repliedAt IS NOT NULL AND m.repliedAt >= ? AND ca.id IS NULL
-        `).get(orgId, startDate) as any)?.cnt || 0;
+          AND m.repliedAt IS NOT NULL AND m.repliedAt >= ? AND m.repliedAt < ? AND ca.id IS NULL
+        `).get(orgId, startDate, endDate) as any)?.cnt || 0;
       } catch { /* column may not exist */ }
 
-      res.json({ scorecard, teamTotals, overdueActions, unactionedReplies, period });
+      // Get org createdAt for month picker
+      let orgCreatedAt = '2026-01-01';
+      try {
+        const org = await storage.getOrganization(orgId);
+        if (org && (org as any).createdAt) orgCreatedAt = (org as any).createdAt;
+      } catch { }
+
+      res.json({ scorecard, teamTotals, overdueActions, unactionedReplies, period, orgCreatedAt });
     } catch (error: any) {
       console.error('[Scorecard] Error:', error.message);
       res.status(500).json({ message: 'Failed to fetch scorecard' });
+    }
+  });
+
+  // ── My Dashboard (individual member view) ──
+  app.get('/api/my/dashboard', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const userId = req.user.id;
+      const db = (storage as any).db;
+      const period = (req.query.period as string) || 'today';
+
+      const now = new Date();
+      const todayStr = now.toISOString().split('T')[0];
+      let startDate: string;
+      let endDate: string = '9999-12-31';
+      const monthMatch = period.match(/^(\d{4})-(\d{2})$/);
+      if (period === 'today') {
+        startDate = todayStr;
+      } else if (period === 'week') {
+        const d = new Date(now); d.setDate(d.getDate() - 7);
+        startDate = d.toISOString().split('T')[0];
+      } else if (monthMatch) {
+        const year = parseInt(monthMatch[1]);
+        const month = parseInt(monthMatch[2]);
+        startDate = `${year}-${String(month).padStart(2, '0')}-01`;
+        const nextMonth = month === 12 ? new Date(year + 1, 0, 1) : new Date(year, month, 1);
+        endDate = nextMonth.toISOString().split('T')[0];
+      } else {
+        startDate = '2000-01-01';
+      }
+
+      // ── My Stats ──
+      let emailsSent = 0;
+      try {
+        emailsSent = (db.prepare(`
+          SELECT COUNT(*) as cnt FROM messages m
+          JOIN contacts c ON c.id = m.contactId
+          WHERE c.organizationId = ? AND c.assignedTo = ? AND m.status = 'sent' AND m.sentAt >= ? AND m.sentAt < ?
+        `).get(orgId, userId, startDate, endDate) as any)?.cnt || 0;
+      } catch { }
+
+      let callsMade = 0, meetingsDone = 0, proposalsSent = 0;
+      const activityMap: Record<string, number> = {};
+      try {
+        const activities = db.prepare(`
+          SELECT type, COUNT(*) as cnt FROM contact_activities
+          WHERE organizationId = ? AND userId = ? AND createdAt >= ? AND createdAt < ?
+          GROUP BY type
+        `).all(orgId, userId, startDate, endDate) as any[];
+        for (const a of activities) activityMap[a.type] = a.cnt;
+        callsMade = activityMap['call'] || 0;
+        meetingsDone = activityMap['meeting'] || 0;
+        proposalsSent = activityMap['proposal'] || 0;
+      } catch { }
+
+      let dealsWon = { cnt: 0, totalValue: 0 };
+      let dealsLost = 0;
+      try {
+        dealsWon = (db.prepare(`
+          SELECT COUNT(*) as cnt, SUM(COALESCE(dealValue, 0)) as totalValue
+          FROM contacts WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'won' AND dealClosedAt >= ? AND dealClosedAt < ?
+        `).get(orgId, userId, startDate, endDate) as any) || { cnt: 0, totalValue: 0 };
+        dealsLost = (db.prepare(`
+          SELECT COUNT(*) as cnt FROM contacts
+          WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'lost' AND dealClosedAt >= ? AND dealClosedAt < ?
+        `).get(orgId, userId, startDate, endDate) as any)?.cnt || 0;
+      } catch {
+        dealsWon = (db.prepare(`
+          SELECT COUNT(*) as cnt, 0 as totalValue
+          FROM contacts WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'won'
+        `).get(orgId, userId) as any) || { cnt: 0, totalValue: 0 };
+        dealsLost = (db.prepare(`
+          SELECT COUNT(*) as cnt FROM contacts
+          WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'lost'
+        `).get(orgId, userId) as any)?.cnt || 0;
+      }
+
+      // Pipeline funnel
+      let pipeline: any[] = [];
+      try {
+        pipeline = db.prepare(`
+          SELECT pipelineStage, COUNT(*) as cnt, SUM(COALESCE(dealValue, 0)) as totalValue
+          FROM contacts WHERE organizationId = ? AND assignedTo = ?
+          AND pipelineStage IN ('new', 'contacted', 'interested', 'meeting_scheduled', 'meeting_done', 'proposal_sent', 'won', 'lost')
+          GROUP BY pipelineStage
+        `).all(orgId, userId) as any[];
+      } catch {
+        try {
+          pipeline = db.prepare(`
+            SELECT pipelineStage, COUNT(*) as cnt, 0 as totalValue
+            FROM contacts WHERE organizationId = ? AND assignedTo = ?
+            AND pipelineStage IN ('new', 'contacted', 'interested', 'meeting_scheduled', 'meeting_done', 'proposal_sent', 'won', 'lost')
+            GROUP BY pipelineStage
+          `).all(orgId, userId) as any[];
+        } catch { }
+      }
+      const pipeMap: Record<string, { count: number; value: number }> = {};
+      for (const p of pipeline) pipeMap[p.pipelineStage] = { count: p.cnt, value: p.totalValue || 0 };
+
+      const hotLeads = (pipeMap['interested']?.count || 0) + (pipeMap['meeting_scheduled']?.count || 0) + (pipeMap['meeting_done']?.count || 0);
+      const revenue = dealsWon.totalValue || 0;
+      const wonCount = dealsWon.cnt || 0;
+      const winRate = (wonCount + dealsLost) > 0 ? Math.round((wonCount / (wonCount + dealsLost)) * 100) : 0;
+
+      const stats = {
+        emailsSent, callsMade, meetingsDone, proposalsSent, hotLeads,
+        dealsWon: wonCount, dealsLost, revenue, winRate,
+        totalActivities: callsMade + meetingsDone + proposalsSent + (activityMap['email'] || 0) + (activityMap['whatsapp'] || 0) + (activityMap['note'] || 0),
+        pipeline: pipeMap,
+      };
+
+      // ── Nudges ──
+      const nudges: { type: string; priority: string; title: string; message: string; count: number; actionType?: string }[] = [];
+
+      // 1. Overdue follow-ups
+      try {
+        const overdue = (db.prepare(`
+          SELECT COUNT(*) as cnt FROM contacts
+          WHERE organizationId = ? AND assignedTo = ? AND nextActionDate < ? AND nextActionDate IS NOT NULL
+          AND pipelineStage NOT IN ('won', 'lost')
+        `).get(orgId, userId, todayStr) as any)?.cnt || 0;
+        if (overdue > 0) nudges.push({ type: 'overdue', priority: 'high', title: `${overdue} Overdue Follow-ups`, message: 'Contacts with past-due follow-up dates need attention', count: overdue, actionType: 'contacts' });
+      } catch { }
+
+      // 2. Emails needing reply (received in inbox, status = unread/read but not replied, assigned to this user or from user's email accounts)
+      let emailsNeedingReply = 0;
+      try {
+        emailsNeedingReply = (db.prepare(`
+          SELECT COUNT(*) as cnt FROM unified_inbox ui
+          INNER JOIN email_accounts ea ON ea.id = ui.emailAccountId
+          WHERE ui.organizationId = ? AND ea.userId = ?
+          AND ui.status IN ('unread', 'read') AND ui.repliedAt IS NULL
+          AND (ui.sentByUs IS NULL OR ui.sentByUs = 0)
+        `).get(orgId, userId) as any)?.cnt || 0;
+        if (emailsNeedingReply > 0) nudges.push({ type: 'needs_reply', priority: 'high', title: `${emailsNeedingReply} Emails Need Reply`, message: 'Received emails that haven\'t been replied to yet', count: emailsNeedingReply, actionType: 'emails' });
+      } catch { }
+
+      // 3. Unactioned replies (contacts replied to campaign but no activity logged after)
+      try {
+        const unactioned = (db.prepare(`
+          SELECT COUNT(DISTINCT m.contactId) as cnt
+          FROM messages m
+          JOIN contacts c ON c.id = m.contactId
+          LEFT JOIN contact_activities ca ON ca.contactId = m.contactId AND ca.createdAt > m.repliedAt
+          WHERE c.organizationId = ? AND c.assignedTo = ?
+          AND m.repliedAt IS NOT NULL AND m.repliedAt >= ? AND m.repliedAt < ? AND ca.id IS NULL
+        `).get(orgId, userId, startDate, endDate) as any)?.cnt || 0;
+        if (unactioned > 0) nudges.push({ type: 'unactioned_reply', priority: 'high', title: `${unactioned} Unactioned Replies`, message: 'Contacts replied to campaigns but no follow-up activity logged', count: unactioned, actionType: 'contacts' });
+      } catch { }
+
+      // 4. Stale hot leads (interested/meeting stage, no activity in 3+ days)
+      try {
+        const threeDaysAgo = new Date(now); threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+        const stale = (db.prepare(`
+          SELECT COUNT(*) as cnt FROM contacts c
+          WHERE c.organizationId = ? AND c.assignedTo = ?
+          AND c.pipelineStage IN ('interested', 'meeting_scheduled', 'meeting_done')
+          AND NOT EXISTS (
+            SELECT 1 FROM contact_activities ca WHERE ca.contactId = c.id AND ca.createdAt >= ?
+          )
+        `).get(orgId, userId, threeDaysAgo.toISOString().split('T')[0]) as any)?.cnt || 0;
+        if (stale > 0) nudges.push({ type: 'stale_leads', priority: 'medium', title: `${stale} Stale Hot Leads`, message: 'Hot leads with no activity in 3+ days — reach out before they go cold', count: stale, actionType: 'contacts' });
+      } catch { }
+
+      // 5. Proposals pending (proposal_sent for 3+ days with no update)
+      try {
+        const threeDaysAgo = new Date(now); threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+        const pendingProposals = (db.prepare(`
+          SELECT COUNT(*) as cnt FROM contacts c
+          WHERE c.organizationId = ? AND c.assignedTo = ? AND c.pipelineStage = 'proposal_sent'
+          AND NOT EXISTS (
+            SELECT 1 FROM contact_activities ca WHERE ca.contactId = c.id AND ca.createdAt >= ?
+          )
+        `).get(orgId, userId, threeDaysAgo.toISOString().split('T')[0]) as any)?.cnt || 0;
+        if (pendingProposals > 0) nudges.push({ type: 'pending_proposals', priority: 'medium', title: `${pendingProposals} Proposals Awaiting Response`, message: 'Proposals sent 3+ days ago with no follow-up — time to check in', count: pendingProposals, actionType: 'contacts' });
+      } catch { }
+
+      // 6. No calls today (only for today period)
+      if (period === 'today' && callsMade === 0) {
+        nudges.push({ type: 'no_calls', priority: 'low', title: 'No Calls Made Today', message: 'Start your day with outbound calls to warm up your pipeline', count: 0 });
+      }
+
+      // 7. Win celebration
+      if (wonCount > 0) {
+        nudges.push({ type: 'celebration', priority: 'low', title: `${wonCount} Deal${wonCount > 1 ? 's' : ''} Won!`, message: `You closed ${wonCount > 1 ? 'deals' : 'a deal'} worth ₹${revenue.toLocaleString('en-IN')}`, count: wonCount });
+      }
+
+      // Sort nudges by priority
+      const priorityOrder: Record<string, number> = { high: 0, medium: 1, low: 2 };
+      nudges.sort((a, b) => (priorityOrder[a.priority] ?? 9) - (priorityOrder[b.priority] ?? 9));
+
+      // ── Recent Activity Feed (last 10) ──
+      let recentActivities: any[] = [];
+      try {
+        recentActivities = db.prepare(`
+          SELECT ca.*, c.firstName, c.lastName, c.email as contactEmail, c.company
+          FROM contact_activities ca
+          JOIN contacts c ON c.id = ca.contactId
+          WHERE ca.organizationId = ? AND ca.userId = ?
+          ORDER BY ca.createdAt DESC LIMIT 10
+        `).all(orgId, userId) as any[];
+      } catch { }
+
+      // Get org createdAt for month picker
+      let orgCreatedAt = '2026-01-01';
+      try {
+        const org = await storage.getOrganization(orgId);
+        if (org && (org as any).createdAt) orgCreatedAt = (org as any).createdAt;
+      } catch { }
+
+      res.json({ stats, nudges, recentActivities, period, orgCreatedAt });
+    } catch (error: any) {
+      console.error('[MyDashboard] Error:', error.message);
+      res.status(500).json({ message: 'Failed to fetch dashboard' });
+    }
+  });
+
+  // ── Emails needing reply (detail list for nudge click) ──
+  app.get('/api/my/emails-needing-reply', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const userId = req.user.id;
+      const db = (storage as any).db;
+      const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
+      const offset = parseInt(req.query.offset as string) || 0;
+
+      const emails = db.prepare(`
+        SELECT ui.id, ui.fromEmail, ui.fromName, ui.toEmail, ui.subject, ui.snippet, ui.body, ui.bodyHtml,
+               ui.receivedAt, ui.status, ui.campaignId, ui.contactId, ui.replyType,
+               c.firstName as contactFirstName, c.lastName as contactLastName, c.company as contactCompany,
+               camp.name as campaignName
+        FROM unified_inbox ui
+        INNER JOIN email_accounts ea ON ea.id = ui.emailAccountId
+        LEFT JOIN contacts c ON c.id = ui.contactId
+        LEFT JOIN campaigns camp ON camp.id = ui.campaignId
+        WHERE ui.organizationId = ? AND ea.userId = ?
+        AND ui.status IN ('unread', 'read') AND ui.repliedAt IS NULL
+        AND (ui.sentByUs IS NULL OR ui.sentByUs = 0)
+        ORDER BY ui.receivedAt DESC
+        LIMIT ? OFFSET ?
+      `).all(orgId, userId, limit, offset) as any[];
+
+      const total = (db.prepare(`
+        SELECT COUNT(*) as cnt FROM unified_inbox ui
+        INNER JOIN email_accounts ea ON ea.id = ui.emailAccountId
+        WHERE ui.organizationId = ? AND ea.userId = ?
+        AND ui.status IN ('unread', 'read') AND ui.repliedAt IS NULL
+        AND (ui.sentByUs IS NULL OR ui.sentByUs = 0)
+      `).get(orgId, userId) as any)?.cnt || 0;
+
+      res.json({ emails, total });
+    } catch (error: any) {
+      console.error('[EmailsNeedingReply] Error:', error.message);
+      res.status(500).json({ message: 'Failed to fetch emails' });
     }
   });
 
