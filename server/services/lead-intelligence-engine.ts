@@ -162,7 +162,7 @@ async function scanGmailHistory(
 
     let pageToken: string | null = null;
     let totalFetched = 0;
-    const maxEmails = 500; // cap to avoid excessive API calls
+    const maxEmails = 2000; // cap per account
 
     do {
       // Fetch message list (sent + received)
@@ -294,7 +294,7 @@ async function scanOutlookHistory(
 
     let nextLink: string | null = null;
     let totalFetched = 0;
-    const maxEmails = 500;
+    const maxEmails = 2000;
 
     // Scan both inbox and sentitems
     const folders = ['inbox', 'sentitems'];
@@ -507,15 +507,18 @@ async function buildContactSummaries(orgId: string): Promise<ContactConversation
       WHERE organizationId = ?
         AND CASE WHEN direction = 'sent' THEN toEmail ELSE fromEmail END != ''
       GROUP BY contactEmail
-      HAVING totalEmails >= 2
+      HAVING totalEmails >= 1
       ORDER BY lastEmailDate DESC
-      LIMIT 500
+      LIMIT 1000
     `).all(orgId) as any[];
 
+    // Get org account emails once (to skip internal emails)
+    const orgAccounts = await storage.getEmailAccounts(orgId);
+    const orgEmails = new Set((orgAccounts as any[]).map((a: any) => a.email?.toLowerCase()));
+    const orgDomains = new Set((orgAccounts as any[]).map((a: any) => (a.email || '').split('@')[1]?.toLowerCase()).filter(Boolean));
+
     for (const row of rows) {
-      // Skip internal org emails (same domain as linked accounts)
-      const orgAccounts = await storage.getEmailAccounts(orgId);
-      const orgEmails = new Set((orgAccounts as any[]).map((a: any) => a.email?.toLowerCase()));
+      // Skip internal org emails (exact match with linked accounts)
       if (orgEmails.has(row.contactEmail?.toLowerCase())) continue;
 
       const subjects = (row.subjects || '').split('|||').filter(Boolean).slice(0, 5);
