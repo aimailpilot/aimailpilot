@@ -156,7 +156,11 @@ export default function LeadOpportunities() {
     try {
       const resp = await fetch('/api/lead-intelligence/analyze', {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
+        body: JSON.stringify({
+          emailAccountIds: selectedAccountIds.length > 0 ? selectedAccountIds : undefined,
+        }),
       });
       if (resp.ok) {
         const data = await resp.json();

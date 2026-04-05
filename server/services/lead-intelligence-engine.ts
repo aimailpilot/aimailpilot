@@ -487,7 +487,7 @@ interface ContactConversationSummary {
   snippets: string[];
 }
 
-async function buildContactSummaries(orgId: string): Promise<ContactConversationSummary[]> {
+async function buildContactSummaries(orgId: string, emailAccountIds?: string[]): Promise<ContactConversationSummary[]> {
   const db = (storage as any).db;
   if (!db) {
     console.error('[LeadIntel] buildContactSummaries: db is null/undefined!');
@@ -502,32 +502,53 @@ async function buildContactSummaries(orgId: string): Promise<ContactConversation
 
   // 1. From email_history (historical scan) — use simple query to avoid GROUP_CONCAT memory issues
   try {
-    const countCheck = db.prepare(`SELECT COUNT(*) as cnt FROM email_history WHERE organizationId = ?`).get(orgId) as any;
-    console.log(`[LeadIntel] email_history has ${countCheck?.cnt || 0} rows for org ${orgId}`);
+    // Build account filter clause
+    const hasAccountFilter = emailAccountIds && emailAccountIds.length > 0;
+    const accountFilterSQL = hasAccountFilter ? ` AND emailAccountId IN (${emailAccountIds.map(() => '?').join(',')})` : '';
+    const accountFilterParams = hasAccountFilter ? emailAccountIds : [];
+
+    const countCheck = db.prepare(`SELECT COUNT(*) as cnt FROM email_history WHERE organizationId = ?${accountFilterSQL}`).get(orgId, ...accountFilterParams) as any;
+    console.log(`[LeadIntel] email_history has ${countCheck?.cnt || 0} rows for org ${orgId}${hasAccountFilter ? ` (filtered to ${emailAccountIds.length} accounts)` : ''}`);
 
     if ((countCheck?.cnt || 0) === 0) {
       console.log(`[LeadIntel] No email_history rows — skipping history-based summaries`);
     } else {
-      // Step 1: Get contact-level aggregates (no GROUP_CONCAT — avoids memory blowup)
+      // Step 1: Get contacts who have REPLIED or INITIATED contact (at least 1 received email)
+      // Sent-only contacts are just outreach recipients — not leads
       const contactRows = db.prepare(`
         SELECT
-          CASE WHEN direction = 'sent' THEN LOWER(toEmail) ELSE LOWER(fromEmail) END as contactEmail,
-          MAX(CASE WHEN direction != 'sent' THEN fromName ELSE '' END) as contactName,
-          COUNT(*) as totalEmails,
-          SUM(CASE WHEN direction = 'sent' THEN 1 ELSE 0 END) as totalSent,
-          SUM(CASE WHEN direction = 'received' THEN 1 ELSE 0 END) as totalReceived,
+          LOWER(fromEmail) as contactEmail,
+          MAX(fromName) as contactName,
+          COUNT(*) as totalReceived,
           MAX(receivedAt) as lastEmailDate
         FROM email_history
-        WHERE organizationId = ?
+        WHERE organizationId = ? AND direction = 'received'
+          AND fromEmail IS NOT NULL AND fromEmail != ''
+          ${accountFilterSQL}
         GROUP BY contactEmail
-        HAVING contactEmail != '' AND contactEmail IS NOT NULL
         ORDER BY lastEmailDate DESC
         LIMIT 1000
-      `).all(orgId) as any[];
+      `).all(orgId, ...accountFilterParams) as any[];
 
-      console.log(`[LeadIntel] Contact aggregation returned ${contactRows.length} rows`);
+      console.log(`[LeadIntel] Contacts with incoming emails: ${contactRows.length}`);
 
-      // Step 2: For each external contact, fetch a few sample subjects/snippets separately
+      // Also get sent counts per contact (for context: how many times we reached out)
+      const sentCounts: Record<string, number> = {};
+      try {
+        const sentRows = db.prepare(`
+          SELECT LOWER(toEmail) as contactEmail, COUNT(*) as cnt
+          FROM email_history
+          WHERE organizationId = ? AND direction = 'sent'
+            AND toEmail IS NOT NULL AND toEmail != ''
+            ${accountFilterSQL}
+          GROUP BY contactEmail
+        `).all(orgId, ...accountFilterParams) as any[];
+        for (const r of sentRows) {
+          sentCounts[(r.contactEmail || '').toLowerCase()] = r.cnt;
+        }
+      } catch (e) { /* non-critical */ }
+
+      // Step 2: Filter out internal org emails
       let skippedInternal = 0;
       for (const row of contactRows) {
         const email = (row.contactEmail || '').toLowerCase().trim();
@@ -546,12 +567,13 @@ async function buildContactSummaries(orgId: string): Promise<ContactConversation
           snippets = samples.map((s: any) => (s.snippet || '').substring(0, 200)).filter(Boolean);
         } catch (e) { /* non-critical */ }
 
+        const totalSent = sentCounts[email] || 0;
         summaries.push({
           contactEmail: email,
           contactName: row.contactName || '',
-          totalEmails: row.totalEmails,
-          totalSent: row.totalSent || 0,
-          totalReceived: row.totalReceived || 0,
+          totalEmails: row.totalReceived + totalSent,
+          totalSent,
+          totalReceived: row.totalReceived,
           lastEmailDate: row.lastEmailDate,
           subjects,
           snippets,
@@ -841,7 +863,7 @@ export interface AnalysisResult {
   debug?: any;
 }
 
-export async function analyzeOrgLeads(orgId: string): Promise<AnalysisResult> {
+export async function analyzeOrgLeads(orgId: string, emailAccountIds?: string[]): Promise<AnalysisResult> {
   const result: AnalysisResult = { orgId, contactsAnalyzed: 0, opportunitiesCreated: 0, bucketCounts: {}, errors: [], debug: {} };
 
   try {
@@ -858,7 +880,7 @@ export async function analyzeOrgLeads(orgId: string): Promise<AnalysisResult> {
     }
 
     // 1. Build contact conversation summaries
-    const summaries = await buildContactSummaries(orgId);
+    const summaries = await buildContactSummaries(orgId, emailAccountIds);
     result.contactsAnalyzed = summaries.length;
     result.debug.summariesBuilt = summaries.length;
     result.debug.sampleContacts = summaries.slice(0, 3).map(s => ({ email: s.contactEmail, emails: s.totalEmails }));
@@ -928,7 +950,7 @@ export async function runFullLeadIntelligence(orgId: string, monthsBack: number 
   const scan = await scanOrgEmailHistory(orgId, monthsBack, emailAccountIds);
 
   // Step 2: Analyze and classify
-  const analysis = await analyzeOrgLeads(orgId);
+  const analysis = await analyzeOrgLeads(orgId, emailAccountIds);
 
   return { scan, analysis };
 }

@@ -10374,8 +10374,9 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   app.post('/api/lead-intelligence/analyze', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.user.organizationId;
-      console.log(`[LeadIntel] Manual analysis triggered for org ${orgId}`);
-      const result = await analyzeOrgLeads(orgId);
+      const emailAccountIds = Array.isArray(req.body.emailAccountIds) ? req.body.emailAccountIds.map(String) : undefined;
+      console.log(`[LeadIntel] Manual analysis triggered for org ${orgId}${emailAccountIds ? ` accounts: ${emailAccountIds.join(',')}` : ' (all accounts)'}`);
+      const result = await analyzeOrgLeads(orgId, emailAccountIds);
       res.json({ success: true, result });
     } catch (error) {
       console.error('[LeadIntel] Analysis error:', error);
