@@ -10305,6 +10305,44 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     }
   });
 
+  // Debug: check email_history data quality
+  app.get('/api/lead-intelligence/debug', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const db = (storage as any).db;
+
+      const totalRows = db.prepare(`SELECT COUNT(*) as cnt FROM email_history WHERE organizationId = ?`).get(orgId) as any;
+      const sample = db.prepare(`SELECT id, direction, fromEmail, toEmail, subject, accountEmail FROM email_history WHERE organizationId = ? LIMIT 5`).all(orgId) as any[];
+      const directionCounts = db.prepare(`SELECT direction, COUNT(*) as cnt FROM email_history WHERE organizationId = ? GROUP BY direction`).all(orgId) as any[];
+      const contactQuery = db.prepare(`
+        SELECT
+          CASE WHEN direction = 'sent' THEN LOWER(toEmail) ELSE LOWER(fromEmail) END as contactEmail,
+          COUNT(*) as totalEmails
+        FROM email_history
+        WHERE organizationId = ?
+        GROUP BY contactEmail
+        HAVING contactEmail != '' AND contactEmail IS NOT NULL
+        ORDER BY totalEmails DESC
+        LIMIT 10
+      `).all(orgId) as any[];
+
+      // Check org emails
+      const orgAccounts = await storage.getEmailAccounts(orgId);
+      const orgEmailList = (orgAccounts as any[]).map((a: any) => (a.email || '').toLowerCase()).filter(Boolean);
+
+      res.json({
+        totalRows: totalRows?.cnt || 0,
+        directionCounts,
+        sampleRows: sample,
+        topContacts: contactQuery,
+        orgEmails: orgEmailList,
+        orgId,
+      });
+    } catch (error) {
+      res.status(500).json({ message: 'Debug failed', error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   // Get email history sync status
   app.get('/api/lead-intelligence/sync-status', requireAuth, async (req: any, res) => {
     try {
