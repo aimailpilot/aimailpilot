@@ -355,6 +355,7 @@ export default function LeadOpportunities() {
               )}
               {lastResult.type === 'analysis' && (
                 <span><strong>Analysis complete:</strong> {lastResult.contactsAnalyzed} contacts analyzed, {lastResult.opportunitiesCreated} opportunities found
+                  {lastResult.errors?.length > 0 && <span className="text-red-600"> | {lastResult.errors.join(', ')}</span>}
                   {lastResult.bucketCounts && Object.entries(lastResult.bucketCounts).map(([k, v]) => (
                     <Badge key={k} variant="outline" className="ml-1 text-[10px]">{BUCKET_CONFIG[k]?.label || k}: {v as number}</Badge>
                   ))}

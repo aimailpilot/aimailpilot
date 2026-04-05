@@ -489,65 +489,80 @@ interface ContactConversationSummary {
 
 async function buildContactSummaries(orgId: string): Promise<ContactConversationSummary[]> {
   const db = (storage as any).db;
+  if (!db) {
+    console.error('[LeadIntel] buildContactSummaries: db is null/undefined!');
+    return [];
+  }
   const summaries: ContactConversationSummary[] = [];
 
-  // 1. From email_history (historical scan)
+  // Get org account emails once (to skip internal emails)
+  const orgAccounts = await storage.getEmailAccounts(orgId);
+  const orgEmails = new Set((orgAccounts as any[]).map((a: any) => (a.email || '').toLowerCase()).filter(Boolean));
+  console.log(`[LeadIntel] Org emails to exclude: ${Array.from(orgEmails).join(', ')}`);
+
+  // 1. From email_history (historical scan) — use simple query to avoid GROUP_CONCAT memory issues
   try {
-    // Debug: check email_history count for this org
     const countCheck = db.prepare(`SELECT COUNT(*) as cnt FROM email_history WHERE organizationId = ?`).get(orgId) as any;
-    console.log(`[LeadIntel] buildContactSummaries: email_history has ${countCheck?.cnt || 0} rows for org ${orgId}`);
+    console.log(`[LeadIntel] email_history has ${countCheck?.cnt || 0} rows for org ${orgId}`);
 
-    // Also check a sample row to verify data shape
-    const sampleRow = db.prepare(`SELECT direction, fromEmail, toEmail FROM email_history WHERE organizationId = ? LIMIT 1`).get(orgId) as any;
-    console.log(`[LeadIntel] Sample row:`, JSON.stringify(sampleRow));
+    if ((countCheck?.cnt || 0) === 0) {
+      console.log(`[LeadIntel] No email_history rows — skipping history-based summaries`);
+    } else {
+      // Step 1: Get contact-level aggregates (no GROUP_CONCAT — avoids memory blowup)
+      const contactRows = db.prepare(`
+        SELECT
+          CASE WHEN direction = 'sent' THEN LOWER(toEmail) ELSE LOWER(fromEmail) END as contactEmail,
+          MAX(CASE WHEN direction != 'sent' THEN fromName ELSE '' END) as contactName,
+          COUNT(*) as totalEmails,
+          SUM(CASE WHEN direction = 'sent' THEN 1 ELSE 0 END) as totalSent,
+          SUM(CASE WHEN direction = 'received' THEN 1 ELSE 0 END) as totalReceived,
+          MAX(receivedAt) as lastEmailDate
+        FROM email_history
+        WHERE organizationId = ?
+        GROUP BY contactEmail
+        HAVING contactEmail != '' AND contactEmail IS NOT NULL
+        ORDER BY lastEmailDate DESC
+        LIMIT 1000
+      `).all(orgId) as any[];
 
-    const rows = db.prepare(`
-      SELECT
-        CASE WHEN direction = 'sent' THEN toEmail ELSE fromEmail END as contactEmail,
-        CASE WHEN direction = 'sent' THEN '' ELSE fromName END as contactName,
-        COUNT(*) as totalEmails,
-        SUM(CASE WHEN direction = 'sent' THEN 1 ELSE 0 END) as totalSent,
-        SUM(CASE WHEN direction = 'received' THEN 1 ELSE 0 END) as totalReceived,
-        MAX(receivedAt) as lastEmailDate,
-        GROUP_CONCAT(DISTINCT subject, '|||') as subjects,
-        GROUP_CONCAT(snippet, '|||') as snippets
-      FROM email_history
-      WHERE organizationId = ?
-        AND CASE WHEN direction = 'sent' THEN toEmail ELSE fromEmail END != ''
-      GROUP BY contactEmail
-      HAVING totalEmails >= 1
-      ORDER BY lastEmailDate DESC
-      LIMIT 1000
-    `).all(orgId) as any[];
+      console.log(`[LeadIntel] Contact aggregation returned ${contactRows.length} rows`);
 
-    console.log(`[LeadIntel] Query returned ${rows.length} contact rows`);
+      // Step 2: For each external contact, fetch a few sample subjects/snippets separately
+      let skippedInternal = 0;
+      for (const row of contactRows) {
+        const email = (row.contactEmail || '').toLowerCase().trim();
+        if (!email || orgEmails.has(email)) { skippedInternal++; continue; }
 
-    // Get org account emails once (to skip internal emails)
-    const orgAccounts = await storage.getEmailAccounts(orgId);
-    const orgEmails = new Set((orgAccounts as any[]).map((a: any) => a.email?.toLowerCase()));
-    const orgDomains = new Set((orgAccounts as any[]).map((a: any) => (a.email || '').split('@')[1]?.toLowerCase()).filter(Boolean));
+        // Fetch up to 5 recent subjects + snippets for this contact
+        let subjects: string[] = [];
+        let snippets: string[] = [];
+        try {
+          const samples = db.prepare(`
+            SELECT subject, snippet FROM email_history
+            WHERE organizationId = ? AND (LOWER(fromEmail) = ? OR LOWER(toEmail) = ?)
+            ORDER BY receivedAt DESC LIMIT 5
+          `).all(orgId, email, email) as any[];
+          subjects = samples.map((s: any) => s.subject).filter(Boolean);
+          snippets = samples.map((s: any) => (s.snippet || '').substring(0, 200)).filter(Boolean);
+        } catch (e) { /* non-critical */ }
 
-    for (const row of rows) {
-      // Skip internal org emails (exact match with linked accounts)
-      if (orgEmails.has(row.contactEmail?.toLowerCase())) continue;
-
-      const subjects = (row.subjects || '').split('|||').filter(Boolean).slice(0, 5);
-      const snippets = (row.snippets || '').split('|||').filter(Boolean).slice(0, 3);
-
-      summaries.push({
-        contactEmail: row.contactEmail,
-        contactName: row.contactName || '',
-        totalEmails: row.totalEmails,
-        totalSent: row.totalSent,
-        totalReceived: row.totalReceived,
-        lastEmailDate: row.lastEmailDate,
-        subjects,
-        snippets: snippets.map((s: string) => s.substring(0, 200)),
-      });
+        summaries.push({
+          contactEmail: email,
+          contactName: row.contactName || '',
+          totalEmails: row.totalEmails,
+          totalSent: row.totalSent || 0,
+          totalReceived: row.totalReceived || 0,
+          lastEmailDate: row.lastEmailDate,
+          subjects,
+          snippets,
+        });
+      }
+      console.log(`[LeadIntel] After filtering: ${summaries.length} external contacts, ${skippedInternal} internal skipped`);
     }
-    console.log(`[LeadIntel] After filtering org emails: ${summaries.length} external contacts (filtered ${rows.length - summaries.length} internal)`);
   } catch (e) {
-    console.error('[LeadIntel] Error building history summaries:', e instanceof Error ? e.message : e);
+    const errMsg = e instanceof Error ? e.message : String(e);
+    console.error('[LeadIntel] ERROR building history summaries:', errMsg);
+    console.error('[LeadIntel] Stack:', e instanceof Error ? e.stack : '');
   }
 
   // 2. From unified_inbox + campaign data (existing campaign contacts)
