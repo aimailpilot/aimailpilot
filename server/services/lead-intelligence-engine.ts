@@ -493,6 +493,14 @@ async function buildContactSummaries(orgId: string): Promise<ContactConversation
 
   // 1. From email_history (historical scan)
   try {
+    // Debug: check email_history count for this org
+    const countCheck = db.prepare(`SELECT COUNT(*) as cnt FROM email_history WHERE organizationId = ?`).get(orgId) as any;
+    console.log(`[LeadIntel] buildContactSummaries: email_history has ${countCheck?.cnt || 0} rows for org ${orgId}`);
+
+    // Also check a sample row to verify data shape
+    const sampleRow = db.prepare(`SELECT direction, fromEmail, toEmail FROM email_history WHERE organizationId = ? LIMIT 1`).get(orgId) as any;
+    console.log(`[LeadIntel] Sample row:`, JSON.stringify(sampleRow));
+
     const rows = db.prepare(`
       SELECT
         CASE WHEN direction = 'sent' THEN toEmail ELSE fromEmail END as contactEmail,
@@ -511,6 +519,8 @@ async function buildContactSummaries(orgId: string): Promise<ContactConversation
       ORDER BY lastEmailDate DESC
       LIMIT 1000
     `).all(orgId) as any[];
+
+    console.log(`[LeadIntel] Query returned ${rows.length} contact rows`);
 
     // Get org account emails once (to skip internal emails)
     const orgAccounts = await storage.getEmailAccounts(orgId);
@@ -535,6 +545,7 @@ async function buildContactSummaries(orgId: string): Promise<ContactConversation
         snippets: snippets.map((s: string) => s.substring(0, 200)),
       });
     }
+    console.log(`[LeadIntel] After filtering org emails: ${summaries.length} external contacts (filtered ${rows.length - summaries.length} internal)`);
   } catch (e) {
     console.error('[LeadIntel] Error building history summaries:', e instanceof Error ? e.message : e);
   }
