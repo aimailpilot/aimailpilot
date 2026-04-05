@@ -838,21 +838,34 @@ export interface AnalysisResult {
   opportunitiesCreated: number;
   bucketCounts: Record<string, number>;
   errors: string[];
+  debug?: any;
 }
 
 export async function analyzeOrgLeads(orgId: string): Promise<AnalysisResult> {
-  const result: AnalysisResult = { orgId, contactsAnalyzed: 0, opportunitiesCreated: 0, bucketCounts: {}, errors: [] };
+  const result: AnalysisResult = { orgId, contactsAnalyzed: 0, opportunitiesCreated: 0, bucketCounts: {}, errors: [], debug: {} };
 
   try {
     console.log(`[LeadIntel] Starting lead analysis for org ${orgId}...`);
 
+    // Quick DB check before building summaries
+    try {
+      const db = (storage as any).db;
+      const cnt = db.prepare(`SELECT COUNT(*) as cnt FROM email_history WHERE organizationId = ?`).get(orgId) as any;
+      result.debug.emailHistoryCount = cnt?.cnt || 0;
+      result.debug.dbOk = true;
+    } catch (dbErr) {
+      result.debug.dbError = dbErr instanceof Error ? dbErr.message : String(dbErr);
+    }
+
     // 1. Build contact conversation summaries
     const summaries = await buildContactSummaries(orgId);
     result.contactsAnalyzed = summaries.length;
+    result.debug.summariesBuilt = summaries.length;
+    result.debug.sampleContacts = summaries.slice(0, 3).map(s => ({ email: s.contactEmail, emails: s.totalEmails }));
     console.log(`[LeadIntel] Built ${summaries.length} contact summaries`);
 
     if (summaries.length === 0) {
-      result.errors.push('No contacts with email history found. Run email history scan first.');
+      result.errors.push(`No contacts found. DB has ${result.debug.emailHistoryCount} email_history rows. Check buildContactSummaries.`);
       return result;
     }
 
