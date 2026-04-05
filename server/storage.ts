@@ -3210,6 +3210,9 @@ export class DatabaseStorage {
     return { imported, errors };
   }
 
+  /** Get the raw better-sqlite3 database instance for direct queries */
+  get db() { return db; }
+
   /** Get the database file path */
   getDbPath(): string {
     return DB_PATH;
