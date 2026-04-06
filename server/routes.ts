@@ -4422,6 +4422,7 @@ Which account should I use and why? If I need to split across accounts, provide 
       const company = req.query.company as string;
       const location = req.query.location as string;
       const designation = req.query.designation as string;
+      const leadFilter = req.query.leadFilter as string; // hot_leads, warm_leads, past_customer, engaged, cold, never_contacted
       const sortByParam = req.query.sortBy as string || 'createdAt';
       const sortOrder = (req.query.sortOrder as string || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
       const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
@@ -4456,7 +4457,7 @@ Which account should I use and why? If I need to split across accounts, provide 
 
       // === ENHANCEMENT: If user requested sorting/search/advanced filters, try SQL path ===
       // On failure, keep the storage-fetched contacts (unsorted but correct data)
-      const needsAdvanced = search || pipelineStage || company || location || designation || (sortByParam && sortByParam !== 'createdAt');
+      const needsAdvanced = search || pipelineStage || company || location || designation || leadFilter || (sortByParam && sortByParam !== 'createdAt');
       if (needsAdvanced) {
         try {
           const db = (storage as any).db;
@@ -4487,6 +4488,34 @@ Which account should I use and why? If I need to split across accounts, provide 
             params.push(loc, loc, loc);
           }
           if (designation) { conditions.push('LOWER(c.jobTitle) LIKE ?'); params.push(`%${designation.toLowerCase()}%`); }
+
+          // Lead intelligence smart filters (requires subquery to lead_opportunities)
+          if (leadFilter && leadFilter !== 'all') {
+            if (leadFilter === 'hot_leads') {
+              conditions.push(`LOWER(c.email) IN (SELECT LOWER(contactEmail) FROM lead_opportunities WHERE organizationId = ? AND bucket = 'hot_lead')`);
+              params.push(orgId);
+            } else if (leadFilter === 'warm_leads') {
+              conditions.push(`LOWER(c.email) IN (SELECT LOWER(contactEmail) FROM lead_opportunities WHERE organizationId = ? AND bucket = 'warm_lead')`);
+              params.push(orgId);
+            } else if (leadFilter === 'past_customer') {
+              conditions.push(`LOWER(c.email) IN (SELECT LOWER(contactEmail) FROM lead_opportunities WHERE organizationId = ? AND bucket = 'past_customer')`);
+              params.push(orgId);
+            } else if (leadFilter === 'engaged') {
+              // Contacts with opens or clicks or replies in campaigns
+              conditions.push(`(c.totalOpened > 0 OR c.totalClicked > 0 OR c.totalReplied > 0)`);
+            } else if (leadFilter === 'cold') {
+              // No engagement in any campaign and no AI classification as hot/warm
+              conditions.push(`(c.totalOpened = 0 OR c.totalOpened IS NULL) AND (c.totalClicked = 0 OR c.totalClicked IS NULL) AND (c.totalReplied = 0 OR c.totalReplied IS NULL)`);
+              conditions.push(`LOWER(c.email) NOT IN (SELECT LOWER(contactEmail) FROM lead_opportunities WHERE organizationId = ? AND bucket IN ('hot_lead','warm_lead','past_customer'))`);
+              params.push(orgId);
+            } else if (leadFilter === 'never_contacted') {
+              conditions.push(`(c.totalSent = 0 OR c.totalSent IS NULL)`);
+            } else {
+              // Generic bucket filter (e.g., 'churned', 'vendor', 'newsletter', etc.)
+              conditions.push(`LOWER(c.email) IN (SELECT LOWER(contactEmail) FROM lead_opportunities WHERE organizationId = ? AND bucket = ?)`);
+              params.push(orgId, leadFilter);
+            }
+          }
 
           if (search) {
             const q = `%${search.toLowerCase()}%`;
@@ -4557,10 +4586,140 @@ Which account should I use and why? If I need to split across accounts, provide 
         } catch { /* contact_activities table may not exist yet — ignore */ }
       }
 
+      // === ENRICHMENT: Add lead intelligence data (AI classification from lead_opportunities) ===
+      // Safe enhancement — if lead_opportunities table doesn't exist or query fails, contacts still return fine
+      if (contacts.length > 0) {
+        try {
+          const db = (storage as any).db;
+          const emails = contacts.map((c: any) => c.email?.toLowerCase()).filter(Boolean);
+          if (emails.length > 0 && db) {
+            const ph = emails.map(() => '?').join(',');
+            // Get the BEST (highest confidence) lead classification per email for this org
+            const leadData = db.prepare(`
+              SELECT contactEmail, bucket, confidence, aiReasoning, suggestedAction, lastEmailDate, totalEmails, totalReceived, totalSent, accountEmail,
+                     ROW_NUMBER() OVER (PARTITION BY LOWER(contactEmail) ORDER BY confidence DESC) as rn
+              FROM lead_opportunities
+              WHERE organizationId = ? AND LOWER(contactEmail) IN (${ph})
+            `).all(orgId, ...emails);
+            // Only keep rn=1 (best classification per email)
+            const leadMap = new Map<string, any>();
+            for (const row of leadData as any[]) {
+              if (row.rn === 1) {
+                leadMap.set(row.contactEmail?.toLowerCase(), {
+                  leadBucket: row.bucket,
+                  leadConfidence: row.confidence,
+                  aiReasoning: row.aiReasoning,
+                  suggestedAction: row.suggestedAction,
+                  lastEmailDate: row.lastEmailDate,
+                  leadTotalEmails: row.totalEmails,
+                  leadTotalReceived: row.totalReceived,
+                  leadTotalSent: row.totalSent,
+                  leadAccountEmail: row.accountEmail,
+                });
+              }
+            }
+            contacts.forEach((c: any) => {
+              const lead = leadMap.get(c.email?.toLowerCase());
+              if (lead) Object.assign(c, lead);
+            });
+          }
+        } catch (leadErr: any) {
+          console.error('[Contacts] Lead intelligence enrichment failed (non-fatal):', leadErr.message);
+        }
+      }
+
       res.json({ contacts, total, limit, offset });
     } catch (error: any) {
       console.error('[Contacts] GET error:', error.message, error.stack);
       res.status(500).json({ message: 'Failed to fetch contacts' });
+    }
+  });
+
+  // ========== HOT LEADS — AI-enriched lead view ==========
+  app.get('/api/contacts/hot-leads', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const db = (storage as any).db;
+      if (!db) return res.status(500).json({ message: 'Database not available' });
+
+      const bucket = req.query.bucket as string || 'all'; // hot_lead, warm_lead, past_customer, etc.
+      const limit = parseInt(req.query.limit as string) || 25;
+      const offset = parseInt(req.query.offset as string) || 0;
+      const search = (req.query.search as string || '').trim();
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+
+      const conditions: string[] = ['lo.organizationId = ?'];
+      const params: any[] = [orgId];
+
+      if (bucket && bucket !== 'all') {
+        conditions.push('lo.bucket = ?');
+        params.push(bucket);
+      } else {
+        // Default: show hot_lead, warm_lead, past_customer (actionable buckets)
+        conditions.push(`lo.bucket IN ('hot_lead', 'warm_lead', 'past_customer', 'churned')`);
+      }
+
+      if (search) {
+        const q = `%${search.toLowerCase()}%`;
+        conditions.push(`(LOWER(lo.contactEmail) LIKE ? OR LOWER(lo.contactName) LIKE ? OR LOWER(lo.company) LIKE ?)`);
+        params.push(q, q, q);
+      }
+
+      // Member role: restrict to their email accounts only
+      if (!isAdmin) {
+        const memberAccounts = db.prepare(`SELECT email FROM email_accounts WHERE organizationId = ? AND userId = ?`).all(orgId, req.user.id) as any[];
+        if (memberAccounts.length > 0) {
+          const ph = memberAccounts.map(() => '?').join(',');
+          conditions.push(`lo.accountEmail IN (${ph})`);
+          params.push(...memberAccounts.map((a: any) => a.email));
+        } else {
+          return res.json({ leads: [], total: 0, bucketCounts: {} });
+        }
+      }
+
+      const where = conditions.join(' AND ');
+
+      // Get total count
+      const countRow = db.prepare(`SELECT COUNT(*) as cnt FROM lead_opportunities lo WHERE ${where}`).get(...params) as any;
+      const total = countRow?.cnt || 0;
+
+      // Get leads with contact data joined
+      const leads = db.prepare(`
+        SELECT lo.*,
+               c.id as contactId, c.firstName, c.lastName, c.company as contactCompany, c.jobTitle,
+               c.phone, c.city, c.country, c.status as contactStatus, c.pipelineStage,
+               c.totalOpened, c.totalClicked, c.totalReplied, c.totalSent as contactTotalSent, c.totalBounced,
+               c.lastOpenedAt, c.lastClickedAt, c.lastRepliedAt, c.assignedTo
+        FROM lead_opportunities lo
+        LEFT JOIN contacts c ON LOWER(c.email) = LOWER(lo.contactEmail) AND c.organizationId = lo.organizationId
+        WHERE ${where}
+        ORDER BY lo.confidence DESC, lo.lastEmailDate DESC
+        LIMIT ? OFFSET ?
+      `).all(...params, limit, offset);
+
+      // Parse JSON fields
+      leads.forEach((l: any) => {
+        try { if (l.sampleSubjects && typeof l.sampleSubjects === 'string') l.sampleSubjects = JSON.parse(l.sampleSubjects); } catch { l.sampleSubjects = []; }
+        try { if (l.sampleSnippets && typeof l.sampleSnippets === 'string') l.sampleSnippets = JSON.parse(l.sampleSnippets); } catch { l.sampleSnippets = []; }
+      });
+
+      // Bucket counts for sidebar
+      const bucketCounts = db.prepare(`
+        SELECT bucket, COUNT(*) as cnt
+        FROM lead_opportunities
+        WHERE organizationId = ?
+        GROUP BY bucket
+        ORDER BY cnt DESC
+      `).all(orgId) as any[];
+      const bucketCountMap: Record<string, number> = {};
+      for (const b of bucketCounts) {
+        bucketCountMap[b.bucket] = b.cnt;
+      }
+
+      res.json({ leads, total, limit, offset, bucketCounts: bucketCountMap });
+    } catch (error: any) {
+      console.error('[HotLeads] GET error:', error.message, error.stack);
+      res.status(500).json({ message: 'Failed to fetch hot leads' });
     }
   });
 

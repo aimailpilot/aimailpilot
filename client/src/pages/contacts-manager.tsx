@@ -74,6 +74,16 @@ interface Contact {
   pipelineStage?: string;
   nextActionDate?: string;
   nextActionType?: string;
+  // Lead Intelligence (enriched from AI scan)
+  leadBucket?: string;
+  leadConfidence?: number;
+  aiReasoning?: string;
+  suggestedAction?: string;
+  lastEmailDate?: string;
+  leadTotalEmails?: number;
+  leadTotalReceived?: number;
+  leadTotalSent?: number;
+  leadAccountEmail?: string;
 }
 
 interface ContactList {
@@ -87,7 +97,7 @@ interface ContactList {
   createdAt: string;
 }
 
-type TabType = 'all' | 'unsubscribers' | 'blocklist' | 'lists' | 'follow-ups';
+type TabType = 'all' | 'unsubscribers' | 'blocklist' | 'lists' | 'follow-ups' | 'hot-leads';
 
 export default function ContactsManager() {
   const [contacts, setContacts] = useState<Contact[]>([]);
@@ -177,6 +187,7 @@ export default function ContactsManager() {
   const [companyFilter, setCompanyFilter] = useState('');
   const [locationFilter, setLocationFilter] = useState('');
   const [designationFilter, setDesignationFilter] = useState('');
+  const [leadFilterValue, setLeadFilterValue] = useState('');
   const [filterOptions, setFilterOptions] = useState<{ companies: string[]; designations: string[]; cities: string[]; countries: string[] }>({ companies: [], designations: [], cities: [], countries: [] });
   const [showFilters, setShowFilters] = useState(false);
 
@@ -224,6 +235,15 @@ export default function ContactsManager() {
   const sendEmailEditorRef = useRef<HTMLDivElement>(null);
   const [sendEmailEditorMode, setSendEmailEditorMode] = useState<'visual' | 'html'>('visual');
 
+  // Hot Leads tab state
+  const [hotLeads, setHotLeads] = useState<any[]>([]);
+  const [hotLeadsTotal, setHotLeadsTotal] = useState(0);
+  const [hotLeadsLoading, setHotLeadsLoading] = useState(false);
+  const [hotLeadsBucket, setHotLeadsBucket] = useState('all');
+  const [hotLeadsBucketCounts, setHotLeadsBucketCounts] = useState<Record<string, number>>({});
+  const [hotLeadsPage, setHotLeadsPage] = useState(1);
+  const [hotLeadsSearch, setHotLeadsSearch] = useState('');
+
   // Debounced search
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedSearch(search), 300);
@@ -243,8 +263,8 @@ export default function ContactsManager() {
     }
   }, []);
 
-  useEffect(() => { fetchContacts(); }, [debouncedSearch, statusFilter, activeListId, activeTab, assignFilterUserId, currentPage, sortBy, sortOrder, pipelineFilter, companyFilter, locationFilter, designationFilter]);
-  useEffect(() => { fetchContactLists(); fetchTeamMembers(); fetchFollowUps(); fetchFilterOptions(); }, []);
+  useEffect(() => { fetchContacts(); }, [debouncedSearch, statusFilter, activeListId, activeTab, assignFilterUserId, currentPage, sortBy, sortOrder, pipelineFilter, companyFilter, locationFilter, designationFilter, leadFilterValue]);
+  useEffect(() => { fetchContactLists(); fetchTeamMembers(); fetchFollowUps(); fetchFilterOptions(); fetchHotLeadsCounts(); }, []);
 
   const fetchContacts = async () => {
     setLoading(true);
@@ -272,6 +292,7 @@ export default function ContactsManager() {
       if (companyFilter) params.set('company', companyFilter);
       if (locationFilter) params.set('location', locationFilter);
       if (designationFilter) params.set('designation', designationFilter);
+      if (leadFilterValue) params.set('leadFilter', leadFilterValue);
 
       // Pagination & sorting
       params.set('limit', String(pageSize));
@@ -322,6 +343,35 @@ export default function ContactsManager() {
   };
 
   const isAdmin = userRole === 'owner' || userRole === 'admin';
+
+  const fetchHotLeads = async () => {
+    setHotLeadsLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (hotLeadsBucket && hotLeadsBucket !== 'all') params.set('bucket', hotLeadsBucket);
+      if (hotLeadsSearch) params.set('search', hotLeadsSearch);
+      params.set('limit', '25');
+      params.set('offset', String((hotLeadsPage - 1) * 25));
+      const res = await fetch(`/api/contacts/hot-leads?${params}`, { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        setHotLeads(data.leads || []);
+        setHotLeadsTotal(data.total || 0);
+        setHotLeadsBucketCounts(data.bucketCounts || {});
+      }
+    } catch (e) { console.error('Failed to fetch hot leads:', e); }
+    setHotLeadsLoading(false);
+  };
+
+  const fetchHotLeadsCounts = async () => {
+    try {
+      const res = await fetch('/api/contacts/hot-leads?limit=1', { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        setHotLeadsBucketCounts(data.bucketCounts || {});
+      }
+    } catch {}
+  };
 
   const handleAssignContacts = async () => {
     if (!assignTargetUserId || selectedIds.length === 0) return;
@@ -699,10 +749,10 @@ export default function ContactsManager() {
   const clearAllFilters = () => {
     setSearch(''); setStatusFilter('all'); setPipelineFilter('all');
     setCompanyFilter(''); setLocationFilter(''); setDesignationFilter('');
-    setAssignFilterUserId(''); setCurrentPage(1);
+    setAssignFilterUserId(''); setLeadFilterValue(''); setCurrentPage(1);
   };
 
-  const hasActiveFilters = pipelineFilter !== 'all' || companyFilter || locationFilter || designationFilter;
+  const hasActiveFilters = pipelineFilter !== 'all' || companyFilter || locationFilter || designationFilter || !!leadFilterValue;
 
   const totalPages = Math.ceil(total / pageSize);
 
@@ -1074,6 +1124,20 @@ export default function ContactsManager() {
     return configs[status] || configs.cold;
   };
 
+  const LEAD_BUCKET_CONFIG: Record<string, { label: string; bg: string; text: string; icon: string }> = {
+    hot_lead: { label: 'Hot Lead', bg: 'bg-red-100', text: 'text-red-700', icon: '🔥' },
+    warm_lead: { label: 'Warm', bg: 'bg-orange-100', text: 'text-orange-700', icon: '🌡' },
+    past_customer: { label: 'Past Customer', bg: 'bg-purple-100', text: 'text-purple-700', icon: '💎' },
+    churned: { label: 'Churned', bg: 'bg-gray-200', text: 'text-gray-700', icon: '📉' },
+    active_conversation: { label: 'Active', bg: 'bg-green-100', text: 'text-green-700', icon: '💬' },
+    cold_outreach: { label: 'Cold Outreach', bg: 'bg-blue-100', text: 'text-blue-700', icon: '📧' },
+    newsletter: { label: 'Newsletter', bg: 'bg-cyan-100', text: 'text-cyan-700', icon: '📰' },
+    vendor: { label: 'Vendor', bg: 'bg-slate-100', text: 'text-slate-600', icon: '🏢' },
+    internal: { label: 'Internal', bg: 'bg-indigo-100', text: 'text-indigo-700', icon: '🏠' },
+    job_applicant: { label: 'Applicant', bg: 'bg-teal-100', text: 'text-teal-700', icon: '📋' },
+    unknown: { label: 'Unknown', bg: 'bg-gray-100', text: 'text-gray-500', icon: '❓' },
+  };
+
   const getInitials = (first: string, last: string) => `${(first || '?')[0]}${(last || '')[0] || ''}`.toUpperCase();
 
   const getAvatarColor = (email: string) => {
@@ -1305,10 +1369,11 @@ export default function ContactsManager() {
             { key: 'blocklist' as TabType, label: 'Blocklist', count: tabCounts.blocklist, icon: Ban },
             { key: 'lists' as TabType, label: 'Your lists', count: tabCounts.lists, icon: LayoutList },
             { key: 'follow-ups' as TabType, label: 'Follow-ups', count: followUpContacts.length, icon: CalendarClock },
+            { key: 'hot-leads' as TabType, label: 'AI Leads', count: Object.values(hotLeadsBucketCounts).reduce((a, b) => a + b, 0), icon: Flame },
           ]).map((tab) => (
             <button
               key={tab.key}
-              onClick={() => { setActiveTab(tab.key); setActiveListId(null); setSelectedIds([]); setSearch(''); setStatusFilter('all'); setCurrentPage(1); if (tab.key === 'follow-ups') fetchFollowUps(); }}
+              onClick={() => { setActiveTab(tab.key); setActiveListId(null); setSelectedIds([]); setSearch(''); setStatusFilter('all'); setCurrentPage(1); if (tab.key === 'follow-ups') fetchFollowUps(); if (tab.key === 'hot-leads') fetchHotLeads(); }}
               className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-all -mb-[1px] ${
                 activeTab === tab.key
                   ? 'border-blue-600 text-blue-600'
@@ -1668,6 +1733,161 @@ export default function ContactsManager() {
             )}
           </div>
         )}
+
+        {/* ── AI Leads (Hot Leads) tab ── */}
+        {activeTab === 'hot-leads' && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                  <Flame className="h-5 w-5 text-orange-500" /> AI Lead Intelligence
+                </h3>
+                <p className="text-sm text-gray-500">Contacts classified by AI from your email history scan</p>
+              </div>
+              <Button size="sm" variant="outline" onClick={fetchHotLeads} disabled={hotLeadsLoading}>
+                {hotLeadsLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" /> : <RefreshCw className="h-3.5 w-3.5 mr-1.5" />}
+                Refresh
+              </Button>
+            </div>
+
+            {/* Bucket filter pills */}
+            <div className="flex flex-wrap items-center gap-2">
+              {[
+                { key: 'all', label: 'All Actionable', icon: '📊' },
+                { key: 'hot_lead', label: 'Hot Leads', icon: '🔥' },
+                { key: 'warm_lead', label: 'Warm Leads', icon: '🌡' },
+                { key: 'past_customer', label: 'Past Customers', icon: '💎' },
+                { key: 'churned', label: 'Churned', icon: '📉' },
+                { key: 'active_conversation', label: 'Active', icon: '💬' },
+                { key: 'cold_outreach', label: 'Cold Outreach', icon: '📧' },
+              ].map(b => (
+                <button key={b.key}
+                  onClick={() => { setHotLeadsBucket(b.key); setHotLeadsPage(1); setTimeout(fetchHotLeads, 50); }}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                    hotLeadsBucket === b.key
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}>
+                  <span>{b.icon}</span> {b.label}
+                  {hotLeadsBucketCounts[b.key] ? (
+                    <span className={`text-[10px] px-1 rounded-full ${hotLeadsBucket === b.key ? 'bg-white/20' : 'bg-gray-200'}`}>
+                      {hotLeadsBucketCounts[b.key]}
+                    </span>
+                  ) : null}
+                </button>
+              ))}
+              <div className="ml-auto relative">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3 w-3 text-gray-400" />
+                <Input
+                  placeholder="Search leads..."
+                  value={hotLeadsSearch}
+                  onChange={(e) => { setHotLeadsSearch(e.target.value); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') fetchHotLeads(); }}
+                  className="pl-8 h-8 w-48 text-xs"
+                />
+              </div>
+            </div>
+
+            {/* Leads list */}
+            {hotLeadsLoading ? (
+              <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-gray-400" /></div>
+            ) : hotLeads.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-20">
+                <div className="bg-gradient-to-br from-orange-50 to-amber-50 w-20 h-20 rounded-2xl flex items-center justify-center mb-5 shadow-sm">
+                  <Sparkles className="h-10 w-10 text-amber-400" />
+                </div>
+                <h3 className="text-lg font-semibold text-gray-900 mb-1.5">No AI leads found</h3>
+                <p className="text-sm text-gray-400 text-center max-w-sm">
+                  Run the AI Lead Intelligence scan from the Lead Opportunities page to classify your contacts from email history.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {hotLeads.map((lead: any) => {
+                  const bucketCfg = LEAD_BUCKET_CONFIG[lead.bucket] || LEAD_BUCKET_CONFIG.unknown;
+                  return (
+                    <div key={lead.id} className="flex items-start gap-4 p-4 rounded-xl border border-gray-200 bg-white hover:shadow-sm transition cursor-pointer"
+                      onClick={() => {
+                        if (lead.contactId) {
+                          const c = { id: lead.contactId, email: lead.contactEmail, firstName: lead.firstName || lead.contactName?.split(' ')[0] || '', lastName: lead.lastName || lead.contactName?.split(' ').slice(1).join(' ') || '', company: lead.contactCompany || lead.company || '', jobTitle: lead.jobTitle || '', status: lead.contactStatus || 'cold' } as any;
+                          openDetail(c);
+                        }
+                      }}>
+                      <Avatar className="h-10 w-10 flex-shrink-0 shadow-sm">
+                        <AvatarFallback className={`bg-gradient-to-br ${getAvatarColor(lead.contactEmail)} text-white text-xs font-semibold`}>
+                          {(lead.contactName || lead.contactEmail || '?')[0].toUpperCase()}
+                        </AvatarFallback>
+                      </Avatar>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="text-sm font-semibold text-gray-900 truncate">
+                            {lead.contactName || lead.contactEmail}
+                          </span>
+                          <span className={`inline-flex items-center gap-0.5 text-[10px] font-medium px-2 py-0.5 rounded-full ${bucketCfg.bg} ${bucketCfg.text}`}>
+                            {bucketCfg.icon} {bucketCfg.label}
+                          </span>
+                          <span className="text-[10px] text-gray-400">{lead.confidence}% confidence</span>
+                          {lead.pipelineStage && lead.pipelineStage !== 'new' && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-600 font-medium capitalize">{lead.pipelineStage.replace('_', ' ')}</span>
+                          )}
+                        </div>
+                        <div className="text-xs text-gray-500 mb-1.5">
+                          {lead.contactEmail}
+                          {(lead.contactCompany || lead.company) && <span className="ml-2 text-gray-400">at {lead.contactCompany || lead.company}</span>}
+                          {lead.jobTitle && <span className="ml-2 text-gray-400">({lead.jobTitle})</span>}
+                        </div>
+                        {lead.aiReasoning && (
+                          <p className="text-xs text-gray-600 mb-1 line-clamp-2">{lead.aiReasoning}</p>
+                        )}
+                        {lead.suggestedAction && (
+                          <div className="flex items-center gap-1.5 mt-1">
+                            <Zap className="h-3 w-3 text-amber-500" />
+                            <span className="text-xs text-amber-700 font-medium">{lead.suggestedAction}</span>
+                          </div>
+                        )}
+                      </div>
+                      <div className="text-right flex-shrink-0 space-y-1">
+                        <div className="text-[10px] text-gray-400">
+                          {lead.totalEmails || 0} emails ({lead.totalReceived || 0} received)
+                        </div>
+                        {lead.lastEmailDate && (
+                          <div className="text-[10px] text-gray-300">
+                            Last: {new Date(lead.lastEmailDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                          </div>
+                        )}
+                        {lead.accountEmail && (
+                          <div className="text-[10px] text-gray-300 truncate max-w-[120px]" title={lead.accountEmail}>
+                            via {lead.accountEmail.split('@')[0]}
+                          </div>
+                        )}
+                        {/* Engagement indicators from contacts table */}
+                        {(lead.totalOpened > 0 || lead.totalClicked > 0 || lead.totalReplied > 0) && (
+                          <div className="flex items-center gap-2 justify-end mt-1">
+                            {lead.totalOpened > 0 && <span className="text-[9px] text-green-600" title="Opens">{lead.totalOpened} opens</span>}
+                            {lead.totalClicked > 0 && <span className="text-[9px] text-blue-600" title="Clicks">{lead.totalClicked} clicks</span>}
+                            {lead.totalReplied > 0 && <span className="text-[9px] text-purple-600" title="Replies">{lead.totalReplied} replies</span>}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {/* Pagination */}
+                {hotLeadsTotal > 25 && (
+                  <div className="flex items-center justify-between pt-3">
+                    <span className="text-xs text-gray-400">Showing {((hotLeadsPage - 1) * 25) + 1}-{Math.min(hotLeadsPage * 25, hotLeadsTotal)} of {hotLeadsTotal}</span>
+                    <div className="flex items-center gap-1">
+                      <Button variant="outline" size="sm" disabled={hotLeadsPage <= 1} onClick={() => { setHotLeadsPage(p => p - 1); setTimeout(fetchHotLeads, 50); }} className="h-7 text-xs">Prev</Button>
+                      <span className="text-xs text-gray-500 px-2">Page {hotLeadsPage}</span>
+                      <Button variant="outline" size="sm" disabled={hotLeadsPage * 25 >= hotLeadsTotal} onClick={() => { setHotLeadsPage(p => p + 1); setTimeout(fetchHotLeads, 50); }} className="h-7 text-xs">Next</Button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* ====== DIALOGS ====== */}
@@ -1704,6 +1924,36 @@ export default function ContactsManager() {
                   </AlertDescription>
                 </Alert>
               )}
+
+              {/* AI Lead Intelligence Card */}
+              {detailContact.leadBucket && detailContact.leadBucket !== 'unknown' && (() => {
+                const cfg = LEAD_BUCKET_CONFIG[detailContact.leadBucket] || LEAD_BUCKET_CONFIG.unknown;
+                return (
+                  <div className={`border rounded-xl p-3 ${cfg.bg} border-opacity-50`}>
+                    <div className="flex items-center gap-2 mb-2">
+                      <Sparkles className="h-3.5 w-3.5 text-amber-500" />
+                      <span className="text-[10px] text-gray-500 uppercase font-semibold tracking-wide">AI Lead Intelligence</span>
+                      <span className={`inline-flex items-center gap-0.5 text-[10px] font-medium px-2 py-0.5 rounded-full ${cfg.bg} ${cfg.text} ml-auto`}>
+                        {cfg.icon} {cfg.label} ({detailContact.leadConfidence}%)
+                      </span>
+                    </div>
+                    {detailContact.aiReasoning && (
+                      <p className="text-xs text-gray-700 mb-1.5">{detailContact.aiReasoning}</p>
+                    )}
+                    {detailContact.suggestedAction && (
+                      <div className="flex items-center gap-1.5">
+                        <Zap className="h-3 w-3 text-amber-500" />
+                        <span className="text-xs text-amber-800 font-medium">{detailContact.suggestedAction}</span>
+                      </div>
+                    )}
+                    <div className="flex items-center gap-3 mt-2 text-[10px] text-gray-500">
+                      {detailContact.leadTotalEmails != null && <span>{detailContact.leadTotalEmails} total emails</span>}
+                      {detailContact.leadTotalReceived != null && <span>{detailContact.leadTotalReceived} received</span>}
+                      {detailContact.lastEmailDate && <span>Last: {new Date(detailContact.lastEmailDate).toLocaleDateString()}</span>}
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Pipeline Stage */}
               <div className="border border-gray-100 rounded-xl p-3 bg-gradient-to-br from-blue-50/30 to-white">
@@ -3341,6 +3591,18 @@ export default function ContactsManager() {
                 {filterOptions.countries.slice(0, 30).map(c => <SelectItem key={`country-${c}`} value={c} className="text-xs font-medium">{c}</SelectItem>)}
               </SelectContent>
             </Select>
+            <Select value={leadFilterValue || '_all'} onValueChange={v => { setLeadFilterValue(v === '_all' ? '' : v); setCurrentPage(1); }}>
+              <SelectTrigger className="h-8 w-[140px] text-xs bg-white"><SelectValue placeholder="AI Lead Type" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="_all">All Leads</SelectItem>
+                <SelectItem value="hot_leads">Hot Leads</SelectItem>
+                <SelectItem value="warm_leads">Warm Leads</SelectItem>
+                <SelectItem value="past_customer">Past Customers</SelectItem>
+                <SelectItem value="engaged">Engaged</SelectItem>
+                <SelectItem value="cold">Gone Cold</SelectItem>
+                <SelectItem value="never_contacted">Never Contacted</SelectItem>
+              </SelectContent>
+            </Select>
             {isAdmin && teamMembers.length > 0 && (
               <Select value={assignFilterUserId || '_all'} onValueChange={(v) => { setAssignFilterUserId(v === '_all' ? '' : v); setCurrentPage(1); }}>
                 <SelectTrigger className="h-8 w-[140px] text-xs bg-white"><SelectValue placeholder="Assigned to" /></SelectTrigger>
@@ -3486,6 +3748,24 @@ export default function ContactsManager() {
                       ) : (
                         <div className="text-sm text-gray-900 truncate">{contact.email}</div>
                       )}
+                      {/* AI Lead Intelligence badge */}
+                      {contact.leadBucket && contact.leadBucket !== 'unknown' && (() => {
+                        const cfg = LEAD_BUCKET_CONFIG[contact.leadBucket] || LEAD_BUCKET_CONFIG.unknown;
+                        return (
+                          <Tooltip>
+                            <TooltipTrigger>
+                              <span className={`inline-flex items-center gap-0.5 text-[9px] font-medium px-1.5 py-0 rounded-full ${cfg.bg} ${cfg.text}`}>
+                                <span className="text-[8px]">{cfg.icon}</span> {cfg.label}
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="bottom" className="max-w-xs">
+                              <p className="text-xs font-semibold mb-1">{cfg.icon} {cfg.label} ({contact.leadConfidence}% confidence)</p>
+                              {contact.aiReasoning && <p className="text-xs text-gray-600 mb-1">{contact.aiReasoning}</p>}
+                              {contact.suggestedAction && <p className="text-xs text-blue-600">Suggested: {contact.suggestedAction}</p>}
+                            </TooltipContent>
+                          </Tooltip>
+                        );
+                      })()}
                     </div>
                   </div>
 
