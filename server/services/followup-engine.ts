@@ -647,9 +647,14 @@ export class FollowupEngine {
     
     // Build a lookup: contactId -> has any replied message
     const contactReplied = new Set<string>();
+    // Build a lookup: contactId -> has any bounced message (P6 fix: skip follow-ups for bounced contacts)
+    const contactBounced = new Set<string>();
     for (const m of campaignMessages) {
       if ((m as any).repliedAt && (m as any).contactId) {
         contactReplied.add((m as any).contactId);
+      }
+      if ((m as any).bouncedAt && (m as any).contactId) {
+        contactBounced.add((m as any).contactId);
       }
     }
     
@@ -681,7 +686,27 @@ export class FollowupEngine {
         }
         continue;
       }
-      
+
+      // P6 fix: Skip if Step 0 message bounced — no point sending follow-ups to invalid addresses
+      if (contactBounced.has(msg.contactId)) {
+        for (const step of followupSteps) {
+          const execKey = `${msg.id}_${step.id}`;
+          if (!executionSet.has(execKey)) {
+            await storage.createFollowupExecution({
+              campaignMessageId: msg.id,
+              stepId: step.id,
+              contactId: msg.contactId,
+              campaignId: campaignId,
+              status: "skipped",
+              scheduledAt: new Date().toISOString(),
+            });
+            executionSet.add(execKey);
+            console.log(`[Followup] Skipping step ${step.stepNumber} for contact ${msg.contactId} — message bounced`);
+          }
+        }
+        continue;
+      }
+
       await this.processMessageFollowups(msg, followupSteps, campaignId, executionSet);
     }
   }
