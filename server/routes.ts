@@ -2117,6 +2117,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.use('/api/settings', requireAuth);
   app.use('/api/llm', requireAuth);
   app.use('/api/sheets', requireAuth);
+  app.use('/api/attachments', requireAuth);
 
   // ========== DASHBOARD ==========
   
@@ -6275,6 +6276,63 @@ Respond with ONLY a JSON object in this format:
       res.json({ success: true });
     } catch (error) {
       res.status(500).json({ message: 'Failed to delete template' });
+    }
+  });
+
+  // ========== ATTACHMENT ENDPOINTS ==========
+
+  // List attachments for a template or campaign
+  app.get('/api/attachments', async (req: any, res) => {
+    try {
+      const { templateId, campaignId } = req.query;
+      const attachments = await storage.getAttachments(req.user.organizationId, { templateId, campaignId });
+      res.json(attachments);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch attachments' });
+    }
+  });
+
+  // Upload attachment (base64 encoded in JSON body — max 10MB)
+  app.post('/api/attachments', async (req: any, res) => {
+    try {
+      const { templateId, campaignId, fileName, mimeType, content } = req.body;
+      if (!fileName || !content) return res.status(400).json({ message: 'fileName and content (base64) required' });
+      // content is base64 string — check size (base64 is ~33% larger than raw)
+      const rawSize = Math.ceil(content.length * 3 / 4);
+      if (rawSize > 10 * 1024 * 1024) return res.status(400).json({ message: 'File too large (max 10MB)' });
+      const attachment = await storage.createAttachment({
+        organizationId: req.user.organizationId,
+        templateId: templateId || undefined,
+        campaignId: campaignId || undefined,
+        fileName, fileSize: rawSize, mimeType: mimeType || 'application/octet-stream', content
+      });
+      res.json({ id: attachment.id, fileName, fileSize: rawSize, mimeType });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to upload attachment' });
+    }
+  });
+
+  // Download attachment
+  app.get('/api/attachments/:id', async (req: any, res) => {
+    try {
+      const att = await storage.getAttachment(req.params.id, req.user.organizationId);
+      if (!att) return res.status(404).json({ message: 'Not found' });
+      const buf = Buffer.from(att.content, 'base64');
+      res.setHeader('Content-Type', att.mimeType || 'application/octet-stream');
+      res.setHeader('Content-Disposition', `attachment; filename="${att.fileName}"`);
+      res.send(buf);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to download attachment' });
+    }
+  });
+
+  // Delete attachment
+  app.delete('/api/attachments/:id', async (req: any, res) => {
+    try {
+      await storage.deleteAttachment(req.params.id, req.user.organizationId);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to delete attachment' });
     }
   });
 

@@ -1034,6 +1034,23 @@ try {
   `);
 } catch (e) { /* FTS5 already exists or not supported */ }
 
+// Email attachments table — stores files for templates/campaigns
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS email_attachments (
+      id TEXT PRIMARY KEY,
+      organizationId TEXT NOT NULL,
+      templateId TEXT,
+      campaignId TEXT,
+      fileName TEXT NOT NULL,
+      fileSize INTEGER DEFAULT 0,
+      mimeType TEXT DEFAULT '',
+      content TEXT NOT NULL,
+      createdAt TEXT NOT NULL
+    );
+  `);
+} catch (e) { /* table already exists */ }
+
 // Performance indexes for slow queries
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_status ON contacts(organizationId, status)`); } catch (e) {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_org_created ON contacts(organizationId, createdAt)`); } catch (e) {}
@@ -3530,6 +3547,43 @@ export class DatabaseStorage {
     // Fallback: LIKE search
     const q = `%${query.toLowerCase()}%`;
     return db.prepare(`SELECT * FROM org_documents WHERE organizationId = ? AND (LOWER(name) LIKE ? OR LOWER(content) LIKE ? OR LOWER(summary) LIKE ? OR LOWER(tags) LIKE ?) ORDER BY updatedAt DESC LIMIT ?`).all(orgId, q, q, q, q, limit) as any[];
+  }
+
+  // ===== EMAIL ATTACHMENTS =====
+  async createAttachment(data: { organizationId: string; templateId?: string; campaignId?: string; fileName: string; fileSize: number; mimeType: string; content: string }) {
+    const id = genId();
+    db.prepare('INSERT INTO email_attachments (id, organizationId, templateId, campaignId, fileName, fileSize, mimeType, content, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      id, data.organizationId, data.templateId || null, data.campaignId || null, data.fileName, data.fileSize, data.mimeType, data.content, now()
+    );
+    return { id, ...data, createdAt: now() };
+  }
+
+  async getAttachments(orgId: string, opts: { templateId?: string; campaignId?: string }) {
+    if (opts.templateId) {
+      return db.prepare('SELECT id, fileName, fileSize, mimeType, createdAt FROM email_attachments WHERE organizationId = ? AND templateId = ?').all(orgId, opts.templateId) as any[];
+    }
+    if (opts.campaignId) {
+      return db.prepare('SELECT id, fileName, fileSize, mimeType, createdAt FROM email_attachments WHERE organizationId = ? AND campaignId = ?').all(orgId, opts.campaignId) as any[];
+    }
+    return [];
+  }
+
+  async getAttachment(id: string, orgId: string) {
+    return db.prepare('SELECT * FROM email_attachments WHERE id = ? AND organizationId = ?').get(id, orgId) as any;
+  }
+
+  async deleteAttachment(id: string, orgId: string) {
+    db.prepare('DELETE FROM email_attachments WHERE id = ? AND organizationId = ?').run(id, orgId);
+  }
+
+  async copyAttachmentsTocampaign(templateId: string, campaignId: string, orgId: string) {
+    const attachments = db.prepare('SELECT * FROM email_attachments WHERE organizationId = ? AND templateId = ?').all(orgId, templateId) as any[];
+    for (const att of attachments) {
+      const id = genId();
+      db.prepare('INSERT INTO email_attachments (id, organizationId, templateId, campaignId, fileName, fileSize, mimeType, content, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+        id, orgId, null, campaignId, att.fileName, att.fileSize, att.mimeType, att.content, now()
+      );
+    }
   }
 
   // ===== GUARDRAIL: resetCorruptDatabase has been REMOVED =====

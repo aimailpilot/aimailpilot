@@ -15,7 +15,8 @@ import {
   AlignLeft, AlignCenter, AlignRight, Type, Strikethrough, ChevronDown,
   Monitor, Info, User, Users, Star, TrendingUp, AlertTriangle, Mail,
   MessageSquare, MousePointer, Shield, ArrowUpDown, ChevronRight,
-  ArrowLeft, Save, Palette, Smartphone, Send, CheckCircle, Lock, Globe
+  ArrowLeft, Save, Palette, Smartphone, Send, CheckCircle, Lock, Globe,
+  Paperclip
 } from "lucide-react";
 
 interface TemplateCreator {
@@ -123,6 +124,60 @@ export default function TemplateManager() {
   const [aiFeedbackLoading, setAiFeedbackLoading] = useState(false);
   const [aiFeedbackApplying, setAiFeedbackApplying] = useState(false);
   const aiFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Attachment state
+  const [attachments, setAttachments] = useState<Array<{ id: string; fileName: string; fileSize: number; mimeType: string }>>([]);
+  const [attachmentUploading, setAttachmentUploading] = useState(false);
+  const attachInputRef = useRef<HTMLInputElement>(null);
+
+  const loadAttachments = async (templateId: string) => {
+    try {
+      const resp = await fetch(`/api/attachments?templateId=${templateId}`, { credentials: 'include' });
+      if (resp.ok) setAttachments(await resp.json());
+    } catch {}
+  };
+
+  const handleAttachFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) { alert('File too large (max 10MB)'); return; }
+    setAttachmentUploading(true);
+    try {
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve((reader.result as string).split(',')[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const resp = await fetch('/api/attachments', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          templateId: editTemplate?.id || undefined,
+          fileName: file.name, mimeType: file.type || 'application/octet-stream', content: base64,
+        }),
+      });
+      if (resp.ok) {
+        const att = await resp.json();
+        setAttachments(prev => [...prev, att]);
+      }
+    } catch { alert('Failed to upload attachment'); }
+    setAttachmentUploading(false);
+    if (attachInputRef.current) attachInputRef.current.value = '';
+  };
+
+  const removeAttachment = async (id: string) => {
+    try {
+      await fetch(`/api/attachments/${id}`, { method: 'DELETE', credentials: 'include' });
+      setAttachments(prev => prev.filter(a => a.id !== id));
+    } catch {}
+  };
+
+  const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
 
   const getAiFeedback = async (subj?: string, cont?: string) => {
     const s = subj ?? formSubject;
@@ -356,11 +411,15 @@ export default function TemplateManager() {
     setAiResult(null);
     setAiError('');
     setShowEditor(true);
+    // Load attachments for existing template
+    if (template?.id) loadAttachments(template.id);
+    else setAttachments([]);
   };
 
   const closeEditor = () => {
     setShowEditor(false);
     setEditTemplate(null);
+    setAttachments([]);
   };
 
   // When editor opens or mode switches, populate content editable
@@ -537,7 +596,25 @@ export default function TemplateManager() {
     }
   };
 
+  // Save/restore selection so toolbar dropdowns don't lose it
+  const savedSelectionRef = useRef<Range | null>(null);
+  const saveSelection = () => {
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount > 0) savedSelectionRef.current = sel.getRangeAt(0).cloneRange();
+  };
+  const restoreSelection = () => {
+    const range = savedSelectionRef.current;
+    if (range) {
+      const sel = window.getSelection();
+      if (sel) { sel.removeAllRanges(); sel.addRange(range); }
+    }
+  };
+
+  // Save selection whenever editor loses focus (e.g., clicking toolbar)
+  const handleEditorBlur = () => { saveSelection(); };
+
   const execCmd = (cmd: string, value?: string) => {
+    restoreSelection();
     document.execCommand(cmd, false, value);
     editorRef.current?.focus();
     if (editorRef.current) {
@@ -777,13 +854,19 @@ export default function TemplateManager() {
               <div className="w-px h-5 bg-gray-200 mx-1" />
               <TbBtn icon={<Link className="h-4 w-4" />} onClick={() => { const url = prompt('Enter URL:'); if (url) execCmd('createLink', url); }} title="Link" />
               <TbBtn icon={<Image className="h-4 w-4" />} onClick={() => { const url = prompt('Image URL:'); if (url) execCmd('insertImage', url); }} title="Image" />
+              <TbBtn icon={<Paperclip className="h-4 w-4" />} onClick={() => attachInputRef.current?.click()} title="Attach file" />
               <div className="w-px h-5 bg-gray-200 mx-1" />
               {/* Font family */}
               <select className="text-xs border-0 bg-transparent text-gray-500 cursor-pointer outline-none px-1"
-                onMouseDown={e => { e.stopPropagation(); }} onChange={e => { execCmd('fontName', e.target.value); editorRef.current?.focus(); }}>
-                <option>Sans Serif</option><option value="serif">Serif</option>
-                <option value="monospace">Monospace</option><option value="Georgia">Georgia</option>
+                onMouseDown={e => { e.stopPropagation(); saveSelection(); }} onChange={e => { restoreSelection(); execCmd('fontName', e.target.value); }}>
+                <option value="Arial, Helvetica, sans-serif">Sans Serif</option>
+                <option value="Georgia, Times, serif">Serif</option>
+                <option value="Courier New, monospace">Monospace</option>
+                <option value="Georgia">Georgia</option>
                 <option value="Arial">Arial</option>
+                <option value="Verdana">Verdana</option>
+                <option value="Tahoma">Tahoma</option>
+                <option value="Times New Roman">Times New Roman</option>
               </select>
               <div className="w-px h-5 bg-gray-200 mx-1" />
               <TbBtn icon={<ListOrdered className="h-4 w-4" />} onClick={() => execCmd('insertOrderedList')} title="Numbered list" />
@@ -961,6 +1044,7 @@ export default function TemplateManager() {
               <div
                 ref={editorRef}
                 contentEditable
+                onBlur={handleEditorBlur}
                 onInput={() => { if (editorRef.current) { setFormContent(editorRef.current.innerHTML); pendingContentRef.current = editorRef.current.innerHTML; } }}
                 className="h-full overflow-y-auto px-8 py-5 text-sm text-gray-800 outline-none leading-relaxed max-w-4xl mx-auto [&:empty]:before:content-[attr(data-placeholder)] [&:empty]:before:text-gray-300 [&:empty]:before:italic [&_a]:text-blue-600 [&_a]:underline [&_img]:max-w-full [&_img]:rounded [&_ul]:list-disc [&_ul]:pl-6 [&_ul]:my-1 [&_ol]:list-decimal [&_ol]:pl-6 [&_ol]:my-1 [&_li]:my-0.5"
                 data-placeholder="Start composing your email template here..."
@@ -974,6 +1058,24 @@ export default function TemplateManager() {
                 placeholder="<p>Hi {{firstName}},</p>&#10;&#10;<p>Your HTML email content here...</p>"
                 spellCheck={false}
               />
+            )}
+
+            {/* Attachment bar */}
+            <input type="file" ref={attachInputRef} className="hidden" onChange={handleAttachFile} />
+            {(attachments.length > 0 || attachmentUploading) && (
+              <div className="px-4 py-2 border-t border-gray-200 bg-gray-50 flex items-center gap-2 flex-wrap shrink-0">
+                <Paperclip className="h-3.5 w-3.5 text-gray-400" />
+                {attachments.map(att => (
+                  <div key={att.id} className="flex items-center gap-1.5 bg-white border border-gray-200 rounded-md px-2 py-1 text-xs">
+                    <span className="text-gray-700 font-medium max-w-[140px] truncate">{att.fileName}</span>
+                    <span className="text-gray-400">{formatFileSize(att.fileSize)}</span>
+                    <button onClick={() => removeAttachment(att.id)} className="text-gray-400 hover:text-red-500 ml-0.5">
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
+                {attachmentUploading && <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-500" />}
+              </div>
             )}
           </div>
 
@@ -1175,9 +1277,9 @@ export default function TemplateManager() {
                       <div className="w-20 h-1.5 bg-gray-600 rounded-full mx-auto" />
                     </div>
                   )}
-                  <div className={previewMode === 'mobile' ? 'p-4 max-h-[500px] overflow-y-auto' : 'p-6'}>
+                  <div className={previewMode === 'mobile' ? 'p-4 max-h-[500px] overflow-y-auto' : 'px-8 py-5'}>
                     <div dangerouslySetInnerHTML={{ __html: previewHtml }}
-                      className={`prose max-w-none text-gray-800 [&_a]:text-blue-600 [&_img]:max-w-full ${previewMode === 'mobile' ? 'prose-sm text-[13px]' : 'prose-sm'}`} />
+                      className={`max-w-none text-gray-800 text-sm leading-relaxed [&_a]:text-blue-600 [&_a]:underline [&_img]:max-w-full [&_img]:rounded [&_ul]:list-disc [&_ul]:pl-6 [&_ul]:my-1 [&_ol]:list-decimal [&_ol]:pl-6 [&_ol]:my-1 [&_li]:my-0.5 [&_p]:my-2 [&_h1]:text-xl [&_h1]:font-bold [&_h1]:my-3 [&_h2]:text-lg [&_h2]:font-bold [&_h2]:my-2 [&_h3]:text-base [&_h3]:font-semibold [&_h3]:my-2 [&_b]:font-bold [&_strong]:font-bold ${previewMode === 'mobile' ? 'text-[13px]' : ''}`} />
                   </div>
                   {previewMode === 'mobile' && (
                     <div className="bg-gray-800 text-center py-3">
@@ -1186,6 +1288,15 @@ export default function TemplateManager() {
                   )}
                 </div>
               </div>
+              {attachments.length > 0 && (
+                <div className="flex items-center gap-2 flex-wrap bg-gray-50 rounded-lg p-3 border border-gray-100">
+                  <Paperclip className="h-3.5 w-3.5 text-gray-400" />
+                  <span className="text-xs text-gray-400 font-medium">Attachments:</span>
+                  {attachments.map(att => (
+                    <span key={att.id} className="text-xs bg-white border border-gray-200 rounded px-2 py-0.5 text-gray-600">{att.fileName} ({formatFileSize(att.fileSize)})</span>
+                  ))}
+                </div>
+              )}
               {previewContact && (
                 <div className="flex items-center gap-2 text-xs text-gray-400 bg-gray-50 rounded-lg p-3">
                   <Info className="h-3.5 w-3.5" />
@@ -1551,9 +1662,9 @@ export default function TemplateManager() {
                     <div className="w-20 h-1.5 bg-gray-600 rounded-full mx-auto" />
                   </div>
                 )}
-                <div className={previewMode === 'mobile' ? 'p-4 max-h-[500px] overflow-y-auto' : 'p-6'}>
+                <div className={previewMode === 'mobile' ? 'p-4 max-h-[500px] overflow-y-auto' : 'px-8 py-5'}>
                   <div dangerouslySetInnerHTML={{ __html: previewHtml }}
-                    className={`prose max-w-none text-gray-800 [&_a]:text-blue-600 [&_img]:max-w-full ${previewMode === 'mobile' ? 'prose-sm text-[13px]' : 'prose-sm'}`} />
+                    className={`max-w-none text-gray-800 text-sm leading-relaxed [&_a]:text-blue-600 [&_a]:underline [&_img]:max-w-full [&_img]:rounded [&_ul]:list-disc [&_ul]:pl-6 [&_ul]:my-1 [&_ol]:list-decimal [&_ol]:pl-6 [&_ol]:my-1 [&_li]:my-0.5 [&_p]:my-2 [&_h1]:text-xl [&_h1]:font-bold [&_h1]:my-3 [&_h2]:text-lg [&_h2]:font-bold [&_h2]:my-2 [&_h3]:text-base [&_h3]:font-semibold [&_h3]:my-2 [&_b]:font-bold [&_strong]:font-bold ${previewMode === 'mobile' ? 'text-[13px]' : ''}`} />
                 </div>
                 {previewMode === 'mobile' && (
                   <div className="bg-gray-800 text-center py-3">
