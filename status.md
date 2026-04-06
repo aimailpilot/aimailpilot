@@ -281,10 +281,17 @@ This file tracks features that are confirmed working in production.
 - Stores in `email_history` table with dedup via `externalId`, direction tracking (sent/received), thread grouping
 - AI lead classifier using Azure OpenAI: classifies contacts into 11 buckets (past_customer, hot_lead, warm_lead, almost_closed, interested_stalled, meeting_no_deal, went_silent, not_interested, no_response, referral_potential, converted)
 - Rule-based fallback when Azure OpenAI not configured (keyword/pattern matching on snippets)
-- Aggregates data from 3 sources: email_history (scanned), unified_inbox (campaign replies), contacts table (engagement stats)
-- Stores results in `lead_opportunities` table with confidence scores, AI reasoning, suggested actions
+- Aggregates data from 3 sources: email_history (scanned), unified_inbox (campaign replies), contacts table (enrichment only — no sent-only contacts)
+- **Received-only filtering**: Only contacts who replied or initiated contact are analyzed — sent-only outreach recipients are excluded
+- Stores results in `lead_opportunities` table with confidence scores, AI reasoning, suggested actions, `accountEmail` field
 - Opportunity status workflow: new → reviewed → actioned / dismissed
-- API endpoints: `GET /api/lead-intelligence/opportunities`, `GET /api/lead-intelligence/summary`, `POST /api/lead-intelligence/scan`, `POST /api/lead-intelligence/analyze`, `POST /api/lead-intelligence/run` (full pipeline)
+- **Email account selection**: Users can select/deselect which email accounts to scan and analyze (clickable chips UI)
+- **Account-wise filter**: Dropdown to filter displayed opportunities by receiving email account
+- **Pagination**: 25 items per page with navigation controls
+- **Member role filtering**: Members only see opportunities from their own email accounts
+- **Custom AI prompt**: Admin/owner can edit the classification prompt via built-in editor; default prompt shown when no custom prompt is set
+- **Account email display**: Each opportunity card shows which email account received the reply
+- API endpoints: `GET /api/lead-intelligence/opportunities`, `GET /api/lead-intelligence/summary`, `GET /api/lead-intelligence/sync-status`, `GET /api/lead-intelligence/debug`, `GET/POST /api/lead-intelligence/prompt`, `POST /api/lead-intelligence/scan`, `POST /api/lead-intelligence/analyze`, `POST /api/lead-intelligence/run` (full pipeline)
 - UI page with summary cards, bucket filter chips, search, expandable detail (AI reasoning + email samples + actions)
 - Available to all roles in sidebar: Insights > Lead Intelligence
 - **Do not touch**: `server/services/lead-intelligence-engine.ts`; `email_history` and `lead_opportunities` tables in `server/storage.ts`; lead intelligence routes in `server/routes.ts`; `client/src/pages/lead-opportunities.tsx`

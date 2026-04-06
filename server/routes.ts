@@ -10412,8 +10412,9 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   app.get('/api/lead-intelligence/prompt', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.user.organizationId;
+      const { DEFAULT_LEAD_PROMPT } = await import('./services/lead-intelligence-engine.js');
       const settings = await storage.getApiSettings(orgId);
-      res.json({ prompt: (settings as any).lead_intelligence_prompt || '', role: req.user.role });
+      res.json({ prompt: (settings as any).lead_intelligence_prompt || '', defaultPrompt: DEFAULT_LEAD_PROMPT, role: req.user.role });
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch prompt' });
     }

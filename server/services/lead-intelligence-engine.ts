@@ -476,6 +476,30 @@ const BUCKET_LABELS: Record<string, string> = {
 
 export { BUCKET_LABELS };
 
+export const DEFAULT_LEAD_PROMPT = `You are a B2B sales intelligence analyst. Classify each contact based on their email conversation history with our team.
+
+IMPORTANT CONTEXT:
+- "Sent to them" = our outreach emails (cold emails, follow-ups, proposals)
+- "Received from them" = they replied or initiated contact with us — this is the key signal
+- All contacts listed here have at least 1 inbound email from them
+- Focus on the CONTENT of subjects/snippets to determine intent and relationship stage
+- Auto-replies, bounces, out-of-office, and unsubscribe requests are NOT real engagement
+- Newsletter signups, marketing emails, and automated notifications are NOT leads
+
+BUCKETS (choose exactly ONE per contact):
+- past_customer: Clear evidence of completed business — invoices, orders, payments, delivery confirmations, "thank you for your business", contract references
+- hot_lead: Recent positive reply with buying signals — asked about pricing, requested demo/meeting, wants proposal, "let's discuss", "send me details"
+- almost_closed: Negotiation phase — pricing/proposal discussed, "let me think about it", "need approval from management", back-and-forth on terms
+- warm_lead: Positive but non-committal — polite interest, asked general questions, "sounds interesting", forwarded to colleague, but no concrete next step
+- interested_stalled: Initially showed interest (1-2 positive replies) then went quiet — no response to follow-ups for 2+ weeks
+- meeting_no_deal: Meeting/call clearly happened (calendar invite, "nice meeting you", "per our discussion") but no deal resulted
+- went_silent: Had active back-and-forth conversation (3+ exchanges) then abruptly stopped responding
+- not_interested: Explicitly declined — "not interested", "not the right time", "please remove me", "do not contact", negative sentiment
+- referral_potential: Very positive relationship, expressed satisfaction, may refer others — "happy with your service", "I'll recommend you"
+- converted: Deal clearly closed — active ongoing customer, regular orders, support emails, account management
+
+DO NOT classify as hot_lead or almost_closed unless there is CLEAR evidence of buying intent in the subjects/snippets. When in doubt between warm_lead and interested_stalled, prefer interested_stalled if the last email is older than 2 weeks.`;
+
 interface ContactConversationSummary {
   contactEmail: string;
   contactName: string;
@@ -722,37 +746,8 @@ Emails: ${c.totalEmails} total (${c.totalSent} sent to them, ${c.totalReceived} 
 Last email: ${c.lastEmailDate || 'unknown'}${subjectText}${snippetText}`;
     }).join('\n\n');
 
-    const defaultPromptInstructions = `You are a B2B sales intelligence analyst. Classify each contact based on their email conversation history with our team.
-
-IMPORTANT CONTEXT:
-- "Sent to them" = our outreach emails (cold emails, follow-ups, proposals)
-- "Received from them" = they replied or initiated contact with us — this is the key signal
-- All contacts listed here have at least 1 inbound email from them
-- Focus on the CONTENT of subjects/snippets to determine intent and relationship stage
-- Auto-replies, bounces, out-of-office, and unsubscribe requests are NOT real engagement
-- Newsletter signups, marketing emails, and automated notifications are NOT leads
-
-BUCKETS (choose exactly ONE per contact):
-- past_customer: Clear evidence of completed business — invoices, orders, payments, delivery confirmations, "thank you for your business", contract references
-- hot_lead: Recent positive reply with buying signals — asked about pricing, requested demo/meeting, wants proposal, "let's discuss", "send me details"
-- almost_closed: Negotiation phase — pricing/proposal discussed, "let me think about it", "need approval from management", back-and-forth on terms
-- warm_lead: Positive but non-committal — polite interest, asked general questions, "sounds interesting", forwarded to colleague, but no concrete next step
-- interested_stalled: Initially showed interest (1-2 positive replies) then went quiet — no response to follow-ups for 2+ weeks
-- meeting_no_deal: Meeting/call clearly happened (calendar invite, "nice meeting you", "per our discussion") but no deal resulted
-- went_silent: Had active back-and-forth conversation (3+ exchanges) then abruptly stopped responding
-- not_interested: Explicitly declined — "not interested", "not the right time", "please remove me", "do not contact", negative sentiment
-- referral_potential: Very positive relationship, expressed satisfaction, may refer others — "happy with your service", "I'll recommend you"
-- converted: Deal clearly closed — active ongoing customer, regular orders, support emails, account management
-
-DO NOT classify as hot_lead or almost_closed unless there is CLEAR evidence of buying intent in the subjects/snippets. When in doubt between warm_lead and interested_stalled, prefer interested_stalled if the last email is older than 2 weeks.
-
-CONTACTS TO CLASSIFY:
-${contactDescriptions}
-
-Respond with a JSON array. Each object must have: email, bucket, confidence (0-100), reasoning (1 sentence explaining WHY this bucket), action (1 specific suggested next step).
-[{"email": "...", "bucket": "...", "confidence": <0-100>, "reasoning": "...", "action": "..."}]
-
-Respond ONLY with the JSON array.`;
+    const contactSuffix = `\n\nCONTACTS TO CLASSIFY:\n${contactDescriptions}\n\nRespond with a JSON array. Each object must have: email, bucket, confidence (0-100), reasoning (1 sentence explaining WHY this bucket), action (1 specific suggested next step).\n[{"email": "...", "bucket": "...", "confidence": <0-100>, "reasoning": "...", "action": "..."}]\n\nRespond ONLY with the JSON array.`;
+    const defaultPromptInstructions = DEFAULT_LEAD_PROMPT + contactSuffix;
 
     // Use custom prompt if admin has set one, otherwise use default
     const prompt = customPrompt

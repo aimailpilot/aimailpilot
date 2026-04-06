@@ -100,6 +100,7 @@ export default function LeadOpportunities() {
   const [showPromptEditor, setShowPromptEditor] = useState(false);
   const [customPrompt, setCustomPrompt] = useState('');
   const [savedPrompt, setSavedPrompt] = useState('');
+  const [defaultPrompt, setDefaultPrompt] = useState('');
   const [savingPrompt, setSavingPrompt] = useState(false);
   const [monthsBack, setMonthsBack] = useState('6');
   const [emailAccounts, setEmailAccounts] = useState<EmailAccount[]>([]);
@@ -138,6 +139,7 @@ export default function LeadOpportunities() {
             const data = await promptRes.json();
             setCustomPrompt(data.prompt || '');
             setSavedPrompt(data.prompt || '');
+            if (data.defaultPrompt) setDefaultPrompt(data.defaultPrompt);
           }
         } catch (e) { /* ignore */ }
       }
@@ -738,10 +740,14 @@ export default function LeadOpportunities() {
                       The contact data is automatically appended. Use bucket names: past_customer, hot_lead, warm_lead, almost_closed,
                       interested_stalled, meeting_no_deal, went_silent, not_interested, referral_potential, converted.
                     </p>
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${customPrompt ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-600'}`}>
+                        {customPrompt ? 'Custom Prompt' : 'Default Prompt (edit to customize)'}
+                      </span>
+                    </div>
                     <textarea
-                      value={customPrompt}
+                      value={customPrompt || defaultPrompt}
                       onChange={e => setCustomPrompt(e.target.value)}
-                      placeholder="Leave empty for default prompt. Example: You are a B2B sales analyst for an education technology company. Classify contacts based on..."
                       className="w-full h-48 p-3 text-xs border rounded-lg bg-gray-50 font-mono resize-y focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400 outline-none"
                     />
                     <div className="flex items-center gap-2">
