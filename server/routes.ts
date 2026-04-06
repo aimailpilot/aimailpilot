@@ -10279,6 +10279,15 @@ Generate an appropriate reply to the LATEST email above, considering the full co
 
   // ========== LEAD INTELLIGENCE ==========
 
+  // Helper: get member's own account IDs (for filtering)
+  const getMemberAccountIds = async (req: any): Promise<string[] | null> => {
+    const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+    if (isAdmin) return null; // null means no filter (see all)
+    const allAccounts = await storage.getEmailAccounts(req.user.organizationId);
+    const memberAccounts = allAccounts.filter((a: any) => a.userId === req.user.id);
+    return memberAccounts.map((a: any) => String(a.id));
+  };
+
   // Get opportunities (AI-classified leads)
   app.get('/api/lead-intelligence/opportunities', requireAuth, async (req: any, res) => {
     try {
@@ -10286,7 +10295,12 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       const bucket = req.query.bucket as string | undefined;
       const status = req.query.status as string | undefined;
       const limit = parseInt(req.query.limit as string) || undefined;
-      const opportunities = await storage.getLeadOpportunities(orgId, { bucket, status, limit });
+      let opportunities = await storage.getLeadOpportunities(orgId, { bucket, status, limit });
+      // Member filtering: only show opportunities from their accounts
+      const memberIds = await getMemberAccountIds(req);
+      if (memberIds) {
+        opportunities = opportunities.filter((o: any) => memberIds.includes(String(o.emailAccountId)));
+      }
       res.json(opportunities);
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch opportunities' });
@@ -10297,7 +10311,24 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   app.get('/api/lead-intelligence/summary', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.user.organizationId;
-      const summary = await storage.getLeadOpportunitySummary(orgId);
+      let summary = await storage.getLeadOpportunitySummary(orgId);
+      // Member filtering: recompute summary from their opportunities only
+      const memberIds = await getMemberAccountIds(req);
+      if (memberIds) {
+        const allOpps = await storage.getLeadOpportunities(orgId, {});
+        const memberOpps = allOpps.filter((o: any) => memberIds.includes(String(o.emailAccountId)));
+        const bucketMap: Record<string, any> = {};
+        for (const o of memberOpps as any[]) {
+          if (!bucketMap[o.bucket]) bucketMap[o.bucket] = { bucket: o.bucket, count: 0, avgConfidence: 0, newCount: 0, reviewedCount: 0, actionedCount: 0, dismissedCount: 0, totalConf: 0 };
+          bucketMap[o.bucket].count++;
+          bucketMap[o.bucket].totalConf += (o.confidence || 0);
+          if (o.status === 'new') bucketMap[o.bucket].newCount++;
+          if (o.status === 'reviewed') bucketMap[o.bucket].reviewedCount++;
+          if (o.status === 'actioned') bucketMap[o.bucket].actionedCount++;
+          if (o.status === 'dismissed') bucketMap[o.bucket].dismissedCount++;
+        }
+        summary = Object.values(bucketMap).map((b: any) => ({ ...b, avgConfidence: b.count > 0 ? Math.round(b.totalConf / b.count) : 0 }));
+      }
       const bucketLabels = BUCKET_LABELS;
       res.json({ summary, bucketLabels });
     } catch (error) {
@@ -10347,8 +10378,13 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   app.get('/api/lead-intelligence/sync-status', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.user.organizationId;
-      const syncStatus = await storage.getEmailHistorySyncStatus(orgId);
+      let syncStatus = await storage.getEmailHistorySyncStatus(orgId);
       const stats = await storage.getEmailHistoryStats(orgId);
+      // Member filtering: only show their accounts' sync status
+      const memberIds = await getMemberAccountIds(req);
+      if (memberIds) {
+        syncStatus = (syncStatus as any[]).filter((s: any) => memberIds.includes(String(s.emailAccountId)));
+      }
       res.json({ syncStatus, stats });
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch sync status' });

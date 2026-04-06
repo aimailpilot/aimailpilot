@@ -16,6 +16,7 @@ interface Opportunity {
   id: string;
   organizationId: string;
   emailAccountId: string | null;
+  accountEmail: string | null;
   contactEmail: string;
   contactName: string | null;
   company: string | null;
@@ -89,6 +90,9 @@ export default function LeadOpportunities() {
   const [searchTerm, setSearchTerm] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<any>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const PAGE_SIZE = 25;
+  const [filterAccountEmail, setFilterAccountEmail] = useState<string>('');
   const [monthsBack, setMonthsBack] = useState('6');
   const [emailAccounts, setEmailAccounts] = useState<EmailAccount[]>([]);
   const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
@@ -215,6 +219,7 @@ export default function LeadOpportunities() {
   const filtered = opportunities
     .filter(o => {
       if (selectedBucket && o.bucket !== selectedBucket) return false;
+      if (filterAccountEmail && (o.accountEmail || '') !== filterAccountEmail) return false;
       if (searchTerm) {
         const term = searchTerm.toLowerCase();
         return (
@@ -231,6 +236,13 @@ export default function LeadOpportunities() {
       if (pa !== pb) return pa - pb;
       return b.confidence - a.confidence;
     });
+
+  // Pagination
+  const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
+  const paginatedOpps = filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+
+  // Reset page when filters change
+  useEffect(() => { setCurrentPage(1); }, [selectedBucket, searchTerm, filterAccountEmail]);
 
   // Top-level counts for summary cards
   const hotCount = opportunities.filter(o => o.bucket === 'hot_lead' || o.bucket === 'almost_closed').length;
@@ -458,6 +470,19 @@ export default function LeadOpportunities() {
                   );
                 })}
             </div>
+            {/* Account filter dropdown */}
+            {emailAccounts.length > 1 && (
+              <select
+                value={filterAccountEmail}
+                onChange={e => setFilterAccountEmail(e.target.value)}
+                className="h-8 text-xs border border-gray-200 rounded-md px-2 bg-white text-gray-700 min-w-[160px]"
+              >
+                <option value="">All Accounts</option>
+                {emailAccounts.map(acc => (
+                  <option key={acc.id} value={acc.email}>{acc.email}</option>
+                ))}
+              </select>
+            )}
             <div className="relative w-64">
               <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-gray-400" />
               <Input
@@ -492,9 +517,9 @@ export default function LeadOpportunities() {
         )}
 
         {/* Opportunity List */}
-        {filtered.length > 0 && (
+        {filtered.length > 0 && (<>
           <div className="space-y-2">
-            {filtered.map(opp => {
+            {paginatedOpps.map(opp => {
               const cfg = BUCKET_CONFIG[opp.bucket] || BUCKET_CONFIG.unknown;
               const Icon = cfg.icon;
               const isExpanded = expandedId === opp.id;
@@ -536,6 +561,11 @@ export default function LeadOpportunities() {
                         </div>
                         <div className="flex items-center gap-3 text-xs text-gray-500">
                           <span>{opp.contactEmail}</span>
+                          {opp.accountEmail && (
+                            <span className="text-indigo-500 flex items-center gap-0.5">
+                              <ArrowRight className="h-3 w-3" /> {opp.accountEmail}
+                            </span>
+                          )}
                           <span>{opp.totalEmails} emails ({opp.totalSent} sent, {opp.totalReceived} received)</span>
                           {opp.lastEmailDate && (
                             <span className="flex items-center gap-0.5">
@@ -634,7 +664,38 @@ export default function LeadOpportunities() {
               );
             })}
           </div>
-        )}
+
+          {/* Pagination */}
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between mt-4 pt-3 border-t">
+              <span className="text-xs text-gray-500">
+                Showing {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, filtered.length)} of {filtered.length}
+              </span>
+              <div className="flex items-center gap-1">
+                <Button variant="outline" size="sm" className="h-7 text-xs" disabled={currentPage <= 1}
+                  onClick={() => setCurrentPage(1)}>First</Button>
+                <Button variant="outline" size="sm" className="h-7 text-xs" disabled={currentPage <= 1}
+                  onClick={() => setCurrentPage(p => p - 1)}>Prev</Button>
+                {Array.from({ length: Math.min(totalPages, 5) }, (_, i) => {
+                  let page: number;
+                  if (totalPages <= 5) { page = i + 1; }
+                  else if (currentPage <= 3) { page = i + 1; }
+                  else if (currentPage >= totalPages - 2) { page = totalPages - 4 + i; }
+                  else { page = currentPage - 2 + i; }
+                  return (
+                    <Button key={page} variant={page === currentPage ? 'default' : 'outline'} size="sm"
+                      className={`h-7 w-7 text-xs ${page === currentPage ? 'bg-indigo-600' : ''}`}
+                      onClick={() => setCurrentPage(page)}>{page}</Button>
+                  );
+                })}
+                <Button variant="outline" size="sm" className="h-7 text-xs" disabled={currentPage >= totalPages}
+                  onClick={() => setCurrentPage(p => p + 1)}>Next</Button>
+                <Button variant="outline" size="sm" className="h-7 text-xs" disabled={currentPage >= totalPages}
+                  onClick={() => setCurrentPage(totalPages)}>Last</Button>
+              </div>
+            </div>
+          )}
+        </>)}
 
         {/* Info Section */}
         <div className="mt-6">

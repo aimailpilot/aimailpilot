@@ -8,6 +8,8 @@ export interface User {
   provider: 'google' | 'microsoft';
   accessToken: string;
   refreshToken?: string;
+  role?: string;
+  organizationId?: string;
 }
 
 export function useAuth() {

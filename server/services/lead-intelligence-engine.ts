@@ -479,6 +479,8 @@ export { BUCKET_LABELS };
 interface ContactConversationSummary {
   contactEmail: string;
   contactName: string;
+  accountEmail: string;
+  emailAccountId: string;
   totalEmails: number;
   totalSent: number;
   totalReceived: number;
@@ -519,6 +521,8 @@ async function buildContactSummaries(orgId: string, emailAccountIds?: string[]):
         SELECT
           LOWER(fromEmail) as contactEmail,
           MAX(fromName) as contactName,
+          MAX(accountEmail) as accountEmail,
+          MAX(emailAccountId) as emailAccountId,
           COUNT(*) as totalReceived,
           MAX(receivedAt) as lastEmailDate
         FROM email_history
@@ -571,6 +575,8 @@ async function buildContactSummaries(orgId: string, emailAccountIds?: string[]):
         summaries.push({
           contactEmail: email,
           contactName: row.contactName || '',
+          accountEmail: row.accountEmail || '',
+          emailAccountId: row.emailAccountId || '',
           totalEmails: row.totalReceived + totalSent,
           totalSent,
           totalReceived: row.totalReceived,
@@ -622,6 +628,8 @@ async function buildContactSummaries(orgId: string, emailAccountIds?: string[]):
         summaries.push({
           contactEmail: row.contactEmail,
           contactName: row.contactName || '',
+          accountEmail: '',
+          emailAccountId: '',
           totalEmails: row.totalReplies,
           totalSent: 0,
           totalReceived: row.totalReplies,
@@ -713,28 +721,37 @@ Emails: ${c.totalEmails} total (${c.totalSent} sent to them, ${c.totalReceived} 
 Last email: ${c.lastEmailDate || 'unknown'}${subjectText}${snippetText}`;
     }).join('\n\n');
 
-    const prompt = `You are a sales intelligence analyst. Classify each contact into exactly ONE bucket based on their email history.
+    const prompt = `You are a B2B sales intelligence analyst. Classify each contact based on their email conversation history with our team.
 
-BUCKETS:
-- past_customer: Evidence of completed business (invoices, orders, payments, "thank you for your business")
-- hot_lead: Recently replied positively, asked about pricing/demo/meeting, strong buying intent
-- warm_lead: Some engagement (opened, clicked, brief replies), mild interest
-- interested_stalled: Showed interest initially but conversation stopped (replied 1-2 times then nothing)
-- almost_closed: Pricing/proposal was discussed, "let me think about it", negotiation phase
-- meeting_no_deal: Meeting or call happened (calendar refs, "nice meeting you") but no deal closed
-- went_silent: Was actively conversing (3+ exchanges) then suddenly stopped responding
-- not_interested: Explicitly declined, "not interested", "please remove me", negative sentiment
-- no_response: Emails sent but zero replies or engagement
-- referral_potential: Very positive relationship, happy customer who might refer others
-- converted: Deal clearly closed, ongoing customer relationship
+IMPORTANT CONTEXT:
+- "Sent to them" = our outreach emails (cold emails, follow-ups, proposals)
+- "Received from them" = they replied or initiated contact with us — this is the key signal
+- All contacts listed here have at least 1 inbound email from them
+- Focus on the CONTENT of subjects/snippets to determine intent and relationship stage
+- Auto-replies, bounces, out-of-office, and unsubscribe requests are NOT real engagement
+- Newsletter signups, marketing emails, and automated notifications are NOT leads
+
+BUCKETS (choose exactly ONE per contact):
+- past_customer: Clear evidence of completed business — invoices, orders, payments, delivery confirmations, "thank you for your business", contract references
+- hot_lead: Recent positive reply with buying signals — asked about pricing, requested demo/meeting, wants proposal, "let's discuss", "send me details"
+- almost_closed: Negotiation phase — pricing/proposal discussed, "let me think about it", "need approval from management", back-and-forth on terms
+- warm_lead: Positive but non-committal — polite interest, asked general questions, "sounds interesting", forwarded to colleague, but no concrete next step
+- interested_stalled: Initially showed interest (1-2 positive replies) then went quiet — no response to follow-ups for 2+ weeks
+- meeting_no_deal: Meeting/call clearly happened (calendar invite, "nice meeting you", "per our discussion") but no deal resulted
+- went_silent: Had active back-and-forth conversation (3+ exchanges) then abruptly stopped responding
+- not_interested: Explicitly declined — "not interested", "not the right time", "please remove me", "do not contact", negative sentiment
+- referral_potential: Very positive relationship, expressed satisfaction, may refer others — "happy with your service", "I'll recommend you"
+- converted: Deal clearly closed — active ongoing customer, regular orders, support emails, account management
+
+DO NOT classify as hot_lead or almost_closed unless there is CLEAR evidence of buying intent in the subjects/snippets. When in doubt between warm_lead and interested_stalled, prefer interested_stalled if the last email is older than 2 weeks.
 
 CONTACTS TO CLASSIFY:
 ${contactDescriptions}
 
-For each contact, respond with a JSON array of objects:
-[{"email": "...", "bucket": "...", "confidence": <0-100>, "reasoning": "<1 sentence>", "action": "<suggested next step>"}]
+Respond with a JSON array. Each object must have: email, bucket, confidence (0-100), reasoning (1 sentence explaining WHY this bucket), action (1 specific suggested next step).
+[{"email": "...", "bucket": "...", "confidence": <0-100>, "reasoning": "...", "action": "..."}]
 
-Respond ONLY with the JSON array, no other text.`;
+Respond ONLY with the JSON array.`;
 
     try {
       const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${deploymentName}/chat/completions?api-version=${apiVersion}`;
@@ -743,7 +760,7 @@ Respond ONLY with the JSON array, no other text.`;
         headers: { 'Content-Type': 'application/json', 'api-key': apiKey },
         body: JSON.stringify({
           messages: [
-            { role: 'system', content: 'You are a sales intelligence analyst. Classify leads accurately based on email conversation history. Respond only with valid JSON arrays.' },
+            { role: 'system', content: 'You are a B2B sales intelligence analyst. Classify leads accurately based on email conversation history. Be conservative — only assign high-confidence buckets (hot_lead, almost_closed, past_customer) when there is clear evidence in the email content. When snippets are vague or generic, use lower confidence scores. Respond only with valid JSON arrays.' },
             { role: 'user', content: prompt }
           ],
           temperature: 0.1,
@@ -805,15 +822,22 @@ function classifyByRules(contact: ContactConversationSummary): ClassificationRes
   const snippetText = snippets.join(' ').toLowerCase();
 
   // Check snippets for signals
-  const positiveSignals = ['interested', 'pricing', 'demo', 'meeting', 'schedule', 'call', 'proposal', 'budget', 'timeline', 'purchase'];
-  const negativeSignals = ['not interested', 'unsubscribe', 'remove me', 'stop', 'no thanks', 'not right now'];
-  const customerSignals = ['invoice', 'payment', 'order', 'receipt', 'thank you for your business', 'renewal'];
+  const positiveSignals = ['interested', 'pricing', 'demo', 'meeting', 'schedule', 'call', 'proposal', 'budget', 'timeline', 'purchase', 'let\'s discuss', 'send me details', 'would like to know'];
+  const negativeSignals = ['not interested', 'unsubscribe', 'remove me', 'stop', 'no thanks', 'not right now', 'do not contact', 'opt out', 'wrong person'];
+  const customerSignals = ['invoice', 'payment', 'order', 'receipt', 'thank you for your business', 'renewal', 'contract', 'delivery', 'shipped'];
+  const autoReplySignals = ['out of office', 'auto-reply', 'automatic reply', 'vacation', 'i am currently out', 'will be out of office', 'mailer-daemon', 'postmaster', 'undeliverable', 'delivery failed'];
 
   const hasPositive = positiveSignals.some(s => snippetText.includes(s));
   const hasNegative = negativeSignals.some(s => snippetText.includes(s));
   const hasCustomer = customerSignals.some(s => snippetText.includes(s));
+  const hasAutoReply = autoReplySignals.some(s => snippetText.includes(s));
 
   const daysSinceLastEmail = lastEmailDate ? Math.floor((Date.now() - new Date(lastEmailDate).getTime()) / (1000 * 60 * 60 * 24)) : 999;
+
+  // Skip auto-replies/bounces — they're not real engagement
+  if (hasAutoReply && totalReceived <= 1 && !hasPositive && !hasCustomer) {
+    return { contactEmail, bucket: 'no_response', confidence: 80, reasoning: 'Only received auto-reply or bounce notification — no real engagement', suggestedAction: 'Retry with different email or channel' };
+  }
 
   if (hasCustomer) {
     return { contactEmail, bucket: 'past_customer', confidence: 70, reasoning: 'Email content suggests previous business relationship', suggestedAction: 'Re-engage for upsell or referral' };
@@ -903,6 +927,8 @@ export async function analyzeOrgLeads(orgId: string, emailAccountIds?: string[])
 
       await storage.addLeadOpportunity({
         organizationId: orgId,
+        emailAccountId: summary.emailAccountId || undefined,
+        accountEmail: summary.accountEmail || undefined,
         contactEmail: cls.contactEmail,
         contactName: summary.contactName,
         company,

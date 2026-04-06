@@ -962,6 +962,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_lead_opps_email ON lead_opportunities(contactEmail);
   CREATE INDEX IF NOT EXISTS idx_lead_opps_status ON lead_opportunities(organizationId, status);
 `);
+try { db.exec(`ALTER TABLE lead_opportunities ADD COLUMN accountEmail TEXT DEFAULT ''`); } catch (e) {}
 
 // Contact Activity Timeline
 db.exec(`
@@ -3128,11 +3129,11 @@ export class DatabaseStorage {
   }
 
   // Lead Opportunities
-  async addLeadOpportunity(data: { organizationId: string; emailAccountId?: string; contactEmail: string; contactName?: string; company?: string; bucket: string; confidence: number; aiReasoning?: string; suggestedAction?: string; lastEmailDate?: string; totalEmails?: number; totalSent?: number; totalReceived?: number; sampleSubjects?: string[]; sampleSnippets?: string[] }) {
+  async addLeadOpportunity(data: { organizationId: string; emailAccountId?: string; accountEmail?: string; contactEmail: string; contactName?: string; company?: string; bucket: string; confidence: number; aiReasoning?: string; suggestedAction?: string; lastEmailDate?: string; totalEmails?: number; totalSent?: number; totalReceived?: number; sampleSubjects?: string[]; sampleSnippets?: string[] }) {
     const id = genId();
     const ts = now();
-    db.prepare(`INSERT INTO lead_opportunities (id, organizationId, emailAccountId, contactEmail, contactName, company, bucket, confidence, aiReasoning, suggestedAction, lastEmailDate, totalEmails, totalSent, totalReceived, sampleSubjects, sampleSnippets, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)`).run(
-      id, data.organizationId, data.emailAccountId || null, data.contactEmail, data.contactName || null,
+    db.prepare(`INSERT INTO lead_opportunities (id, organizationId, emailAccountId, accountEmail, contactEmail, contactName, company, bucket, confidence, aiReasoning, suggestedAction, lastEmailDate, totalEmails, totalSent, totalReceived, sampleSubjects, sampleSnippets, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)`).run(
+      id, data.organizationId, data.emailAccountId || null, data.accountEmail || null, data.contactEmail, data.contactName || null,
       data.company || null, data.bucket, data.confidence, data.aiReasoning || null, data.suggestedAction || null,
       data.lastEmailDate || null, data.totalEmails || 0, data.totalSent || 0, data.totalReceived || 0,
       JSON.stringify(data.sampleSubjects || []), JSON.stringify(data.sampleSnippets || []), ts, ts
