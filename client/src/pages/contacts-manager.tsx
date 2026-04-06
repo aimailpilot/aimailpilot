@@ -219,6 +219,13 @@ export default function ContactsManager() {
   const [gsImportResult, setGsImportResult] = useState<any>(null);
   const [gsToExistingList, setGsToExistingList] = useState<string>('');
 
+  // AI Context Draft state
+  const [showDraftDialog, setShowDraftDialog] = useState(false);
+  const [draftLoading, setDraftLoading] = useState(false);
+  const [draftResult, setDraftResult] = useState<{ draft: string; contextUsed?: any } | null>(null);
+  const [draftTone, setDraftTone] = useState('professional');
+  const [draftInstructions, setDraftInstructions] = useState('');
+
   // Quick Send Email state
   const [showSendEmailDialog, setShowSendEmailDialog] = useState(false);
   const [sendEmailAccountId, setSendEmailAccountId] = useState('');
@@ -361,6 +368,35 @@ export default function ContactsManager() {
       }
     } catch (e) { console.error('Failed to fetch hot leads:', e); }
     setHotLeadsLoading(false);
+  };
+
+  const handleAiDraft = async () => {
+    if (!detailContact) return;
+    setDraftLoading(true);
+    setDraftResult(null);
+    try {
+      const res = await fetch('/api/context/draft-reply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          contactId: detailContact.id,
+          contactEmail: detailContact.email,
+          tone: draftTone,
+          customInstructions: draftInstructions || undefined,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setDraftResult(data);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        setDraftResult({ draft: `Error: ${err.message || 'Failed to generate draft'}` });
+      }
+    } catch (e: any) {
+      setDraftResult({ draft: `Error: ${e.message}` });
+    }
+    setDraftLoading(false);
   };
 
   const fetchHotLeadsCounts = async () => {
@@ -2299,12 +2335,110 @@ export default function ContactsManager() {
               </div>
             </div>
           )}
-          <DialogFooter>
+          <DialogFooter className="gap-2 sm:gap-0">
             <Button variant="outline" size="sm" onClick={() => { setShowContactDetail(false); if (detailContact) openEdit(detailContact); }}>
               <Edit className="h-3.5 w-3.5 mr-1.5" /> Edit
             </Button>
+            <Button size="sm" className="bg-purple-600 hover:bg-purple-700 text-white" onClick={() => { setDraftResult(null); setDraftInstructions(''); setShowDraftDialog(true); }}>
+              <Sparkles className="h-3.5 w-3.5 mr-1.5" /> AI Draft Email
+            </Button>
             <Button variant="outline" size="sm" onClick={() => setShowContactDetail(false)}>Close</Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* AI Context-Aware Draft Dialog */}
+      <Dialog open={showDraftDialog} onOpenChange={setShowDraftDialog}>
+        <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Sparkles className="h-5 w-5 text-purple-500" /> AI Draft Email
+            </DialogTitle>
+            <DialogDescription>
+              Generate a context-aware email using your knowledge base, email history, and lead intelligence data
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-2">
+            {/* Tone selector */}
+            <div>
+              <Label className="text-xs font-medium">Tone</Label>
+              <div className="flex gap-1.5 mt-1.5">
+                {['professional', 'friendly', 'concise', 'formal', 'persuasive'].map(t => (
+                  <button key={t} onClick={() => setDraftTone(t)}
+                    className={`text-xs px-3 py-1.5 rounded-lg capitalize transition ${
+                      draftTone === t ? 'bg-purple-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                    }`}>{t}</button>
+                ))}
+              </div>
+            </div>
+
+            {/* Custom instructions */}
+            <div>
+              <Label className="text-xs font-medium">Custom Instructions (optional)</Label>
+              <Textarea
+                value={draftInstructions}
+                onChange={e => setDraftInstructions(e.target.value)}
+                placeholder="e.g., Mention our recent award, propose a meeting next week, focus on their need for email automation..."
+                className="mt-1 min-h-[60px] text-sm"
+              />
+            </div>
+
+            {/* Generate button */}
+            <Button onClick={handleAiDraft} disabled={draftLoading} className="w-full bg-purple-600 hover:bg-purple-700 text-white">
+              {draftLoading ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : <Sparkles className="h-4 w-4 mr-1.5" />}
+              {draftLoading ? 'Generating with context...' : 'Generate Draft'}
+            </Button>
+
+            {/* Result */}
+            {draftResult && (
+              <div className="space-y-3">
+                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                  <pre className="text-sm text-gray-800 whitespace-pre-wrap font-sans">{draftResult.draft}</pre>
+                </div>
+
+                {/* Context used indicator */}
+                {draftResult.contextUsed && (
+                  <div className="flex flex-wrap items-center gap-2 text-[10px] text-gray-400">
+                    <span className="font-semibold text-gray-500">Context used:</span>
+                    {draftResult.contextUsed.docsCount > 0 && (
+                      <span className="px-2 py-0.5 bg-blue-50 text-blue-600 rounded-full">
+                        {draftResult.contextUsed.docsCount} docs
+                        {draftResult.contextUsed.docNames?.length > 0 && ` (${draftResult.contextUsed.docNames.slice(0, 2).join(', ')})`}
+                      </span>
+                    )}
+                    {draftResult.contextUsed.emailHistoryCount > 0 && (
+                      <span className="px-2 py-0.5 bg-green-50 text-green-600 rounded-full">
+                        {draftResult.contextUsed.emailHistoryCount} past emails
+                      </span>
+                    )}
+                    {draftResult.contextUsed.leadBucket && (
+                      <span className="px-2 py-0.5 bg-purple-50 text-purple-600 rounded-full">
+                        AI: {draftResult.contextUsed.leadBucket}
+                      </span>
+                    )}
+                    {draftResult.contextUsed.activitiesCount > 0 && (
+                      <span className="px-2 py-0.5 bg-amber-50 text-amber-600 rounded-full">
+                        {draftResult.contextUsed.activitiesCount} activities
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {/* Copy button */}
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={() => {
+                    navigator.clipboard.writeText(draftResult.draft);
+                  }}>
+                    <Copy className="h-3.5 w-3.5 mr-1.5" /> Copy to Clipboard
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={handleAiDraft} disabled={draftLoading}>
+                    <RefreshCw className="h-3.5 w-3.5 mr-1.5" /> Regenerate
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
         </DialogContent>
       </Dialog>
 

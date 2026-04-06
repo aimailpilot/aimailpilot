@@ -1000,6 +1000,40 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_notifications_org ON notifications(organizationId, createdAt);
 `);
 
+// ========== CONTEXT ENGINE — Organization Knowledge Base ==========
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS org_documents (
+      id TEXT PRIMARY KEY,
+      organizationId TEXT NOT NULL,
+      name TEXT NOT NULL,
+      docType TEXT NOT NULL DEFAULT 'general',
+      source TEXT NOT NULL DEFAULT 'upload',
+      content TEXT DEFAULT '',
+      summary TEXT DEFAULT '',
+      tags TEXT DEFAULT '[]',
+      metadata TEXT DEFAULT '{}',
+      fileSize INTEGER DEFAULT 0,
+      mimeType TEXT DEFAULT '',
+      uploadedBy TEXT,
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_org_docs_org ON org_documents(organizationId, docType);
+    CREATE INDEX IF NOT EXISTS idx_org_docs_tags ON org_documents(organizationId, tags);
+  `);
+} catch (e) { /* table already exists */ }
+
+// FTS5 full-text search index for org_documents (zero dependencies, built into better-sqlite3)
+try {
+  db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS org_documents_fts USING fts5(
+      name, content, summary, tags,
+      content='org_documents', content_rowid='rowid'
+    );
+  `);
+} catch (e) { /* FTS5 already exists or not supported */ }
+
 // Performance indexes for slow queries
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_status ON contacts(organizationId, status)`); } catch (e) {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_org_created ON contacts(organizationId, createdAt)`); } catch (e) {}
@@ -3395,6 +3429,107 @@ export class DatabaseStorage {
   /** Check if running on Azure */
   isAzureEnvironment(): boolean {
     return isAzure;
+  }
+
+  // ========== CONTEXT ENGINE — Org Documents ==========
+
+  async createOrgDocument(doc: { id: string; organizationId: string; name: string; docType: string; source: string; content: string; summary?: string; tags?: string[]; metadata?: any; fileSize?: number; mimeType?: string; uploadedBy?: string }) {
+    const ts = now();
+    db.prepare(`INSERT INTO org_documents (id, organizationId, name, docType, source, content, summary, tags, metadata, fileSize, mimeType, uploadedBy, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      doc.id, doc.organizationId, doc.name, doc.docType, doc.source, doc.content, doc.summary || '',
+      JSON.stringify(doc.tags || []), JSON.stringify(doc.metadata || {}), doc.fileSize || 0, doc.mimeType || '', doc.uploadedBy || '', ts, ts
+    );
+    // Update FTS index
+    try {
+      db.prepare(`INSERT INTO org_documents_fts(rowid, name, content, summary, tags)
+        SELECT rowid, name, content, summary, tags FROM org_documents WHERE id = ?`).run(doc.id);
+    } catch (e) { /* FTS not available */ }
+    return this.getOrgDocument(doc.id);
+  }
+
+  async getOrgDocument(id: string) {
+    return db.prepare('SELECT * FROM org_documents WHERE id = ?').get(id);
+  }
+
+  async getOrgDocuments(orgId: string, filters?: { docType?: string; source?: string; search?: string }, limit = 50, offset = 0) {
+    let sql = 'SELECT * FROM org_documents WHERE organizationId = ?';
+    const params: any[] = [orgId];
+    if (filters?.docType) { sql += ' AND docType = ?'; params.push(filters.docType); }
+    if (filters?.source) { sql += ' AND source = ?'; params.push(filters.source); }
+    if (filters?.search) {
+      // Try FTS5 first, fall back to LIKE
+      try {
+        const ftsResults = db.prepare(`SELECT rowid FROM org_documents_fts WHERE org_documents_fts MATCH ? ORDER BY rank LIMIT ?`).all(filters.search, limit);
+        if (ftsResults.length > 0) {
+          const rowids = (ftsResults as any[]).map(r => r.rowid);
+          const ph = rowids.map(() => '?').join(',');
+          return db.prepare(`SELECT * FROM org_documents WHERE organizationId = ? AND rowid IN (${ph}) ORDER BY updatedAt DESC`).all(orgId, ...rowids);
+        }
+      } catch { /* FTS not available, fall through to LIKE */ }
+      sql += ' AND (LOWER(name) LIKE ? OR LOWER(content) LIKE ? OR LOWER(tags) LIKE ?)';
+      const q = `%${filters.search.toLowerCase()}%`;
+      params.push(q, q, q);
+    }
+    sql += ' ORDER BY updatedAt DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+    return db.prepare(sql).all(...params);
+  }
+
+  async getOrgDocumentsCount(orgId: string, filters?: { docType?: string; source?: string }) {
+    let sql = 'SELECT COUNT(*) as cnt FROM org_documents WHERE organizationId = ?';
+    const params: any[] = [orgId];
+    if (filters?.docType) { sql += ' AND docType = ?'; params.push(filters.docType); }
+    if (filters?.source) { sql += ' AND source = ?'; params.push(filters.source); }
+    return (db.prepare(sql).get(...params) as any).cnt;
+  }
+
+  async updateOrgDocument(id: string, updates: Partial<{ name: string; docType: string; content: string; summary: string; tags: string[]; metadata: any }>) {
+    const sets: string[] = [];
+    const params: any[] = [];
+    if (updates.name !== undefined) { sets.push('name = ?'); params.push(updates.name); }
+    if (updates.docType !== undefined) { sets.push('docType = ?'); params.push(updates.docType); }
+    if (updates.content !== undefined) { sets.push('content = ?'); params.push(updates.content); }
+    if (updates.summary !== undefined) { sets.push('summary = ?'); params.push(updates.summary); }
+    if (updates.tags !== undefined) { sets.push('tags = ?'); params.push(JSON.stringify(updates.tags)); }
+    if (updates.metadata !== undefined) { sets.push('metadata = ?'); params.push(JSON.stringify(updates.metadata)); }
+    sets.push('updatedAt = ?'); params.push(now());
+    params.push(id);
+    db.prepare(`UPDATE org_documents SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+    // Rebuild FTS for this doc
+    try {
+      const doc = db.prepare('SELECT rowid, * FROM org_documents WHERE id = ?').get(id) as any;
+      if (doc) {
+        db.prepare(`DELETE FROM org_documents_fts WHERE rowid = ?`).run(doc.rowid);
+        db.prepare(`INSERT INTO org_documents_fts(rowid, name, content, summary, tags) VALUES (?, ?, ?, ?, ?)`).run(doc.rowid, doc.name, doc.content, doc.summary, doc.tags);
+      }
+    } catch { /* FTS not available */ }
+    return this.getOrgDocument(id);
+  }
+
+  async deleteOrgDocument(id: string) {
+    try {
+      const doc = db.prepare('SELECT rowid FROM org_documents WHERE id = ?').get(id) as any;
+      if (doc) db.prepare('DELETE FROM org_documents_fts WHERE rowid = ?').run(doc.rowid);
+    } catch { /* FTS not available */ }
+    db.prepare('DELETE FROM org_documents WHERE id = ?').run(id);
+  }
+
+  async searchOrgDocuments(orgId: string, query: string, limit = 10): Promise<any[]> {
+    // Try FTS5 first (best relevance)
+    try {
+      const results = db.prepare(`
+        SELECT od.*, rank FROM org_documents_fts fts
+        JOIN org_documents od ON od.rowid = fts.rowid
+        WHERE org_documents_fts MATCH ? AND od.organizationId = ?
+        ORDER BY rank
+        LIMIT ?
+      `).all(query, orgId, limit);
+      if (results.length > 0) return results as any[];
+    } catch { /* FTS not available */ }
+    // Fallback: LIKE search
+    const q = `%${query.toLowerCase()}%`;
+    return db.prepare(`SELECT * FROM org_documents WHERE organizationId = ? AND (LOWER(name) LIKE ? OR LOWER(content) LIKE ? OR LOWER(summary) LIKE ? OR LOWER(tags) LIKE ?) ORDER BY updatedAt DESC LIMIT ?`).all(orgId, q, q, q, q, limit) as any[];
   }
 
   // ===== GUARDRAIL: resetCorruptDatabase has been REMOVED =====

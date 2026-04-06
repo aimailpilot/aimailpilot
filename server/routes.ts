@@ -10428,6 +10428,321 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     }
   });
 
+  // ========== CONTEXT ENGINE — Organization Knowledge Base ==========
+
+  // List org documents
+  app.get('/api/context/documents', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const limit = parseInt(req.query.limit as string) || 50;
+      const offset = parseInt(req.query.offset as string) || 0;
+      const docType = req.query.docType as string;
+      const source = req.query.source as string;
+      const search = req.query.search as string;
+
+      const filters: any = {};
+      if (docType) filters.docType = docType;
+      if (source) filters.source = source;
+      if (search) filters.search = search;
+
+      const docs = await storage.getOrgDocuments(orgId, filters, limit, offset);
+      const total = await storage.getOrgDocumentsCount(orgId, filters);
+
+      // Don't send full content in list view — too heavy
+      const lightDocs = (docs as any[]).map(d => ({
+        ...d,
+        content: undefined,
+        contentPreview: (d.content || '').substring(0, 200),
+        tags: typeof d.tags === 'string' ? JSON.parse(d.tags) : (d.tags || []),
+        metadata: typeof d.metadata === 'string' ? JSON.parse(d.metadata) : (d.metadata || {}),
+      }));
+
+      res.json({ documents: lightDocs, total });
+    } catch (error: any) {
+      console.error('[Context] GET documents error:', error.message);
+      res.status(500).json({ message: 'Failed to fetch documents' });
+    }
+  });
+
+  // Get single document (with full content)
+  app.get('/api/context/documents/:id', requireAuth, async (req: any, res) => {
+    try {
+      const doc: any = await storage.getOrgDocument(req.params.id);
+      if (!doc) return res.status(404).json({ message: 'Document not found' });
+      if (doc.organizationId !== req.user.organizationId) return res.status(403).json({ message: 'Access denied' });
+      doc.tags = typeof doc.tags === 'string' ? JSON.parse(doc.tags) : (doc.tags || []);
+      doc.metadata = typeof doc.metadata === 'string' ? JSON.parse(doc.metadata) : (doc.metadata || {});
+      res.json(doc);
+    } catch (error: any) {
+      res.status(500).json({ message: 'Failed to fetch document' });
+    }
+  });
+
+  // Upload / create document
+  app.post('/api/context/documents', requireAuth, async (req: any, res) => {
+    try {
+      const { name, docType, source, content, summary, tags, metadata, mimeType } = req.body;
+      if (!name || !content) return res.status(400).json({ message: 'Name and content are required' });
+
+      const { nanoid } = await import('nanoid');
+      const { extractText, generateDocumentSummary } = await import('./services/context-engine.js');
+
+      // Extract text from content
+      const plainText = extractText(content, mimeType || 'text/plain');
+
+      // Auto-generate summary if not provided
+      let docSummary = summary || '';
+      if (!docSummary && plainText.length > 100) {
+        try {
+          docSummary = await generateDocumentSummary(req.user.organizationId, plainText, name);
+        } catch { /* AI summary failed — proceed without */ }
+      }
+
+      const doc = await storage.createOrgDocument({
+        id: nanoid(),
+        organizationId: req.user.organizationId,
+        name,
+        docType: docType || 'general',
+        source: source || 'upload',
+        content: plainText,
+        summary: docSummary,
+        tags: tags || [],
+        metadata: metadata || {},
+        fileSize: Buffer.byteLength(plainText, 'utf8'),
+        mimeType: mimeType || 'text/plain',
+        uploadedBy: req.user.id,
+      });
+
+      res.json(doc);
+    } catch (error: any) {
+      console.error('[Context] POST document error:', error.message);
+      res.status(500).json({ message: 'Failed to create document' });
+    }
+  });
+
+  // Update document
+  app.put('/api/context/documents/:id', requireAuth, async (req: any, res) => {
+    try {
+      const existing: any = await storage.getOrgDocument(req.params.id);
+      if (!existing) return res.status(404).json({ message: 'Document not found' });
+      if (existing.organizationId !== req.user.organizationId) return res.status(403).json({ message: 'Access denied' });
+
+      const { name, docType, content, summary, tags, metadata } = req.body;
+      const doc = await storage.updateOrgDocument(req.params.id, {
+        ...(name !== undefined && { name }),
+        ...(docType !== undefined && { docType }),
+        ...(content !== undefined && { content }),
+        ...(summary !== undefined && { summary }),
+        ...(tags !== undefined && { tags }),
+        ...(metadata !== undefined && { metadata }),
+      });
+      res.json(doc);
+    } catch (error: any) {
+      res.status(500).json({ message: 'Failed to update document' });
+    }
+  });
+
+  // Delete document
+  app.delete('/api/context/documents/:id', requireAuth, async (req: any, res) => {
+    try {
+      const existing: any = await storage.getOrgDocument(req.params.id);
+      if (!existing) return res.status(404).json({ message: 'Document not found' });
+      if (existing.organizationId !== req.user.organizationId) return res.status(403).json({ message: 'Access denied' });
+      await storage.deleteOrgDocument(req.params.id);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ message: 'Failed to delete document' });
+    }
+  });
+
+  // Get context for a contact (used by AI draft, proposal builder, etc.)
+  app.get('/api/context/contact/:contactId', requireAuth, async (req: any, res) => {
+    try {
+      const { assembleContext, buildContextPrompt } = await import('./services/context-engine.js');
+      const ctx = await assembleContext(req.user.organizationId, {
+        contactId: req.params.contactId,
+        query: req.query.query as string,
+        docTypes: req.query.docTypes ? (req.query.docTypes as string).split(',') : undefined,
+      });
+      res.json({
+        contact: ctx.contact ? {
+          ...ctx.contact.contact,
+          leadOpportunity: ctx.contact.leadOpportunity,
+          campaignEngagement: ctx.contact.campaignEngagement,
+          emailHistoryCount: ctx.contact.emailHistory.length,
+          activitiesCount: ctx.contact.activities.length,
+          lastRemark: ctx.contact.lastRemark,
+        } : null,
+        relevantDocs: ctx.relevantDocs.map((d: any) => ({ id: d.id, name: d.name, docType: d.docType, summary: d.summary })),
+        totalOrgDocs: ctx.org.totalDocs,
+        contextPrompt: buildContextPrompt(ctx),
+      });
+    } catch (error: any) {
+      console.error('[Context] GET contact context error:', error.message);
+      res.status(500).json({ message: 'Failed to build context' });
+    }
+  });
+
+  // AI Draft Reply with full context
+  app.post('/api/context/draft-reply', requireAuth, async (req: any, res) => {
+    try {
+      const { contactId, contactEmail, incomingEmail, tone, customInstructions } = req.body;
+      if (!contactId && !contactEmail) return res.status(400).json({ message: 'Contact ID or email required' });
+
+      const { assembleContext, buildReplyDraftPrompt } = await import('./services/context-engine.js');
+      const orgId = req.user.organizationId;
+
+      // Build context
+      const ctx = await assembleContext(orgId, {
+        contactId,
+        contactEmail,
+        docTypes: ['case_study', 'brochure', 'proposal', 'general'],
+      });
+
+      const systemPrompt = buildReplyDraftPrompt(ctx, tone || 'professional');
+
+      // Add custom instructions if provided
+      const finalSystem = customInstructions
+        ? `${systemPrompt}\n\nADDITIONAL INSTRUCTIONS: ${customInstructions}`
+        : systemPrompt;
+
+      // Call Azure OpenAI
+      const settings = await storage.getApiSettingsWithAzureFallback(orgId);
+      const endpoint = settings.azure_openai_endpoint;
+      const apiKey = settings.azure_openai_api_key;
+      const deploymentName = settings.azure_openai_deployment;
+      const apiVersion = settings.azure_openai_api_version || '2024-08-01-preview';
+
+      if (!endpoint || !apiKey || !deploymentName) {
+        return res.json({
+          draft: `Hi ${ctx.contact?.contact?.firstName || 'there'},\n\nThank you for your email. I'll review and get back to you shortly.\n\nBest regards`,
+          provider: 'fallback',
+          note: 'Configure Azure OpenAI in Advanced Settings for AI-powered drafts.',
+          contextUsed: { docsCount: ctx.relevantDocs.length, emailHistoryCount: ctx.contact?.emailHistory?.length || 0 },
+        });
+      }
+
+      const userPrompt = incomingEmail
+        ? `Draft a reply to this email:\n\nFrom: ${incomingEmail.from || contactEmail}\nSubject: ${incomingEmail.subject || '(no subject)'}\n\n${incomingEmail.body || incomingEmail.snippet || ''}`
+        : `Draft an outreach email to ${ctx.contact?.contact?.firstName || ''} ${ctx.contact?.contact?.lastName || ''} at ${ctx.contact?.contact?.company || 'their company'}. Use the context provided to make it relevant and personalized.`;
+
+      const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${deploymentName}/chat/completions?api-version=${apiVersion}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'api-key': apiKey },
+        body: JSON.stringify({
+          messages: [
+            { role: 'system', content: finalSystem },
+            { role: 'user', content: userPrompt },
+          ],
+          temperature: 0.7,
+          max_tokens: 1000,
+        }),
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error('[Context] Azure OpenAI error:', response.status, errText);
+        return res.status(500).json({ message: 'AI draft generation failed' });
+      }
+
+      const data = await response.json() as any;
+      const draft = data.choices?.[0]?.message?.content || '';
+
+      res.json({
+        draft,
+        provider: 'azure-openai',
+        contextUsed: {
+          docsCount: ctx.relevantDocs.length,
+          docNames: ctx.relevantDocs.map((d: any) => d.name),
+          emailHistoryCount: ctx.contact?.emailHistory?.length || 0,
+          leadBucket: ctx.contact?.leadOpportunity?.bucket || null,
+          activitiesCount: ctx.contact?.activities?.length || 0,
+        },
+      });
+    } catch (error: any) {
+      console.error('[Context] Draft reply error:', error.message, error.stack);
+      res.status(500).json({ message: 'Failed to generate draft' });
+    }
+  });
+
+  // AI Proposal Builder with full context
+  app.post('/api/context/proposal', requireAuth, async (req: any, res) => {
+    try {
+      const { contactId, contactEmail, requirements, customInstructions } = req.body;
+
+      const { assembleContext, buildProposalPrompt } = await import('./services/context-engine.js');
+      const orgId = req.user.organizationId;
+
+      const ctx = await assembleContext(orgId, {
+        contactId,
+        contactEmail,
+        docTypes: ['case_study', 'proposal', 'brochure', 'award', 'testimonial'],
+        maxDocTokens: 12000, // More docs for proposals
+      });
+
+      const systemPrompt = buildProposalPrompt(ctx);
+
+      const settings = await storage.getApiSettingsWithAzureFallback(orgId);
+      const endpoint = settings.azure_openai_endpoint;
+      const apiKey = settings.azure_openai_api_key;
+      const deploymentName = settings.azure_openai_deployment;
+      const apiVersion = settings.azure_openai_api_version || '2024-08-01-preview';
+
+      if (!endpoint || !apiKey || !deploymentName) {
+        return res.json({ proposal: '', provider: 'none', note: 'Configure Azure OpenAI in Advanced Settings.' });
+      }
+
+      const userPrompt = requirements
+        ? `Generate a proposal for this contact based on their requirements:\n\n${requirements}\n\n${customInstructions || ''}`
+        : `Generate a proposal for ${ctx.contact?.contact?.firstName || ''} ${ctx.contact?.contact?.lastName || ''} at ${ctx.contact?.contact?.company || 'their company'}. ${customInstructions || ''}`;
+
+      const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${deploymentName}/chat/completions?api-version=${apiVersion}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'api-key': apiKey },
+        body: JSON.stringify({
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+          ],
+          temperature: 0.6,
+          max_tokens: 3000,
+        }),
+      });
+
+      if (!response.ok) {
+        return res.status(500).json({ message: 'AI proposal generation failed' });
+      }
+
+      const data = await response.json() as any;
+      res.json({
+        proposal: data.choices?.[0]?.message?.content || '',
+        provider: 'azure-openai',
+        contextUsed: {
+          docsCount: ctx.relevantDocs.length,
+          docNames: ctx.relevantDocs.map((d: any) => d.name),
+          leadBucket: ctx.contact?.leadOpportunity?.bucket || null,
+        },
+      });
+    } catch (error: any) {
+      console.error('[Context] Proposal error:', error.message);
+      res.status(500).json({ message: 'Failed to generate proposal' });
+    }
+  });
+
+  // Document type counts (for sidebar)
+  app.get('/api/context/doc-types', requireAuth, async (req: any, res) => {
+    try {
+      const db = (storage as any).db;
+      const orgId = req.user.organizationId;
+      const counts = db.prepare(`SELECT docType, COUNT(*) as cnt FROM org_documents WHERE organizationId = ? GROUP BY docType ORDER BY cnt DESC`).all(orgId);
+      res.json(counts);
+    } catch (error: any) {
+      res.status(500).json({ message: 'Failed to fetch doc types' });
+    }
+  });
+
   // ========== LEAD INTELLIGENCE ==========
 
   // Helper: get member's own account IDs (for filtering)

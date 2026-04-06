@@ -12,7 +12,7 @@ import {
   Bell, Activity, Inbox, MoreHorizontal, Pause, Play, Trash2,
   ArrowUp, ArrowDown, Calendar, Sparkles, CreditCard, Lightbulb,
   Wrench, PieChart, Link2, Globe, RefreshCw, ExternalLink, XCircle,
-  AlertTriangle, Building2, Shield, Flame, Loader2, Trophy, Brain
+  AlertTriangle, Building2, Shield, Flame, Loader2, Trophy, Brain, BookOpen
 } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -39,6 +39,7 @@ const WarmupMonitoring = lazy(() => import("./warmup-monitoring"));
 const TeamScorecard = lazy(() => import("./team-scorecard"));
 const MyDashboard = lazy(() => import("./my-dashboard"));
 const LeadOpportunities = lazy(() => import("./lead-opportunities"));
+const KnowledgeBase = lazy(() => import("./knowledge-base"));
 
 // Loading fallback for lazy-loaded pages
 function PageLoader() {
@@ -49,7 +50,7 @@ function PageLoader() {
   );
 }
 
-type ViewType = 'campaigns' | 'templates' | 'contacts' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings' | 'team' | 'superadmin' | 'warmup' | 'scorecard' | 'my-dashboard' | 'lead-intelligence';
+type ViewType = 'campaigns' | 'templates' | 'contacts' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings' | 'team' | 'superadmin' | 'warmup' | 'scorecard' | 'my-dashboard' | 'lead-intelligence' | 'knowledge-base';
 
 // Live Tracking Feed component - fetches real tracking events
 function LiveTrackingFeed({ dashStats }: { dashStats: any }) {
@@ -204,7 +205,7 @@ export default function MailMeteorDashboard() {
   const [currentView, setCurrentViewRaw] = useState<ViewType>(() => {
     // Restore view from URL hash on initial load (e.g. #contacts, #campaign-detail/abc123)
     const hash = window.location.hash.replace('#', '');
-    const validViews = ['campaigns', 'templates', 'contacts', 'inbox', 'setup', 'analytics', 'verification', 'tracking', 'account', 'billing', 'followups', 'insights', 'tools', 'advanced-settings', 'team', 'superadmin', 'warmup', 'scorecard', 'my-dashboard', 'lead-intelligence', 'campaign-detail'];
+    const validViews = ['campaigns', 'templates', 'contacts', 'inbox', 'setup', 'analytics', 'verification', 'tracking', 'account', 'billing', 'followups', 'insights', 'tools', 'advanced-settings', 'team', 'superadmin', 'warmup', 'scorecard', 'my-dashboard', 'lead-intelligence', 'knowledge-base', 'campaign-detail'];
     if (hash.startsWith('campaign-detail/')) return 'campaign-detail' as ViewType;
     return validViews.includes(hash) ? hash as ViewType : 'campaigns';
   });
@@ -388,6 +389,7 @@ export default function MailMeteorDashboard() {
     ...(isAdminOrOwner ? [{ key: 'followups' as ViewType, label: 'Automations', icon: Zap }] : []),
     { key: 'setup' as ViewType, label: 'Email Accounts', icon: Inbox },
     ...(isAdminOrOwner ? [{ key: 'warmup' as ViewType, label: 'Warmup', icon: Flame }] : []),
+    ...(isAdminOrOwner ? [{ key: 'knowledge-base' as ViewType, label: 'Knowledge Base', icon: BookOpen }] : []),
   ];
 
   const sidebarBottomItems = [
@@ -411,6 +413,7 @@ export default function MailMeteorDashboard() {
       scorecard: 'Team Scorecard',
       'my-dashboard': 'My Dashboard',
       'lead-intelligence': 'AI Lead Intelligence',
+      'knowledge-base': 'Knowledge Base',
       superadmin: 'SuperAdmin Console',
       warmup: 'Warmup Monitoring',
     };
@@ -439,6 +442,7 @@ export default function MailMeteorDashboard() {
       scorecard: 'Sales performance, leaderboard, and team activity tracking',
       'my-dashboard': 'Your personal sales performance, action items, and emails to reply',
       'lead-intelligence': 'AI-powered deep analysis of email history to find missed opportunities, past customers, and hot leads',
+      'knowledge-base': 'Upload case studies, proposals, brochures, and company docs to power AI-driven email drafts and proposals',
       superadmin: 'Platform-wide management, monitoring, and user administration',
       warmup: 'Track email warmup progress and sender reputation',
     };
@@ -1040,6 +1044,10 @@ export default function MailMeteorDashboard() {
 
           {viewMode === 'dashboard' && currentView === 'lead-intelligence' && (
             <LeadOpportunities />
+          )}
+
+          {viewMode === 'dashboard' && currentView === 'knowledge-base' && (
+            <KnowledgeBase />
           )}
          </Suspense>
         </main>
