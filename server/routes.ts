@@ -3292,19 +3292,11 @@ Which account should I use and why? If I need to split across accounts, provide 
         const campaign = await storage.getCampaign(req.params.id);
         if (!campaign) return res.status(404).json({ success: false, error: 'Campaign not found' });
         
-        // If the campaign was in 'following_up' state before being paused,
-        // just restore it to 'following_up' — the follow-up engine will handle sending.
-        // No need to re-run the campaign engine for Step 1.
-        const hasFollowups = await storage.hasActiveFollowupSteps(req.params.id);
-        const allStep1Sent = (campaign as any).sentCount > 0; // Step 1 already sent
-        
-        if (hasFollowups && allStep1Sent) {
-          await storage.updateCampaign(req.params.id, { status: 'following_up' });
-          console.log(`[Campaign] Resumed ${req.params.id} to 'following_up' — follow-up engine will handle pending steps`);
-          return res.json({ success: true, status: 'following_up' });
-        }
-
-        // Otherwise re-start Step 1 — startCampaign skips already-sent contacts.
+        // Always go through startCampaign on resume — it checks existing messages,
+        // skips already-sent contacts, and sends only the remaining ones.
+        // If ALL Step 1 contacts are already sent, startCampaign sets status to 'following_up'.
+        // This handles: partial Step 1 (resume sending), complete Step 1 (follow-up only),
+        // and large lists where Step 2 fires for early contacts while Step 1 continues.
         // Read saved sending config to restore ALL settings: delay, time windows, maxPerDay.
         const savedConfig = campaign.sendingConfig;
         if (!savedConfig || !savedConfig.delayBetweenEmails) {
