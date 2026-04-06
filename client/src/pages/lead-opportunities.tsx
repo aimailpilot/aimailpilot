@@ -4,12 +4,14 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
+import { useAuth } from "@/hooks/use-auth";
 import {
   Brain, Flame, TrendingUp, Users, Target, AlertTriangle,
   Search, RefreshCw, Loader2, ArrowRight, Mail, Clock,
   CheckCircle2, XCircle, MessageSquare, ChevronDown, ChevronUp,
   Zap, BarChart3, Eye, EyeOff, Star, ThumbsUp, ThumbsDown,
-  UserPlus, Send, Filter, Calendar, Building2, ExternalLink
+  UserPlus, Send, Filter, Calendar, Building2, ExternalLink,
+  Settings, Save
 } from "lucide-react";
 
 interface Opportunity {
@@ -78,6 +80,8 @@ const BUCKET_CONFIG: Record<string, { label: string; icon: any; color: string; b
 };
 
 export default function LeadOpportunities() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'owner' || user?.role === 'admin';
   const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
   const [summary, setSummary] = useState<BucketSummary[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatus[]>([]);
@@ -93,6 +97,10 @@ export default function LeadOpportunities() {
   const [currentPage, setCurrentPage] = useState(1);
   const PAGE_SIZE = 25;
   const [filterAccountEmail, setFilterAccountEmail] = useState<string>('');
+  const [showPromptEditor, setShowPromptEditor] = useState(false);
+  const [customPrompt, setCustomPrompt] = useState('');
+  const [savedPrompt, setSavedPrompt] = useState('');
+  const [savingPrompt, setSavingPrompt] = useState(false);
   const [monthsBack, setMonthsBack] = useState('6');
   const [emailAccounts, setEmailAccounts] = useState<EmailAccount[]>([]);
   const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
@@ -121,6 +129,17 @@ export default function LeadOpportunities() {
       if (accountsRes.ok) {
         const accounts = await accountsRes.json();
         setEmailAccounts(Array.isArray(accounts) ? accounts : []);
+      }
+      // Fetch custom prompt for admin
+      if (isAdmin) {
+        try {
+          const promptRes = await fetch('/api/lead-intelligence/prompt', { credentials: 'include' });
+          if (promptRes.ok) {
+            const data = await promptRes.json();
+            setCustomPrompt(data.prompt || '');
+            setSavedPrompt(data.prompt || '');
+          }
+        } catch (e) { /* ignore */ }
       }
     } catch (e) {
       console.error('Failed to load lead intelligence:', e);
@@ -219,7 +238,7 @@ export default function LeadOpportunities() {
   const filtered = opportunities
     .filter(o => {
       if (selectedBucket && o.bucket !== selectedBucket) return false;
-      if (filterAccountEmail && (o.accountEmail || '') !== filterAccountEmail) return false;
+      if (filterAccountEmail && (o.accountEmail || '').toLowerCase() !== filterAccountEmail.toLowerCase()) return false;
       if (searchTerm) {
         const term = searchTerm.toLowerCase();
         return (
@@ -696,6 +715,71 @@ export default function LeadOpportunities() {
             </div>
           )}
         </>)}
+
+        {/* AI Prompt Editor (Admin/Owner only) */}
+        {isAdmin && (
+          <div className="mt-6">
+            <Card>
+              <CardContent className="p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2">
+                    <Settings className="h-4 w-4 text-gray-500" />
+                    AI Classification Prompt
+                  </h3>
+                  <Button variant="ghost" size="sm" className="text-xs h-7"
+                    onClick={() => setShowPromptEditor(!showPromptEditor)}>
+                    {showPromptEditor ? 'Hide' : 'Edit Prompt'}
+                  </Button>
+                </div>
+                {showPromptEditor && (
+                  <div className="space-y-3">
+                    <p className="text-[11px] text-gray-500">
+                      Customize the AI prompt used to classify contacts. Leave empty to use the default prompt.
+                      The contact data is automatically appended. Use bucket names: past_customer, hot_lead, warm_lead, almost_closed,
+                      interested_stalled, meeting_no_deal, went_silent, not_interested, referral_potential, converted.
+                    </p>
+                    <textarea
+                      value={customPrompt}
+                      onChange={e => setCustomPrompt(e.target.value)}
+                      placeholder="Leave empty for default prompt. Example: You are a B2B sales analyst for an education technology company. Classify contacts based on..."
+                      className="w-full h-48 p-3 text-xs border rounded-lg bg-gray-50 font-mono resize-y focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400 outline-none"
+                    />
+                    <div className="flex items-center gap-2">
+                      <Button size="sm" className="gap-1.5 text-xs" disabled={savingPrompt || customPrompt === savedPrompt}
+                        onClick={async () => {
+                          setSavingPrompt(true);
+                          try {
+                            const resp = await fetch('/api/lead-intelligence/prompt', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              credentials: 'include',
+                              body: JSON.stringify({ prompt: customPrompt }),
+                            });
+                            if (resp.ok) { setSavedPrompt(customPrompt); }
+                          } catch (e) { /* ignore */ }
+                          finally { setSavingPrompt(false); }
+                        }}>
+                        {savingPrompt ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+                        {savingPrompt ? 'Saving...' : 'Save Prompt'}
+                      </Button>
+                      {customPrompt && (
+                        <Button variant="outline" size="sm" className="text-xs" onClick={() => setCustomPrompt('')}>
+                          Reset to Default
+                        </Button>
+                      )}
+                      {customPrompt !== savedPrompt && (
+                        <span className="text-[10px] text-amber-600">Unsaved changes</span>
+                      )}
+                      {customPrompt === savedPrompt && savedPrompt && (
+                        <span className="text-[10px] text-green-600">Saved — re-run Analyze to apply</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        )}
 
         {/* Info Section */}
         <div className="mt-6">

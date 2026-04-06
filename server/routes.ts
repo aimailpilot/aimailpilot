@@ -10296,6 +10296,23 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       const status = req.query.status as string | undefined;
       const limit = parseInt(req.query.limit as string) || undefined;
       let opportunities = await storage.getLeadOpportunities(orgId, { bucket, status, limit });
+
+      // Backfill accountEmail from email_history for opportunities missing it
+      try {
+        const db = (storage as any).db;
+        for (const opp of opportunities as any[]) {
+          if (!opp.accountEmail && opp.contactEmail) {
+            const hist = db.prepare(`SELECT accountEmail, emailAccountId FROM email_history WHERE organizationId = ? AND LOWER(fromEmail) = ? AND direction = 'received' LIMIT 1`).get(orgId, opp.contactEmail.toLowerCase()) as any;
+            if (hist?.accountEmail) {
+              opp.accountEmail = hist.accountEmail;
+              if (!opp.emailAccountId) opp.emailAccountId = hist.emailAccountId;
+              // Persist the backfill
+              try { db.prepare(`UPDATE lead_opportunities SET accountEmail = ?, emailAccountId = ? WHERE id = ?`).run(hist.accountEmail, hist.emailAccountId, opp.id); } catch (e) {}
+            }
+          }
+        }
+      } catch (e) { /* non-critical */ }
+
       // Member filtering: only show opportunities from their accounts
       const memberIds = await getMemberAccountIds(req);
       if (memberIds) {
@@ -10388,6 +10405,29 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       res.json({ syncStatus, stats });
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch sync status' });
+    }
+  });
+
+  // Get/set custom AI prompt for lead intelligence
+  app.get('/api/lead-intelligence/prompt', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const settings = await storage.getApiSettings(orgId);
+      res.json({ prompt: (settings as any).lead_intelligence_prompt || '', role: req.user.role });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to fetch prompt' });
+    }
+  });
+
+  app.post('/api/lead-intelligence/prompt', requireAuth, async (req: any, res) => {
+    try {
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      if (!isAdmin) return res.status(403).json({ message: 'Only admin/owner can edit the prompt' });
+      const orgId = req.user.organizationId;
+      await storage.setApiSetting(orgId, 'lead_intelligence_prompt', req.body.prompt || '');
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to save prompt' });
     }
   });
 

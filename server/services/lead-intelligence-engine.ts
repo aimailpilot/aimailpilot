@@ -692,12 +692,13 @@ async function classifyContactsWithAI(
 ): Promise<ClassificationResult[]> {
   const results: ClassificationResult[] = [];
 
-  // Get Azure OpenAI settings
+  // Get Azure OpenAI settings and custom prompt
   const settings = await storage.getApiSettingsWithAzureFallback(orgId);
   const endpoint = settings.azure_openai_endpoint;
   const apiKey = settings.azure_openai_api_key;
   const deploymentName = settings.azure_openai_deployment;
   const apiVersion = settings.azure_openai_api_version || '2024-08-01-preview';
+  const customPrompt = (settings as any).lead_intelligence_prompt || '';
 
   if (!endpoint || !apiKey || !deploymentName) {
     console.log('[LeadIntel] Azure OpenAI not configured — using rule-based classification');
@@ -721,7 +722,7 @@ Emails: ${c.totalEmails} total (${c.totalSent} sent to them, ${c.totalReceived} 
 Last email: ${c.lastEmailDate || 'unknown'}${subjectText}${snippetText}`;
     }).join('\n\n');
 
-    const prompt = `You are a B2B sales intelligence analyst. Classify each contact based on their email conversation history with our team.
+    const defaultPromptInstructions = `You are a B2B sales intelligence analyst. Classify each contact based on their email conversation history with our team.
 
 IMPORTANT CONTEXT:
 - "Sent to them" = our outreach emails (cold emails, follow-ups, proposals)
@@ -752,6 +753,11 @@ Respond with a JSON array. Each object must have: email, bucket, confidence (0-1
 [{"email": "...", "bucket": "...", "confidence": <0-100>, "reasoning": "...", "action": "..."}]
 
 Respond ONLY with the JSON array.`;
+
+    // Use custom prompt if admin has set one, otherwise use default
+    const prompt = customPrompt
+      ? `${customPrompt}\n\nCONTACTS TO CLASSIFY:\n${contactDescriptions}\n\nRespond with a JSON array. Each object must have: email, bucket, confidence (0-100), reasoning (1 sentence), action (suggested next step).\n[{"email": "...", "bucket": "...", "confidence": <0-100>, "reasoning": "...", "action": "..."}]\n\nRespond ONLY with the JSON array.`
+      : defaultPromptInstructions;
 
     try {
       const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${deploymentName}/chat/completions?api-version=${apiVersion}`;
