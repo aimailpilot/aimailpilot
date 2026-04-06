@@ -653,8 +653,10 @@ export class FollowupEngine {
       }
     }
     
-    // Only evaluate original (step 0) messages for follow-up triggers
-    const originalMessages = campaignMessages.filter((m: any) => (m.stepNumber || 0) === 0);
+    // Only evaluate original (step 0) messages that have actually been SENT
+    // CRITICAL: Must check status='sent' AND sentAt exists — without this, queued messages
+    // with null sentAt cause new Date(null)=epoch, bypassing the delay check entirely
+    const originalMessages = campaignMessages.filter((m: any) => (m.stepNumber || 0) === 0 && m.status === 'sent' && m.sentAt);
     
     for (const message of originalMessages) {
       const msg = message as any;
@@ -839,7 +841,7 @@ export class FollowupEngine {
       });
 
       console.log(`Scheduled follow-up for contact ${contact.email}, step ${step.stepNumber}, scheduledAt ${nextValidTime.toISOString()}`);
-      
+
       // If the follow-up should be sent immediately (no delay configured), send it now
       const hasDelay = (parseInt(step.delayDays) || 0) > 0 || (parseInt(step.delayHours) || 0) > 0 || (parseInt(step.delayMinutes) || 0) > 0;
       if (!hasDelay) {
