@@ -233,7 +233,27 @@ export default function MailMeteorDashboard() {
   const [currentOrgName, setCurrentOrgName] = useState('');
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   
-  const { campaigns, isLoading } = useCampaigns();
+  const [campaignPage, setCampaignPage] = useState(0);
+  const campaignsPerPage = 10;
+  const { campaigns, isLoading } = useCampaigns({ limit: campaignsPerPage, offset: campaignPage * campaignsPerPage });
+
+  // Fetch total campaign count for pagination
+  const { data: campaignCountData } = useQuery<{ total: number }>({
+    queryKey: ['/api/campaigns/count', activeFilter],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (activeFilter !== 'All') {
+        const statusMap: Record<string, string> = { 'Active': 'active', 'Scheduled': 'scheduled', 'Drafts': 'draft', 'Completed': 'completed', 'Paused': 'paused' };
+        if (statusMap[activeFilter]) params.set('status', statusMap[activeFilter]);
+      }
+      const resp = await fetch(`/api/campaigns/count?${params}`, { credentials: 'include' });
+      if (!resp.ok) return { total: 0 };
+      return resp.json();
+    },
+    staleTime: 5 * 60 * 1000,
+  });
+  const totalCampaigns = campaignCountData?.total || 0;
+  const totalPages = Math.ceil(totalCampaigns / campaignsPerPage);
 
   const { data: user } = useQuery({
     queryKey: ['/api/auth/user'],
@@ -348,7 +368,12 @@ export default function MailMeteorDashboard() {
     return matchesSearch && matchesFilter;
   }) || [];
 
-  const formatDate = (dateStr: string) => new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const formatDate = (dateStr: string) => {
+    const d = new Date(dateStr);
+    const now = new Date();
+    const sameYear = d.getFullYear() === now.getFullYear();
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', ...(sameYear ? {} : { year: 'numeric' }) });
+  };
   const formatPercentage = (num: number, den: number) => den === 0 ? '0%' : `${((num / den) * 100).toFixed(1)}%`;
 
   // Campaign actions
@@ -832,7 +857,7 @@ export default function MailMeteorDashboard() {
                   {filters.map((filter) => (
                     <button
                       key={filter}
-                      onClick={() => setActiveFilter(filter)}
+                      onClick={() => { setActiveFilter(filter); setCampaignPage(0); }}
                       className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
                         activeFilter === filter
                           ? 'bg-white text-gray-900 shadow-sm'
@@ -869,13 +894,14 @@ export default function MailMeteorDashboard() {
                 </div>
               ) : (
                 <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden">
-                  <div className="grid grid-cols-[2fr_80px_80px_80px_80px_80px_80px_44px] gap-2 px-5 py-3 border-b border-gray-100 bg-gray-50/50 text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+                  <div className="grid grid-cols-[2fr_80px_60px_65px_65px_65px_65px_80px_44px] gap-2 px-5 py-3 border-b border-gray-100 bg-gray-50/50 text-[11px] font-semibold uppercase tracking-wider text-gray-400">
                     <div>Campaign</div>
                     <div>Status</div>
                     <div className="text-right">Sent</div>
                     <div className="text-right">Opens</div>
                     <div className="text-right">Clicks</div>
                     <div className="text-right">Replies</div>
+                    <div className="text-right">Bounced</div>
                     <div className="text-right">Date</div>
                     <div></div>
                   </div>
@@ -883,9 +909,9 @@ export default function MailMeteorDashboard() {
                   {filteredCampaigns.map((campaign: Campaign) => {
                     const openRate = campaign.sentCount ? ((campaign.openedCount || 0) / campaign.sentCount) * 100 : 0;
                     return (
-                      <div 
-                        key={campaign.id} 
-                        className="grid grid-cols-[2fr_80px_80px_80px_80px_80px_80px_44px] gap-2 px-5 py-3.5 border-b border-gray-50 hover:bg-blue-50/30 items-center transition-colors group cursor-pointer"
+                      <div
+                        key={campaign.id}
+                        className="grid grid-cols-[2fr_80px_60px_65px_65px_65px_65px_80px_44px] gap-2 px-5 py-3.5 border-b border-gray-50 hover:bg-blue-50/30 items-center transition-colors group cursor-pointer"
                         onClick={() => { setSelectedCampaignId(campaign.id); setCurrentView('campaign-detail'); }}
                       >
                         <div className="min-w-0">
@@ -906,9 +932,12 @@ export default function MailMeteorDashboard() {
                           <span className="text-sm font-medium text-gray-700">{formatPercentage(campaign.repliedCount || 0, campaign.sentCount || 0)}</span>
                         </div>
                         <div className="text-right">
+                          <span className={`text-sm font-medium ${(campaign.bouncedCount || 0) > 0 ? 'text-red-500' : 'text-gray-700'}`}>{formatPercentage(campaign.bouncedCount || 0, campaign.sentCount || 0)}</span>
+                        </div>
+                        <div className="text-right">
                           <span className="text-xs text-gray-400">{campaign.createdAt ? formatDate(campaign.createdAt) : '-'}</span>
                         </div>
-                        <div className="opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
+                        <div className="opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e: any) => e.stopPropagation()}>
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                               <Button variant="ghost" size="sm" className="h-7 w-7 p-0">
@@ -936,6 +965,58 @@ export default function MailMeteorDashboard() {
                       </div>
                     );
                   })}
+                </div>
+              )}
+
+              {/* Pagination */}
+              {!isLoading && totalCampaigns > campaignsPerPage && (
+                <div className="flex items-center justify-between pt-2">
+                  <span className="text-xs text-gray-400">
+                    Showing {campaignPage * campaignsPerPage + 1}–{Math.min((campaignPage + 1) * campaignsPerPage, totalCampaigns)} of {totalCampaigns} campaigns
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 px-2.5 text-xs"
+                      disabled={campaignPage === 0}
+                      onClick={() => setCampaignPage((p: number) => Math.max(0, p - 1))}
+                    >
+                      Previous
+                    </Button>
+                    {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
+                      let page: number;
+                      if (totalPages <= 7) {
+                        page = i;
+                      } else if (campaignPage < 3) {
+                        page = i;
+                      } else if (campaignPage > totalPages - 4) {
+                        page = totalPages - 7 + i;
+                      } else {
+                        page = campaignPage - 3 + i;
+                      }
+                      return (
+                        <Button
+                          key={page}
+                          variant={page === campaignPage ? "default" : "outline"}
+                          size="sm"
+                          className={`h-7 w-7 p-0 text-xs ${page === campaignPage ? 'bg-blue-600 text-white' : ''}`}
+                          onClick={() => setCampaignPage(page)}
+                        >
+                          {page + 1}
+                        </Button>
+                      );
+                    })}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 px-2.5 text-xs"
+                      disabled={campaignPage >= totalPages - 1}
+                      onClick={() => setCampaignPage((p: number) => Math.min(totalPages - 1, p + 1))}
+                    >
+                      Next
+                    </Button>
+                  </div>
                 </div>
               )}
             </div>

@@ -3149,6 +3149,33 @@ Which account should I use and why? If I need to split across accounts, provide 
     }
   });
 
+  // Campaign count for pagination
+  app.get('/api/campaigns/count', async (req: any, res) => {
+    try {
+      const db = (storage as any).db;
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      const status = req.query.status as string;
+      let sql = 'SELECT COUNT(*) as total FROM campaigns WHERE organizationId = ?';
+      const params: any[] = [req.user.organizationId];
+      if (!isAdmin) {
+        sql += ' AND createdBy = ?';
+        params.push(req.user.id);
+      }
+      if (status && status !== 'all') {
+        if (status === 'active') {
+          sql += " AND (status = 'active' OR status = 'following_up')";
+        } else {
+          sql += ' AND status = ?';
+          params.push(status);
+        }
+      }
+      const row = db.prepare(sql).get(...params) as any;
+      res.json({ total: row?.total || 0 });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to count campaigns' });
+    }
+  });
+
   app.get('/api/campaigns/:id', async (req: any, res) => {
     try {
       const campaign = await storage.getCampaign(req.params.id);

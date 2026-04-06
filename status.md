@@ -296,6 +296,37 @@ This file tracks features that are confirmed working in production.
 - Available to all roles in sidebar: Insights > Lead Intelligence
 - **Do not touch**: `server/services/lead-intelligence-engine.ts`; `email_history` and `lead_opportunities` tables in `server/storage.ts`; lead intelligence routes in `server/routes.ts`; `client/src/pages/lead-opportunities.tsx`
 
+### 39. Contact Enrichment (AI Lead Badges + Smart Filters + AI Leads Tab)
+- Contacts API (`GET /api/contacts`) now enriches each contact with `leadBucket`, `leadConfidence`, `aiReasoning`, `suggestedAction` from `lead_opportunities` table via batch query
+- AI lead classification badges shown on contact rows (Hot Lead, Warm, Past Customer, Churned, etc.) with tooltip showing AI reasoning and suggested action
+- AI Lead Intelligence card shown in contact detail dialog when classification exists
+- Smart filter dropdown (`leadFilter` param): Hot Leads, Warm Leads, Past Customers, Engaged, Gone Cold, Never Contacted — uses SQL subqueries to `lead_opportunities` and engagement stats
+- "AI Leads" tab in contacts manager: full lead cards with AI reasoning, suggested action, engagement stats, bucket filter pills, search, pagination (25/page), member role filtering
+- Hot leads API: `GET /api/contacts/hot-leads` with bucket filtering, search, member role restriction, LEFT JOIN to contacts for pipeline/engagement data, bucket counts sidebar
+- Enrichment is a safe enhancement — wrapped in try/catch, non-fatal if `lead_opportunities` table doesn't exist
+- **Do not touch**: The enrichment block in `GET /api/contacts` route; `GET /api/contacts/hot-leads` endpoint; `LEAD_BUCKET_CONFIG` in `client/src/pages/contacts-manager.tsx`
+
+### 40. Follow-up Bounce Skip (P6 Fix)
+- Follow-up engine now skips all follow-up steps for contacts whose Step 0 message bounced
+- Builds `contactBounced` set from `bouncedAt` field on campaign messages (same pattern as existing reply skip)
+- Creates "skipped" execution records to prevent re-evaluation on subsequent polling cycles
+- Saves wasted sends and protects sender reputation
+- **Do not touch**: Bounce skip block in `processCampaignFollowups()` in `server/services/followup-engine.ts` (lines ~690-710)
+
+### 41. Context Engine (Organization Knowledge Base + AI Drafts + Proposals)
+- `org_documents` table stores organization knowledge: case studies, proposals, brochures, pricing, testimonials, awards, company profiles, FAQ/objections
+- SQLite FTS5 full-text search index (`org_documents_fts`) for keyword relevance matching — zero external dependencies
+- Context engine service (`server/services/context-engine.ts`): assembles contact context (email history + lead intel + engagement + activities) + relevant org docs into structured prompts
+- AI draft reply: generates context-aware email drafts using Azure OpenAI with full org knowledge, tone control (professional/friendly/concise/formal/persuasive), custom instructions
+- AI proposal builder: generates tailored proposals referencing case studies, past wins, contact needs
+- Auto-generated document summaries via Azure OpenAI on upload
+- Document management API: CRUD endpoints at `/api/context/documents`, context assembly at `/api/context/contact/:id`, AI draft at `/api/context/draft-reply`, proposal at `/api/context/proposal`
+- Knowledge Base page (`client/src/pages/knowledge-base.tsx`): document list with search, doc type filter pills, add/edit/view/delete, file upload (TXT/CSV/MD/HTML/JSON), AI summary display
+- "AI Draft Email" button on contact detail dialog: tone selector, custom instructions, draft result with "context used" indicators, copy to clipboard
+- Located in sidebar: Tools > Knowledge Base (admin/owner only)
+- See `CONTEXT-ENGINE.md` for full architecture and API documentation
+- **Do not touch**: `server/services/context-engine.ts`; `org_documents` + `org_documents_fts` tables in `server/storage.ts`; context engine routes in `server/routes.ts`; `client/src/pages/knowledge-base.tsx`
+
 ---
 
 ## General Rule

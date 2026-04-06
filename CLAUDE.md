@@ -92,6 +92,7 @@ server/          Express backend
     warmup-engine.ts        Email warmup between org accounts (auto-open/star/reply)
     email-rating-engine.ts  Contact scoring
     lead-intelligence-engine.ts  Deep email history scan + AI lead classification
+    context-engine.ts       Organization knowledge base + context assembly for AI drafts/proposals
     scheduler.ts            Task scheduling
 shared/schema.ts  Drizzle ORM schema (PostgreSQL dialect, used for type definitions)
 ```
@@ -115,6 +116,10 @@ shared/schema.ts  Drizzle ORM schema (PostgreSQL dialect, used for type definiti
 **Azure OpenAI**: Integrated via `email-rating-engine.ts` and `lead-intelligence-engine.ts`. Settings in `api_settings`: `azure_openai_endpoint`, `azure_openai_api_key`, `azure_openai_deployment`, `azure_openai_api_version`. Used for: contact reply quality scoring, lead classification (11 buckets), AI draft suggestions.
 
 **Lead Intelligence Engine**: `lead-intelligence-engine.ts` scans linked Gmail/Outlook accounts for 6-12 months of email history, stores in `email_history` table, then uses Azure OpenAI (or rule-based fallback) to classify contacts into opportunity buckets (past_customer, hot_lead, warm_lead, etc.) stored in `lead_opportunities` table. Only received/reply emails are analyzed (sent-only outreach excluded). Supports email account selection (scan/analyze specific accounts), account-wise filtering, pagination (25/page), member role filtering (members see own accounts only), and custom AI prompt editing (admin). `accountEmail` column on `lead_opportunities` tracks which account received each reply. API: `/api/lead-intelligence/scan`, `/api/lead-intelligence/analyze`, `/api/lead-intelligence/run`, `/api/lead-intelligence/prompt` (GET/POST custom prompt), `/api/lead-intelligence/debug`. Has own token helpers independent of other engines.
+
+**Context Engine**: `context-engine.ts` is the RAG-lite layer that assembles organizational knowledge for AI-powered actions. Pulls from 6 data sources (email_history, lead_opportunities, messages, contact_activities, contacts, org_documents) to build structured context prompts. Powers: smart email reply drafts (`/api/context/draft-reply`), proposal generation (`/api/context/proposal`), and contact context assembly (`/api/context/contact/:id`). Uses SQLite FTS5 for document search (zero dependencies). `org_documents` table stores case studies, proposals, brochures, pricing, etc. with auto-generated AI summaries. Knowledge Base page at sidebar > Tools > Knowledge Base (admin only). See `CONTEXT-ENGINE.md` for full architecture.
+
+**Contact Enrichment**: `GET /api/contacts` enriches each contact with AI lead classification from `lead_opportunities` (leadBucket, leadConfidence, aiReasoning, suggestedAction). `GET /api/contacts/hot-leads` provides a dedicated AI leads view with bucket filtering, search, and pagination. Smart filters via `leadFilter` query param: `hot_leads`, `warm_leads`, `past_customer`, `engaged`, `cold`, `never_contacted`. Frontend shows lead badges on contact rows, AI intelligence card in detail dialog, and "AI Leads" tab in contacts manager.
 
 **Raw SQLite access**: `DatabaseStorage` exposes `get db()` getter. Use `const db = (storage as any).db;` in routes. Never import `server/db.ts`.
 
