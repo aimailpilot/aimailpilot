@@ -19,7 +19,13 @@
       "Read(//c/Users/Bhupesh/AppData/Local/fnm/**)",
       "Read(//c/Users/Bhupesh/.nvm/**)",
       "Read(//c//**)",
-      "Read(//c/Users/Bhupesh/**)"
+      "Read(//c/Users/Bhupesh/**)",
+      "Bash(ls node_modules/.bin/esbuild*)",
+      "Bash(npx --yes esbuild server/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/test-build.js)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(export PATH=\"/c/Program Files/nodejs:$HOME/AppData/Roaming/npm:$PATH\")",
+      "Bash(npx esbuild:*)",
+      "Bash(where.exe node:*)"
     ]
   }
 }
