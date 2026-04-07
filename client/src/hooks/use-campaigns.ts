@@ -5,6 +5,7 @@ import type { Campaign } from "@/types";
 interface UseCampaignsOptions {
   limit?: number;
   offset?: number;
+  enabled?: boolean;
 }
 
 export function useCampaigns(options: UseCampaignsOptions = {}) {
@@ -25,6 +26,7 @@ export function useCampaigns(options: UseCampaignsOptions = {}) {
     refetchOnWindowFocus: false,
     refetchOnMount: false,
     refetchInterval: false,
+    enabled: options.enabled !== false,
   });
 
   const createCampaignMutation = useMutation({

@@ -41,6 +41,25 @@ const MyDashboard = lazy(() => import("./my-dashboard"));
 const LeadOpportunities = lazy(() => import("./lead-opportunities"));
 const KnowledgeBase = lazy(() => import("./knowledge-base"));
 
+// Prefetch key chunks after initial render so tab switches feel instant
+if (typeof window !== 'undefined') {
+  const prefetch = () => {
+    import("./template-manager");
+    import("./contacts-manager");
+    import("./unified-inbox");
+    import("./warmup-monitoring");
+    import("./campaign-detail");
+    import("./lead-opportunities");
+    import("./email-account-setup");
+    import("./knowledge-base");
+  };
+  if (typeof requestIdleCallback === 'function') {
+    requestIdleCallback(prefetch);
+  } else {
+    setTimeout(prefetch, 1500);
+  }
+}
+
 // Loading fallback for lazy-loaded pages
 function PageLoader() {
   return (
@@ -235,9 +254,10 @@ export default function MailMeteorDashboard() {
   
   const [campaignPage, setCampaignPage] = useState(0);
   const campaignsPerPage = 10;
-  const { campaigns, isLoading } = useCampaigns({ limit: campaignsPerPage, offset: campaignPage * campaignsPerPage });
+  const onCampaignsView = currentView === 'campaigns';
+  const { campaigns, isLoading } = useCampaigns({ limit: campaignsPerPage, offset: campaignPage * campaignsPerPage, enabled: onCampaignsView });
 
-  // Fetch total campaign count for pagination
+  // Fetch total campaign count for pagination (only when on campaigns view)
   const { data: campaignCountData } = useQuery<{ total: number }>({
     queryKey: ['/api/campaigns/count', activeFilter],
     queryFn: async () => {
@@ -251,6 +271,7 @@ export default function MailMeteorDashboard() {
       return resp.json();
     },
     staleTime: 5 * 60 * 1000,
+    enabled: onCampaignsView,
   });
   const totalCampaigns = campaignCountData?.total || 0;
   const totalPages = Math.ceil(totalCampaigns / campaignsPerPage);
