@@ -327,36 +327,6 @@ This file tracks features that are confirmed working in production.
 - See `CONTEXT-ENGINE.md` for full architecture and API documentation
 - **Do not touch**: `server/services/context-engine.ts`; `org_documents` + `org_documents_fts` tables in `server/storage.ts`; context engine routes in `server/routes.ts`; `client/src/pages/knowledge-base.tsx`
 
-### 42. Campaigns Pagination + UI Improvements
-- Campaign list now paginates server-side: 10 per page with Previous/Next + numbered page buttons
-- `/api/campaigns/count` endpoint returns total campaign count with optional status filter and role scoping
-- Bounced column added to campaigns table (red highlight when bounces > 0)
-- Date column now shows year for campaigns not from the current year
-- Filter tabs reset to page 1 on change
-- Campaigns and count queries only fire when user is on the campaigns view (not on other tabs)
-- **Do not touch**: `/api/campaigns/count` endpoint in `server/routes.ts`; pagination state in `client/src/pages/mailmeteor-dashboard.tsx`
-
-### 43. Template Attachments
-- `email_attachments` table stores file attachments (base64) for templates and campaigns
-- API endpoints: `GET/POST/DELETE /api/attachments` with org scoping and auth
-- Paperclip button in template editor toolbar opens file picker (max 10MB per file)
-- Attachment bar below editor shows attached files with name, size, and remove button
-- Attachments displayed in preview dialog
-- Storage methods: `createAttachment`, `getAttachments`, `getAttachment`, `deleteAttachment`, `copyAttachmentsToCampaign`
-- **Do not touch**: `email_attachments` table in `server/storage.ts`; attachment routes in `server/routes.ts`; attachment UI in `client/src/pages/template-manager.tsx`
-
-### 44. Template Editor Improvements
-- Font change now works correctly — selection is saved on editor blur and restored before executing toolbar commands
-- Font dropdown expanded: Sans Serif, Serif, Monospace, Georgia, Arial, Verdana, Tahoma, Times New Roman
-- Preview dialog now uses same CSS styles as the editor (matching text size, line height, link/list/heading styles) for consistent rendering
-- **Do not touch**: `saveSelection`/`restoreSelection`/`handleEditorBlur` in `client/src/pages/template-manager.tsx`
-
-### 45. Page Loading Performance (Prefetch)
-- All key lazy-loaded page chunks are prefetched after initial render via `requestIdleCallback` (fallback: setTimeout 1.5s)
-- Tab switches feel instant because chunks are already in browser cache
-- Campaign queries gated with `enabled` flag — only fire on campaigns view, reducing unnecessary API calls on other tabs
-- **Do not touch**: Prefetch block in `client/src/pages/mailmeteor-dashboard.tsx`; `enabled` option in `client/src/hooks/use-campaigns.ts`
-
 ---
 
 ## General Rule

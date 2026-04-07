@@ -1061,40 +1061,6 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_campaigns_created_by ON campaigns(
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_campaign_status ON messages(campaignId, status)`); } catch (e) {}
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_email_accounts_org ON email_accounts(organizationId)`); } catch (e) {}
 
-// ── Performance indexes (added to fix slow queries) ──
-// Composite indexes for dashboard/scorecard queries
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_org_sent ON messages(status, sentAt)`); } catch (e) {}
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_activities_org_user_type ON contact_activities(organizationId, userId, type, createdAt)`); } catch (e) {}
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_org_assigned_pipeline ON contacts(organizationId, assignedTo, pipelineStage)`); } catch (e) {}
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_org_assigned_action ON contacts(organizationId, assignedTo, nextActionDate)`); } catch (e) {}
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_org_assigned_deal ON contacts(organizationId, assignedTo, dealClosedAt)`); } catch (e) {}
-// Inbox enrichment queries
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_inbox_org_status_assigned ON unified_inbox(organizationId, status, assignedTo)`); } catch (e) {}
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_inbox_org_received ON unified_inbox(organizationId, receivedAt DESC)`); } catch (e) {}
-// Contact DISTINCT filter queries (company, jobTitle, city, country)
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_org_company ON contacts(organizationId, company)`); } catch (e) {}
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_org_jobtitle ON contacts(organizationId, jobTitle)`); } catch (e) {}
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_org_city ON contacts(organizationId, city)`); } catch (e) {}
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_org_country ON contacts(organizationId, country)`); } catch (e) {}
-// Contact activities latest lookup (fixes N+1 correlated subqueries)
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_activities_contact_created ON contact_activities(contactId, createdAt DESC)`); } catch (e) {}
-// Email attachments
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_attachments_template ON email_attachments(templateId)`); } catch (e) {}
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_attachments_campaign ON email_attachments(campaignId)`); } catch (e) {}
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_attachments_org ON email_attachments(organizationId)`); } catch (e) {}
-// Unsubscribes
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_unsub_org_email ON unsubscribes(organizationId, email)`); } catch (e) {}
-// Contact lists
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_contact_lists_org ON contact_lists(organizationId)`); } catch (e) {}
-// Messages contact+sent for dashboard joins
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_contact_status_sent ON messages(contactId, status, sentAt)`); } catch (e) {}
-// Lead opportunities for contact enrichment
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_lead_opps_org_bucket ON lead_opportunities(organizationId, bucket, confidence DESC)`); } catch (e) {}
-// Email history for lead intelligence
-try { db.exec(`CREATE INDEX IF NOT EXISTS idx_email_history_org_from ON email_history(organizationId, fromEmail)`); } catch (e) {}
-
-// ANALYZE removed — was blocking event loop on large DBs
-
 // Migrate existing email accounts to correct provider-based daily limits
 // Gmail=2000, Outlook=10000, ElasticEmail=unlimited, Custom=500
 try {
@@ -3391,26 +3357,17 @@ export class DatabaseStorage {
 
   // Get inbox stats breakdown for dashboard
   async getInboxStats(organizationId: string) {
-    // Single query instead of 10 separate COUNT queries
-    const row = db.prepare(`
-      SELECT
-        COUNT(*) as total,
-        SUM(CASE WHEN status = 'unread' THEN 1 ELSE 0 END) as unread,
-        SUM(CASE WHEN status = 'replied' THEN 1 ELSE 0 END) as replied,
-        SUM(CASE WHEN status = 'archived' THEN 1 ELSE 0 END) as archived,
-        SUM(CASE WHEN replyType = 'positive' THEN 1 ELSE 0 END) as positive,
-        SUM(CASE WHEN replyType = 'negative' THEN 1 ELSE 0 END) as negative,
-        SUM(CASE WHEN replyType = 'ooo' THEN 1 ELSE 0 END) as ooo,
-        SUM(CASE WHEN replyType = 'auto_reply' THEN 1 ELSE 0 END) as autoReply,
-        SUM(CASE WHEN bounceType != '' AND bounceType IS NOT NULL THEN 1 ELSE 0 END) as bounced,
-        SUM(CASE WHEN isStarred = 1 THEN 1 ELSE 0 END) as starred
-      FROM unified_inbox WHERE organizationId = ?
-    `).get(organizationId) as any;
-    return {
-      total: row.total || 0, unread: row.unread || 0, replied: row.replied || 0,
-      archived: row.archived || 0, positive: row.positive || 0, negative: row.negative || 0,
-      ooo: row.ooo || 0, autoReply: row.autoReply || 0, bounced: row.bounced || 0, starred: row.starred || 0,
-    };
+    const total = (db.prepare('SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ?').get(organizationId) as any).c;
+    const unread = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND status = 'unread'").get(organizationId) as any).c;
+    const replied = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND status = 'replied'").get(organizationId) as any).c;
+    const archived = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND status = 'archived'").get(organizationId) as any).c;
+    const positive = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND replyType = 'positive'").get(organizationId) as any).c;
+    const negative = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND replyType = 'negative'").get(organizationId) as any).c;
+    const ooo = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND replyType = 'ooo'").get(organizationId) as any).c;
+    const autoReply = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND replyType = 'auto_reply'").get(organizationId) as any).c;
+    const bounced = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND (bounceType != '' AND bounceType IS NOT NULL)").get(organizationId) as any).c;
+    const starred = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND isStarred = 1").get(organizationId) as any).c;
+    return { total, unread, replied, archived, positive, negative, ooo, autoReply, bounced, starred };
   }
 
   // ========== DATABASE EXPORT/IMPORT ==========

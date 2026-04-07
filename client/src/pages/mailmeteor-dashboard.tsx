@@ -41,25 +41,6 @@ const MyDashboard = lazy(() => import("./my-dashboard"));
 const LeadOpportunities = lazy(() => import("./lead-opportunities"));
 const KnowledgeBase = lazy(() => import("./knowledge-base"));
 
-// Prefetch key chunks after initial render so tab switches feel instant
-if (typeof window !== 'undefined') {
-  const prefetch = () => {
-    import("./template-manager");
-    import("./contacts-manager");
-    import("./unified-inbox");
-    import("./warmup-monitoring");
-    import("./campaign-detail");
-    import("./lead-opportunities");
-    import("./email-account-setup");
-    import("./knowledge-base");
-  };
-  if (typeof requestIdleCallback === 'function') {
-    requestIdleCallback(prefetch);
-  } else {
-    setTimeout(prefetch, 1500);
-  }
-}
-
 // Loading fallback for lazy-loaded pages
 function PageLoader() {
   return (
@@ -92,7 +73,7 @@ function LiveTrackingFeed({ dashStats }: { dashStats: any }) {
 
   useEffect(() => {
     fetchEvents();
-    const interval = setInterval(fetchEvents, 120000); // Refresh every 2 min (was 15s — too disruptive)
+    const interval = setInterval(fetchEvents, 15000); // Refresh every 15s
     return () => clearInterval(interval);
   }, []);
 
@@ -254,10 +235,9 @@ export default function MailMeteorDashboard() {
   
   const [campaignPage, setCampaignPage] = useState(0);
   const campaignsPerPage = 10;
-  const onCampaignsView = currentView === 'campaigns';
-  const { campaigns, isLoading } = useCampaigns({ limit: campaignsPerPage, offset: campaignPage * campaignsPerPage, enabled: onCampaignsView });
+  const { campaigns, isLoading } = useCampaigns({ limit: campaignsPerPage, offset: campaignPage * campaignsPerPage });
 
-  // Fetch total campaign count for pagination (only when on campaigns view)
+  // Fetch total campaign count for pagination
   const { data: campaignCountData } = useQuery<{ total: number }>({
     queryKey: ['/api/campaigns/count', activeFilter],
     queryFn: async () => {
@@ -271,7 +251,6 @@ export default function MailMeteorDashboard() {
       return resp.json();
     },
     staleTime: 5 * 60 * 1000,
-    enabled: onCampaignsView,
   });
   const totalCampaigns = campaignCountData?.total || 0;
   const totalPages = Math.ceil(totalCampaigns / campaignsPerPage);
@@ -349,7 +328,7 @@ export default function MailMeteorDashboard() {
       } catch {}
     };
     fetchUnread();
-    const interval = setInterval(fetchUnread, 120000); // Refresh every 2 min (was 30s)
+    const interval = setInterval(fetchUnread, 30000);
     return () => clearInterval(interval);
   }, []);
 

@@ -212,7 +212,7 @@ export default function UnifiedInbox() {
 
   // Auto-refresh every 30s
   useEffect(() => {
-    const interval = setInterval(fetchMessages, 120000); // Refresh every 2 min (was 30s — too disruptive)
+    const interval = setInterval(fetchMessages, 30000);
     return () => clearInterval(interval);
   }, [fetchMessages]);
 

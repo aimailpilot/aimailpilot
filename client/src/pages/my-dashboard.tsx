@@ -6,7 +6,7 @@ import {
   MessageSquare, RefreshCw, Zap, IndianRupee, BarChart3, Clock,
   Send, Briefcase, CheckCircle2, XCircle, Flame, ChevronRight,
   ArrowRight, PartyPopper, Bell, Eye, ChevronDown, ChevronUp,
-  ExternalLink, User, Building2, Reply, Newspaper, Linkedin
+  ExternalLink, User, Building2, Reply
 } from "lucide-react";
 
 interface DashboardStats {
@@ -258,8 +258,7 @@ export default function MyDashboard() {
           <div className="space-y-2">
             {nudges.map((nudge) => {
               const style = nudgeStyles[nudge.priority] || nudgeStyles.medium;
-              const nudgeIconMap: Record<string, any> = { needs_reply: Mail, celebration: PartyPopper, email_target: Send, newsletter_target: Newspaper, call_target: Phone, linkedin_target: Linkedin, overdue: AlertTriangle, stale_leads: Flame };
-              const NudgeIcon = nudgeIconMap[nudge.type] || style.icon;
+              const NudgeIcon = nudge.type === 'needs_reply' ? Mail : nudge.type === 'celebration' ? PartyPopper : style.icon;
               const isExpanded = expandedNudge === nudge.type;
               const isClickable = nudge.type === 'needs_reply';
 

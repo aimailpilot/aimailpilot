@@ -3576,24 +3576,10 @@ Which account should I use and why? If I need to split across accounts, provide 
       let followupSequences: any[] = [];
       try {
         const campaignFollowups = await storage.getCampaignFollowups(req.params.id);
-        // Batch-fetch all sequences and steps to avoid N+1
-        const seqIds = campaignFollowups.map((cf: any) => cf.sequenceId).filter(Boolean);
-        const seqMap: Record<string, any> = {};
-        const stepsMap: Record<string, any[]> = {};
-        if (seqIds.length > 0) {
-          const dbLocal = (storage as any).db;
-          try {
-            const seqPlaceholders = seqIds.map(() => '?').join(',');
-            const seqs = dbLocal.prepare(`SELECT * FROM followup_sequences WHERE id IN (${seqPlaceholders})`).all(...seqIds) as any[];
-            for (const s of seqs) seqMap[s.id] = s;
-            const allSteps = dbLocal.prepare(`SELECT * FROM followup_steps WHERE sequenceId IN (${seqPlaceholders}) ORDER BY stepNumber`).all(...seqIds) as any[];
-            for (const st of allSteps) { if (!stepsMap[st.sequenceId]) stepsMap[st.sequenceId] = []; stepsMap[st.sequenceId].push(st); }
-          } catch { /* fallback to individual queries below */ }
-        }
         for (const cf of campaignFollowups) {
-          let seq = seqMap[cf.sequenceId]; if (!seq) seq = await storage.getFollowupSequence(cf.sequenceId);
+          const seq = await storage.getFollowupSequence(cf.sequenceId);
           if (seq) {
-            let steps = stepsMap[seq.id]; if (!steps) steps = await storage.getFollowupSteps(seq.id);
+            const steps = await storage.getFollowupSteps(seq.id);
             followupSequences.push({ ...seq, steps });
             // Enhance step analytics with follow-up info (Mailmeteor-style description)
             for (const step of steps) {
@@ -7316,105 +7302,6 @@ Respond with ONLY a JSON object in this format:
     }
   });
 
-  // ── Campaign diagnostic endpoint — check why campaigns aren't sending ──
-  app.post('/api/debug/campaign-force-restart/:id', requireAuth, async (req: any, res) => {
-    try {
-      const campaign = await storage.getCampaign(req.params.id);
-      if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
-
-      // Clear from in-memory map
-      (campaignEngine as any).activeCampaigns?.delete(req.params.id);
-
-      // Get sending config
-      const sc = (campaign as any).sendingConfig || {};
-
-      // Set public URL
-      const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
-      const host = req.headers['x-forwarded-host'] || req.headers['host'];
-      if (host && !host.includes('localhost')) campaignEngine.setPublicBaseUrl(`${proto}://${host}`);
-
-      // Force restart
-      const result = await campaignEngine.startCampaign({
-        campaignId: req.params.id,
-        delayBetweenEmails: sc.delayBetweenEmails || 2000,
-        batchSize: sc.batchSize || 10,
-        sendingConfig: sc,
-      });
-      res.json({ result, message: 'Force restart attempted' });
-    } catch (e) {
-      res.status(500).json({ error: (e as Error).message, stack: (e as Error).stack });
-    }
-  });
-
-  app.get('/api/debug/campaign-diagnose', requireAuth, async (req: any, res) => {
-    try {
-      const db = (storage as any).db;
-      const orgId = req.user.organizationId;
-
-      // 1. Get all active/paused campaigns for this org
-      const campaigns = db.prepare(`
-        SELECT id, name, status, sentCount, totalRecipients, emailAccountId, sendingConfig, createdAt, updatedAt
-        FROM campaigns WHERE organizationId = ? AND status IN ('active', 'paused', 'draft') ORDER BY createdAt DESC LIMIT 10
-      `).all(orgId) as any[];
-
-      const results: any[] = [];
-      for (const c of campaigns) {
-        const diag: any = {
-          id: c.id, name: c.name, status: c.status, sentCount: c.sentCount,
-          totalRecipients: c.totalRecipients, createdAt: c.createdAt, updatedAt: c.updatedAt,
-          inMemory: !!(campaignEngine as any).activeCampaigns?.has(c.id),
-        };
-
-        // Check email account
-        if (c.emailAccountId) {
-          const acct = await storage.getEmailAccount(c.emailAccountId);
-          if (acct) {
-            diag.emailAccount = { id: acct.id, email: (acct as any).email, provider: (acct as any).provider, dailySent: (acct as any).dailySent, dailyLimit: (acct as any).dailyLimit, hasSmtpConfig: !!(acct as any).smtpConfig };
-          } else {
-            diag.emailAccountError = 'Account not found';
-          }
-        } else {
-          diag.emailAccountError = 'No email account assigned';
-        }
-
-        // Parse sendingConfig
-        let sc = c.sendingConfig;
-        if (typeof sc === 'string') try { sc = JSON.parse(sc); } catch { sc = null; }
-        if (sc) {
-          diag.sendingConfig = { delay: sc.delayBetweenEmails, autopilot: sc.autopilot?.enabled, maxPerDay: sc.autopilot?.maxPerDay, timezone: sc.timezone, timezoneOffset: sc.timezoneOffset };
-        }
-
-        // Check contacts count
-        const campaign = await storage.getCampaign(c.id);
-        if (campaign) {
-          let contactCount = 0;
-          if ((campaign as any).segmentId) {
-            contactCount = (await storage.getContactsBySegment((campaign as any).segmentId)).length;
-          } else if ((campaign as any).contactIds?.length > 0) {
-            contactCount = (campaign as any).contactIds.length;
-          } else {
-            contactCount = (await storage.getContacts(orgId, 1, 0) as any[]).length > 0 ? -1 : 0; // -1 = has contacts
-          }
-          diag.contactCount = contactCount;
-
-          // Check messages for this campaign
-          const msgs = db.prepare('SELECT COUNT(*) as cnt FROM messages WHERE campaignId = ?').get(c.id) as any;
-          diag.messageCount = msgs?.cnt || 0;
-        }
-
-        results.push(diag);
-      }
-
-      // Also check activeCampaigns map
-      const activeCampaignIds: string[] = [];
-      (campaignEngine as any).activeCampaigns?.forEach((_v: any, k: string) => activeCampaignIds.push(k));
-
-      res.json({ campaigns: results, activeCampaignsInMemory: activeCampaignIds, serverUptime: process.uptime(), nodeVersion: process.version });
-    } catch (e) {
-      res.status(500).json({ error: (e as Error).message, stack: (e as Error).stack });
-    }
-  });
-
   // Fetch spreadsheet info (sheet names) using Google Sheets API v4 with OAuth, fallback to public CSV export
   // NOTE: Wrapped with .then().catch() for Express 4 async safety
   app.post('/api/sheets/fetch-info', (req: any, res, next) => {
@@ -7789,48 +7676,31 @@ Respond with ONLY a JSON object in this format:
         unread = await storage.getInboxUnreadCount(req.user.organizationId, filterAccountIds);
       }
 
-      // Enrich messages with contact info (batch lookup instead of N+1)
-      const db = (storage as any).db;
-      const contactIds = [...new Set(messages.map((m: any) => m.contactId).filter(Boolean))];
-      const fromEmails = [...new Set(messages.map((m: any) => m.fromEmail).filter(Boolean))];
-      const accountIds = isAdmin ? [...new Set(messages.map((m: any) => m.emailAccountId).filter(Boolean))] : [];
-
-      // Batch fetch contacts by ID
-      const contactsById: Record<string, any> = {};
-      if (contactIds.length > 0) {
-        try {
-          const placeholders = contactIds.map(() => '?').join(',');
-          const rows = db.prepare(`SELECT id, email, firstName, lastName, company, jobTitle FROM contacts WHERE id IN (${placeholders})`).all(...contactIds) as any[];
-          for (const r of rows) contactsById[r.id] = r;
-        } catch { }
-      }
-      // Batch fetch contacts by email (for unlinked messages)
-      const contactsByEmail: Record<string, any> = {};
-      if (fromEmails.length > 0) {
-        try {
-          const placeholders = fromEmails.map(() => '?').join(',');
-          const rows = db.prepare(`SELECT id, email, firstName, lastName, company, jobTitle FROM contacts WHERE organizationId = ? AND email IN (${placeholders})`).all(req.user.organizationId, ...fromEmails) as any[];
-          for (const r of rows) contactsByEmail[r.email.toLowerCase()] = r;
-        } catch { }
-      }
-      // Batch fetch account owners (admin only)
-      const accountOwners: Record<string, any> = {};
-      if (accountIds.length > 0) {
-        try {
-          const placeholders = accountIds.map(() => '?').join(',');
-          const rows = db.prepare(`SELECT ea.id as accountId, u.id, u.email, u.firstName, u.lastName FROM email_accounts ea JOIN users u ON u.id = ea.userId WHERE ea.id IN (${placeholders})`).all(...accountIds) as any[];
-          for (const r of rows) accountOwners[r.accountId] = { id: r.id, email: r.email, firstName: r.firstName, lastName: r.lastName };
-        } catch { }
-      }
-
-      const enriched = messages.map((m: any) => {
-        const contact = (m.contactId && contactsById[m.contactId]) || (m.fromEmail && contactsByEmail[m.fromEmail.toLowerCase()]) || null;
+      // Enrich messages with contact info
+      const enriched = await Promise.all(messages.map(async (m: any) => {
+        let contact = null;
+        if (m.contactId) {
+          contact = await storage.getContact(m.contactId);
+        }
+        // Try to find contact by email if not linked
+        if (!contact && m.fromEmail) {
+          contact = await storage.getContactByEmail(req.user.organizationId, m.fromEmail);
+        }
+        // Add account owner info for admin view
+        let accountOwner = null;
+        if (isAdmin && m.emailAccountId) {
+          const acct = await storage.getEmailAccount(m.emailAccountId);
+          if (acct && (acct as any).userId) {
+            const owner = await storage.getUser((acct as any).userId);
+            if (owner) accountOwner = { id: owner.id, email: owner.email, firstName: (owner as any).firstName, lastName: (owner as any).lastName };
+          }
+        }
         return {
           ...m,
           contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company, jobTitle: contact.jobTitle } : null,
-          accountOwner: (isAdmin && m.emailAccountId) ? (accountOwners[m.emailAccountId] || null) : null,
+          accountOwner,
         };
-      });
+      }));
 
       res.json({ messages: enriched, total, unread });
     } catch (error) {
@@ -8153,52 +8023,33 @@ Respond with ONLY a JSON object in this format:
       const stats = await storage.getInboxStats(req.user.organizationId);
       const unread = stats.unread;
 
-      // Enrich messages — batch lookups instead of N+1 per-message queries
-      const dbE = (storage as any).db;
-      const eContactIds = [...new Set(messages.map((m: any) => m.contactId).filter(Boolean))];
-      const eFromEmails = [...new Set(messages.map((m: any) => m.fromEmail).filter(Boolean))];
-      const eAccountIds = isAdmin ? [...new Set(messages.map((m: any) => m.emailAccountId).filter(Boolean))] : [];
-      const eCampaignIds = [...new Set(messages.map((m: any) => m.campaignId).filter(Boolean))];
-
-      const eContactsById: Record<string, any> = {};
-      const eContactsByEmail: Record<string, any> = {};
-      const eAccountOwners: Record<string, any> = {};
-      const eCampaignsById: Record<string, any> = {};
-
-      try {
-        if (eContactIds.length > 0) {
-          const ph = eContactIds.map(() => '?').join(',');
-          for (const r of dbE.prepare(`SELECT id, email, firstName, lastName, company, jobTitle, status, score, leadStatus FROM contacts WHERE id IN (${ph})`).all(...eContactIds) as any[])
-            eContactsById[r.id] = r;
+      // Enrich messages (individual try/catch to prevent one bad message from crashing the whole endpoint)
+      const enriched = await Promise.all(messages.map(async (m: any) => {
+        try {
+          let contact = null;
+          if (m.contactId) contact = await storage.getContact(m.contactId);
+          if (!contact && m.fromEmail) contact = await storage.getContactByEmail(req.user.organizationId, m.fromEmail);
+          let accountOwner = null;
+          if (isAdmin && m.emailAccountId) {
+            const acct = await storage.getEmailAccount(m.emailAccountId);
+            if (acct && (acct as any).userId) {
+              const owner = await storage.getUser((acct as any).userId);
+              if (owner) accountOwner = { id: owner.id, email: owner.email, firstName: (owner as any).firstName, lastName: (owner as any).lastName };
+            }
+          }
+          let campaign = null;
+          if (m.campaignId) campaign = await storage.getCampaign(m.campaignId);
+          return {
+            ...m,
+            contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company, jobTitle: contact.jobTitle, status: contact.status, score: contact.score, leadStatus: (contact as any).leadStatus } : null,
+            campaign: campaign ? { id: campaign.id, name: campaign.name } : null,
+            accountOwner,
+          };
+        } catch (enrichErr) {
+          console.error(`[Enhanced Inbox] Failed to enrich message ${m.id}:`, enrichErr);
+          return { ...m, contact: null, campaign: null, accountOwner: null };
         }
-        if (eFromEmails.length > 0) {
-          const ph = eFromEmails.map(() => '?').join(',');
-          for (const r of dbE.prepare(`SELECT id, email, firstName, lastName, company, jobTitle, status, score, leadStatus FROM contacts WHERE organizationId = ? AND email IN (${ph})`).all(req.user.organizationId, ...eFromEmails) as any[])
-            eContactsByEmail[r.email.toLowerCase()] = r;
-        }
-        if (eAccountIds.length > 0) {
-          const ph = eAccountIds.map(() => '?').join(',');
-          for (const r of dbE.prepare(`SELECT ea.id as accountId, u.id, u.email, u.firstName, u.lastName FROM email_accounts ea JOIN users u ON u.id = ea.userId WHERE ea.id IN (${ph})`).all(...eAccountIds) as any[])
-            eAccountOwners[r.accountId] = { id: r.id, email: r.email, firstName: r.firstName, lastName: r.lastName };
-        }
-        if (eCampaignIds.length > 0) {
-          const ph = eCampaignIds.map(() => '?').join(',');
-          for (const r of dbE.prepare(`SELECT id, name FROM campaigns WHERE id IN (${ph})`).all(...eCampaignIds) as any[])
-            eCampaignsById[r.id] = r;
-        }
-      } catch (batchErr) {
-        console.error('[Enhanced Inbox] Batch enrichment error:', batchErr);
-      }
-
-      const enriched = messages.map((m: any) => {
-        const contact = (m.contactId && eContactsById[m.contactId]) || (m.fromEmail && eContactsByEmail[m.fromEmail.toLowerCase()]) || null;
-        return {
-          ...m,
-          contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company, jobTitle: contact.jobTitle, status: contact.status, score: contact.score, leadStatus: contact.leadStatus } : null,
-          campaign: m.campaignId ? (eCampaignsById[m.campaignId] || null) : null,
-          accountOwner: (isAdmin && m.emailAccountId) ? (eAccountOwners[m.emailAccountId] || null) : null,
-        };
-      });
+      }));
 
       res.json({ messages: enriched, total, unread, stats });
     } catch (error) {
@@ -9494,68 +9345,12 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         if (pendingProposals > 0) nudges.push({ type: 'pending_proposals', priority: 'medium', title: `${pendingProposals} Proposals Awaiting Response`, message: 'Proposals sent 3+ days ago with no follow-up — time to check in', count: pendingProposals, actionType: 'contacts' });
       } catch { }
 
-      // 6. Email sending daily target (starts 2000, +25%/day, cap 4000) — today only
-      if (period === 'today') {
-        try {
-          const orgData = await storage.getOrganization(orgId) as any;
-          const orgAge = orgData?.createdAt ? Math.floor((Date.now() - new Date(orgData.createdAt).getTime()) / 86400000) : 0;
-          const dailyEmailTarget = Math.min(4000, Math.floor(2000 * Math.pow(1.25, orgAge)));
-          const remaining = dailyEmailTarget - emailsSent;
-          const pct = dailyEmailTarget > 0 ? Math.round((emailsSent / dailyEmailTarget) * 100) : 0;
-          if (emailsSent === 0) {
-            nudges.push({ type: 'email_target', priority: 'high', title: `0/${dailyEmailTarget} Emails Sent Today`, message: `Target: ${dailyEmailTarget} emails today — get started!`, count: 0 });
-          } else if (remaining > 0) {
-            nudges.push({ type: 'email_target', priority: pct < 50 ? 'high' : 'medium', title: `${emailsSent}/${dailyEmailTarget} Emails (${pct}%)`, message: `${remaining} more to hit your daily target`, count: emailsSent });
-          } else {
-            nudges.push({ type: 'email_target', priority: 'low', title: `Target Hit! ${emailsSent}/${dailyEmailTarget} Emails`, message: 'Great job — daily email target reached!', count: emailsSent });
-          }
-        } catch { }
-
-        // 7. Newsletter sending target (2000/day)
-        try {
-          const nlSent = (db.prepare(`
-            SELECT COUNT(*) as cnt FROM messages m
-            JOIN campaigns camp ON camp.id = m.campaignId
-            JOIN contacts c ON c.id = m.contactId
-            WHERE c.organizationId = ? AND c.assignedTo = ? AND m.status = 'sent' AND m.sentAt >= ? AND m.sentAt < ?
-            AND (LOWER(camp.name) LIKE '%newsletter%' OR camp.templateId IN (SELECT id FROM templates WHERE category = 'newsletter' AND organizationId = ?))
-          `).get(orgId, userId, startDate, endDate, orgId) as any)?.cnt || 0;
-          const nlTarget = 2000;
-          const nlRemaining = nlTarget - nlSent;
-          const nlPct = Math.round((nlSent / nlTarget) * 100);
-          if (nlSent === 0) {
-            nudges.push({ type: 'newsletter_target', priority: 'high', title: `0/${nlTarget} Newsletters Sent`, message: 'No newsletters sent yet — your subscribers are waiting!', count: 0 });
-          } else if (nlRemaining > 0) {
-            nudges.push({ type: 'newsletter_target', priority: nlPct < 50 ? 'high' : 'medium', title: `${nlSent}/${nlTarget} Newsletters (${nlPct}%)`, message: `${nlRemaining} more newsletters to reach your daily goal`, count: nlSent });
-          } else {
-            nudges.push({ type: 'newsletter_target', priority: 'low', title: `Newsletter Target Hit! ${nlSent}/${nlTarget}`, message: 'All newsletters sent for today!', count: nlSent });
-          }
-        } catch { }
-
-        // 8. Call target (20-30 calls/day)
-        if (callsMade < 20) {
-          nudges.push({ type: 'call_target', priority: callsMade === 0 ? 'high' : 'high', title: `${callsMade}/20-30 Calls Made`, message: callsMade === 0 ? 'Target: 20-30 calls/day — start dialing!' : `${20 - callsMade} more calls to hit minimum target`, count: callsMade });
-        } else if (callsMade < 30) {
-          nudges.push({ type: 'call_target', priority: 'medium', title: `${callsMade}/30 Calls — Almost There!`, message: `${30 - callsMade} more to hit max target`, count: callsMade });
-        } else {
-          nudges.push({ type: 'call_target', priority: 'low', title: `${callsMade} Calls — Target Smashed!`, message: 'You\'ve exceeded the 20-30 call target!', count: callsMade });
-        }
-
-        // 9. LinkedIn 10 min engagement
-        try {
-          const linkedinDone = (db.prepare(`
-            SELECT COUNT(*) as cnt FROM contact_activities
-            WHERE organizationId = ? AND userId = ? AND type = 'linkedin' AND createdAt >= ? AND createdAt < ?
-          `).get(orgId, userId, startDate, endDate) as any)?.cnt || 0;
-          if (linkedinDone === 0) {
-            nudges.push({ type: 'linkedin_target', priority: 'medium', title: 'LinkedIn: 10 Min Engagement Pending', message: 'Spend 10 min connecting & commenting on LinkedIn today', count: 0 });
-          } else {
-            nudges.push({ type: 'linkedin_target', priority: 'low', title: `${linkedinDone} LinkedIn Activities Logged`, message: 'Keep engaging — consistency builds pipeline', count: linkedinDone });
-          }
-        } catch { }
+      // 6. No calls today (only for today period)
+      if (period === 'today' && callsMade === 0) {
+        nudges.push({ type: 'no_calls', priority: 'low', title: 'No Calls Made Today', message: 'Start your day with outbound calls to warm up your pipeline', count: 0 });
       }
 
-      // 10. Win celebration
+      // 7. Win celebration
       if (wonCount > 0) {
         nudges.push({ type: 'celebration', priority: 'low', title: `${wonCount} Deal${wonCount > 1 ? 's' : ''} Won!`, message: `You closed ${wonCount > 1 ? 'deals' : 'a deal'} worth ₹${revenue.toLocaleString('en-IN')}`, count: wonCount });
       }
