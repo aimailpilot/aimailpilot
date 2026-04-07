@@ -9345,12 +9345,68 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         if (pendingProposals > 0) nudges.push({ type: 'pending_proposals', priority: 'medium', title: `${pendingProposals} Proposals Awaiting Response`, message: 'Proposals sent 3+ days ago with no follow-up — time to check in', count: pendingProposals, actionType: 'contacts' });
       } catch { }
 
-      // 6. No calls today (only for today period)
-      if (period === 'today' && callsMade === 0) {
-        nudges.push({ type: 'no_calls', priority: 'low', title: 'No Calls Made Today', message: 'Start your day with outbound calls to warm up your pipeline', count: 0 });
+      // 6. Email sending daily target (starts 2000, +25%/day, cap 4000) — today only
+      if (period === 'today') {
+        try {
+          const orgData = await storage.getOrganization(orgId) as any;
+          const orgAge = orgData?.createdAt ? Math.floor((Date.now() - new Date(orgData.createdAt).getTime()) / 86400000) : 0;
+          const dailyEmailTarget = Math.min(4000, Math.floor(2000 * Math.pow(1.25, orgAge)));
+          const remaining = dailyEmailTarget - emailsSent;
+          const pct = dailyEmailTarget > 0 ? Math.round((emailsSent / dailyEmailTarget) * 100) : 0;
+          if (emailsSent === 0) {
+            nudges.push({ type: 'email_target', priority: 'high', title: `0/${dailyEmailTarget} Emails Sent Today`, message: `Target: ${dailyEmailTarget} emails today — get started!`, count: 0 });
+          } else if (remaining > 0) {
+            nudges.push({ type: 'email_target', priority: pct < 50 ? 'high' : 'medium', title: `${emailsSent}/${dailyEmailTarget} Emails (${pct}%)`, message: `${remaining} more to hit your daily target`, count: emailsSent });
+          } else {
+            nudges.push({ type: 'email_target', priority: 'low', title: `Target Hit! ${emailsSent}/${dailyEmailTarget} Emails`, message: 'Great job — daily email target reached!', count: emailsSent });
+          }
+        } catch { }
+
+        // 7. Newsletter sending target (2000/day)
+        try {
+          const nlSent = (db.prepare(`
+            SELECT COUNT(*) as cnt FROM messages m
+            JOIN campaigns camp ON camp.id = m.campaignId
+            JOIN contacts c ON c.id = m.contactId
+            WHERE c.organizationId = ? AND c.assignedTo = ? AND m.status = 'sent' AND m.sentAt >= ? AND m.sentAt < ?
+            AND (LOWER(camp.name) LIKE '%newsletter%' OR camp.templateId IN (SELECT id FROM templates WHERE category = 'newsletter' AND organizationId = ?))
+          `).get(orgId, userId, startDate, endDate, orgId) as any)?.cnt || 0;
+          const nlTarget = 2000;
+          const nlRemaining = nlTarget - nlSent;
+          const nlPct = Math.round((nlSent / nlTarget) * 100);
+          if (nlSent === 0) {
+            nudges.push({ type: 'newsletter_target', priority: 'high', title: `0/${nlTarget} Newsletters Sent`, message: 'No newsletters sent yet — your subscribers are waiting!', count: 0 });
+          } else if (nlRemaining > 0) {
+            nudges.push({ type: 'newsletter_target', priority: nlPct < 50 ? 'high' : 'medium', title: `${nlSent}/${nlTarget} Newsletters (${nlPct}%)`, message: `${nlRemaining} more newsletters to reach your daily goal`, count: nlSent });
+          } else {
+            nudges.push({ type: 'newsletter_target', priority: 'low', title: `Newsletter Target Hit! ${nlSent}/${nlTarget}`, message: 'All newsletters sent for today!', count: nlSent });
+          }
+        } catch { }
+
+        // 8. Call target (20-30 calls/day)
+        if (callsMade < 20) {
+          nudges.push({ type: 'call_target', priority: callsMade === 0 ? 'high' : 'high', title: `${callsMade}/20-30 Calls Made`, message: callsMade === 0 ? 'Target: 20-30 calls/day — start dialing!' : `${20 - callsMade} more calls to hit minimum target`, count: callsMade });
+        } else if (callsMade < 30) {
+          nudges.push({ type: 'call_target', priority: 'medium', title: `${callsMade}/30 Calls — Almost There!`, message: `${30 - callsMade} more to hit max target`, count: callsMade });
+        } else {
+          nudges.push({ type: 'call_target', priority: 'low', title: `${callsMade} Calls — Target Smashed!`, message: 'You\'ve exceeded the 20-30 call target!', count: callsMade });
+        }
+
+        // 9. LinkedIn 10 min engagement
+        try {
+          const linkedinDone = (db.prepare(`
+            SELECT COUNT(*) as cnt FROM contact_activities
+            WHERE organizationId = ? AND userId = ? AND type = 'linkedin' AND createdAt >= ? AND createdAt < ?
+          `).get(orgId, userId, startDate, endDate) as any)?.cnt || 0;
+          if (linkedinDone === 0) {
+            nudges.push({ type: 'linkedin_target', priority: 'medium', title: 'LinkedIn: 10 Min Engagement Pending', message: 'Spend 10 min connecting & commenting on LinkedIn today', count: 0 });
+          } else {
+            nudges.push({ type: 'linkedin_target', priority: 'low', title: `${linkedinDone} LinkedIn Activities Logged`, message: 'Keep engaging — consistency builds pipeline', count: linkedinDone });
+          }
+        } catch { }
       }
 
-      // 7. Win celebration
+      // 10. Win celebration
       if (wonCount > 0) {
         nudges.push({ type: 'celebration', priority: 'low', title: `${wonCount} Deal${wonCount > 1 ? 's' : ''} Won!`, message: `You closed ${wonCount > 1 ? 'deals' : 'a deal'} worth ₹${revenue.toLocaleString('en-IN')}`, count: wonCount });
       }

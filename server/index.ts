@@ -4,6 +4,7 @@ import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { startFollowupEngine } from "./services/followup-engine";
 import { startWarmupEngine } from "./services/warmup-engine";
+import { startNudgeEmailEngine } from "./services/nudge-email-engine";
 import { campaignEngine } from "./services/campaign-engine";
 import { storage } from "./storage";
 
@@ -62,6 +63,8 @@ app.use((req, res, next) => {
     startFollowupEngine();
     // Start the warmup engine (self-warmup between connected accounts)
     startWarmupEngine();
+    // Start the nudge email engine (daily nudge digests at 10 AM & 2:30 PM IST)
+    startNudgeEmailEngine();
     
     // Auto-resume active campaigns that were interrupted by server restart
     // Delay by 10 seconds to let the server fully initialize (OAuth, DB, etc.)

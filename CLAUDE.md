@@ -121,6 +121,12 @@ shared/schema.ts  Drizzle ORM schema (PostgreSQL dialect, used for type definiti
 
 **Contact Enrichment**: `GET /api/contacts` enriches each contact with AI lead classification from `lead_opportunities` (leadBucket, leadConfidence, aiReasoning, suggestedAction). `GET /api/contacts/hot-leads` provides a dedicated AI leads view with bucket filtering, search, and pagination. Smart filters via `leadFilter` query param: `hot_leads`, `warm_leads`, `past_customer`, `engaged`, `cold`, `never_contacted`. Frontend shows lead badges on contact rows, AI intelligence card in detail dialog, and "AI Leads" tab in contacts manager.
 
+**Email Attachments**: `email_attachments` table stores base64-encoded file attachments linked to templates or campaigns. API: `GET/POST/DELETE /api/attachments`. Template editor has a Paperclip toolbar button for file upload (max 10MB). Attachments shown in editor bar and preview dialog. `copyAttachmentsToCampaign()` copies template attachments when creating a campaign. See `template.md` for full schema.
+
+**Template Editor**: Uses `contentEditable` div with `document.execCommand` for formatting. Selection save/restore (`savedSelectionRef`) ensures toolbar dropdowns (font, color) apply to highlighted text correctly. Font options: Sans Serif, Serif, Monospace, Georgia, Arial, Verdana, Tahoma, Times New Roman. Preview dialog uses same CSS classes as editor for consistent rendering.
+
+**Performance (Lazy Loading)**: All page components are lazy-loaded via `React.lazy()`. Key chunks are prefetched after initial render via `requestIdleCallback` so tab switches are instant. Campaign queries gated with `enabled` flag — only fire when on campaigns view.
+
 **Raw SQLite access**: `DatabaseStorage` exposes `get db()` getter. Use `const db = (storage as any).db;` in routes. Never import `server/db.ts`.
 
 **Frontend data fetching**: TanStack Query (`@tanstack/react-query`) with a shared `queryClient` in `client/src/lib/queryClient.ts`. All API calls go through fetch wrappers in that file.

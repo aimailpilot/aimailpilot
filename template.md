@@ -193,15 +193,57 @@ grade: A/B/C/D/F
 - **Top bar:** Back, actions dropdown, Public/Private toggle (owner), Preview, Save
 - **Template name:** Inline editable text input
 - **Subject + category:** Subject input with category dropdown
-- **Toolbar (visual mode):** Bold, Italic, Underline, Strikethrough, Link, Image, Lists, Alignment, Clear formatting, Variables dropdown
+- **Toolbar (visual mode):** Bold, Italic, Underline, Strikethrough, Link, Image, **Attach file (Paperclip)**, Font family dropdown, Lists, Alignment, Clear formatting, Variables dropdown
+- **Font selection:** Saves/restores editor selection so fonts apply to highlighted text correctly. Options: Sans Serif, Serif, Monospace, Georgia, Arial, Verdana, Tahoma, Times New Roman
+- **Attachments:** Paperclip button opens file picker (max 10MB). Attachment bar below editor shows file names, sizes, remove button. Attachments display in preview dialog too. Stored in `email_attachments` table as base64.
 - **Editor modes:** Visual (contentEditable) / HTML (code textarea)
 - **AI Write section:** Collapsible, format selector (Text/HTML/Both), prompt textarea, quick suggestions, result display with Use buttons
 - **Deliverability panel:** Right sidebar (340px), score card, quick stats, issues list, spam highlighting, AI suggestions, auto-fix button
 
 ### Preview Dialog
 - Desktop/mobile viewport toggle (mobile = 375px phone frame)
-- Personalized content with sample contact
+- Personalized content with sample contact — uses same CSS styles as editor for consistent rendering
+- Attachment list shown in preview when attachments exist
 - Send test email: account selector, recipient input, send button with success/error feedback
+
+---
+
+## Email Attachments
+
+### Database Schema
+
+**Table:** `email_attachments` in `server/storage.ts`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | TEXT PK | Unique attachment ID |
+| organizationId | TEXT | Owning organization |
+| templateId | TEXT | Associated template (nullable) |
+| campaignId | TEXT | Associated campaign (nullable) |
+| fileName | TEXT | Original file name |
+| fileSize | INTEGER | File size in bytes |
+| mimeType | TEXT | MIME type |
+| content | TEXT | Base64-encoded file content |
+| createdAt | TEXT | Upload timestamp |
+
+### Storage Methods
+
+| Method | Purpose |
+|--------|---------|
+| `createAttachment(data)` | Upload and store attachment |
+| `getAttachments(orgId, { templateId?, campaignId? })` | List attachments (without content) |
+| `getAttachment(id, orgId)` | Single attachment with content |
+| `deleteAttachment(id, orgId)` | Remove attachment |
+| `copyAttachmentsToCampaign(templateId, campaignId, orgId)` | Copy template attachments to campaign |
+
+### API Routes
+
+| Method | Route | Purpose |
+|--------|-------|---------|
+| GET | `/api/attachments?templateId=X` | List attachments for template/campaign |
+| POST | `/api/attachments` | Upload attachment (base64 in JSON body, max 10MB) |
+| GET | `/api/attachments/:id` | Download attachment as binary |
+| DELETE | `/api/attachments/:id` | Delete attachment |
 
 ---
 

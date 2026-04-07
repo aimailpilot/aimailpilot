@@ -92,7 +92,7 @@ function LiveTrackingFeed({ dashStats }: { dashStats: any }) {
 
   useEffect(() => {
     fetchEvents();
-    const interval = setInterval(fetchEvents, 15000); // Refresh every 15s
+    const interval = setInterval(fetchEvents, 120000); // Refresh every 2 min (was 15s — too disruptive)
     return () => clearInterval(interval);
   }, []);
 
@@ -349,7 +349,7 @@ export default function MailMeteorDashboard() {
       } catch {}
     };
     fetchUnread();
-    const interval = setInterval(fetchUnread, 30000);
+    const interval = setInterval(fetchUnread, 120000); // Refresh every 2 min (was 30s)
     return () => clearInterval(interval);
   }, []);
 
