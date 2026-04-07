@@ -1,6 +1,17 @@
 import { storage } from '../storage';
 import { smtpEmailService, type SmtpConfig, type SendResult, getProviderDailyLimit } from './smtp-email-service';
 
+/** Wrap a promise with a timeout — returns null on timeout instead of hanging forever */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T | null> {
+  return Promise.race([
+    promise,
+    new Promise<null>((resolve) => setTimeout(() => {
+      console.error(`[CampaignEngine] TIMEOUT (${ms}ms) on: ${label}`);
+      resolve(null);
+    }, ms)),
+  ]);
+}
+
 /**
  * RFC 2047 encode a subject line for MIME headers.
  * Non-ASCII subjects must be encoded as =?UTF-8?B?<base64>?= for email headers.
@@ -627,7 +638,14 @@ export class CampaignEngine {
       console.log(`[CampaignEngine] ==========================`);
 
       // Send emails in batches with throttling
-      this.sendBatched(campaignId, contacts, emailAccount, subject, content, effectiveDelay, batchSize, stepNumber, activeSendingConfig);
+      this.sendBatched(campaignId, contacts, emailAccount, subject, content, effectiveDelay, batchSize, stepNumber, activeSendingConfig)
+        .catch(async (err) => {
+          console.error(`[CampaignEngine] FATAL: sendBatched crashed for campaign ${campaignId}:`, err);
+          try {
+            await storage.updateCampaign(campaignId, { status: 'paused' });
+            this.activeCampaigns.delete(campaignId);
+          } catch { }
+        });
 
       return { success: true };
     } catch (error) {
@@ -673,8 +691,11 @@ export class CampaignEngine {
     let autopilotDailySent = 0;
     const autopilotMaxPerDay = sendingConfig?.autopilot?.enabled ? (sendingConfig.autopilot.maxPerDay || Infinity) : Infinity;
     
-    console.log(`[CampaignEngine] Campaign ${campaignId} send loop starting: delay=${delay}ms, accountDailyLimit=${accountDailyLimit}, autopilotMaxPerDay=${autopilotMaxPerDay === Infinity ? 'unlimited' : autopilotMaxPerDay}, autopilotEnabled=${sendingConfig?.autopilot?.enabled || false}`);
+    console.log(`[CampaignEngine] Campaign ${campaignId} send loop starting: delay=${delay}ms, accountDailySent=${accountDailySent}, accountDailyLimit=${accountDailyLimit}, autopilotMaxPerDay=${autopilotMaxPerDay === Infinity ? 'unlimited' : autopilotMaxPerDay}, autopilotEnabled=${sendingConfig?.autopilot?.enabled || false}, provider=${emailAccount.provider}, email=${emailAccount.email}`);
     console.log(`[CampaignEngine] Campaign ${campaignId} sendingConfig: ${JSON.stringify(sendingConfig)?.slice(0, 500)}`);
+    if (accountDailySent >= accountDailyLimit) {
+      console.error(`[CampaignEngine] *** DAILY LIMIT ALREADY REACHED *** Campaign ${campaignId}: ${accountDailySent} >= ${accountDailyLimit} — will pause on first contact!`);
+    }
 
     // ===== PRE-LOAD REPLIED CONTACTS =====
     // Build set of contactIds that already replied in this campaign (e.g. during pause)
@@ -692,7 +713,10 @@ export class CampaignEngine {
       // Non-fatal — proceed without reply check if this fails
     }
 
+    console.log(`[CampaignEngine] Campaign ${campaignId} entering for loop with ${contacts.length} contacts`);
+
     for (let i = 0; i < contacts.length; i++) {
+      if (i === 0) console.log(`[CampaignEngine] Campaign ${campaignId} processing FIRST contact: ${contacts[i]?.email}`);
       // Check if paused or stopped
       if (!tracker || tracker.paused) {
         // Wait until resumed
@@ -936,7 +960,7 @@ export class CampaignEngine {
 
         if (provider === 'gmail' || provider === 'google') {
           // Try Gmail API first
-          const accessToken = await refreshGmailToken(orgId, fromEmail);
+          const accessToken = await withTimeout(refreshGmailToken(orgId, fromEmail), 30000, `refreshGmailToken(${fromEmail})`);
           if (accessToken) {
             console.log(`[CampaignEngine] Sending via Gmail API to ${contact.email}`);
             result = await sendViaGmailAPI(accessToken, {
@@ -971,7 +995,7 @@ export class CampaignEngine {
         } else if (provider === 'outlook' || provider === 'microsoft') {
           // Try Microsoft Graph API first
           console.log(`[CampaignEngine] Outlook send: orgId=${orgId}, fromEmail=${fromEmail}, isOAuth=${isOAuthAccount}, provider=${provider}`);
-          let accessToken = await refreshMicrosoftToken(orgId, fromEmail);
+          let accessToken = await withTimeout(refreshMicrosoftToken(orgId, fromEmail), 30000, `refreshMicrosoftToken(${fromEmail})`);
           if (accessToken) {
             console.log(`[CampaignEngine] Sending via Microsoft Graph to ${contact.email} (token len=${accessToken.length})`);
             result = await sendViaMicrosoftGraph(accessToken, {
@@ -988,7 +1012,7 @@ export class CampaignEngine {
               try {
                 await storage.setApiSetting(orgId, `outlook_sender_${fromEmail}_token_expiry`, '0');
               } catch (e) { /* ignore */ }
-              const retryToken = await refreshMicrosoftToken(orgId, fromEmail);
+              const retryToken = await withTimeout(refreshMicrosoftToken(orgId, fromEmail), 30000, `retryRefreshMicrosoftToken(${fromEmail})`);
               if (retryToken && retryToken !== accessToken) {
                 console.log(`[CampaignEngine] Token refreshed, retrying Graph API for ${contact.email}`);
                 result = await sendViaMicrosoftGraph(retryToken, {
