@@ -3576,10 +3576,24 @@ Which account should I use and why? If I need to split across accounts, provide 
       let followupSequences: any[] = [];
       try {
         const campaignFollowups = await storage.getCampaignFollowups(req.params.id);
+        // Batch-fetch all sequences and steps to avoid N+1
+        const seqIds = campaignFollowups.map((cf: any) => cf.sequenceId).filter(Boolean);
+        const seqMap: Record<string, any> = {};
+        const stepsMap: Record<string, any[]> = {};
+        if (seqIds.length > 0) {
+          const dbLocal = (storage as any).db;
+          try {
+            const seqPlaceholders = seqIds.map(() => '?').join(',');
+            const seqs = dbLocal.prepare(`SELECT * FROM followup_sequences WHERE id IN (${seqPlaceholders})`).all(...seqIds) as any[];
+            for (const s of seqs) seqMap[s.id] = s;
+            const allSteps = dbLocal.prepare(`SELECT * FROM followup_steps WHERE sequenceId IN (${seqPlaceholders}) ORDER BY stepNumber`).all(...seqIds) as any[];
+            for (const st of allSteps) { if (!stepsMap[st.sequenceId]) stepsMap[st.sequenceId] = []; stepsMap[st.sequenceId].push(st); }
+          } catch { /* fallback to individual queries below */ }
+        }
         for (const cf of campaignFollowups) {
-          const seq = await storage.getFollowupSequence(cf.sequenceId);
+          let seq = seqMap[cf.sequenceId]; if (!seq) seq = await storage.getFollowupSequence(cf.sequenceId);
           if (seq) {
-            const steps = await storage.getFollowupSteps(seq.id);
+            let steps = stepsMap[seq.id]; if (!steps) steps = await storage.getFollowupSteps(seq.id);
             followupSequences.push({ ...seq, steps });
             // Enhance step analytics with follow-up info (Mailmeteor-style description)
             for (const step of steps) {
@@ -7676,31 +7690,48 @@ Respond with ONLY a JSON object in this format:
         unread = await storage.getInboxUnreadCount(req.user.organizationId, filterAccountIds);
       }
 
-      // Enrich messages with contact info
-      const enriched = await Promise.all(messages.map(async (m: any) => {
-        let contact = null;
-        if (m.contactId) {
-          contact = await storage.getContact(m.contactId);
-        }
-        // Try to find contact by email if not linked
-        if (!contact && m.fromEmail) {
-          contact = await storage.getContactByEmail(req.user.organizationId, m.fromEmail);
-        }
-        // Add account owner info for admin view
-        let accountOwner = null;
-        if (isAdmin && m.emailAccountId) {
-          const acct = await storage.getEmailAccount(m.emailAccountId);
-          if (acct && (acct as any).userId) {
-            const owner = await storage.getUser((acct as any).userId);
-            if (owner) accountOwner = { id: owner.id, email: owner.email, firstName: (owner as any).firstName, lastName: (owner as any).lastName };
-          }
-        }
+      // Enrich messages with contact info (batch lookup instead of N+1)
+      const db = (storage as any).db;
+      const contactIds = [...new Set(messages.map((m: any) => m.contactId).filter(Boolean))];
+      const fromEmails = [...new Set(messages.map((m: any) => m.fromEmail).filter(Boolean))];
+      const accountIds = isAdmin ? [...new Set(messages.map((m: any) => m.emailAccountId).filter(Boolean))] : [];
+
+      // Batch fetch contacts by ID
+      const contactsById: Record<string, any> = {};
+      if (contactIds.length > 0) {
+        try {
+          const placeholders = contactIds.map(() => '?').join(',');
+          const rows = db.prepare(`SELECT id, email, firstName, lastName, company, jobTitle FROM contacts WHERE id IN (${placeholders})`).all(...contactIds) as any[];
+          for (const r of rows) contactsById[r.id] = r;
+        } catch { }
+      }
+      // Batch fetch contacts by email (for unlinked messages)
+      const contactsByEmail: Record<string, any> = {};
+      if (fromEmails.length > 0) {
+        try {
+          const placeholders = fromEmails.map(() => '?').join(',');
+          const rows = db.prepare(`SELECT id, email, firstName, lastName, company, jobTitle FROM contacts WHERE organizationId = ? AND email IN (${placeholders})`).all(req.user.organizationId, ...fromEmails) as any[];
+          for (const r of rows) contactsByEmail[r.email.toLowerCase()] = r;
+        } catch { }
+      }
+      // Batch fetch account owners (admin only)
+      const accountOwners: Record<string, any> = {};
+      if (accountIds.length > 0) {
+        try {
+          const placeholders = accountIds.map(() => '?').join(',');
+          const rows = db.prepare(`SELECT ea.id as accountId, u.id, u.email, u.firstName, u.lastName FROM email_accounts ea JOIN users u ON u.id = ea.userId WHERE ea.id IN (${placeholders})`).all(...accountIds) as any[];
+          for (const r of rows) accountOwners[r.accountId] = { id: r.id, email: r.email, firstName: r.firstName, lastName: r.lastName };
+        } catch { }
+      }
+
+      const enriched = messages.map((m: any) => {
+        const contact = (m.contactId && contactsById[m.contactId]) || (m.fromEmail && contactsByEmail[m.fromEmail.toLowerCase()]) || null;
         return {
           ...m,
           contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company, jobTitle: contact.jobTitle } : null,
-          accountOwner,
+          accountOwner: (isAdmin && m.emailAccountId) ? (accountOwners[m.emailAccountId] || null) : null,
         };
-      }));
+      });
 
       res.json({ messages: enriched, total, unread });
     } catch (error) {
@@ -8023,33 +8054,52 @@ Respond with ONLY a JSON object in this format:
       const stats = await storage.getInboxStats(req.user.organizationId);
       const unread = stats.unread;
 
-      // Enrich messages (individual try/catch to prevent one bad message from crashing the whole endpoint)
-      const enriched = await Promise.all(messages.map(async (m: any) => {
-        try {
-          let contact = null;
-          if (m.contactId) contact = await storage.getContact(m.contactId);
-          if (!contact && m.fromEmail) contact = await storage.getContactByEmail(req.user.organizationId, m.fromEmail);
-          let accountOwner = null;
-          if (isAdmin && m.emailAccountId) {
-            const acct = await storage.getEmailAccount(m.emailAccountId);
-            if (acct && (acct as any).userId) {
-              const owner = await storage.getUser((acct as any).userId);
-              if (owner) accountOwner = { id: owner.id, email: owner.email, firstName: (owner as any).firstName, lastName: (owner as any).lastName };
-            }
-          }
-          let campaign = null;
-          if (m.campaignId) campaign = await storage.getCampaign(m.campaignId);
-          return {
-            ...m,
-            contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company, jobTitle: contact.jobTitle, status: contact.status, score: contact.score, leadStatus: (contact as any).leadStatus } : null,
-            campaign: campaign ? { id: campaign.id, name: campaign.name } : null,
-            accountOwner,
-          };
-        } catch (enrichErr) {
-          console.error(`[Enhanced Inbox] Failed to enrich message ${m.id}:`, enrichErr);
-          return { ...m, contact: null, campaign: null, accountOwner: null };
+      // Enrich messages — batch lookups instead of N+1 per-message queries
+      const dbE = (storage as any).db;
+      const eContactIds = [...new Set(messages.map((m: any) => m.contactId).filter(Boolean))];
+      const eFromEmails = [...new Set(messages.map((m: any) => m.fromEmail).filter(Boolean))];
+      const eAccountIds = isAdmin ? [...new Set(messages.map((m: any) => m.emailAccountId).filter(Boolean))] : [];
+      const eCampaignIds = [...new Set(messages.map((m: any) => m.campaignId).filter(Boolean))];
+
+      const eContactsById: Record<string, any> = {};
+      const eContactsByEmail: Record<string, any> = {};
+      const eAccountOwners: Record<string, any> = {};
+      const eCampaignsById: Record<string, any> = {};
+
+      try {
+        if (eContactIds.length > 0) {
+          const ph = eContactIds.map(() => '?').join(',');
+          for (const r of dbE.prepare(`SELECT id, email, firstName, lastName, company, jobTitle, status, score, leadStatus FROM contacts WHERE id IN (${ph})`).all(...eContactIds) as any[])
+            eContactsById[r.id] = r;
         }
-      }));
+        if (eFromEmails.length > 0) {
+          const ph = eFromEmails.map(() => '?').join(',');
+          for (const r of dbE.prepare(`SELECT id, email, firstName, lastName, company, jobTitle, status, score, leadStatus FROM contacts WHERE organizationId = ? AND email IN (${ph})`).all(req.user.organizationId, ...eFromEmails) as any[])
+            eContactsByEmail[r.email.toLowerCase()] = r;
+        }
+        if (eAccountIds.length > 0) {
+          const ph = eAccountIds.map(() => '?').join(',');
+          for (const r of dbE.prepare(`SELECT ea.id as accountId, u.id, u.email, u.firstName, u.lastName FROM email_accounts ea JOIN users u ON u.id = ea.userId WHERE ea.id IN (${ph})`).all(...eAccountIds) as any[])
+            eAccountOwners[r.accountId] = { id: r.id, email: r.email, firstName: r.firstName, lastName: r.lastName };
+        }
+        if (eCampaignIds.length > 0) {
+          const ph = eCampaignIds.map(() => '?').join(',');
+          for (const r of dbE.prepare(`SELECT id, name FROM campaigns WHERE id IN (${ph})`).all(...eCampaignIds) as any[])
+            eCampaignsById[r.id] = r;
+        }
+      } catch (batchErr) {
+        console.error('[Enhanced Inbox] Batch enrichment error:', batchErr);
+      }
+
+      const enriched = messages.map((m: any) => {
+        const contact = (m.contactId && eContactsById[m.contactId]) || (m.fromEmail && eContactsByEmail[m.fromEmail.toLowerCase()]) || null;
+        return {
+          ...m,
+          contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company, jobTitle: contact.jobTitle, status: contact.status, score: contact.score, leadStatus: contact.leadStatus } : null,
+          campaign: m.campaignId ? (eCampaignsById[m.campaignId] || null) : null,
+          accountOwner: (isAdmin && m.emailAccountId) ? (eAccountOwners[m.emailAccountId] || null) : null,
+        };
+      });
 
       res.json({ messages: enriched, total, unread, stats });
     } catch (error) {

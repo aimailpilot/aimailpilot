@@ -38,7 +38,7 @@ export default function SuperAdminDashboard() {
       if (!res.ok) throw new Error('Failed to fetch');
       return res.json();
     },
-    refetchInterval: 30000,
+    refetchInterval: 120000, // Every 2 min (was 30s — too frequent)
   });
 
   // Fetch users
