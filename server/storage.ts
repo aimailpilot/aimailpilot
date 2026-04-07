@@ -1093,8 +1093,7 @@ try { db.exec(`CREATE INDEX IF NOT EXISTS idx_lead_opps_org_bucket ON lead_oppor
 // Email history for lead intelligence
 try { db.exec(`CREATE INDEX IF NOT EXISTS idx_email_history_org_from ON email_history(organizationId, fromEmail)`); } catch (e) {}
 
-// Run ANALYZE after server startup so it doesn't block initialization on large DBs
-setTimeout(() => { try { db.exec('ANALYZE'); } catch (e) { /* ignore */ } }, 15000);
+// ANALYZE removed — was blocking event loop on large DBs
 
 // Migrate existing email accounts to correct provider-based daily limits
 // Gmail=2000, Outlook=10000, ElasticEmail=unlimited, Custom=500

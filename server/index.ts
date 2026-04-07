@@ -63,8 +63,8 @@ app.use((req, res, next) => {
     startFollowupEngine();
     // Start the warmup engine (self-warmup between connected accounts)
     startWarmupEngine();
-    // Start the nudge email engine (daily nudge digests at 10 AM & 2:30 PM IST)
-    try { startNudgeEmailEngine(); } catch (e) { console.error('[Startup] Nudge email engine failed to start:', e); }
+    // Nudge email engine temporarily disabled for campaign debugging
+    // try { startNudgeEmailEngine(); } catch (e) { console.error('[Startup] Nudge email engine failed to start:', e); }
     
     // Auto-resume active campaigns that were interrupted by server restart
     // Delay by 10 seconds to let the server fully initialize (OAuth, DB, etc.)

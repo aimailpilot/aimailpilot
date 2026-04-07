@@ -7316,6 +7316,105 @@ Respond with ONLY a JSON object in this format:
     }
   });
 
+  // ── Campaign diagnostic endpoint — check why campaigns aren't sending ──
+  app.post('/api/debug/campaign-force-restart/:id', requireAuth, async (req: any, res) => {
+    try {
+      const campaign = await storage.getCampaign(req.params.id);
+      if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+
+      // Clear from in-memory map
+      (campaignEngine as any).activeCampaigns?.delete(req.params.id);
+
+      // Get sending config
+      const sc = (campaign as any).sendingConfig || {};
+
+      // Set public URL
+      const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+      const host = req.headers['x-forwarded-host'] || req.headers['host'];
+      if (host && !host.includes('localhost')) campaignEngine.setPublicBaseUrl(`${proto}://${host}`);
+
+      // Force restart
+      const result = await campaignEngine.startCampaign({
+        campaignId: req.params.id,
+        delayBetweenEmails: sc.delayBetweenEmails || 2000,
+        batchSize: sc.batchSize || 10,
+        sendingConfig: sc,
+      });
+      res.json({ result, message: 'Force restart attempted' });
+    } catch (e) {
+      res.status(500).json({ error: (e as Error).message, stack: (e as Error).stack });
+    }
+  });
+
+  app.get('/api/debug/campaign-diagnose', requireAuth, async (req: any, res) => {
+    try {
+      const db = (storage as any).db;
+      const orgId = req.user.organizationId;
+
+      // 1. Get all active/paused campaigns for this org
+      const campaigns = db.prepare(`
+        SELECT id, name, status, sentCount, totalRecipients, emailAccountId, sendingConfig, createdAt, updatedAt
+        FROM campaigns WHERE organizationId = ? AND status IN ('active', 'paused', 'draft') ORDER BY createdAt DESC LIMIT 10
+      `).all(orgId) as any[];
+
+      const results: any[] = [];
+      for (const c of campaigns) {
+        const diag: any = {
+          id: c.id, name: c.name, status: c.status, sentCount: c.sentCount,
+          totalRecipients: c.totalRecipients, createdAt: c.createdAt, updatedAt: c.updatedAt,
+          inMemory: !!(campaignEngine as any).activeCampaigns?.has(c.id),
+        };
+
+        // Check email account
+        if (c.emailAccountId) {
+          const acct = await storage.getEmailAccount(c.emailAccountId);
+          if (acct) {
+            diag.emailAccount = { id: acct.id, email: (acct as any).email, provider: (acct as any).provider, dailySent: (acct as any).dailySent, dailyLimit: (acct as any).dailyLimit, hasSmtpConfig: !!(acct as any).smtpConfig };
+          } else {
+            diag.emailAccountError = 'Account not found';
+          }
+        } else {
+          diag.emailAccountError = 'No email account assigned';
+        }
+
+        // Parse sendingConfig
+        let sc = c.sendingConfig;
+        if (typeof sc === 'string') try { sc = JSON.parse(sc); } catch { sc = null; }
+        if (sc) {
+          diag.sendingConfig = { delay: sc.delayBetweenEmails, autopilot: sc.autopilot?.enabled, maxPerDay: sc.autopilot?.maxPerDay, timezone: sc.timezone, timezoneOffset: sc.timezoneOffset };
+        }
+
+        // Check contacts count
+        const campaign = await storage.getCampaign(c.id);
+        if (campaign) {
+          let contactCount = 0;
+          if ((campaign as any).segmentId) {
+            contactCount = (await storage.getContactsBySegment((campaign as any).segmentId)).length;
+          } else if ((campaign as any).contactIds?.length > 0) {
+            contactCount = (campaign as any).contactIds.length;
+          } else {
+            contactCount = (await storage.getContacts(orgId, 1, 0) as any[]).length > 0 ? -1 : 0; // -1 = has contacts
+          }
+          diag.contactCount = contactCount;
+
+          // Check messages for this campaign
+          const msgs = db.prepare('SELECT COUNT(*) as cnt FROM messages WHERE campaignId = ?').get(c.id) as any;
+          diag.messageCount = msgs?.cnt || 0;
+        }
+
+        results.push(diag);
+      }
+
+      // Also check activeCampaigns map
+      const activeCampaignIds: string[] = [];
+      (campaignEngine as any).activeCampaigns?.forEach((_v: any, k: string) => activeCampaignIds.push(k));
+
+      res.json({ campaigns: results, activeCampaignsInMemory: activeCampaignIds, serverUptime: process.uptime(), nodeVersion: process.version });
+    } catch (e) {
+      res.status(500).json({ error: (e as Error).message, stack: (e as Error).stack });
+    }
+  });
+
   // Fetch spreadsheet info (sheet names) using Google Sheets API v4 with OAuth, fallback to public CSV export
   // NOTE: Wrapped with .then().catch() for Express 4 async safety
   app.post('/api/sheets/fetch-info', (req: any, res, next) => {
