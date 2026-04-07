@@ -1646,6 +1646,37 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.json({ connected: false });
   });
 
+  // ========== POSTGRESQL HEALTH CHECK ==========
+  // Quick smoke test after cutover: GET /api/pg-health
+  app.get('/api/pg-health', async (_req, res) => {
+    const results: Record<string, any> = {
+      backend: process.env.DATABASE_URL ? 'postgresql' : 'sqlite',
+      timestamp: new Date().toISOString(),
+    };
+    const checks = [
+      { name: 'organizations', sql: 'SELECT COUNT(*) as cnt FROM organizations' },
+      { name: 'users', sql: 'SELECT COUNT(*) as cnt FROM users' },
+      { name: 'contacts', sql: 'SELECT COUNT(*) as cnt FROM contacts' },
+      { name: 'campaigns', sql: 'SELECT COUNT(*) as cnt FROM campaigns' },
+      { name: 'email_accounts', sql: 'SELECT COUNT(*) as cnt FROM email_accounts' },
+      { name: 'messages', sql: 'SELECT COUNT(*) as cnt FROM messages' },
+      { name: 'unified_inbox', sql: 'SELECT COUNT(*) as cnt FROM unified_inbox' },
+      { name: 'api_settings', sql: 'SELECT COUNT(*) as cnt FROM api_settings' },
+    ];
+    let allOk = true;
+    for (const check of checks) {
+      try {
+        const row = await storage.rawGet(check.sql);
+        results[check.name] = row?.cnt ?? 0;
+      } catch (e: any) {
+        results[check.name] = `ERROR: ${e.message}`;
+        allOk = false;
+      }
+    }
+    results.ok = allOk;
+    res.status(allOk ? 200 : 500).json(results);
+  });
+
   app.get('/api/auth/user', async (req, res) => {
     const session = req.session as any;
     const userId = req.cookies?.user_id || session?.userId;
@@ -3153,7 +3184,6 @@ Which account should I use and why? If I need to split across accounts, provide 
   // Campaign count for pagination
   app.get('/api/campaigns/count', async (req: any, res) => {
     try {
-      const db = (storage as any).db;
       const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
       const status = req.query.status as string;
       let sql = 'SELECT COUNT(*) as total FROM campaigns WHERE organizationId = ?';
@@ -3170,7 +3200,7 @@ Which account should I use and why? If I need to split across accounts, provide 
           params.push(status);
         }
       }
-      const row = db.prepare(sql).get(...params) as any;
+      const row = await storage.rawGet(sql, ...params) as any;
       res.json({ total: row?.total || 0 });
     } catch (error) {
       res.status(500).json({ message: 'Failed to count campaigns' });
@@ -3227,11 +3257,10 @@ Which account should I use and why? If I need to split across accounts, provide 
       const campaign = await storage.getCampaign(req.params.id);
       if (!campaign) return res.status(404).json({ message: 'Campaign not found' });
       const contacts = await storage.getCampaignContacts(req.params.id);
-      const db = (storage as any).db;
       const contactIds = contacts.map((c: any) => c.id);
       if (contactIds.length === 0) return res.json({ total: 0, unverified: 0, invalid: 0, risky: 0, valid: 0 });
       const placeholders = contactIds.map(() => '?').join(',');
-      const rows = db.prepare(`SELECT emailVerificationStatus, COUNT(*) as count FROM contacts WHERE id IN (${placeholders}) GROUP BY emailVerificationStatus`).all(...contactIds);
+      const rows = await storage.rawAll(`SELECT emailVerificationStatus, COUNT(*) as count FROM contacts WHERE id IN (${placeholders}) GROUP BY emailVerificationStatus`, ...contactIds);
       const counts: Record<string, number> = {};
       for (const row of rows) counts[row.emailVerificationStatus || 'unverified'] = row.count;
       // Check if superadmin has block_invalid enabled
@@ -3630,7 +3659,6 @@ Which account should I use and why? If I need to split across accounts, provide 
       // Get contact list info — find the most common listId among campaign's selected contacts
       let contactList: any = null;
       try {
-        const db = (storage as any).db;
         // Campaign stores all selected contactIds as JSON array — use that (not messages table which may be partial)
         const contactIdsJson = (campaign as any).contactIds;
         const contactIds: string[] = contactIdsJson ? (typeof contactIdsJson === 'string' ? JSON.parse(contactIdsJson) : contactIdsJson) : [];
@@ -3638,14 +3666,14 @@ Which account should I use and why? If I need to split across accounts, provide 
           // Sample first 50 contacts to find the most common list (efficient enough)
           const sample = contactIds.slice(0, 50);
           const ph = sample.map(() => '?').join(',');
-          const listRow = db.prepare(`
+          const listRow = await storage.rawGet(`
             SELECT c.listId, cl.name as listName, COUNT(*) as cnt
             FROM contacts c
             LEFT JOIN contact_lists cl ON cl.id = c.listId
             WHERE c.id IN (${ph}) AND c.listId IS NOT NULL AND c.listId != ''
             GROUP BY c.listId
             ORDER BY cnt DESC LIMIT 1
-          `).get(...sample) as any;
+          `, ...sample) as any;
           if (listRow && listRow.listId) {
             contactList = { id: listRow.listId, name: listRow.listName || 'Unnamed list' };
           }
@@ -4488,8 +4516,7 @@ Which account should I use and why? If I need to split across accounts, provide 
       const needsAdvanced = search || pipelineStage || company || location || designation || leadFilter || (sortByParam && sortByParam !== 'createdAt');
       if (needsAdvanced) {
         try {
-          const db = (storage as any).db;
-          if (!db) throw new Error('db is null/undefined');
+          // rawGet/rawAll/rawRun used for advanced SQL path
 
           const conditions: string[] = ['c.organizationId = ?'];
           const params: any[] = [orgId];
@@ -4567,19 +4594,19 @@ Which account should I use and why? If I need to split across accounts, provide 
 
           const countSql = `SELECT COUNT(*) as cnt FROM contacts c WHERE ${where}`;
           console.log(`[Contacts] Advanced SQL: sort=${sortCol} ${sortOrder}, params=${params.length}, search="${search}"`);
-          const countRow = db.prepare(countSql).get(...params) as any;
+          const countRow = await storage.rawGet(countSql, ...params) as any;
           if (!countRow) throw new Error('COUNT query returned null');
           total = countRow.cnt;
 
           const selectSql = `SELECT c.* FROM contacts c WHERE ${where} ORDER BY ${sortCol}${collate} ${sortOrder} LIMIT ? OFFSET ?`;
-          const advContacts = db.prepare(selectSql).all(...params, limit, offset);
+          const advContacts = await storage.rawAll(selectSql, ...params, limit, offset);
 
           // Add lastRemark separately (safe — won't break if table missing)
           try {
             const ids = advContacts.map((c: any) => c.id);
             if (ids.length > 0) {
               const ph = ids.map(() => '?').join(',');
-              const remarks = db.prepare(`SELECT contactId, notes FROM contact_activities WHERE contactId IN (${ph}) AND id IN (SELECT MAX(id) FROM contact_activities WHERE contactId IN (${ph}) GROUP BY contactId)`).all(...ids, ...ids);
+              const remarks = await storage.rawAll(`SELECT contactId, notes FROM contact_activities WHERE contactId IN (${ph}) AND id IN (SELECT MAX(id) FROM contact_activities WHERE contactId IN (${ph}) GROUP BY contactId)`, ...ids, ...ids);
               const map = new Map(remarks.map((r: any) => [r.contactId, r.notes]));
               advContacts.forEach((c: any) => { c.lastRemark = map.get(c.id) || null; });
             }
@@ -4602,13 +4629,12 @@ Which account should I use and why? If I need to split across accounts, provide 
       // Add lastRemark if not already included (safe path doesn't include it)
       if (contacts.length > 0 && !(contacts[0] as any).lastRemark) {
         try {
-          const db = (storage as any).db;
           const contactIds = contacts.map((c: any) => c.id);
           const placeholders = contactIds.map(() => '?').join(',');
-          const remarks = db.prepare(`SELECT ca.contactId, ca.notes FROM contact_activities ca
+          const remarks = await storage.rawAll(`SELECT ca.contactId, ca.notes FROM contact_activities ca
             WHERE ca.contactId IN (${placeholders}) AND ca.id IN (
               SELECT MAX(ca2.id) FROM contact_activities ca2 WHERE ca2.contactId IN (${placeholders}) GROUP BY ca2.contactId
-            )`).all(...contactIds, ...contactIds);
+            )`, ...contactIds, ...contactIds);
           const remarkMap = new Map(remarks.map((r: any) => [r.contactId, r.notes]));
           contacts.forEach((c: any) => { c.lastRemark = remarkMap.get(c.id) || null; });
         } catch { /* contact_activities table may not exist yet — ignore */ }
@@ -4618,17 +4644,16 @@ Which account should I use and why? If I need to split across accounts, provide 
       // Safe enhancement — if lead_opportunities table doesn't exist or query fails, contacts still return fine
       if (contacts.length > 0) {
         try {
-          const db = (storage as any).db;
           const emails = contacts.map((c: any) => c.email?.toLowerCase()).filter(Boolean);
-          if (emails.length > 0 && db) {
+          if (emails.length > 0) {
             const ph = emails.map(() => '?').join(',');
             // Get the BEST (highest confidence) lead classification per email for this org
-            const leadData = db.prepare(`
+            const leadData = await storage.rawAll(`
               SELECT contactEmail, bucket, confidence, aiReasoning, suggestedAction, lastEmailDate, totalEmails, totalReceived, totalSent, accountEmail,
                      ROW_NUMBER() OVER (PARTITION BY LOWER(contactEmail) ORDER BY confidence DESC) as rn
               FROM lead_opportunities
               WHERE organizationId = ? AND LOWER(contactEmail) IN (${ph})
-            `).all(orgId, ...emails);
+            `, orgId, ...emails);
             // Only keep rn=1 (best classification per email)
             const leadMap = new Map<string, any>();
             for (const row of leadData as any[]) {
@@ -4667,9 +4692,6 @@ Which account should I use and why? If I need to split across accounts, provide 
   app.get('/api/contacts/hot-leads', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.user.organizationId;
-      const db = (storage as any).db;
-      if (!db) return res.status(500).json({ message: 'Database not available' });
-
       const bucket = req.query.bucket as string || 'all'; // hot_lead, warm_lead, past_customer, etc.
       const limit = parseInt(req.query.limit as string) || 25;
       const offset = parseInt(req.query.offset as string) || 0;
@@ -4695,7 +4717,7 @@ Which account should I use and why? If I need to split across accounts, provide 
 
       // Member role: restrict to their email accounts only
       if (!isAdmin) {
-        const memberAccounts = db.prepare(`SELECT email FROM email_accounts WHERE organizationId = ? AND userId = ?`).all(orgId, req.user.id) as any[];
+        const memberAccounts = await storage.rawAll(`SELECT email FROM email_accounts WHERE organizationId = ? AND userId = ?`, orgId, req.user.id) as any[];
         if (memberAccounts.length > 0) {
           const ph = memberAccounts.map(() => '?').join(',');
           conditions.push(`lo.accountEmail IN (${ph})`);
@@ -4708,11 +4730,11 @@ Which account should I use and why? If I need to split across accounts, provide 
       const where = conditions.join(' AND ');
 
       // Get total count
-      const countRow = db.prepare(`SELECT COUNT(*) as cnt FROM lead_opportunities lo WHERE ${where}`).get(...params) as any;
+      const countRow = await storage.rawGet(`SELECT COUNT(*) as cnt FROM lead_opportunities lo WHERE ${where}`, ...params) as any;
       const total = countRow?.cnt || 0;
 
       // Get leads with contact data joined
-      const leads = db.prepare(`
+      const leads = await storage.rawAll(`
         SELECT lo.*,
                c.id as contactId, c.firstName, c.lastName, c.company as contactCompany, c.jobTitle,
                c.phone, c.city, c.country, c.status as contactStatus, c.pipelineStage,
@@ -4723,7 +4745,7 @@ Which account should I use and why? If I need to split across accounts, provide 
         WHERE ${where}
         ORDER BY lo.confidence DESC, lo.lastEmailDate DESC
         LIMIT ? OFFSET ?
-      `).all(...params, limit, offset);
+      `, ...params, limit, offset);
 
       // Parse JSON fields
       leads.forEach((l: any) => {
@@ -4732,13 +4754,13 @@ Which account should I use and why? If I need to split across accounts, provide 
       });
 
       // Bucket counts for sidebar
-      const bucketCounts = db.prepare(`
+      const bucketCounts = await storage.rawAll(`
         SELECT bucket, COUNT(*) as cnt
         FROM lead_opportunities
         WHERE organizationId = ?
         GROUP BY bucket
         ORDER BY cnt DESC
-      `).all(orgId) as any[];
+      `, orgId) as any[];
       const bucketCountMap: Record<string, number> = {};
       for (const b of bucketCounts) {
         bucketCountMap[b.bucket] = b.cnt;
@@ -4754,7 +4776,6 @@ Which account should I use and why? If I need to split across accounts, provide 
   // DEBUG: Test SQL sort/search directly (temporary — remove after fixing)
   app.get('/api/contacts/debug-sql', requireAuth, async (req: any, res) => {
     try {
-      const db = (storage as any).db;
       const orgId = req.user.organizationId;
       const search = (req.query.q as string || '').trim();
       const sortBy = req.query.sort as string || 'createdAt';
@@ -4774,8 +4795,8 @@ Which account should I use and why? If I need to split across accounts, provide 
       };
       const sortCol = allowedSorts[sortBy] || 'c.createdAt';
 
-      const total = (db.prepare(`SELECT COUNT(*) as cnt FROM contacts c WHERE ${where}`).get(...params) as any).cnt;
-      const rows = db.prepare(`SELECT c.id, c.firstName, c.lastName, c.company, c.email FROM contacts c WHERE ${where} ORDER BY ${sortCol} COLLATE NOCASE ASC LIMIT 5`).all(...params);
+      const total = (await storage.rawGet(`SELECT COUNT(*) as cnt FROM contacts c WHERE ${where}`, ...params) as any).cnt;
+      const rows = await storage.rawAll(`SELECT c.id, c.firstName, c.lastName, c.company, c.email FROM contacts c WHERE ${where} ORDER BY ${sortCol} COLLATE NOCASE ASC LIMIT 5`, ...params);
 
       res.json({ success: true, total, sortCol, where, paramCount: params.length, rows });
     } catch (e: any) {
@@ -4786,12 +4807,11 @@ Which account should I use and why? If I need to split across accounts, provide 
   // Get unique filter options for contacts dropdowns
   app.get('/api/contacts/filter-options', requireAuth, async (req: any, res) => {
     try {
-      const db = (storage as any).db;
       const orgId = req.session.organizationId!;
-      const companies = db.prepare(`SELECT DISTINCT company FROM contacts WHERE organizationId = ? AND company IS NOT NULL AND company != '' ORDER BY company LIMIT 200`).all(orgId).map((r: any) => r.company);
-      const designations = db.prepare(`SELECT DISTINCT jobTitle FROM contacts WHERE organizationId = ? AND jobTitle IS NOT NULL AND jobTitle != '' ORDER BY jobTitle LIMIT 200`).all(orgId).map((r: any) => r.jobTitle);
-      const cities = db.prepare(`SELECT DISTINCT city FROM contacts WHERE organizationId = ? AND city IS NOT NULL AND city != '' ORDER BY city LIMIT 200`).all(orgId).map((r: any) => r.city);
-      const countries = db.prepare(`SELECT DISTINCT country FROM contacts WHERE organizationId = ? AND country IS NOT NULL AND country != '' ORDER BY country LIMIT 100`).all(orgId).map((r: any) => r.country);
+      const companies = (await storage.rawAll(`SELECT DISTINCT company FROM contacts WHERE organizationId = ? AND company IS NOT NULL AND company != '' ORDER BY company LIMIT 200`, orgId)).map((r: any) => r.company);
+      const designations = (await storage.rawAll(`SELECT DISTINCT jobTitle FROM contacts WHERE organizationId = ? AND jobTitle IS NOT NULL AND jobTitle != '' ORDER BY jobTitle LIMIT 200`, orgId)).map((r: any) => r.jobTitle);
+      const cities = (await storage.rawAll(`SELECT DISTINCT city FROM contacts WHERE organizationId = ? AND city IS NOT NULL AND city != '' ORDER BY city LIMIT 200`, orgId)).map((r: any) => r.city);
+      const countries = (await storage.rawAll(`SELECT DISTINCT country FROM contacts WHERE organizationId = ? AND country IS NOT NULL AND country != '' ORDER BY country LIMIT 100`, orgId)).map((r: any) => r.country);
       res.json({ companies, designations, cities, countries });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
@@ -4804,15 +4824,14 @@ Which account should I use and why? If I need to split across accounts, provide 
   app.get('/api/contacts/follow-ups', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.session.organizationId!;
-      const db = (storage as any).db;
       const today = new Date().toISOString().split('T')[0];
-      const contacts = db.prepare(`SELECT c.*,
+      const contacts = await storage.rawAll(`SELECT c.*,
         (SELECT ca.notes FROM contact_activities ca WHERE ca.contactId = c.id ORDER BY ca.createdAt DESC LIMIT 1) as lastRemark,
         (SELECT ca.type FROM contact_activities ca WHERE ca.contactId = c.id ORDER BY ca.createdAt DESC LIMIT 1) as lastActivityType,
         (SELECT ca.createdAt FROM contact_activities ca WHERE ca.contactId = c.id ORDER BY ca.createdAt DESC LIMIT 1) as lastActivityDate
         FROM contacts c WHERE c.organizationId = ? AND c.nextActionDate IS NOT NULL AND c.nextActionDate <= ?
         AND c.pipelineStage NOT IN ('won', 'lost') AND c.status NOT IN ('bounced', 'unsubscribed')
-        ORDER BY c.nextActionDate ASC LIMIT 200`).all(orgId, today + 'T23:59:59');
+        ORDER BY c.nextActionDate ASC LIMIT 200`, orgId, today + 'T23:59:59');
       res.json(contacts);
     } catch (e: any) {
       res.status(500).json({ message: e.message });
@@ -4823,8 +4842,7 @@ Which account should I use and why? If I need to split across accounts, provide 
   app.get('/api/contacts/pipeline-stats', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.session.organizationId!;
-      const db = (storage as any).db;
-      const stats = db.prepare(`SELECT pipelineStage, COUNT(*) as count FROM contacts WHERE organizationId = ? AND status NOT IN ('bounced', 'unsubscribed') GROUP BY pipelineStage`).all(orgId);
+      const stats = await storage.rawAll(`SELECT pipelineStage, COUNT(*) as count FROM contacts WHERE organizationId = ? AND status NOT IN ('bounced', 'unsubscribed') GROUP BY pipelineStage`, orgId);
       res.json(stats);
     } catch (e: any) {
       res.status(500).json({ message: e.message });
@@ -4836,8 +4854,7 @@ Which account should I use and why? If I need to split across accounts, provide 
     try {
       const orgId = req.session.organizationId!;
       const { pipelineStage, nextActionDate, nextActionType, dealValue, dealNotes } = req.body;
-      const db = (storage as any).db;
-      const contact = db.prepare(`SELECT id FROM contacts WHERE id = ? AND organizationId = ?`).get(req.params.id, orgId);
+      const contact = await storage.rawGet(`SELECT id FROM contacts WHERE id = ? AND organizationId = ?`, req.params.id, orgId);
       if (!contact) return res.status(404).json({ message: 'Contact not found' });
       const updates: string[] = [];
       const values: any[] = [];
@@ -4855,7 +4872,7 @@ Which account should I use and why? If I need to split across accounts, provide 
       }
       updates.push('updatedAt = ?'); values.push(new Date().toISOString());
       values.push(req.params.id, orgId);
-      db.prepare(`UPDATE contacts SET ${updates.join(', ')} WHERE id = ? AND organizationId = ?`).run(...values);
+      await storage.rawRun(`UPDATE contacts SET ${updates.join(', ')} WHERE id = ? AND organizationId = ?`, ...values);
       res.json({ success: true });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
@@ -4866,10 +4883,9 @@ Which account should I use and why? If I need to split across accounts, provide 
   app.get('/api/contacts/:id/activities', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.session.organizationId!;
-      const db = (storage as any).db;
-      const activities = db.prepare(`SELECT ca.*, u.firstName as userFirstName, u.lastName as userLastName, u.email as userEmail
+      const activities = await storage.rawAll(`SELECT ca.*, u.firstName as userFirstName, u.lastName as userLastName, u.email as userEmail
         FROM contact_activities ca LEFT JOIN users u ON ca.userId = u.id
-        WHERE ca.contactId = ? AND ca.organizationId = ? ORDER BY ca.createdAt DESC LIMIT 100`).all(req.params.id, orgId);
+        WHERE ca.contactId = ? AND ca.organizationId = ? ORDER BY ca.createdAt DESC LIMIT 100`, req.params.id, orgId);
       res.json(activities);
     } catch (e: any) {
       res.status(500).json({ message: e.message });
@@ -4883,16 +4899,15 @@ Which account should I use and why? If I need to split across accounts, provide 
       const userId = req.session.userId;
       const { type, outcome, notes, nextActionDate, nextActionType } = req.body;
       if (!type) return res.status(400).json({ message: 'Activity type is required' });
-      const db = (storage as any).db;
-      const contact = db.prepare(`SELECT id, pipelineStage FROM contacts WHERE id = ? AND organizationId = ?`).get(req.params.id, orgId) as any;
+      const contact = await storage.rawGet(`SELECT id, pipelineStage FROM contacts WHERE id = ? AND organizationId = ?`, req.params.id, orgId) as any;
       if (!contact) return res.status(404).json({ message: 'Contact not found' });
       const id = `act_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const now = new Date().toISOString();
-      db.prepare(`INSERT INTO contact_activities (id, contactId, organizationId, userId, type, outcome, notes, nextActionDate, nextActionType, metadata, createdAt)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, req.params.id, orgId, userId, type, outcome || null, notes || null, nextActionDate || null, nextActionType || null, '{}', now);
+      await storage.rawRun(`INSERT INTO contact_activities (id, contactId, organizationId, userId, type, outcome, notes, nextActionDate, nextActionType, metadata, createdAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, req.params.id, orgId, userId, type, outcome || null, notes || null, nextActionDate || null, nextActionType || null, '{}', now);
       // Update contact's nextActionDate if provided
       if (nextActionDate) {
-        db.prepare(`UPDATE contacts SET nextActionDate = ?, nextActionType = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`).run(nextActionDate, nextActionType || null, now, req.params.id, orgId);
+        await storage.rawRun(`UPDATE contacts SET nextActionDate = ?, nextActionType = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`, nextActionDate, nextActionType || null, now, req.params.id, orgId);
       }
       // Auto-advance pipeline stage (only forward, never backward)
       const autoStageMap: Record<string, string> = { call: 'contacted', email: 'contacted', whatsapp: 'contacted', meeting_scheduled: 'meeting_scheduled', meeting: 'meeting_done', proposal: 'proposal_sent' };
@@ -4901,11 +4916,11 @@ Which account should I use and why? If I need to split across accounts, provide 
         const currentIdx = stageOrder.indexOf(contact.pipelineStage || 'new');
         const newIdx = stageOrder.indexOf(autoStageMap[type]);
         if (newIdx > currentIdx) {
-          db.prepare(`UPDATE contacts SET pipelineStage = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`).run(autoStageMap[type], now, req.params.id, orgId);
+          await storage.rawRun(`UPDATE contacts SET pipelineStage = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`, autoStageMap[type], now, req.params.id, orgId);
         }
       }
-      if (outcome === 'converted') db.prepare(`UPDATE contacts SET pipelineStage = 'won', dealClosedAt = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`).run(now, now, req.params.id, orgId);
-      else if (outcome === 'rejected') db.prepare(`UPDATE contacts SET pipelineStage = 'lost', dealClosedAt = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`).run(now, now, req.params.id, orgId);
+      if (outcome === 'converted') await storage.rawRun(`UPDATE contacts SET pipelineStage = 'won', dealClosedAt = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`, now, now, req.params.id, orgId);
+      else if (outcome === 'rejected') await storage.rawRun(`UPDATE contacts SET pipelineStage = 'lost', dealClosedAt = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`, now, now, req.params.id, orgId);
       res.json({ id, success: true });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
@@ -8989,7 +9004,6 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   app.get('/api/team/scorecard', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.user.organizationId;
-      const db = (storage as any).db;
       const period = (req.query.period as string) || 'today'; // today, week, YYYY-MM, all
 
       // Calculate date range — supports month names like "2026-01", "2026-04"
@@ -9024,22 +9038,22 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         // Emails sent — count messages for contacts assigned to this user
         let emailsSent = 0;
         try {
-          emailsSent = (db.prepare(`
+          emailsSent = (await storage.rawGet(`
             SELECT COUNT(*) as cnt FROM messages m
             JOIN contacts c ON c.id = m.contactId
             WHERE c.organizationId = ? AND c.assignedTo = ? AND m.status = 'sent' AND m.sentAt >= ? AND m.sentAt < ?
-          `).get(orgId, userId, startDate, endDate) as any)?.cnt || 0;
+          `, orgId, userId, startDate, endDate) as any)?.cnt || 0;
         } catch { /* messages table schema mismatch — skip */ }
 
         // Activities by type
         let callsMade = 0, meetingsDone = 0, proposalsSent = 0;
         const activityMap: Record<string, number> = {};
         try {
-          const activities = db.prepare(`
+          const activities = await storage.rawAll(`
             SELECT type, COUNT(*) as cnt FROM contact_activities
             WHERE organizationId = ? AND userId = ? AND createdAt >= ? AND createdAt < ?
             GROUP BY type
-          `).all(orgId, userId, startDate, endDate) as any[];
+          `, orgId, userId, startDate, endDate) as any[];
           for (const a of activities) activityMap[a.type] = a.cnt;
           callsMade = activityMap['call'] || 0;
           meetingsDone = activityMap['meeting'] || 0;
@@ -9050,19 +9064,19 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         // dealValue column may not exist yet on older deployments — use try/catch
         let pipelineStats: any[] = [];
         try {
-          pipelineStats = db.prepare(`
+          pipelineStats = await storage.rawAll(`
             SELECT pipelineStage, COUNT(*) as cnt, SUM(COALESCE(dealValue, 0)) as totalValue
             FROM contacts WHERE organizationId = ? AND assignedTo = ?
             AND pipelineStage IN ('interested', 'meeting_scheduled', 'meeting_done', 'proposal_sent', 'won', 'lost')
             GROUP BY pipelineStage
-          `).all(orgId, userId) as any[];
+          `, orgId, userId) as any[];
         } catch {
-          pipelineStats = db.prepare(`
+          pipelineStats = await storage.rawAll(`
             SELECT pipelineStage, COUNT(*) as cnt, 0 as totalValue
             FROM contacts WHERE organizationId = ? AND assignedTo = ?
             AND pipelineStage IN ('interested', 'meeting_scheduled', 'meeting_done', 'proposal_sent', 'won', 'lost')
             GROUP BY pipelineStage
-          `).all(orgId, userId) as any[];
+          `, orgId, userId) as any[];
         }
         const pipeMap: Record<string, { count: number; value: number }> = {};
         for (const p of pipelineStats) pipeMap[p.pipelineStage] = { count: p.cnt, value: p.totalValue || 0 };
@@ -9071,24 +9085,24 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         let dealsWon = { cnt: 0, totalValue: 0 };
         let dealsLost = 0;
         try {
-          dealsWon = (db.prepare(`
+          dealsWon = (await storage.rawGet(`
             SELECT COUNT(*) as cnt, SUM(COALESCE(dealValue, 0)) as totalValue
             FROM contacts WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'won' AND dealClosedAt >= ? AND dealClosedAt < ?
-          `).get(orgId, userId, startDate, endDate) as any) || { cnt: 0, totalValue: 0 };
-          dealsLost = (db.prepare(`
+          `, orgId, userId, startDate, endDate) as any) || { cnt: 0, totalValue: 0 };
+          dealsLost = (await storage.rawGet(`
             SELECT COUNT(*) as cnt FROM contacts
             WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'lost' AND dealClosedAt >= ? AND dealClosedAt < ?
-          `).get(orgId, userId, startDate, endDate) as any)?.cnt || 0;
+          `, orgId, userId, startDate, endDate) as any)?.cnt || 0;
         } catch {
           // dealClosedAt column may not exist — fall back to counting all won/lost
-          dealsWon = (db.prepare(`
+          dealsWon = (await storage.rawGet(`
             SELECT COUNT(*) as cnt, 0 as totalValue
             FROM contacts WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'won'
-          `).get(orgId, userId) as any) || { cnt: 0, totalValue: 0 };
-          dealsLost = (db.prepare(`
+          `, orgId, userId) as any) || { cnt: 0, totalValue: 0 };
+          dealsLost = (await storage.rawGet(`
             SELECT COUNT(*) as cnt FROM contacts
             WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'lost'
-          `).get(orgId, userId) as any)?.cnt || 0;
+          `, orgId, userId) as any)?.cnt || 0;
         }
 
         // Hot leads (interested + meeting_scheduled + meeting_done)
@@ -9138,23 +9152,23 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       // Overdue actions (team-wide) — safe if nextActionDate column missing
       let overdueActions = 0;
       try {
-        overdueActions = (db.prepare(`
+        overdueActions = (await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM contacts
           WHERE organizationId = ? AND nextActionDate < ? AND nextActionDate IS NOT NULL
           AND pipelineStage NOT IN ('won', 'lost')
-        `).get(orgId, now.toISOString().split('T')[0]) as any)?.cnt || 0;
+        `, orgId, now.toISOString().split('T')[0]) as any)?.cnt || 0;
       } catch { /* column may not exist */ }
 
       // Unactioned replies — safe if repliedAt column missing
       let unactionedReplies = 0;
       try {
-        unactionedReplies = (db.prepare(`
+        unactionedReplies = (await storage.rawGet(`
           SELECT COUNT(DISTINCT m.contactId) as cnt
           FROM messages m
           LEFT JOIN contact_activities ca ON ca.contactId = m.contactId AND ca.createdAt > m.repliedAt
           WHERE m.campaignId IN (SELECT id FROM campaigns WHERE organizationId = ?)
           AND m.repliedAt IS NOT NULL AND m.repliedAt >= ? AND m.repliedAt < ? AND ca.id IS NULL
-        `).get(orgId, startDate, endDate) as any)?.cnt || 0;
+        `, orgId, startDate, endDate) as any)?.cnt || 0;
       } catch { /* column may not exist */ }
 
       // Get org createdAt for month picker
@@ -9176,7 +9190,6 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     try {
       const orgId = req.user.organizationId;
       const userId = req.user.id;
-      const db = (storage as any).db;
       const period = (req.query.period as string) || 'today';
 
       const now = new Date();
@@ -9202,21 +9215,21 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       // ── My Stats ──
       let emailsSent = 0;
       try {
-        emailsSent = (db.prepare(`
+        emailsSent = (await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM messages m
           JOIN contacts c ON c.id = m.contactId
           WHERE c.organizationId = ? AND c.assignedTo = ? AND m.status = 'sent' AND m.sentAt >= ? AND m.sentAt < ?
-        `).get(orgId, userId, startDate, endDate) as any)?.cnt || 0;
+        `, orgId, userId, startDate, endDate) as any)?.cnt || 0;
       } catch { }
 
       let callsMade = 0, meetingsDone = 0, proposalsSent = 0;
       const activityMap: Record<string, number> = {};
       try {
-        const activities = db.prepare(`
+        const activities = await storage.rawAll(`
           SELECT type, COUNT(*) as cnt FROM contact_activities
           WHERE organizationId = ? AND userId = ? AND createdAt >= ? AND createdAt < ?
           GROUP BY type
-        `).all(orgId, userId, startDate, endDate) as any[];
+        `, orgId, userId, startDate, endDate) as any[];
         for (const a of activities) activityMap[a.type] = a.cnt;
         callsMade = activityMap['call'] || 0;
         meetingsDone = activityMap['meeting'] || 0;
@@ -9226,42 +9239,42 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       let dealsWon = { cnt: 0, totalValue: 0 };
       let dealsLost = 0;
       try {
-        dealsWon = (db.prepare(`
+        dealsWon = (await storage.rawGet(`
           SELECT COUNT(*) as cnt, SUM(COALESCE(dealValue, 0)) as totalValue
           FROM contacts WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'won' AND dealClosedAt >= ? AND dealClosedAt < ?
-        `).get(orgId, userId, startDate, endDate) as any) || { cnt: 0, totalValue: 0 };
-        dealsLost = (db.prepare(`
+        `, orgId, userId, startDate, endDate) as any) || { cnt: 0, totalValue: 0 };
+        dealsLost = (await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM contacts
           WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'lost' AND dealClosedAt >= ? AND dealClosedAt < ?
-        `).get(orgId, userId, startDate, endDate) as any)?.cnt || 0;
+        `, orgId, userId, startDate, endDate) as any)?.cnt || 0;
       } catch {
-        dealsWon = (db.prepare(`
+        dealsWon = (await storage.rawGet(`
           SELECT COUNT(*) as cnt, 0 as totalValue
           FROM contacts WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'won'
-        `).get(orgId, userId) as any) || { cnt: 0, totalValue: 0 };
-        dealsLost = (db.prepare(`
+        `, orgId, userId) as any) || { cnt: 0, totalValue: 0 };
+        dealsLost = (await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM contacts
           WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'lost'
-        `).get(orgId, userId) as any)?.cnt || 0;
+        `, orgId, userId) as any)?.cnt || 0;
       }
 
       // Pipeline funnel
       let pipeline: any[] = [];
       try {
-        pipeline = db.prepare(`
+        pipeline = await storage.rawAll(`
           SELECT pipelineStage, COUNT(*) as cnt, SUM(COALESCE(dealValue, 0)) as totalValue
           FROM contacts WHERE organizationId = ? AND assignedTo = ?
           AND pipelineStage IN ('new', 'contacted', 'interested', 'meeting_scheduled', 'meeting_done', 'proposal_sent', 'won', 'lost')
           GROUP BY pipelineStage
-        `).all(orgId, userId) as any[];
+        `, orgId, userId) as any[];
       } catch {
         try {
-          pipeline = db.prepare(`
+          pipeline = await storage.rawAll(`
             SELECT pipelineStage, COUNT(*) as cnt, 0 as totalValue
             FROM contacts WHERE organizationId = ? AND assignedTo = ?
             AND pipelineStage IN ('new', 'contacted', 'interested', 'meeting_scheduled', 'meeting_done', 'proposal_sent', 'won', 'lost')
             GROUP BY pipelineStage
-          `).all(orgId, userId) as any[];
+          `, orgId, userId) as any[];
         } catch { }
       }
       const pipeMap: Record<string, { count: number; value: number }> = {};
@@ -9284,64 +9297,64 @@ Generate an appropriate reply to the LATEST email above, considering the full co
 
       // 1. Overdue follow-ups
       try {
-        const overdue = (db.prepare(`
+        const overdue = (await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM contacts
           WHERE organizationId = ? AND assignedTo = ? AND nextActionDate < ? AND nextActionDate IS NOT NULL
           AND pipelineStage NOT IN ('won', 'lost')
-        `).get(orgId, userId, todayStr) as any)?.cnt || 0;
+        `, orgId, userId, todayStr) as any)?.cnt || 0;
         if (overdue > 0) nudges.push({ type: 'overdue', priority: 'high', title: `${overdue} Overdue Follow-ups`, message: 'Contacts with past-due follow-up dates need attention', count: overdue, actionType: 'contacts' });
       } catch { }
 
       // 2. Emails needing reply (received in inbox, status = unread/read but not replied, assigned to this user or from user's email accounts)
       let emailsNeedingReply = 0;
       try {
-        emailsNeedingReply = (db.prepare(`
+        emailsNeedingReply = (await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM unified_inbox ui
           INNER JOIN email_accounts ea ON ea.id = ui.emailAccountId
           WHERE ui.organizationId = ? AND ea.userId = ?
           AND ui.status IN ('unread', 'read') AND ui.repliedAt IS NULL
           AND (ui.sentByUs IS NULL OR ui.sentByUs = 0)
-        `).get(orgId, userId) as any)?.cnt || 0;
+        `, orgId, userId) as any)?.cnt || 0;
         if (emailsNeedingReply > 0) nudges.push({ type: 'needs_reply', priority: 'high', title: `${emailsNeedingReply} Emails Need Reply`, message: 'Received emails that haven\'t been replied to yet', count: emailsNeedingReply, actionType: 'emails' });
       } catch { }
 
       // 3. Unactioned replies (contacts replied to campaign but no activity logged after)
       try {
-        const unactioned = (db.prepare(`
+        const unactioned = (await storage.rawGet(`
           SELECT COUNT(DISTINCT m.contactId) as cnt
           FROM messages m
           JOIN contacts c ON c.id = m.contactId
           LEFT JOIN contact_activities ca ON ca.contactId = m.contactId AND ca.createdAt > m.repliedAt
           WHERE c.organizationId = ? AND c.assignedTo = ?
           AND m.repliedAt IS NOT NULL AND m.repliedAt >= ? AND m.repliedAt < ? AND ca.id IS NULL
-        `).get(orgId, userId, startDate, endDate) as any)?.cnt || 0;
+        `, orgId, userId, startDate, endDate) as any)?.cnt || 0;
         if (unactioned > 0) nudges.push({ type: 'unactioned_reply', priority: 'high', title: `${unactioned} Unactioned Replies`, message: 'Contacts replied to campaigns but no follow-up activity logged', count: unactioned, actionType: 'contacts' });
       } catch { }
 
       // 4. Stale hot leads (interested/meeting stage, no activity in 3+ days)
       try {
         const threeDaysAgo = new Date(now); threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
-        const stale = (db.prepare(`
+        const stale = (await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM contacts c
           WHERE c.organizationId = ? AND c.assignedTo = ?
           AND c.pipelineStage IN ('interested', 'meeting_scheduled', 'meeting_done')
           AND NOT EXISTS (
             SELECT 1 FROM contact_activities ca WHERE ca.contactId = c.id AND ca.createdAt >= ?
           )
-        `).get(orgId, userId, threeDaysAgo.toISOString().split('T')[0]) as any)?.cnt || 0;
+        `, orgId, userId, threeDaysAgo.toISOString().split('T')[0]) as any)?.cnt || 0;
         if (stale > 0) nudges.push({ type: 'stale_leads', priority: 'medium', title: `${stale} Stale Hot Leads`, message: 'Hot leads with no activity in 3+ days — reach out before they go cold', count: stale, actionType: 'contacts' });
       } catch { }
 
       // 5. Proposals pending (proposal_sent for 3+ days with no update)
       try {
         const threeDaysAgo = new Date(now); threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
-        const pendingProposals = (db.prepare(`
+        const pendingProposals = (await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM contacts c
           WHERE c.organizationId = ? AND c.assignedTo = ? AND c.pipelineStage = 'proposal_sent'
           AND NOT EXISTS (
             SELECT 1 FROM contact_activities ca WHERE ca.contactId = c.id AND ca.createdAt >= ?
           )
-        `).get(orgId, userId, threeDaysAgo.toISOString().split('T')[0]) as any)?.cnt || 0;
+        `, orgId, userId, threeDaysAgo.toISOString().split('T')[0]) as any)?.cnt || 0;
         if (pendingProposals > 0) nudges.push({ type: 'pending_proposals', priority: 'medium', title: `${pendingProposals} Proposals Awaiting Response`, message: 'Proposals sent 3+ days ago with no follow-up — time to check in', count: pendingProposals, actionType: 'contacts' });
       } catch { }
 
@@ -9362,13 +9375,13 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       // ── Recent Activity Feed (last 10) ──
       let recentActivities: any[] = [];
       try {
-        recentActivities = db.prepare(`
+        recentActivities = await storage.rawAll(`
           SELECT ca.*, c.firstName, c.lastName, c.email as contactEmail, c.company
           FROM contact_activities ca
           JOIN contacts c ON c.id = ca.contactId
           WHERE ca.organizationId = ? AND ca.userId = ?
           ORDER BY ca.createdAt DESC LIMIT 10
-        `).all(orgId, userId) as any[];
+        `, orgId, userId) as any[];
       } catch { }
 
       // Get org createdAt for month picker
@@ -9390,11 +9403,10 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     try {
       const orgId = req.user.organizationId;
       const userId = req.user.id;
-      const db = (storage as any).db;
       const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);
       const offset = parseInt(req.query.offset as string) || 0;
 
-      const emails = db.prepare(`
+      const emails = await storage.rawAll(`
         SELECT ui.id, ui.fromEmail, ui.fromName, ui.toEmail, ui.subject, ui.snippet, ui.body, ui.bodyHtml,
                ui.receivedAt, ui.status, ui.campaignId, ui.contactId, ui.replyType,
                c.firstName as contactFirstName, c.lastName as contactLastName, c.company as contactCompany,
@@ -9408,15 +9420,15 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         AND (ui.sentByUs IS NULL OR ui.sentByUs = 0)
         ORDER BY ui.receivedAt DESC
         LIMIT ? OFFSET ?
-      `).all(orgId, userId, limit, offset) as any[];
+      `, orgId, userId, limit, offset) as any[];
 
-      const total = (db.prepare(`
+      const total = (await storage.rawGet(`
         SELECT COUNT(*) as cnt FROM unified_inbox ui
         INNER JOIN email_accounts ea ON ea.id = ui.emailAccountId
         WHERE ui.organizationId = ? AND ea.userId = ?
         AND ui.status IN ('unread', 'read') AND ui.repliedAt IS NULL
         AND (ui.sentByUs IS NULL OR ui.sentByUs = 0)
-      `).get(orgId, userId) as any)?.cnt || 0;
+      `, orgId, userId) as any)?.cnt || 0;
 
       res.json({ emails, total });
     } catch (error: any) {
@@ -10402,12 +10414,11 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   app.get('/api/email-verify/stats', requireAuth, async (req, res) => {
     try {
       const orgId = req.session.organizationId!;
-      const db = (storage as any).db;
-      const stats = db.prepare(`
+      const stats = await storage.rawAll(`
         SELECT emailVerificationStatus, COUNT(*) as count
         FROM contacts WHERE organizationId = ?
         GROUP BY emailVerificationStatus
-      `).all(orgId);
+      `, orgId);
       const apiKey = await getEmailVerifyApiKey();
       let credits = null;
       if (apiKey) {
@@ -10432,9 +10443,8 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       if (!apiKey) return res.status(400).json({ message: 'EmailListVerify API key not configured. Ask your admin to add it in SuperAdmin > Advanced Settings.' });
 
       // Fetch contacts
-      const db = (storage as any).db;
       const placeholders = contactIds.map(() => '?').join(',');
-      const contacts = db.prepare(`SELECT id, email FROM contacts WHERE id IN (${placeholders}) AND organizationId = ?`).all(...contactIds, orgId);
+      const contacts = await storage.rawAll(`SELECT id, email FROM contacts WHERE id IN (${placeholders}) AND organizationId = ?`, ...contactIds, orgId);
 
       if (contacts.length === 0) return res.status(404).json({ message: 'No contacts found' });
 
@@ -10445,10 +10455,9 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       const results = await verifyBatch(emails, apiKey);
 
       // Update contacts in DB
-      const updateStmt = db.prepare(`UPDATE contacts SET emailVerificationStatus = ?, emailVerifiedAt = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`);
       let verified = 0, invalid = 0, risky = 0;
       for (const [contactId, result] of results) {
-        updateStmt.run(result.status, now, now, contactId, orgId);
+        await storage.rawRun(`UPDATE contacts SET emailVerificationStatus = ?, emailVerifiedAt = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`, result.status, now, now, contactId, orgId);
         if (result.status === 'valid') verified++;
         else if (result.status === 'invalid' || result.status === 'disposable' || result.status === 'spamtrap') invalid++;
         else if (result.status === 'risky') risky++;
@@ -10468,14 +10477,13 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       const apiKey = await getEmailVerifyApiKey();
       if (!apiKey) return res.status(400).json({ message: 'EmailListVerify API key not configured. Ask your admin to add it in SuperAdmin > Advanced Settings.' });
 
-      const db = (storage as any).db;
       let contacts;
       if (listId) {
         const filter = statusFilter === 'all' ? '' : "AND (emailVerificationStatus = 'unverified' OR emailVerificationStatus IS NULL)";
-        contacts = db.prepare(`SELECT id, email FROM contacts WHERE listId = ? AND organizationId = ? ${filter}`).all(listId, orgId);
+        contacts = await storage.rawAll(`SELECT id, email FROM contacts WHERE listId = ? AND organizationId = ? ${filter}`, listId, orgId);
       } else {
         const filter = statusFilter === 'all' ? '' : "AND (emailVerificationStatus = 'unverified' OR emailVerificationStatus IS NULL)";
-        contacts = db.prepare(`SELECT id, email FROM contacts WHERE organizationId = ? ${filter}`).all(orgId);
+        contacts = await storage.rawAll(`SELECT id, email FROM contacts WHERE organizationId = ? ${filter}`, orgId);
       }
 
       if (contacts.length === 0) return res.json({ total: 0, verified: 0, invalid: 0, risky: 0, message: 'No contacts to verify' });
@@ -10485,10 +10493,9 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       const now = new Date().toISOString();
       const results = await verifyBatch(emails, apiKey);
 
-      const updateStmt = db.prepare(`UPDATE contacts SET emailVerificationStatus = ?, emailVerifiedAt = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`);
       let verified = 0, invalid = 0, risky = 0;
       for (const [contactId, result] of results) {
-        updateStmt.run(result.status, now, now, contactId, orgId);
+        await storage.rawRun(`UPDATE contacts SET emailVerificationStatus = ?, emailVerifiedAt = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`, result.status, now, now, contactId, orgId);
         if (result.status === 'valid') verified++;
         else if (result.status === 'invalid' || result.status === 'disposable' || result.status === 'spamtrap') invalid++;
         else if (result.status === 'risky') risky++;
@@ -10504,8 +10511,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   app.get('/api/contacts/:id/verification', requireAuth, async (req, res) => {
     try {
       const orgId = req.session.organizationId!;
-      const db = (storage as any).db;
-      const contact = db.prepare(`SELECT emailVerificationStatus, emailVerifiedAt FROM contacts WHERE id = ? AND organizationId = ?`).get(req.params.id, orgId);
+      const contact = await storage.rawGet(`SELECT emailVerificationStatus, emailVerifiedAt FROM contacts WHERE id = ? AND organizationId = ?`, req.params.id, orgId);
       if (!contact) return res.status(404).json({ message: 'Contact not found' });
       res.json(contact);
     } catch (e: any) {
@@ -10819,9 +10825,8 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   // Document type counts (for sidebar)
   app.get('/api/context/doc-types', requireAuth, async (req: any, res) => {
     try {
-      const db = (storage as any).db;
       const orgId = req.user.organizationId;
-      const counts = db.prepare(`SELECT docType, COUNT(*) as cnt FROM org_documents WHERE organizationId = ? GROUP BY docType ORDER BY cnt DESC`).all(orgId);
+      const counts = await storage.rawAll(`SELECT docType, COUNT(*) as cnt FROM org_documents WHERE organizationId = ? GROUP BY docType ORDER BY cnt DESC`, orgId);
       res.json(counts);
     } catch (error: any) {
       res.status(500).json({ message: 'Failed to fetch doc types' });
@@ -10850,15 +10855,14 @@ Generate an appropriate reply to the LATEST email above, considering the full co
 
       // Backfill accountEmail from email_history for opportunities missing it
       try {
-        const db = (storage as any).db;
         for (const opp of opportunities as any[]) {
           if (!opp.accountEmail && opp.contactEmail) {
-            const hist = db.prepare(`SELECT accountEmail, emailAccountId FROM email_history WHERE organizationId = ? AND LOWER(fromEmail) = ? AND direction = 'received' LIMIT 1`).get(orgId, opp.contactEmail.toLowerCase()) as any;
+            const hist = await storage.rawGet(`SELECT accountEmail, emailAccountId FROM email_history WHERE organizationId = ? AND LOWER(fromEmail) = ? AND direction = 'received' LIMIT 1`, orgId, opp.contactEmail.toLowerCase()) as any;
             if (hist?.accountEmail) {
               opp.accountEmail = hist.accountEmail;
               if (!opp.emailAccountId) opp.emailAccountId = hist.emailAccountId;
               // Persist the backfill
-              try { db.prepare(`UPDATE lead_opportunities SET accountEmail = ?, emailAccountId = ? WHERE id = ?`).run(hist.accountEmail, hist.emailAccountId, opp.id); } catch (e) {}
+              try { await storage.rawRun(`UPDATE lead_opportunities SET accountEmail = ?, emailAccountId = ? WHERE id = ?`, hist.accountEmail, hist.emailAccountId, opp.id); } catch (e) {}
             }
           }
         }
@@ -10908,12 +10912,10 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   app.get('/api/lead-intelligence/debug', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.user.organizationId;
-      const db = (storage as any).db;
-
-      const totalRows = db.prepare(`SELECT COUNT(*) as cnt FROM email_history WHERE organizationId = ?`).get(orgId) as any;
-      const sample = db.prepare(`SELECT id, direction, fromEmail, toEmail, subject, accountEmail FROM email_history WHERE organizationId = ? LIMIT 5`).all(orgId) as any[];
-      const directionCounts = db.prepare(`SELECT direction, COUNT(*) as cnt FROM email_history WHERE organizationId = ? GROUP BY direction`).all(orgId) as any[];
-      const contactQuery = db.prepare(`
+      const totalRows = await storage.rawGet(`SELECT COUNT(*) as cnt FROM email_history WHERE organizationId = ?`, orgId) as any;
+      const sample = await storage.rawAll(`SELECT id, direction, fromEmail, toEmail, subject, accountEmail FROM email_history WHERE organizationId = ? LIMIT 5`, orgId) as any[];
+      const directionCounts = await storage.rawAll(`SELECT direction, COUNT(*) as cnt FROM email_history WHERE organizationId = ? GROUP BY direction`, orgId) as any[];
+      const contactQuery = await storage.rawAll(`
         SELECT
           CASE WHEN direction = 'sent' THEN LOWER(toEmail) ELSE LOWER(fromEmail) END as contactEmail,
           COUNT(*) as totalEmails
@@ -10923,7 +10925,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         HAVING contactEmail != '' AND contactEmail IS NOT NULL
         ORDER BY totalEmails DESC
         LIMIT 10
-      `).all(orgId) as any[];
+      `, orgId) as any[];
 
       // Check org emails
       const orgAccounts = await storage.getEmailAccounts(orgId);

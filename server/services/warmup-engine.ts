@@ -510,8 +510,7 @@ async function runWarmupCycle(): Promise<WarmupRunResult[]> {
 
   try {
     // Get all organizations that have warmup accounts
-    const db = (storage as any).db;
-    const orgs = db.prepare('SELECT DISTINCT organizationId FROM warmup_accounts WHERE status = ?').all('active') as any[];
+    const orgs = await storage.rawAll('SELECT DISTINCT organizationId FROM warmup_accounts WHERE status = ?', 'active') as any[];
 
     for (const { organizationId: orgId } of orgs) {
       const result = await runOrgWarmup(orgId);
@@ -794,8 +793,7 @@ async function runOrgWarmup(orgId: string): Promise<WarmupRunResult> {
     // Per-account tracking for accurate logs
     for (const account of activeAccounts) {
       try {
-        const db = (storage as any).db;
-        const existingLog = db.prepare('SELECT * FROM warmup_logs WHERE warmupAccountId = ? AND date = ?').get(account.id, today) as any;
+        const existingLog = await storage.rawGet('SELECT * FROM warmup_logs WHERE warmupAccountId = ? AND date = ?', account.id, today) as any;
 
         // Re-fetch account to get latest stats
         const latest = await storage.getWarmupAccount(account.id) as any;
@@ -809,10 +807,10 @@ async function runOrgWarmup(orgId: string): Promise<WarmupRunResult> {
           try { existingPairs = JSON.parse(existingLog.sendPairs || '[]'); } catch (e) { /* ignore */ }
           const mergedPairs = [...existingPairs, ...accountPairs];
 
-          db.prepare(`UPDATE warmup_logs SET sent = ?, received = received + ?,
+          await storage.rawRun(`UPDATE warmup_logs SET sent = ?, received = received + ?,
             inboxCount = inboxCount + ?, spamCount = spamCount + ?,
             openCount = openCount + ?, replyCount = replyCount + ?,
-            sendPairs = ? WHERE id = ?`).run(
+            sendPairs = ? WHERE id = ?`,
             latest?.currentDaily || existingLog.sent,
             result.received > 0 ? 1 : 0,
             result.received > 0 ? 1 : 0, // inbox (after rescue)
@@ -852,8 +850,7 @@ async function runOrgWarmup(orgId: string): Promise<WarmupRunResult> {
 
 async function resetDailyCounters() {
   try {
-    const db = (storage as any).db;
-    db.prepare('UPDATE warmup_accounts SET currentDaily = 0 WHERE status = ?').run('active');
+    await storage.rawRun('UPDATE warmup_accounts SET currentDaily = 0 WHERE status = ?', 'active');
     console.log('[Warmup] Daily counters reset');
   } catch (e) {
     console.error('[Warmup] Failed to reset daily counters:', e);

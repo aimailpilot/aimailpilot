@@ -45,9 +45,6 @@ interface FullContext {
  * Build full context for a contact — everything we know about them
  */
 export async function getContactContext(orgId: string, contactId?: string, contactEmail?: string): Promise<ContactContext | null> {
-  const db = (storage as any).db;
-  if (!db) return null;
-
   let contact: any = null;
   if (contactId) {
     contact = await storage.getContact(contactId);
@@ -62,29 +59,29 @@ export async function getContactContext(orgId: string, contactId?: string, conta
   // Email history with this contact (last 20 emails)
   let emailHistory: any[] = [];
   try {
-    emailHistory = db.prepare(`
+    emailHistory = await storage.rawAll(`
       SELECT subject, snippet, direction, receivedAt, fromEmail, toEmail
       FROM email_history
       WHERE organizationId = ? AND (LOWER(fromEmail) = ? OR LOWER(toEmail) = ?)
       ORDER BY receivedAt DESC LIMIT 20
-    `).all(orgId, email, email);
+    `, orgId, email, email);
   } catch { /* email_history table may not exist */ }
 
   // Lead intelligence classification
   let leadOpportunity: any = null;
   try {
-    leadOpportunity = db.prepare(`
+    leadOpportunity = await storage.rawGet(`
       SELECT bucket, confidence, aiReasoning, suggestedAction, lastEmailDate, totalEmails, totalReceived
       FROM lead_opportunities
       WHERE organizationId = ? AND LOWER(contactEmail) = ?
       ORDER BY confidence DESC LIMIT 1
-    `).get(orgId, email);
+    `, orgId, email);
   } catch { /* lead_opportunities table may not exist */ }
 
   // Campaign engagement stats
   let campaignEngagement = { totalSent: 0, totalOpened: 0, totalClicked: 0, totalReplied: 0, totalBounced: 0 };
   try {
-    const stats = db.prepare(`
+    const stats = await storage.rawGet(`
       SELECT
         COUNT(*) as totalSent,
         SUM(CASE WHEN openedAt IS NOT NULL THEN 1 ELSE 0 END) as totalOpened,
@@ -92,30 +89,30 @@ export async function getContactContext(orgId: string, contactId?: string, conta
         SUM(CASE WHEN repliedAt IS NOT NULL THEN 1 ELSE 0 END) as totalReplied,
         SUM(CASE WHEN bouncedAt IS NOT NULL THEN 1 ELSE 0 END) as totalBounced
       FROM messages WHERE contactId = ? AND status = 'sent'
-    `).get(contact.id) as any;
+    `, contact.id) as any;
     if (stats) campaignEngagement = stats;
   } catch {}
 
   // Activity notes (last 10)
   let activities: any[] = [];
   try {
-    activities = db.prepare(`
+    activities = await storage.rawAll(`
       SELECT type, outcome, notes, createdAt FROM contact_activities
       WHERE contactId = ? ORDER BY createdAt DESC LIMIT 10
-    `).all(contact.id);
+    `, contact.id);
   } catch {
     try {
-      activities = db.prepare(`
+      activities = await storage.rawAll(`
         SELECT type, outcome, notes, createdAt FROM contact_activity
         WHERE contactId = ? ORDER BY createdAt DESC LIMIT 10
-      `).all(contact.id);
+      `, contact.id);
     } catch {}
   }
 
   // Last remark
   let lastRemark = '';
   try {
-    const remark = db.prepare(`SELECT notes FROM contact_activities WHERE contactId = ? ORDER BY id DESC LIMIT 1`).get(contact.id) as any;
+    const remark = await storage.rawGet(`SELECT notes FROM contact_activities WHERE contactId = ? ORDER BY id DESC LIMIT 1`, contact.id) as any;
     lastRemark = remark?.notes || '';
   } catch {}
 

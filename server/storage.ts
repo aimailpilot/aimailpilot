@@ -1,6 +1,7 @@
 // Persistent SQLite storage for AImailPilot
 // Data is stored in ./data/aimailpilot.db and survives server restarts
 import Database from 'better-sqlite3';
+import { PostgresStorage } from './pg-storage.js';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -3586,6 +3587,22 @@ export class DatabaseStorage {
     }
   }
 
+  // No-op for interface compatibility with PostgresStorage
+  async ensureInitialized(): Promise<void> { /* SQLite is sync-initialized */ }
+
+  // ===== Raw SQL helpers for cross-backend compatibility =====
+  // These provide an async interface that works the same whether using SQLite or PostgreSQL.
+  // Use these instead of (storage as any).db.prepare() for new code and migration.
+  async rawGet(sql: string, ...params: any[]): Promise<any> {
+    return db.prepare(sql).get(...params) || null;
+  }
+  async rawAll(sql: string, ...params: any[]): Promise<any[]> {
+    return db.prepare(sql).all(...params);
+  }
+  async rawRun(sql: string, ...params: any[]): Promise<void> {
+    db.prepare(sql).run(...params);
+  }
+
   // ===== GUARDRAIL: resetCorruptDatabase has been REMOVED =====
   // This method used to delete the production database file. It caused catastrophic data loss.
   // NEVER add any method that deletes, renames, or overwrites the database file.
@@ -3596,4 +3613,285 @@ export class DatabaseStorage {
   }
 }
 
-export const storage = new DatabaseStorage();
+// ===== Storage Switcher =====
+// Modes:
+//   DATABASE_URL unset              → SQLite only
+//   DATABASE_URL + SHADOW_MODE=true → SQLite serves requests, PG mirrors writes in background
+//   DATABASE_URL only               → PostgreSQL only
+
+let _pgStorage: PostgresStorage | null = null;
+if (process.env.DATABASE_URL) {
+  _pgStorage = new PostgresStorage();
+}
+
+const _sqliteStorage = new DatabaseStorage();
+
+// Shadow mode: SQLite is primary, PG mirrors writes + validates reads
+const SHADOW_MODE = !!(process.env.DATABASE_URL && process.env.SHADOW_MODE === 'true');
+
+// Write method prefixes — any method starting with these is a write
+const WRITE_PREFIXES = ['create', 'update', 'delete', 'add', 'set', 'reset', 'remove', 'upsert', 'insert', 'mark', 'save', 'copy'];
+
+// ===== Shadow state tracking =====
+let _pgWriteFailures = 0;
+let _pgWriteTotal = 0;
+// Set to true by shadowValidate() when all tables pass — checked by cutover guard
+let _shadowValidationPassed = false;
+
+// Log failure summary every 5 minutes during shadow mode
+function startShadowFailureReporter() {
+  setInterval(() => {
+    if (_pgWriteTotal === 0) return;
+    if (_pgWriteFailures > 0) {
+      console.warn(`[SHADOW] ⚠ ${_pgWriteFailures}/${_pgWriteTotal} PG write(s) failed — re-run migration before cutover`);
+    } else {
+      console.log(`[SHADOW] ✓ ${_pgWriteTotal} PG write(s) — 0 failures`);
+    }
+    // Reset counters each interval so we see per-period rates
+    _pgWriteFailures = 0;
+    _pgWriteTotal = 0;
+  }, 5 * 60 * 1000);
+}
+
+/**
+ * Dual-write proxy: SQLite is the source of truth for return values.
+ * Writes are mirrored to PostgreSQL in the background (non-blocking).
+ * If PG write fails, increments failure counter and logs — never affects response.
+ */
+function createDualWriteProxy(sqlite: DatabaseStorage, pg: PostgresStorage): any {
+  return new Proxy(sqlite, {
+    get(target, prop: string) {
+      const val = (target as any)[prop];
+      if (typeof val !== 'function') return val;
+
+      const isWrite = WRITE_PREFIXES.some(p => prop.startsWith(p)) || prop === 'rawRun';
+
+      return async function (...args: any[]) {
+        // Always call SQLite first — return its result to the caller
+        const result = await (val as Function).apply(target, args);
+
+        if (isWrite) {
+          _pgWriteTotal++;
+          const pgMethod = (pg as any)[prop];
+          if (typeof pgMethod === 'function') {
+            pgMethod.apply(pg, args).catch((e: any) => {
+              _pgWriteFailures++;
+              console.warn(`[SHADOW-WRITE-FAIL] ${prop}(): ${e.message}`);
+            });
+          }
+        }
+
+        return result;
+      };
+    },
+  });
+}
+
+let storage: any;
+if (SHADOW_MODE && _pgStorage) {
+  storage = createDualWriteProxy(_sqliteStorage, _pgStorage);
+  console.log('[Storage] SHADOW MODE — SQLite primary + dual-write to PostgreSQL');
+} else if (process.env.DATABASE_URL && _pgStorage) {
+  storage = _pgStorage;
+  console.log('[Storage] Using PostgreSQL');
+} else {
+  storage = _sqliteStorage;
+  console.log('[Storage] Using SQLite');
+}
+
+/** Call this at server startup to initialize async storage (PostgreSQL schema) */
+export async function initStorage() {
+  if (_pgStorage) {
+    await _pgStorage.ensureInitialized();
+  }
+
+  if (SHADOW_MODE) {
+    console.log('[MODE]', {
+      db: 'SQLite+PostgreSQL(shadow)',
+      shadow: true,
+      nodeEnv: process.env.NODE_ENV || 'development',
+    });
+    // Shadow mode: validate data and start write-failure reporter
+    shadowValidate().catch(() => {});
+    startShadowFailureReporter();
+    return;
+  }
+
+  // ===== STARTUP MODE LOG =====
+  console.log('[MODE]', {
+    db: process.env.DATABASE_URL ? 'PostgreSQL' : 'SQLite',
+    shadow: false,
+    skipShadowCheck: process.env.SKIP_SHADOW_CHECK === 'true',
+    nodeEnv: process.env.NODE_ENV || 'development',
+  });
+
+  if (process.env.SKIP_SHADOW_CHECK === 'true') {
+    console.warn('[CUTOVER-GUARD] ⚠ SKIP_SHADOW_CHECK is enabled — safety checks bypassed. Use with intent only.');
+  }
+
+  // ===== PG READINESS CHECK (retry up to 5x, 1s apart) =====
+  // Handles Azure cold starts, slow pool warm-up, brief network blips.
+  if (process.env.DATABASE_URL) {
+    let connected = false;
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      try {
+        await _pgStorage!.rawGet('SELECT 1 as ping');
+        connected = true;
+        if (attempt > 1) console.log(`[PG-LIVE] Connected on attempt ${attempt}`);
+        break;
+      } catch (e: any) {
+        console.warn(`[PG-LIVE] Connection attempt ${attempt}/5 failed: ${e.message}`);
+        if (attempt < 5) await new Promise(r => setTimeout(r, 1000 * attempt)); // backoff: 1s, 2s, 3s, 4s
+      }
+    }
+    if (!connected) {
+      throw new Error('[PG-LIVE] Could not connect to PostgreSQL after 5 attempts. Check DATABASE_URL and server status.');
+    }
+  }
+
+  // ===== CUTOVER GUARD =====
+  // Prevents startup if migration was not run (or only partially run).
+  // Bypassed with SKIP_SHADOW_CHECK=true for emergency use.
+  if (process.env.DATABASE_URL && process.env.SKIP_SHADOW_CHECK !== 'true') {
+    try {
+      // Check 3 critical tables — partial migration leaves at least one empty
+      const [orgs, contacts, emailAccounts] = await Promise.all([
+        _pgStorage!.rawGet('SELECT COUNT(*) as cnt FROM organizations'),
+        _pgStorage!.rawGet('SELECT COUNT(*) as cnt FROM contacts'),
+        _pgStorage!.rawGet('SELECT COUNT(*) as cnt FROM email_accounts'),
+      ]);
+      const orgCnt      = Number(orgs?.cnt ?? 0);
+      const contactCnt  = Number(contacts?.cnt ?? 0);
+      const accountCnt  = Number(emailAccounts?.cnt ?? 0);
+
+      if (orgCnt === 0 || contactCnt === 0 || accountCnt === 0) {
+        console.error('[CUTOVER-GUARD] ❌ Migration incomplete or not run:');
+        console.error(`[CUTOVER-GUARD]    organizations=${orgCnt}  contacts=${contactCnt}  email_accounts=${accountCnt}`);
+        console.error('[CUTOVER-GUARD]    Run: npx tsx scripts/migrate-sqlite-to-pg.ts');
+        console.error('[CUTOVER-GUARD]    To bypass (dangerous): set SKIP_SHADOW_CHECK=true');
+        throw new Error('[CUTOVER-GUARD] Cannot start: PostgreSQL migration incomplete.');
+      }
+
+      // Log the exact moment PG becomes primary — audit trail
+      console.log(`[PG-LIVE] ✓ PostgreSQL is now serving production traffic`);
+      console.log(`[PG-LIVE] orgs=${orgCnt}  contacts=${contactCnt}  email_accounts=${accountCnt}`);
+      console.log(`[PG-LIVE] Timestamp: ${new Date().toISOString()}`);
+    } catch (e: any) {
+      if (e.message.startsWith('[CUTOVER-GUARD]')) throw e;
+      console.error('[PG-LIVE] ❌ Failed to connect to PostgreSQL:', e.message);
+      throw e;
+    }
+  }
+}
+
+// Key fields to compare per table (avoids large blob/content columns)
+const SHADOW_SAMPLE_FIELDS: Record<string, string> = {
+  organizations: 'id, name, domain',
+  users:         'id, email, role, "organizationId"',
+  contacts:      'id, email, status, "organizationId", "createdAt"',
+  campaigns:     'id, name, status, "sentCount", "openedCount", "organizationId"',
+  messages:      'id, status, "sentAt", "openedAt", "repliedAt", "campaignId"',
+  email_accounts:'id, email, provider, "isActive", "dailyLimit", "organizationId"',
+  unified_inbox: 'id, "fromEmail", status, "receivedAt", "organizationId"',
+  api_settings:  'id, "organizationId", "settingKey"',
+  templates:     'id, name, subject, "organizationId"',
+  followup_sequences: 'id, name, "isActive", "organizationId"',
+};
+
+/** Normalize a value for comparison: trim strings, unify nulls, ignore whitespace */
+function normalizeVal(v: any): string {
+  if (v === null || v === undefined) return 'NULL';
+  if (typeof v === 'string') return v.trim();
+  return String(v);
+}
+
+/** Compare row counts AND sample rows between SQLite and PostgreSQL */
+async function shadowValidate() {
+  if (!_pgStorage) return;
+  const tables = Object.keys(SHADOW_SAMPLE_FIELDS);
+  let countMismatches = 0;
+  let sampleMismatches = 0;
+
+  for (const table of tables) {
+    // 1. Row count check
+    try {
+      const sqliteRow = await _sqliteStorage.rawGet(`SELECT COUNT(*) as cnt FROM ${table}`);
+      const pgRow     = await _pgStorage.rawGet(`SELECT COUNT(*) as cnt FROM ${table}`);
+      const sqliteCnt = Number(sqliteRow?.cnt ?? 0);
+      const pgCnt     = Number(pgRow?.cnt ?? 0);
+
+      if (sqliteCnt !== pgCnt) {
+        countMismatches++;
+        console.warn(`[SHADOW] COUNT MISMATCH ${table}: SQLite=${sqliteCnt} PG=${pgCnt}`);
+        continue; // skip sample if counts differ — data isn't in sync yet
+      }
+
+      if (sqliteCnt === 0) {
+        console.log(`[SHADOW] OK ${table}: empty`);
+        continue;
+      }
+
+      // 2. Sample row comparison (5 random rows by ID)
+      const fields = SHADOW_SAMPLE_FIELDS[table];
+      const sqliteSample: any[] = await _sqliteStorage.rawAll(
+        `SELECT ${fields} FROM ${table} ORDER BY id LIMIT 5`
+      );
+      const pgSample: any[] = await _pgStorage.rawAll(
+        `SELECT ${fields} FROM ${table} ORDER BY id LIMIT 5`
+      );
+
+      let rowMismatch = false;
+      for (let i = 0; i < Math.min(sqliteSample.length, pgSample.length); i++) {
+        const sRow = sqliteSample[i];
+        const pRow = pgSample[i];
+        const keys = Object.keys(sRow);
+        for (const key of keys) {
+          const sv = normalizeVal(sRow[key]);
+          const pv = normalizeVal(pRow[key]);
+          if (sv !== pv) {
+            console.warn(`[SHADOW] SAMPLE MISMATCH ${table}.${key} id=${sRow.id}: SQLite="${sv}" PG="${pv}"`);
+            rowMismatch = true;
+            sampleMismatches++;
+          }
+        }
+      }
+
+      if (!rowMismatch) {
+        console.log(`[SHADOW] OK ${table}: ${sqliteCnt} rows, sample match ✓`);
+      }
+    } catch (e: any) {
+      console.warn(`[SHADOW] ERROR ${table}: ${e.message}`);
+    }
+  }
+
+  // Summary + persist pass/fail result for cutover guard
+  if (countMismatches === 0 && sampleMismatches === 0) {
+    _shadowValidationPassed = true;
+    console.log('[SHADOW] ✓ All tables: row counts match, sample data matches — SAFE TO CUT OVER');
+    console.log('[SHADOW] → Remove SHADOW_MODE env var and restart to switch to PostgreSQL');
+  } else {
+    _shadowValidationPassed = false;
+    if (countMismatches > 0) console.warn(`[SHADOW] ✗ ${countMismatches} table(s) have row count mismatches — re-run migration`);
+    if (sampleMismatches > 0) console.warn(`[SHADOW] ✗ ${sampleMismatches} field(s) have data mismatches — check migration script`);
+  }
+}
+
+/** Run a query on both DBs and compare results (call from routes for spot-checking) */
+export async function shadowCheck(sql: string, params: any[] = [], label = '') {
+  if (!SHADOW_MODE || !_pgStorage) return;
+  try {
+    const [sqliteRows, pgRows] = await Promise.all([
+      _sqliteStorage.rawAll(sql, ...params),
+      _pgStorage.rawAll(sql, ...params),
+    ]);
+    if (JSON.stringify(sqliteRows) !== JSON.stringify(pgRows)) {
+      console.warn(`[SHADOW-DIFF] ${label || sql.substring(0, 80)}`);
+      console.warn(`[SHADOW-DIFF] SQLite(${sqliteRows.length}):`, JSON.stringify(sqliteRows).substring(0, 200));
+      console.warn(`[SHADOW-DIFF] PG(${pgRows.length}):`, JSON.stringify(pgRows).substring(0, 200));
+    }
+  } catch (e: any) {
+    console.warn(`[SHADOW-DIFF] Error comparing: ${e.message}`);
+  }
+}
+
+export { storage };

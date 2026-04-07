@@ -5,7 +5,7 @@ import { setupVite, serveStatic, log } from "./vite";
 import { startFollowupEngine } from "./services/followup-engine";
 import { startWarmupEngine } from "./services/warmup-engine";
 import { campaignEngine } from "./services/campaign-engine";
-import { storage } from "./storage";
+import { storage, initStorage } from "./storage";
 
 // Global error handling to prevent silent crashes on Azure
 process.on('uncaughtException', (err) => {
@@ -40,6 +40,9 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  // Initialize storage (runs PostgreSQL schema init when DATABASE_URL is set)
+  await initStorage();
+
   const server = await registerRoutes(app);
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {

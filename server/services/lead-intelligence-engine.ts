@@ -514,11 +514,6 @@ interface ContactConversationSummary {
 }
 
 async function buildContactSummaries(orgId: string, emailAccountIds?: string[]): Promise<ContactConversationSummary[]> {
-  const db = (storage as any).db;
-  if (!db) {
-    console.error('[LeadIntel] buildContactSummaries: db is null/undefined!');
-    return [];
-  }
   const summaries: ContactConversationSummary[] = [];
 
   // Get org account emails once (to skip internal emails)
@@ -526,22 +521,22 @@ async function buildContactSummaries(orgId: string, emailAccountIds?: string[]):
   const orgEmails = new Set((orgAccounts as any[]).map((a: any) => (a.email || '').toLowerCase()).filter(Boolean));
   console.log(`[LeadIntel] Org emails to exclude: ${Array.from(orgEmails).join(', ')}`);
 
-  // 1. From email_history (historical scan) — use simple query to avoid GROUP_CONCAT memory issues
+  // 1. From email_history (historical scan)
   try {
     // Build account filter clause
     const hasAccountFilter = emailAccountIds && emailAccountIds.length > 0;
-    const accountFilterSQL = hasAccountFilter ? ` AND emailAccountId IN (${emailAccountIds.map(() => '?').join(',')})` : '';
-    const accountFilterParams = hasAccountFilter ? emailAccountIds : [];
+    const accountFilterSQL = hasAccountFilter ? ` AND emailAccountId IN (${emailAccountIds!.map(() => '?').join(',')})` : '';
+    const accountFilterParams = hasAccountFilter ? emailAccountIds! : [];
 
-    const countCheck = db.prepare(`SELECT COUNT(*) as cnt FROM email_history WHERE organizationId = ?${accountFilterSQL}`).get(orgId, ...accountFilterParams) as any;
-    console.log(`[LeadIntel] email_history has ${countCheck?.cnt || 0} rows for org ${orgId}${hasAccountFilter ? ` (filtered to ${emailAccountIds.length} accounts)` : ''}`);
+    const countCheck = await storage.rawGet(`SELECT COUNT(*) as cnt FROM email_history WHERE organizationId = ?${accountFilterSQL}`, orgId, ...accountFilterParams) as any;
+    console.log(`[LeadIntel] email_history has ${countCheck?.cnt || 0} rows for org ${orgId}${hasAccountFilter ? ` (filtered to ${emailAccountIds!.length} accounts)` : ''}`);
 
     if ((countCheck?.cnt || 0) === 0) {
       console.log(`[LeadIntel] No email_history rows — skipping history-based summaries`);
     } else {
       // Step 1: Get contacts who have REPLIED or INITIATED contact (at least 1 received email)
       // Sent-only contacts are just outreach recipients — not leads
-      const contactRows = db.prepare(`
+      const contactRows = await storage.rawAll(`
         SELECT
           LOWER(fromEmail) as contactEmail,
           MAX(fromName) as contactName,
@@ -556,21 +551,21 @@ async function buildContactSummaries(orgId: string, emailAccountIds?: string[]):
         GROUP BY contactEmail
         ORDER BY lastEmailDate DESC
         LIMIT 1000
-      `).all(orgId, ...accountFilterParams) as any[];
+      `, orgId, ...accountFilterParams) as any[];
 
       console.log(`[LeadIntel] Contacts with incoming emails: ${contactRows.length}`);
 
       // Also get sent counts per contact (for context: how many times we reached out)
       const sentCounts: Record<string, number> = {};
       try {
-        const sentRows = db.prepare(`
+        const sentRows = await storage.rawAll(`
           SELECT LOWER(toEmail) as contactEmail, COUNT(*) as cnt
           FROM email_history
           WHERE organizationId = ? AND direction = 'sent'
             AND toEmail IS NOT NULL AND toEmail != ''
             ${accountFilterSQL}
           GROUP BY contactEmail
-        `).all(orgId, ...accountFilterParams) as any[];
+        `, orgId, ...accountFilterParams) as any[];
         for (const r of sentRows) {
           sentCounts[(r.contactEmail || '').toLowerCase()] = r.cnt;
         }
@@ -586,11 +581,11 @@ async function buildContactSummaries(orgId: string, emailAccountIds?: string[]):
         let subjects: string[] = [];
         let snippets: string[] = [];
         try {
-          const samples = db.prepare(`
+          const samples = await storage.rawAll(`
             SELECT subject, snippet FROM email_history
             WHERE organizationId = ? AND (LOWER(fromEmail) = ? OR LOWER(toEmail) = ?)
             ORDER BY receivedAt DESC LIMIT 5
-          `).all(orgId, email, email) as any[];
+          `, orgId, email, email) as any[];
           subjects = samples.map((s: any) => s.subject).filter(Boolean);
           snippets = samples.map((s: any) => (s.snippet || '').substring(0, 200)).filter(Boolean);
         } catch (e) { /* non-critical */ }
@@ -618,48 +613,51 @@ async function buildContactSummaries(orgId: string, emailAccountIds?: string[]):
   }
 
   // 2. From unified_inbox + campaign data (existing campaign contacts)
+  // Uses JS-side aggregation instead of GROUP_CONCAT for cross-DB compatibility
   try {
-    const campaignRows = db.prepare(`
-      SELECT
-        ui.fromEmail as contactEmail,
-        ui.fromName as contactName,
-        COUNT(*) as totalReplies,
-        MAX(ui.receivedAt) as lastReplyDate,
-        GROUP_CONCAT(DISTINCT ui.subject, '|||') as subjects,
-        GROUP_CONCAT(ui.snippet, '|||') as snippets
-      FROM unified_inbox ui
-      WHERE ui.organizationId = ? AND ui.status != 'sent'
-      GROUP BY ui.fromEmail
-      ORDER BY lastReplyDate DESC
-      LIMIT 200
-    `).all(orgId) as any[];
+    const inboxRows = await storage.rawAll(`
+      SELECT fromEmail as contactEmail, fromName as contactName,
+        subject, snippet, receivedAt
+      FROM unified_inbox
+      WHERE organizationId = ? AND status != 'sent'
+      ORDER BY receivedAt DESC
+      LIMIT 2000
+    `, orgId) as any[];
 
-    for (const row of campaignRows) {
-      // Skip if already in summaries (merge)
+    // Aggregate in JS (works for both SQLite and PostgreSQL)
+    const inboxMap: Record<string, any> = {};
+    for (const row of inboxRows) {
+      const key = (row.contactEmail || '').toLowerCase();
+      if (!key) continue;
+      if (!inboxMap[key]) {
+        inboxMap[key] = { contactEmail: key, contactName: row.contactName || '', totalReplies: 0, lastReplyDate: '', subjects: [], snippets: [] };
+      }
+      inboxMap[key].totalReplies++;
+      if (!inboxMap[key].lastReplyDate || row.receivedAt > inboxMap[key].lastReplyDate) inboxMap[key].lastReplyDate = row.receivedAt;
+      if (row.subject && inboxMap[key].subjects.length < 5) inboxMap[key].subjects.push(row.subject);
+      if (row.snippet && inboxMap[key].snippets.length < 5) inboxMap[key].snippets.push((row.snippet || '').substring(0, 200));
+    }
+
+    for (const row of Object.values(inboxMap)) {
       const existing = summaries.find(s => s.contactEmail === row.contactEmail);
       if (existing) {
-        // Merge campaign data
         existing.totalReceived += row.totalReplies;
         existing.totalEmails += row.totalReplies;
         if (row.lastReplyDate > existing.lastEmailDate) existing.lastEmailDate = row.lastReplyDate;
-        const newSubjects = (row.subjects || '').split('|||').filter(Boolean);
-        existing.subjects = [...new Set([...existing.subjects, ...newSubjects])].slice(0, 5);
-        const newSnippets = (row.snippets || '').split('|||').filter(Boolean);
-        existing.snippets = [...existing.snippets, ...newSnippets.map((s: string) => s.substring(0, 200))].slice(0, 5);
+        existing.subjects = [...existing.subjects, ...row.subjects].filter((v, i, a) => a.indexOf(v) === i).slice(0, 5);
+        existing.snippets = [...existing.snippets, ...row.snippets].slice(0, 5);
       } else {
-        const subjects = (row.subjects || '').split('|||').filter(Boolean).slice(0, 5);
-        const snippets = (row.snippets || '').split('|||').filter(Boolean).slice(0, 3);
         summaries.push({
           contactEmail: row.contactEmail,
-          contactName: row.contactName || '',
+          contactName: row.contactName,
           accountEmail: '',
           emailAccountId: '',
           totalEmails: row.totalReplies,
           totalSent: 0,
           totalReceived: row.totalReplies,
           lastEmailDate: row.lastReplyDate,
-          subjects,
-          snippets: snippets.map((s: string) => s.substring(0, 200)),
+          subjects: row.subjects.slice(0, 5),
+          snippets: row.snippets.slice(0, 5),
         });
       }
     }
@@ -670,7 +668,7 @@ async function buildContactSummaries(orgId: string, emailAccountIds?: string[]):
   // 3. Enrich existing summaries with contact table data (name, company, engagement stats)
   // Only enriches — does NOT add sent-only contacts (those are outreach noise, not leads)
   try {
-    const contactRows = db.prepare(`
+    const contactRows = await storage.rawAll(`
       SELECT email, firstName, lastName, company,
         totalSent, totalOpened, totalClicked, totalReplied,
         lastOpenedAt, lastClickedAt, lastRepliedAt, leadStatus, status
@@ -678,7 +676,7 @@ async function buildContactSummaries(orgId: string, emailAccountIds?: string[]):
       WHERE organizationId = ? AND totalSent > 0
       ORDER BY totalSent DESC
       LIMIT 500
-    `).all(orgId) as any[];
+    `, orgId) as any[];
 
     for (const c of contactRows) {
       if (!c.email) continue;
@@ -887,8 +885,7 @@ export async function analyzeOrgLeads(orgId: string, emailAccountIds?: string[])
 
     // Quick DB check before building summaries
     try {
-      const db = (storage as any).db;
-      const cnt = db.prepare(`SELECT COUNT(*) as cnt FROM email_history WHERE organizationId = ?`).get(orgId) as any;
+      const cnt = await storage.rawGet(`SELECT COUNT(*) as cnt FROM email_history WHERE organizationId = ?`, orgId) as any;
       result.debug.emailHistoryCount = cnt?.cnt || 0;
       result.debug.dbOk = true;
     } catch (dbErr) {
@@ -921,8 +918,7 @@ export async function analyzeOrgLeads(orgId: string, emailAccountIds?: string[])
       // Look up existing contact for company info
       let company = '';
       try {
-        const db = (storage as any).db;
-        const contact = db.prepare('SELECT company FROM contacts WHERE organizationId = ? AND LOWER(email) = ? LIMIT 1').get(orgId, cls.contactEmail.toLowerCase()) as any;
+        const contact = await storage.rawGet('SELECT company FROM contacts WHERE organizationId = ? AND LOWER(email) = ? LIMIT 1', orgId, cls.contactEmail.toLowerCase()) as any;
         if (contact?.company) company = contact.company;
       } catch (e) { /* ignore */ }
 
