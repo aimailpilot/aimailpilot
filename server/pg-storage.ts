@@ -9,9 +9,10 @@ import crypto from 'crypto';
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL?.includes('azure') ? { rejectUnauthorized: false } : undefined,
-  max: 20,
+  max: 10,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000,
+  connectionTimeoutMillis: 5000,  // fail fast — 5s per attempt
+  query_timeout: 30000,           // max 30s per query
 });
 
 pool.on('error', (err) => {

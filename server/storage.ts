@@ -3741,7 +3741,7 @@ export async function initStorage() {
         break;
       } catch (e: any) {
         console.warn(`[PG-LIVE] Connection attempt ${attempt}/5 failed: ${e.message}`);
-        if (attempt < 5) await new Promise(r => setTimeout(r, 1000 * attempt)); // backoff: 1s, 2s, 3s, 4s
+        if (attempt < 5) await new Promise(r => setTimeout(r, 1000)); // 1s between retries
       }
     }
     if (!connected) {
