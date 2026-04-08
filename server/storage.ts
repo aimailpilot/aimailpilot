@@ -3290,9 +3290,10 @@ export class DatabaseStorage {
   }, limit = 50, offset = 0) {
     let sql = 'SELECT * FROM unified_inbox WHERE organizationId = ?';
     const params: any[] = [organizationId];
-    
+
     if (filters?.status === 'bounced') {
-      sql += " AND (status = 'bounced' OR bounceType != '')";
+      // Only show bounces linked to real contacts (excludes warmup emails between org accounts)
+      sql += " AND (status = 'bounced' OR bounceType != '') AND contactId IS NOT NULL AND contactId != ''";
     } else if (filters?.status === 'unsubscribed') {
       sql += " AND replyType = 'unsubscribe'";
     } else if (filters?.status && filters.status !== 'all') {
@@ -3335,7 +3336,7 @@ export class DatabaseStorage {
     let sql = 'SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ?';
     const params: any[] = [organizationId];
     if (filters?.status === 'bounced') {
-      sql += " AND (status = 'bounced' OR bounceType != '')";
+      sql += " AND (status = 'bounced' OR bounceType != '') AND contactId IS NOT NULL AND contactId != ''";
     } else if (filters?.status === 'unsubscribed') {
       sql += " AND replyType = 'unsubscribe'";
     } else if (filters?.status && filters.status !== 'all') {

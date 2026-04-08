@@ -4843,7 +4843,7 @@ Which account should I use and why? If I need to split across accounts, provide 
   app.get('/api/contacts/pipeline-stats', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.session.organizationId!;
-      const stats = await storage.rawAll(`SELECT pipelineStage, COUNT(*) as count FROM contacts WHERE organizationId = ? AND status NOT IN ('bounced', 'unsubscribed') GROUP BY pipelineStage`, orgId);
+      const stats = await storage.rawAll(`SELECT "pipelineStage", COUNT(*) as count FROM contacts WHERE "organizationId" = ? AND status NOT IN ('bounced', 'unsubscribed') GROUP BY "pipelineStage"`, orgId);
       res.json(stats);
     } catch (e: any) {
       res.status(500).json({ message: e.message });
@@ -4855,25 +4855,25 @@ Which account should I use and why? If I need to split across accounts, provide 
     try {
       const orgId = req.session.organizationId!;
       const { pipelineStage, nextActionDate, nextActionType, dealValue, dealNotes } = req.body;
-      const contact = await storage.rawGet(`SELECT id FROM contacts WHERE id = ? AND organizationId = ?`, req.params.id, orgId);
+      const contact = await storage.rawGet(`SELECT id FROM contacts WHERE id = ? AND "organizationId" = ?`, req.params.id, orgId);
       if (!contact) return res.status(404).json({ message: 'Contact not found' });
       const updates: string[] = [];
       const values: any[] = [];
-      if (pipelineStage) { updates.push('pipelineStage = ?'); values.push(pipelineStage); }
-      if (nextActionDate !== undefined) { updates.push('nextActionDate = ?'); values.push(nextActionDate || null); }
-      if (nextActionType !== undefined) { updates.push('nextActionType = ?'); values.push(nextActionType || null); }
-      if (dealValue !== undefined) { updates.push('dealValue = ?'); values.push(dealValue || 0); }
-      if (dealNotes !== undefined) { updates.push('dealNotes = ?'); values.push(dealNotes || ''); }
+      if (pipelineStage) { updates.push('"pipelineStage" = ?'); values.push(pipelineStage); }
+      if (nextActionDate !== undefined) { updates.push('"nextActionDate" = ?'); values.push(nextActionDate || null); }
+      if (nextActionType !== undefined) { updates.push('"nextActionType" = ?'); values.push(nextActionType || null); }
+      if (dealValue !== undefined) { updates.push('"dealValue" = ?'); values.push(dealValue || 0); }
+      if (dealNotes !== undefined) { updates.push('"dealNotes" = ?'); values.push(dealNotes || ''); }
       // Auto-set dealClosedAt when stage changes to won/lost
       if (pipelineStage === 'won' || pipelineStage === 'lost') {
-        updates.push('dealClosedAt = ?'); values.push(new Date().toISOString());
+        updates.push('"dealClosedAt" = ?'); values.push(new Date().toISOString());
       } else if (pipelineStage && pipelineStage !== 'won' && pipelineStage !== 'lost') {
         // Clear dealClosedAt if moved back from won/lost
-        updates.push('dealClosedAt = ?'); values.push(null);
+        updates.push('"dealClosedAt" = ?'); values.push(null);
       }
-      updates.push('updatedAt = ?'); values.push(new Date().toISOString());
+      updates.push('"updatedAt" = ?'); values.push(new Date().toISOString());
       values.push(req.params.id, orgId);
-      await storage.rawRun(`UPDATE contacts SET ${updates.join(', ')} WHERE id = ? AND organizationId = ?`, ...values);
+      await storage.rawRun(`UPDATE contacts SET ${updates.join(', ')} WHERE id = ? AND "organizationId" = ?`, ...values);
       res.json({ success: true });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
@@ -4884,9 +4884,9 @@ Which account should I use and why? If I need to split across accounts, provide 
   app.get('/api/contacts/:id/activities', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.session.organizationId!;
-      const activities = await storage.rawAll(`SELECT ca.*, u.firstName as userFirstName, u.lastName as userLastName, u.email as userEmail
-        FROM contact_activities ca LEFT JOIN users u ON ca.userId = u.id
-        WHERE ca.contactId = ? AND ca.organizationId = ? ORDER BY ca.createdAt DESC LIMIT 100`, req.params.id, orgId);
+      const activities = await storage.rawAll(`SELECT ca.*, u."firstName" as "userFirstName", u."lastName" as "userLastName", u.email as "userEmail"
+        FROM contact_activities ca LEFT JOIN users u ON ca."userId" = u.id
+        WHERE ca."contactId" = ? AND ca."organizationId" = ? ORDER BY ca."createdAt" DESC LIMIT 100`, req.params.id, orgId);
       res.json(activities);
     } catch (e: any) {
       res.status(500).json({ message: e.message });
@@ -4900,15 +4900,15 @@ Which account should I use and why? If I need to split across accounts, provide 
       const userId = req.session.userId;
       const { type, outcome, notes, nextActionDate, nextActionType } = req.body;
       if (!type) return res.status(400).json({ message: 'Activity type is required' });
-      const contact = await storage.rawGet(`SELECT id, pipelineStage FROM contacts WHERE id = ? AND organizationId = ?`, req.params.id, orgId) as any;
+      const contact = await storage.rawGet(`SELECT id, "pipelineStage" FROM contacts WHERE id = ? AND "organizationId" = ?`, req.params.id, orgId) as any;
       if (!contact) return res.status(404).json({ message: 'Contact not found' });
       const id = `act_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const now = new Date().toISOString();
-      await storage.rawRun(`INSERT INTO contact_activities (id, contactId, organizationId, userId, type, outcome, notes, nextActionDate, nextActionType, metadata, createdAt)
+      await storage.rawRun(`INSERT INTO contact_activities (id, "contactId", "organizationId", "userId", type, outcome, notes, "nextActionDate", "nextActionType", metadata, "createdAt")
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, req.params.id, orgId, userId, type, outcome || null, notes || null, nextActionDate || null, nextActionType || null, '{}', now);
       // Update contact's nextActionDate if provided
       if (nextActionDate) {
-        await storage.rawRun(`UPDATE contacts SET nextActionDate = ?, nextActionType = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`, nextActionDate, nextActionType || null, now, req.params.id, orgId);
+        await storage.rawRun(`UPDATE contacts SET "nextActionDate" = ?, "nextActionType" = ?, "updatedAt" = ? WHERE id = ? AND "organizationId" = ?`, nextActionDate, nextActionType || null, now, req.params.id, orgId);
       }
       // Auto-advance pipeline stage (only forward, never backward)
       const autoStageMap: Record<string, string> = { call: 'contacted', email: 'contacted', whatsapp: 'contacted', meeting_scheduled: 'meeting_scheduled', meeting: 'meeting_done', proposal: 'proposal_sent' };
@@ -4917,11 +4917,11 @@ Which account should I use and why? If I need to split across accounts, provide 
         const currentIdx = stageOrder.indexOf(contact.pipelineStage || 'new');
         const newIdx = stageOrder.indexOf(autoStageMap[type]);
         if (newIdx > currentIdx) {
-          await storage.rawRun(`UPDATE contacts SET pipelineStage = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`, autoStageMap[type], now, req.params.id, orgId);
+          await storage.rawRun(`UPDATE contacts SET "pipelineStage" = ?, "updatedAt" = ? WHERE id = ? AND "organizationId" = ?`, autoStageMap[type], now, req.params.id, orgId);
         }
       }
-      if (outcome === 'converted') await storage.rawRun(`UPDATE contacts SET pipelineStage = 'won', dealClosedAt = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`, now, now, req.params.id, orgId);
-      else if (outcome === 'rejected') await storage.rawRun(`UPDATE contacts SET pipelineStage = 'lost', dealClosedAt = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`, now, now, req.params.id, orgId);
+      if (outcome === 'converted') await storage.rawRun(`UPDATE contacts SET "pipelineStage" = 'won', "dealClosedAt" = ?, "updatedAt" = ? WHERE id = ? AND "organizationId" = ?`, now, now, req.params.id, orgId);
+      else if (outcome === 'rejected') await storage.rawRun(`UPDATE contacts SET "pipelineStage" = 'lost', "dealClosedAt" = ?, "updatedAt" = ? WHERE id = ? AND "organizationId" = ?`, now, now, req.params.id, orgId);
       res.json({ id, success: true });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
