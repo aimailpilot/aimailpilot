@@ -2882,7 +2882,8 @@ export class PostgresStorage {
     let idx = 2;
 
     if (filters?.status === 'bounced') {
-      sql += ` AND (status = 'bounced' OR "bounceType" != '')`;
+      // Exclude emails where toEmail is a connected org email account (warmup/internal emails are not real bounces)
+      sql += ` AND (status = 'bounced' OR "bounceType" != '') AND LOWER("toEmail") NOT IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
     } else if (filters?.status === 'unsubscribed') {
       sql += ` AND "replyType" = 'unsubscribe'`;
     } else if (filters?.status && filters.status !== 'all') {
@@ -2922,7 +2923,8 @@ export class PostgresStorage {
     const params: any[] = [organizationId];
     let idx = 2;
     if (filters?.status === 'bounced') {
-      sql += ` AND (status = 'bounced' OR "bounceType" != '')`;
+      // Exclude emails where toEmail is a connected org email account (warmup/internal emails are not real bounces)
+      sql += ` AND (status = 'bounced' OR "bounceType" != '') AND LOWER("toEmail") NOT IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
     } else if (filters?.status === 'unsubscribed') {
       sql += ` AND "replyType" = 'unsubscribe'`;
     } else if (filters?.status && filters.status !== 'all') {
@@ -2957,7 +2959,7 @@ export class PostgresStorage {
     const negative = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'negative'`, [organizationId])).c);
     const ooo = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'ooo'`, [organizationId])).c);
     const autoReply = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'auto_reply'`, [organizationId])).c);
-    const bounced = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND ("bounceType" != '' AND "bounceType" IS NOT NULL)`, [organizationId])).c);
+    const bounced = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND ("bounceType" != '' AND "bounceType" IS NOT NULL) AND LOWER("toEmail") NOT IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`, [organizationId])).c);
     const starred = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "isStarred" = 1`, [organizationId])).c);
     return { total, unread, replied, archived, positive, negative, ooo, autoReply, bounced, starred };
   }

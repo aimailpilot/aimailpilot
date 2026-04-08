@@ -3292,8 +3292,9 @@ export class DatabaseStorage {
     const params: any[] = [organizationId];
 
     if (filters?.status === 'bounced') {
-      // Only show bounces linked to real contacts (excludes warmup emails between org accounts)
-      sql += " AND (status = 'bounced' OR bounceType != '') AND contactId IS NOT NULL AND contactId != ''";
+      // Exclude emails where toEmail is a connected org email account (warmup/internal emails are not real bounces)
+      sql += " AND (status = 'bounced' OR bounceType != '') AND LOWER(toEmail) NOT IN (SELECT LOWER(email) FROM email_accounts WHERE organizationId = ?)";
+      params.push(organizationId);
     } else if (filters?.status === 'unsubscribed') {
       sql += " AND replyType = 'unsubscribe'";
     } else if (filters?.status && filters.status !== 'all') {
@@ -3336,7 +3337,9 @@ export class DatabaseStorage {
     let sql = 'SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ?';
     const params: any[] = [organizationId];
     if (filters?.status === 'bounced') {
-      sql += " AND (status = 'bounced' OR bounceType != '') AND contactId IS NOT NULL AND contactId != ''";
+      // Exclude emails where toEmail is a connected org email account (warmup/internal emails are not real bounces)
+      sql += " AND (status = 'bounced' OR bounceType != '') AND LOWER(toEmail) NOT IN (SELECT LOWER(email) FROM email_accounts WHERE organizationId = ?)";
+      params.push(organizationId);
     } else if (filters?.status === 'unsubscribed') {
       sql += " AND replyType = 'unsubscribe'";
     } else if (filters?.status && filters.status !== 'all') {
@@ -3372,7 +3375,7 @@ export class DatabaseStorage {
     const negative = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND replyType = 'negative'").get(organizationId) as any).c;
     const ooo = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND replyType = 'ooo'").get(organizationId) as any).c;
     const autoReply = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND replyType = 'auto_reply'").get(organizationId) as any).c;
-    const bounced = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND (bounceType != '' AND bounceType IS NOT NULL)").get(organizationId) as any).c;
+    const bounced = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND (bounceType != '' AND bounceType IS NOT NULL) AND LOWER(toEmail) NOT IN (SELECT LOWER(email) FROM email_accounts WHERE organizationId = ?)").get(organizationId, organizationId) as any).c;
     const starred = (db.prepare("SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND isStarred = 1").get(organizationId) as any).c;
     return { total, unread, replied, archived, positive, negative, ooo, autoReply, bounced, starred };
   }
