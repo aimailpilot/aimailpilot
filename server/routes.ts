@@ -4808,7 +4808,7 @@ Which account should I use and why? If I need to split across accounts, provide 
   // Get unique filter options for contacts dropdowns
   app.get('/api/contacts/filter-options', requireAuth, async (req: any, res) => {
     try {
-      const orgId = req.session.organizationId!;
+      const orgId = req.user.organizationId;
       const companies = (await storage.rawAll(`SELECT DISTINCT company FROM contacts WHERE organizationId = ? AND company IS NOT NULL AND company != '' ORDER BY company LIMIT 200`, orgId)).map((r: any) => r.company);
       const designations = (await storage.rawAll(`SELECT DISTINCT jobTitle FROM contacts WHERE organizationId = ? AND jobTitle IS NOT NULL AND jobTitle != '' ORDER BY jobTitle LIMIT 200`, orgId)).map((r: any) => r.jobTitle);
       const cities = (await storage.rawAll(`SELECT DISTINCT city FROM contacts WHERE organizationId = ? AND city IS NOT NULL AND city != '' ORDER BY city LIMIT 200`, orgId)).map((r: any) => r.city);
@@ -4824,7 +4824,7 @@ Which account should I use and why? If I need to split across accounts, provide 
   // Get today's follow-ups (contacts with nextActionDate = today or overdue)
   app.get('/api/contacts/follow-ups', requireAuth, async (req: any, res) => {
     try {
-      const orgId = req.session.organizationId!;
+      const orgId = req.user.organizationId;
       const today = new Date().toISOString().split('T')[0];
       const contacts = await storage.rawAll(`SELECT c.*,
         (SELECT ca.notes FROM contact_activities ca WHERE ca.contactId = c.id ORDER BY ca.createdAt DESC LIMIT 1) as lastRemark,
@@ -4842,7 +4842,7 @@ Which account should I use and why? If I need to split across accounts, provide 
   // Get pipeline stats (count per stage)
   app.get('/api/contacts/pipeline-stats', requireAuth, async (req: any, res) => {
     try {
-      const orgId = req.session.organizationId!;
+      const orgId = req.user.organizationId;
       const stats = await storage.rawAll(`SELECT "pipelineStage", COUNT(*) as count FROM contacts WHERE "organizationId" = ? AND status NOT IN ('bounced', 'unsubscribed') GROUP BY "pipelineStage"`, orgId);
       res.json(stats);
     } catch (e: any) {
@@ -4853,7 +4853,7 @@ Which account should I use and why? If I need to split across accounts, provide 
   // Update contact pipeline stage
   app.put('/api/contacts/:id/pipeline', requireAuth, async (req: any, res) => {
     try {
-      const orgId = req.session.organizationId!;
+      const orgId = req.user.organizationId;
       const { pipelineStage, nextActionDate, nextActionType, dealValue, dealNotes } = req.body;
       const contact = await storage.rawGet(`SELECT id FROM contacts WHERE id = ? AND "organizationId" = ?`, req.params.id, orgId);
       if (!contact) return res.status(404).json({ message: 'Contact not found' });
@@ -4883,7 +4883,7 @@ Which account should I use and why? If I need to split across accounts, provide 
   // Get activities for a contact
   app.get('/api/contacts/:id/activities', requireAuth, async (req: any, res) => {
     try {
-      const orgId = req.session.organizationId!;
+      const orgId = req.user.organizationId;
       const activities = await storage.rawAll(`SELECT ca.*, u."firstName" as "userFirstName", u."lastName" as "userLastName", u.email as "userEmail"
         FROM contact_activities ca LEFT JOIN users u ON ca."userId" = u.id
         WHERE ca."contactId" = ? AND ca."organizationId" = ? ORDER BY ca."createdAt" DESC LIMIT 100`, req.params.id, orgId);
@@ -4896,8 +4896,8 @@ Which account should I use and why? If I need to split across accounts, provide 
   // Log a new activity for a contact
   app.post('/api/contacts/:id/activities', requireAuth, async (req: any, res) => {
     try {
-      const orgId = req.session.organizationId!;
-      const userId = req.session.userId;
+      const orgId = req.user.organizationId;
+      const userId = req.user.id;
       const { type, outcome, notes, nextActionDate, nextActionType } = req.body;
       if (!type) return res.status(400).json({ message: 'Activity type is required' });
       const contact = await storage.rawGet(`SELECT id, "pipelineStage" FROM contacts WHERE id = ? AND "organizationId" = ?`, req.params.id, orgId) as any;
@@ -10431,9 +10431,9 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   });
 
   // Get verification stats for current org
-  app.get('/api/email-verify/stats', requireAuth, async (req, res) => {
+  app.get('/api/email-verify/stats', requireAuth, async (req: any, res) => {
     try {
-      const orgId = req.session.organizationId!;
+      const orgId = req.user.organizationId;
       const stats = await storage.rawAll(`
         SELECT emailVerificationStatus, COUNT(*) as count
         FROM contacts WHERE organizationId = ?
@@ -10452,9 +10452,9 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   });
 
   // Verify specific contacts (by IDs)
-  app.post('/api/contacts/verify', requireAuth, async (req, res) => {
+  app.post('/api/contacts/verify', requireAuth, async (req: any, res) => {
     try {
-      const orgId = req.session.organizationId!;
+      const orgId = req.user.organizationId;
       const { contactIds } = req.body;
       if (!contactIds || !Array.isArray(contactIds) || contactIds.length === 0) {
         return res.status(400).json({ message: 'contactIds array required' });
@@ -10490,9 +10490,9 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   });
 
   // Verify all contacts in a list
-  app.post('/api/contacts/verify-list', requireAuth, async (req, res) => {
+  app.post('/api/contacts/verify-list', requireAuth, async (req: any, res) => {
     try {
-      const orgId = req.session.organizationId!;
+      const orgId = req.user.organizationId;
       const { listId, statusFilter } = req.body; // statusFilter: 'unverified' | 'all'
       const apiKey = await getEmailVerifyApiKey();
       if (!apiKey) return res.status(400).json({ message: 'EmailListVerify API key not configured. Ask your admin to add it in SuperAdmin > Advanced Settings.' });
@@ -10528,9 +10528,9 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   });
 
   // Get verification status for a single contact
-  app.get('/api/contacts/:id/verification', requireAuth, async (req, res) => {
+  app.get('/api/contacts/:id/verification', requireAuth, async (req: any, res) => {
     try {
-      const orgId = req.session.organizationId!;
+      const orgId = req.user.organizationId;
       const contact = await storage.rawGet(`SELECT emailVerificationStatus, emailVerifiedAt FROM contacts WHERE id = ? AND organizationId = ?`, req.params.id, orgId);
       if (!contact) return res.status(404).json({ message: 'Contact not found' });
       res.json(contact);
