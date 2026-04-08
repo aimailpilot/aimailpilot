@@ -3201,7 +3201,7 @@ Which account should I use and why? If I need to split across accounts, provide 
         }
       }
       const row = await storage.rawGet(sql, ...params) as any;
-      res.json({ total: row?.total || 0 });
+      res.json({ total: parseInt(row?.total || '0', 10) });
     } catch (error) {
       res.status(500).json({ message: 'Failed to count campaigns' });
     }

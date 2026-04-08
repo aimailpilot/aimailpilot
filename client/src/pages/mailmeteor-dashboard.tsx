@@ -234,7 +234,7 @@ export default function MailMeteorDashboard() {
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   
   const [campaignPage, setCampaignPage] = useState(0);
-  const campaignsPerPage = 10;
+  const campaignsPerPage = 7;
   const { campaigns, isLoading } = useCampaigns({ limit: campaignsPerPage, offset: campaignPage * campaignsPerPage });
 
   // Fetch total campaign count for pagination
@@ -396,7 +396,7 @@ export default function MailMeteorDashboard() {
   const isAdminOrOwner = userRole === 'owner' || userRole === 'admin';
 
   const sidebarMainItems = [
-    { key: 'campaigns' as ViewType, label: 'Campaigns', icon: Send, count: campaigns?.length },
+    { key: 'campaigns' as ViewType, label: 'Campaigns', icon: Send, count: totalCampaigns || campaigns?.length },
     { key: 'inbox' as ViewType, label: 'Inbox', icon: Inbox, count: inboxUnread },
     { key: 'templates' as ViewType, label: 'Templates', icon: FileText },
     { key: 'contacts' as ViewType, label: 'Contacts', icon: Users },
