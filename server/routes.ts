@@ -3186,10 +3186,10 @@ Which account should I use and why? If I need to split across accounts, provide 
     try {
       const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
       const status = req.query.status as string;
-      let sql = 'SELECT COUNT(*) as total FROM campaigns WHERE organizationId = ?';
+      let sql = 'SELECT COUNT(*) as total FROM campaigns WHERE "organizationId" = ?';
       const params: any[] = [req.user.organizationId];
       if (!isAdmin) {
-        sql += ' AND createdBy = ?';
+        sql += ' AND "createdBy" = ?';
         params.push(req.user.id);
       }
       if (status && status !== 'all') {
