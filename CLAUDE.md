@@ -41,7 +41,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > The build uses `esbuild --packages=external` — all `node_modules` packages are left as external imports resolved at runtime on Azure. If you import a package that is NOT in `package.json` `dependencies`, the app will crash on startup with `ERR_MODULE_NOT_FOUND`.
 > 1. **NEVER** import or require `server/db.ts` — it pulls in `drizzle-orm` which is not a production dependency (caused 1 day of downtime)
 > 2. **NEVER** use `require('./db').db` as a fallback — even dead-code branches get bundled by esbuild and the import executes at module load
-> 3. To access the raw SQLite `better-sqlite3` instance, always use: `const db = (storage as any).db;`
+> 3. For custom SQL queries, always use: `await storage.rawGet(sql, ...params)` / `rawAll` / `rawRun` — these work in both SQLite and PostgreSQL mode
 > 4. Before adding any new `import` from a package, verify it exists in `package.json` `dependencies` (not just `devDependencies`)
 > 5. Run `bash scripts/deploy-safety-check.sh` before deploying to catch forbidden imports
 
@@ -97,7 +97,7 @@ server/          Express backend
 shared/schema.ts  Drizzle ORM schema (PostgreSQL dialect, used for type definitions)
 ```
 
-**Important**: The runtime database is **SQLite** (`./data/aimailpilot.db`), managed directly with `better-sqlite3` in `server/storage.ts`. The `shared/schema.ts` / `drizzle.config.ts` files define a PostgreSQL schema used for type generation — Drizzle migrations are **not** used at runtime.
+**Important**: The runtime database is **PostgreSQL** (Azure Flexible Server, `aimailpilot-db.postgres.database.azure.com`), managed via `server/pg-storage.ts` (drop-in replacement for `DatabaseStorage`). Storage is selected at startup in `server/storage.ts` via `DATABASE_URL` env var. The `shared/schema.ts` / `drizzle.config.ts` files define the PostgreSQL schema used for type generation — Drizzle migrations are **not** used at runtime. Schema is initialized by `scripts/pg-schema.sql` via `initStorage()` on server boot.
 
 ## Key Patterns
 
@@ -121,7 +121,7 @@ shared/schema.ts  Drizzle ORM schema (PostgreSQL dialect, used for type definiti
 
 **Contact Enrichment**: `GET /api/contacts` enriches each contact with AI lead classification from `lead_opportunities` (leadBucket, leadConfidence, aiReasoning, suggestedAction). `GET /api/contacts/hot-leads` provides a dedicated AI leads view with bucket filtering, search, and pagination. Smart filters via `leadFilter` query param: `hot_leads`, `warm_leads`, `past_customer`, `engaged`, `cold`, `never_contacted`. Frontend shows lead badges on contact rows, AI intelligence card in detail dialog, and "AI Leads" tab in contacts manager.
 
-**Raw SQLite access**: `DatabaseStorage` exposes `get db()` getter. Use `const db = (storage as any).db;` in routes. Never import `server/db.ts`.
+**Raw database access**: Use `await storage.rawGet(sql, ...params)`, `await storage.rawAll(sql, ...params)`, `await storage.rawRun(sql, ...params)` for custom SQL in routes. These work on both SQLite and PostgreSQL — `?` placeholders are auto-converted to `$1,$2,...` for PG. Never use `(storage as any).db` for new code — it only works in SQLite mode. Never import `server/db.ts`.
 
 **Frontend data fetching**: TanStack Query (`@tanstack/react-query`) with a shared `queryClient` in `client/src/lib/queryClient.ts`. All API calls go through fetch wrappers in that file.
 
@@ -180,8 +180,15 @@ Key env vars the server expects:
 - `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET` - Microsoft OAuth
 - `PORT` - Server port (default: 3000)
 - `NODE_ENV` - `development` or `production`
+- `DATABASE_URL` - PostgreSQL connection string (production: `postgresql://aimailpilotadmin:...@aimailpilot-db.postgres.database.azure.com:5432/aimailpilot?sslmode=require`)
+- `SHADOW_MODE` - (optional) Set to `true` to enable dual-write shadow validation (SQLite primary + PG mirror)
 
-Database path defaults to `./data/aimailpilot.db` (Azure: `/home/data/aimailpilot.db`).
+**Storage modes** (controlled by env vars):
+1. No `DATABASE_URL` → SQLite only (`./data/aimailpilot.db`)
+2. `DATABASE_URL` + `SHADOW_MODE=true` → Shadow mode (SQLite primary, PG dual-write for validation)
+3. `DATABASE_URL` only → **PostgreSQL live** (current production mode)
+
+**camelCase column names in raw SQL**: PostgreSQL requires quoting — always use `"organizationId"`, `"createdBy"`, `"emailAccountId"` etc. in raw SQL strings. Unquoted names are lowercased by PostgreSQL and cause silent failures (returns 0 rows instead of error).
 
 ## Common Debugging Tips
 
@@ -190,3 +197,7 @@ Database path defaults to `./data/aimailpilot.db` (Azure: `/home/data/aimailpilo
 - **Emails not sending**: Check `campaign-engine.ts` throttling and per-account daily send limits. Daily counters reset via polling in `server/index.ts`.
 - **Adding a new API route**: Add to `server/routes.ts` (primary) or a new file under `server/routes/` mounted in `server/index.ts`.
 - **Frontend query not refreshing**: Check `queryClient` invalidation in `client/src/lib/queryClient.ts`.
+- **Raw SQL returns 0 rows in PG**: camelCase column names must be double-quoted (`"organizationId"`, not `organizationId`). PostgreSQL lowercases unquoted identifiers.
+- **Gmail accounts showing 401**: Gmail OAuth tokens are stored in `api_settings`. If tokens are missing from PG, run `scripts/patch-api-settings.ts` to copy from SQLite backup.
+- **Campaign stats showing 0**: Messages/tracking_events may be missing from PG. Run `scripts/patch-messages.ts` to restore from SQLite backup.
+- **Inbox missing messages**: Run `scripts/patch-unified-inbox.ts` to restore from SQLite backup.

@@ -327,6 +327,27 @@ This file tracks features that are confirmed working in production.
 - See `CONTEXT-ENGINE.md` for full architecture and API documentation
 - **Do not touch**: `server/services/context-engine.ts`; `org_documents` + `org_documents_fts` tables in `server/storage.ts`; context engine routes in `server/routes.ts`; `client/src/pages/knowledge-base.tsx`
 
+### 42. PostgreSQL Migration (Production — 2026-04-08)
+- App is fully live on **PostgreSQL** (Azure Flexible Server). SQLite is no longer the production database.
+- `server/pg-storage.ts` — full PG storage class, drop-in replacement for `DatabaseStorage`
+- `server/storage.ts` — 3-mode switcher: SQLite only / shadow mode / PG live (set via `DATABASE_URL` env var)
+- `scripts/pg-schema.sql` — 31 tables, 40+ indexes. Run once; `initStorage()` applies it on server boot
+- `server/index.ts` calls `await initStorage()` before registering routes
+- **Data patch scripts** (safe, re-runnable, INSERT ON CONFLICT DO NOTHING):
+  - `scripts/patch-api-settings.ts` — restores Gmail/Outlook OAuth tokens from SQLite backup
+  - `scripts/patch-messages.ts` — restores campaign sent messages + tracking events
+  - `scripts/patch-unified-inbox.ts` — restores unified inbox history
+- `/api/pg-health` endpoint — checks 8 key PG tables, use for smoke testing after deploy
+- **camelCase quoting rule**: All camelCase column names in raw SQL MUST be double-quoted (`"organizationId"`, `"createdBy"`, etc.) — PostgreSQL lowercases unquoted identifiers causing silent 0-row results
+- **Do not touch**: `server/pg-storage.ts`; `initStorage()`, `createDualWriteProxy()`, `shadowValidate()` in `server/storage.ts`; `DATABASE_URL` env var on Azure
+
+### 43. Campaign List Pagination
+- Campaign list shows 7 per page with Previous/Next + numbered page buttons
+- Server-side pagination: `GET /api/campaigns?limit=7&offset=N`
+- `GET /api/campaigns/count` returns total count (integer, not bigint string) for page calculation
+- Sidebar badge shows total campaign count (from count endpoint), not current page length
+- **Do not touch**: pagination block in `client/src/pages/mailmeteor-dashboard.tsx`; `campaignsPerPage`, `campaignPage`, `totalCampaigns` state; `/api/campaigns/count` endpoint in `server/routes.ts`
+
 ---
 
 ## General Rule

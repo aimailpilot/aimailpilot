@@ -510,7 +510,7 @@ async function runWarmupCycle(): Promise<WarmupRunResult[]> {
 
   try {
     // Get all organizations that have warmup accounts
-    const orgs = await storage.rawAll('SELECT DISTINCT organizationId FROM warmup_accounts WHERE status = ?', 'active') as any[];
+    const orgs = await storage.rawAll('SELECT DISTINCT "organizationId" FROM warmup_accounts WHERE status = ?', 'active') as any[];
 
     for (const { organizationId: orgId } of orgs) {
       const result = await runOrgWarmup(orgId);
