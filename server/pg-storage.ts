@@ -2881,13 +2881,21 @@ export class PostgresStorage {
     const params: any[] = [organizationId];
     let idx = 2;
 
-    if (filters?.status === 'bounced') {
-      // Exclude emails where toEmail is a connected org email account (warmup/internal emails are not real bounces)
-      sql += ` AND (status = 'bounced' OR "bounceType" != '') AND LOWER("toEmail") NOT IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
+    // Warmup detection: both fromEmail AND toEmail are org email accounts
+    const warmupExclude = ` AND NOT (LOWER("fromEmail") IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1) AND LOWER(COALESCE("toEmail",'')) IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1))`;
+    const warmupOnly = ` AND LOWER("fromEmail") IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1) AND LOWER(COALESCE("toEmail",'')) IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
+
+    if (filters?.status === 'warmup') {
+      sql += warmupOnly;
+    } else if (filters?.status === 'bounced') {
+      sql += ` AND (status = 'bounced' OR "bounceType" != '')` + warmupExclude;
     } else if (filters?.status === 'unsubscribed') {
       sql += ` AND "replyType" = 'unsubscribe'`;
     } else if (filters?.status && filters.status !== 'all') {
-      sql += ` AND status = $${idx++}`; params.push(filters.status);
+      sql += ` AND status = $${idx++}` + warmupExclude; params.push(filters.status);
+    } else {
+      // "all" view — exclude warmup emails so they don't clutter inbox
+      sql += warmupExclude;
     }
     if (filters?.emailAccountId) {
       const accountIds = filters.emailAccountId.split(',').map(id => id.trim()).filter(Boolean);
@@ -2922,13 +2930,20 @@ export class PostgresStorage {
     let sql = 'SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1';
     const params: any[] = [organizationId];
     let idx = 2;
-    if (filters?.status === 'bounced') {
-      // Exclude emails where toEmail is a connected org email account (warmup/internal emails are not real bounces)
-      sql += ` AND (status = 'bounced' OR "bounceType" != '') AND LOWER("toEmail") NOT IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
+
+    const warmupExcludeCount = ` AND NOT (LOWER("fromEmail") IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1) AND LOWER(COALESCE("toEmail",'')) IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1))`;
+    const warmupOnlyCount = ` AND LOWER("fromEmail") IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1) AND LOWER(COALESCE("toEmail",'')) IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
+
+    if (filters?.status === 'warmup') {
+      sql += warmupOnlyCount;
+    } else if (filters?.status === 'bounced') {
+      sql += ` AND (status = 'bounced' OR "bounceType" != '')` + warmupExcludeCount;
     } else if (filters?.status === 'unsubscribed') {
       sql += ` AND "replyType" = 'unsubscribe'`;
     } else if (filters?.status && filters.status !== 'all') {
-      sql += ` AND status = $${idx++}`; params.push(filters.status);
+      sql += ` AND status = $${idx++}` + warmupExcludeCount; params.push(filters.status);
+    } else {
+      sql += warmupExcludeCount;
     }
     if (filters?.emailAccountId) {
       const accountIds = filters.emailAccountId.split(',').map(id => id.trim()).filter(Boolean);
@@ -2951,17 +2966,22 @@ export class PostgresStorage {
   }
 
   async getInboxStats(organizationId: string) {
-    const total = parseInt((await queryOne('SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1', [organizationId])).c);
-    const unread = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'unread'`, [organizationId])).c);
-    const replied = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'replied'`, [organizationId])).c);
+    // Warmup detection: both fromEmail AND toEmail are org email accounts
+    const warmupExcludeSql = `AND NOT (LOWER("fromEmail") IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1) AND LOWER(COALESCE("toEmail",'')) IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1))`;
+    const warmupOnlySql = `AND LOWER("fromEmail") IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1) AND LOWER(COALESCE("toEmail",'')) IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
+
+    const total = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 ${warmupExcludeSql}`, [organizationId])).c);
+    const unread = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'unread' ${warmupExcludeSql}`, [organizationId])).c);
+    const replied = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'replied' ${warmupExcludeSql}`, [organizationId])).c);
     const archived = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'archived'`, [organizationId])).c);
     const positive = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'positive'`, [organizationId])).c);
     const negative = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'negative'`, [organizationId])).c);
     const ooo = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'ooo'`, [organizationId])).c);
     const autoReply = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'auto_reply'`, [organizationId])).c);
-    const bounced = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND ("bounceType" != '' AND "bounceType" IS NOT NULL) AND LOWER("toEmail") NOT IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`, [organizationId])).c);
+    const bounced = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND ("bounceType" != '' AND "bounceType" IS NOT NULL) ${warmupExcludeSql}`, [organizationId])).c);
     const starred = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "isStarred" = 1`, [organizationId])).c);
-    return { total, unread, replied, archived, positive, negative, ooo, autoReply, bounced, starred };
+    const warmup = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 ${warmupOnlySql}`, [organizationId])).c);
+    return { total, unread, replied, archived, positive, negative, ooo, autoReply, bounced, starred, warmup };
   }
 
   // ========== DATABASE EXPORT/IMPORT ==========

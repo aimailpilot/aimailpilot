@@ -210,9 +210,9 @@ export default function UnifiedInbox() {
 
   useEffect(() => { fetchMessages(); }, [fetchMessages]);
 
-  // Auto-refresh every 30s
+  // Auto-refresh every 2 minutes (reduced from 30s to avoid UI disruption)
   useEffect(() => {
-    const interval = setInterval(fetchMessages, 30000);
+    const interval = setInterval(fetchMessages, 120000);
     return () => clearInterval(interval);
   }, [fetchMessages]);
 
@@ -950,6 +950,7 @@ export default function UnifiedInbox() {
               { value: 'bounced', label: 'Bounced', count: stats?.bounced },
               { value: 'archived', label: 'Archived' },
               { value: 'unsubscribed', label: 'Unsub' },
+              { value: 'warmup', label: 'Warmup', count: stats?.warmup },
             ].map(f => (
               <button key={f.value} onClick={() => { setStatusFilter(f.value); setPage(0); }}
                 className={`px-2.5 py-1 rounded-full text-xs font-medium transition-all ${statusFilter === f.value ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
