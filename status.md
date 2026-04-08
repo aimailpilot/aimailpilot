@@ -348,6 +348,26 @@ This file tracks features that are confirmed working in production.
 - Sidebar badge shows total campaign count (from count endpoint), not current page length
 - **Do not touch**: pagination block in `client/src/pages/mailmeteor-dashboard.tsx`; `campaignsPerPage`, `campaignPage`, `totalCampaigns` state; `/api/campaigns/count` endpoint in `server/routes.ts`
 
+### 44. Bounce Suppression System (2026-04-08)
+- **4-layer protection**: (1) real-time auto-blocklist in reply trackers, (2) batch suppression check in campaign-engine before every send, (3) per-execution suppression check in followup-engine, (4) historical sync endpoint (`POST /api/suppression-list/sync-bounces`)
+- **`server/services/bounce-sync-engine.ts`** (new file): 5-source scanner — contacts table (status=bounced/unsubscribed), unified_inbox bounce tags, mailer-daemon notifications, email_history table (82k pre-scanned emails), Gmail API search, Outlook API search
+- `getSuppressedEmails(orgId)` on storage (both SQLite + PG): returns `Set<string>` for O(1) batch lookup before campaign send
+- `isEmailSuppressed(orgId, email)` checked per-contact in followup-engine `executeFollowup()` before send
+- **Connected email protection**: `getOrgConnectedEmails(orgId)` loads all `email_accounts` + `warmup_accounts` per org; `isSafeToSuppress()` refuses to add org's own accounts to suppression list
+- **Auto-blocklist in reply trackers**: `gmail-reply-tracker.ts` and `outlook-reply-tracker.ts` now auto-add unmatched bounce notification senders to suppression_list with `reason='bounce'`, `bounceType='hard'`, `source='auto-detected'`
+- **Gmail/Outlook historical scan**: Uses `"isActive" = 1` filter on `email_accounts` (NOT `status = 'active'` — that column does not exist)
+- **Bounced inbox tab**: `getInboxMessagesEnhanced` filters `AND contactId IS NOT NULL AND contactId != ''` — prevents warmup-to-warmup emails (no contactId) from appearing in Bounced tab as false positives
+- **Do not touch**: `server/services/bounce-sync-engine.ts`; `getSuppressedEmails` in `server/storage.ts` and `server/pg-storage.ts`; suppression check block in `server/services/campaign-engine.ts`; suppression check in `executeFollowup()` in `server/services/followup-engine.ts`; auto-blocklist block in `gmail-reply-tracker.ts` and `outlook-reply-tracker.ts`; bounced filter in `getInboxMessagesEnhanced`/`getInboxMessageCountEnhanced` in `server/storage.ts`
+
+### 45. Contact Activity Log + Pipeline (PostgreSQL Fix — 2026-04-08)
+- `contact_activities` table in PostgreSQL has camelCase columns: `"contactId"`, `"organizationId"`, `"userId"`, `"nextActionDate"`, `"nextActionType"`, `"createdAt"` — ALL must be double-quoted in raw SQL
+- **Root cause of silent failure**: Unquoted camelCase columns were silently lowercased by PG → 0 rows returned → 500 errors → frontend showed "No activities logged yet"
+- Fixed queries in `server/routes.ts`: activities GET (SELECT), activities POST (INSERT), pipeline stats (SELECT + GROUP BY), pipeline PUT (dynamic SET with all camelCase quoted)
+- Fixed contacts UPDATE queries: `"updatedAt"`, `"pipelineStage"`, `"dealValue"`, `"dealNotes"`, `"dealClosedAt"` all quoted
+- Fixed activities GET: JOINs `contact_activities ca` + `users u` — use `ca."contactId"`, `u."firstName"`, `u."lastName"` format
+- **Rule**: Every raw SQL touching `contact_activities` or pipeline-related columns on `contacts` must double-quote ALL camelCase identifiers — no exceptions for PG
+- **Do not touch**: activity routes in `server/routes.ts` (lines ~4438–4548 and surrounding pipeline routes); the exact INSERT/SELECT/UPDATE SQL strings that now have correct quoting
+
 ---
 
 ## General Rule

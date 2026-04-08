@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useToast } from "@/hooks/use-toast";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 
 interface Contact {
@@ -100,6 +101,7 @@ interface ContactList {
 type TabType = 'all' | 'unsubscribers' | 'blocklist' | 'lists' | 'follow-ups' | 'hot-leads';
 
 export default function ContactsManager() {
+  const { toast } = useToast();
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -751,12 +753,18 @@ export default function ContactsManager() {
       if (res.ok) {
         setShowLogActivity(false);
         setActivityForm({ type: 'call', outcome: '', notes: '', nextActionDate: '', nextActionType: '' });
+        toast({ title: "Activity saved", description: "The activity has been logged successfully." });
         await fetchActivities(detailContact.id);
         // Refresh contact to get updated pipeline stage
         const cRes = await fetch(`/api/contacts/${detailContact.id}`, { credentials: 'include' });
         if (cRes.ok) { const c = await cRes.json(); setDetailContact(c); }
+      } else {
+        const err = await res.json().catch(() => ({}));
+        toast({ title: "Failed to save activity", description: err.message || "Please try again.", variant: "destructive" });
       }
-    } catch { /* ignore */ }
+    } catch {
+      toast({ title: "Failed to save activity", description: "Network error. Please try again.", variant: "destructive" });
+    }
     setActivitySaving(false);
   };
 
@@ -2091,7 +2099,7 @@ export default function ContactsManager() {
                       <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setShowLogActivity(false)}>Cancel</Button>
                       <Button size="sm" className="h-7 text-xs bg-blue-600 hover:bg-blue-700" disabled={activitySaving} onClick={logActivity}>
                         {activitySaving ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}
-                        Save
+                        {activitySaving ? 'Saving...' : 'Save'}
                       </Button>
                     </div>
                   </div>
