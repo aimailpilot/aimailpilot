@@ -2882,8 +2882,12 @@ export class PostgresStorage {
     let idx = 2;
 
     // Warmup detection: both fromEmail AND toEmail are org email accounts
-    const warmupExclude = ` AND NOT (LOWER("fromEmail") IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1) AND LOWER(COALESCE("toEmail",'')) IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1))`;
-    const warmupOnly = ` AND LOWER("fromEmail") IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1) AND LOWER(COALESCE("toEmail",'')) IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
+    // fromEmail may store "Name <email>" format — extract just the email part
+    const extractFrom = `LOWER(CASE WHEN "fromEmail" LIKE '%<%>%' THEN substring("fromEmail" from '<([^>]+)>') ELSE "fromEmail" END)`;
+    const extractTo = `LOWER(CASE WHEN "toEmail" LIKE '%<%>%' THEN substring("toEmail" from '<([^>]+)>') ELSE COALESCE("toEmail",'') END)`;
+    const orgEmails = `(SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
+    const warmupExclude = ` AND NOT (${extractFrom} IN ${orgEmails} AND ${extractTo} IN ${orgEmails})`;
+    const warmupOnly = ` AND ${extractFrom} IN ${orgEmails} AND ${extractTo} IN ${orgEmails}`;
 
     if (filters?.status === 'warmup') {
       sql += warmupOnly;
@@ -2931,8 +2935,11 @@ export class PostgresStorage {
     const params: any[] = [organizationId];
     let idx = 2;
 
-    const warmupExcludeCount = ` AND NOT (LOWER("fromEmail") IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1) AND LOWER(COALESCE("toEmail",'')) IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1))`;
-    const warmupOnlyCount = ` AND LOWER("fromEmail") IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1) AND LOWER(COALESCE("toEmail",'')) IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
+    const extractFromC = `LOWER(CASE WHEN "fromEmail" LIKE '%<%>%' THEN substring("fromEmail" from '<([^>]+)>') ELSE "fromEmail" END)`;
+    const extractToC = `LOWER(CASE WHEN "toEmail" LIKE '%<%>%' THEN substring("toEmail" from '<([^>]+)>') ELSE COALESCE("toEmail",'') END)`;
+    const orgEmailsC = `(SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
+    const warmupExcludeCount = ` AND NOT (${extractFromC} IN ${orgEmailsC} AND ${extractToC} IN ${orgEmailsC})`;
+    const warmupOnlyCount = ` AND ${extractFromC} IN ${orgEmailsC} AND ${extractToC} IN ${orgEmailsC}`;
 
     if (filters?.status === 'warmup') {
       sql += warmupOnlyCount;
@@ -2967,8 +2974,11 @@ export class PostgresStorage {
 
   async getInboxStats(organizationId: string) {
     // Warmup detection: both fromEmail AND toEmail are org email accounts
-    const warmupExcludeSql = `AND NOT (LOWER("fromEmail") IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1) AND LOWER(COALESCE("toEmail",'')) IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1))`;
-    const warmupOnlySql = `AND LOWER("fromEmail") IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1) AND LOWER(COALESCE("toEmail",'')) IN (SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
+    const exF = `LOWER(CASE WHEN "fromEmail" LIKE '%<%>%' THEN substring("fromEmail" from '<([^>]+)>') ELSE "fromEmail" END)`;
+    const exT = `LOWER(CASE WHEN "toEmail" LIKE '%<%>%' THEN substring("toEmail" from '<([^>]+)>') ELSE COALESCE("toEmail",'') END)`;
+    const oE = `(SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
+    const warmupExcludeSql = `AND NOT (${exF} IN ${oE} AND ${exT} IN ${oE})`;
+    const warmupOnlySql = `AND ${exF} IN ${oE} AND ${exT} IN ${oE}`;
 
     const total = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 ${warmupExcludeSql}`, [organizationId])).c);
     const unread = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'unread' ${warmupExcludeSql}`, [organizationId])).c);

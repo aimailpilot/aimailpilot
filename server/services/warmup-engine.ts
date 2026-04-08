@@ -866,8 +866,9 @@ export function startWarmupEngine() {
   if (warmupInterval) return;
   console.log('[Warmup] Starting warmup engine (every 30 min)...');
 
-  // Run first cycle after 60s delay (let server fully start)
-  setTimeout(() => {
+  // Always reset daily counters on startup (fixes stuck counters from failed resets)
+  setTimeout(async () => {
+    await resetDailyCounters();
     runWarmupCycle().catch(e => console.error('[Warmup] Initial cycle error:', e));
   }, 60000);
 

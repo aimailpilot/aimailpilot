@@ -3292,8 +3292,12 @@ export class DatabaseStorage {
     const params: any[] = [organizationId];
 
     // Warmup detection: both fromEmail AND toEmail are org email accounts
-    const warmupExclude = " AND NOT (LOWER(fromEmail) IN (SELECT LOWER(email) FROM email_accounts WHERE organizationId = ?) AND LOWER(COALESCE(toEmail,'')) IN (SELECT LOWER(email) FROM email_accounts WHERE organizationId = ?))";
-    const warmupOnly = " AND LOWER(fromEmail) IN (SELECT LOWER(email) FROM email_accounts WHERE organizationId = ?) AND LOWER(COALESCE(toEmail,'')) IN (SELECT LOWER(email) FROM email_accounts WHERE organizationId = ?)";
+    // fromEmail may store "Name <email>" format — extract just the email part
+    const exF = "LOWER(CASE WHEN fromEmail LIKE '%<%>%' THEN SUBSTR(fromEmail, INSTR(fromEmail,'<')+1, INSTR(fromEmail,'>')-INSTR(fromEmail,'<')-1) ELSE fromEmail END)";
+    const exT = "LOWER(CASE WHEN toEmail LIKE '%<%>%' THEN SUBSTR(toEmail, INSTR(toEmail,'<')+1, INSTR(toEmail,'>')-INSTR(toEmail,'<')-1) ELSE COALESCE(toEmail,'') END)";
+    const oE = "(SELECT LOWER(email) FROM email_accounts WHERE organizationId = ?)";
+    const warmupExclude = ` AND NOT (${exF} IN ${oE} AND ${exT} IN ${oE})`;
+    const warmupOnly = ` AND ${exF} IN ${oE} AND ${exT} IN ${oE}`;
 
     if (filters?.status === 'warmup') {
       sql += warmupOnly;
@@ -3346,8 +3350,11 @@ export class DatabaseStorage {
     let sql = 'SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ?';
     const params: any[] = [organizationId];
 
-    const warmupExcludeC = " AND NOT (LOWER(fromEmail) IN (SELECT LOWER(email) FROM email_accounts WHERE organizationId = ?) AND LOWER(COALESCE(toEmail,'')) IN (SELECT LOWER(email) FROM email_accounts WHERE organizationId = ?))";
-    const warmupOnlyC = " AND LOWER(fromEmail) IN (SELECT LOWER(email) FROM email_accounts WHERE organizationId = ?) AND LOWER(COALESCE(toEmail,'')) IN (SELECT LOWER(email) FROM email_accounts WHERE organizationId = ?)";
+    const exFC = "LOWER(CASE WHEN fromEmail LIKE '%<%>%' THEN SUBSTR(fromEmail, INSTR(fromEmail,'<')+1, INSTR(fromEmail,'>')-INSTR(fromEmail,'<')-1) ELSE fromEmail END)";
+    const exTC = "LOWER(CASE WHEN toEmail LIKE '%<%>%' THEN SUBSTR(toEmail, INSTR(toEmail,'<')+1, INSTR(toEmail,'>')-INSTR(toEmail,'<')-1) ELSE COALESCE(toEmail,'') END)";
+    const oEC = "(SELECT LOWER(email) FROM email_accounts WHERE organizationId = ?)";
+    const warmupExcludeC = ` AND NOT (${exFC} IN ${oEC} AND ${exTC} IN ${oEC})`;
+    const warmupOnlyC = ` AND ${exFC} IN ${oEC} AND ${exTC} IN ${oEC}`;
 
     if (filters?.status === 'warmup') {
       sql += warmupOnlyC;
@@ -3385,8 +3392,11 @@ export class DatabaseStorage {
 
   // Get inbox stats breakdown for dashboard
   async getInboxStats(organizationId: string) {
-    const warmupExcludeS = "AND NOT (LOWER(fromEmail) IN (SELECT LOWER(email) FROM email_accounts WHERE organizationId = ?) AND LOWER(COALESCE(toEmail,'')) IN (SELECT LOWER(email) FROM email_accounts WHERE organizationId = ?))";
-    const warmupOnlyS = "AND LOWER(fromEmail) IN (SELECT LOWER(email) FROM email_accounts WHERE organizationId = ?) AND LOWER(COALESCE(toEmail,'')) IN (SELECT LOWER(email) FROM email_accounts WHERE organizationId = ?)";
+    const exFS = "LOWER(CASE WHEN fromEmail LIKE '%<%>%' THEN SUBSTR(fromEmail, INSTR(fromEmail,'<')+1, INSTR(fromEmail,'>')-INSTR(fromEmail,'<')-1) ELSE fromEmail END)";
+    const exTS = "LOWER(CASE WHEN toEmail LIKE '%<%>%' THEN SUBSTR(toEmail, INSTR(toEmail,'<')+1, INSTR(toEmail,'>')-INSTR(toEmail,'<')-1) ELSE COALESCE(toEmail,'') END)";
+    const oES = "(SELECT LOWER(email) FROM email_accounts WHERE organizationId = ?)";
+    const warmupExcludeS = `AND NOT (${exFS} IN ${oES} AND ${exTS} IN ${oES})`;
+    const warmupOnlyS = `AND ${exFS} IN ${oES} AND ${exTS} IN ${oES}`;
 
     const total = (db.prepare(`SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? ${warmupExcludeS}`).get(organizationId, organizationId, organizationId) as any).c;
     const unread = (db.prepare(`SELECT COUNT(*) as c FROM unified_inbox WHERE organizationId = ? AND status = 'unread' ${warmupExcludeS}`).get(organizationId, organizationId, organizationId) as any).c;
