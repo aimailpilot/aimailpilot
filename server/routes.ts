@@ -13,6 +13,7 @@ import { classifyReply, classifyBounce } from "./services/reply-classifier";
 import { verifySingleEmail, verifyBatch, checkCredits, getEmailVerifyApiKey } from "./services/email-verifier";
 import { OAuth2Client } from 'google-auth-library';
 import { runWarmupNow, runOrgWarmupDirect } from "./services/warmup-engine";
+import { runBounceSyncForOrg, runBounceSyncAllOrgs } from "./services/bounce-sync-engine";
 import { scanOrgEmailHistory, analyzeOrgLeads, runFullLeadIntelligence, BUCKET_LABELS } from "./services/lead-intelligence-engine";
 
 
@@ -8701,6 +8702,25 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       res.json(results);
     } catch (error) {
       res.status(500).json({ message: 'Failed to check suppression' });
+    }
+  });
+
+  // Bounce sync — scan all sources and populate suppression list
+  app.post('/api/suppression-list/sync-bounces', requireAuth, async (req: any, res) => {
+    try {
+      const { lookbackDays, allOrgs } = req.body;
+      const days = Math.min(parseInt(lookbackDays) || 30, 180);
+      const orgId = req.user.organizationId;
+
+      if (allOrgs && req.user.role === 'superadmin') {
+        const results = await runBounceSyncAllOrgs(days);
+        return res.json({ success: true, results });
+      }
+
+      const result = await runBounceSyncForOrg(orgId, days);
+      res.json({ success: true, result });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to sync bounces' });
     }
   });
 

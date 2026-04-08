@@ -407,6 +407,20 @@ export class OutlookReplyTracker {
                   detectedVia: 'outlook-api',
                 },
               });
+            } else {
+              // No matching contact — auto-add bounced emails to suppression/blocklist
+              for (const email of foundEmails) {
+                const emailLower = email.toLowerCase();
+                if (emailLower.includes('mailer-daemon') || emailLower.includes('postmaster') || emailLower.includes('noreply')) continue;
+                try {
+                  await storage.addToSuppressionList(orgId, emailLower, 'bounce', {
+                    bounceType: 'hard',
+                    source: 'auto-detected',
+                    notes: `Auto-blocked: bounce notification received (${(msg.subject || '').slice(0, 100)})`,
+                  });
+                  console.log(`[OutlookReplyTracker] Bounce: Auto-added ${emailLower} to suppression/blocklist`);
+                } catch (e) { /* ignore duplicate */ }
+              }
             }
           } catch (e) {
             console.error('[OutlookReplyTracker] Bounce processing error:', e);

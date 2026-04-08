@@ -991,6 +991,19 @@ export class FollowupEngine {
         return;
       }
 
+      // Suppression list check — skip if contact email is blocked (bounced/unsubscribed)
+      try {
+        const suppressed = await storage.isEmailSuppressed(campaign.organizationId, (contact as any).email);
+        if (suppressed) {
+          await storage.updateFollowupExecution(executionId, {
+            status: "skipped",
+            errorMessage: "Contact email is suppressed (bounced/unsubscribed)"
+          });
+          console.log(`[Followup] Skipped step ${step.stepNumber} for ${(contact as any).email} — email is in suppression list`);
+          return;
+        }
+      } catch (e) { /* non-critical */ }
+
       // CRITICAL FIX: Before sending, check if the contact has replied to ANY message in this campaign
       // This catches replies that arrived between scheduling and execution
       // Use preloaded campaign messages if available; otherwise load once

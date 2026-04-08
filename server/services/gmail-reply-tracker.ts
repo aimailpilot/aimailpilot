@@ -598,6 +598,19 @@ export class GmailReplyTracker {
                 console.log(`[GmailReplyTracker] Bounce skipped: contact ${(bouncedContact as any).email} already status=${(bouncedContact as any).status}`);
               } else {
                 console.log(`[GmailReplyTracker] Bounce: No matching contact found for bounce notification (from: ${from}, subject: ${subject})`);
+                // Auto-add unmatched bounced emails to suppression/blocklist so they're blocked if imported later
+                for (const email of foundEmails) {
+                  const emailLower = email.toLowerCase();
+                  if (emailLower.includes('mailer-daemon') || emailLower.includes('postmaster') || emailLower.includes('noreply')) continue;
+                  try {
+                    await storage.addToSuppressionList(orgId, emailLower, 'bounce', {
+                      bounceType: 'hard',
+                      source: 'auto-detected',
+                      notes: `Auto-blocked: bounce notification received (${subject.slice(0, 100)})`,
+                    });
+                    console.log(`[GmailReplyTracker] Bounce: Auto-added ${emailLower} to suppression/blocklist`);
+                  } catch (e) { /* ignore duplicate */ }
+                }
               }
             } catch (bounceError) {
               console.error('[GmailReplyTracker] Error processing bounce notification:', bounceError);

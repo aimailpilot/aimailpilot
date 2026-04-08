@@ -2962,6 +2962,11 @@ export class DatabaseStorage {
     return !!row;
   }
 
+  async getSuppressedEmails(orgId: string): Promise<Set<string>> {
+    const rows = db.prepare('SELECT email FROM suppression_list WHERE organizationId = ?').all(orgId) as any[];
+    return new Set(rows.map(r => r.email.toLowerCase()));
+  }
+
   async getSuppressionList(orgId: string, filters?: { reason?: string }, limit = 100, offset = 0) {
     let sql = 'SELECT * FROM suppression_list WHERE organizationId = ?';
     const params: any[] = [orgId];

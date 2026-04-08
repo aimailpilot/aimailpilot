@@ -2568,6 +2568,11 @@ export class PostgresStorage {
     return !!row;
   }
 
+  async getSuppressedEmails(orgId: string): Promise<Set<string>> {
+    const rows = await queryAll('SELECT email FROM suppression_list WHERE "organizationId" = $1', [orgId]);
+    return new Set(rows.map((r: any) => r.email.toLowerCase()));
+  }
+
   async getSuppressionList(orgId: string, filters?: { reason?: string }, limit = 100, offset = 0) {
     let sql = 'SELECT * FROM suppression_list WHERE "organizationId" = $1';
     const params: any[] = [orgId];

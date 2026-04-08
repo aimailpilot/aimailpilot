@@ -528,8 +528,19 @@ export class CampaignEngine {
       const unsubscribedContacts = contacts.filter(c => c.status === 'unsubscribed');
       contacts = contacts.filter(c => c.status !== 'unsubscribed' && c.status !== 'bounced');
 
-      if (bouncedContacts.length > 0 || unsubscribedContacts.length > 0) {
-        console.log(`[CampaignEngine] Campaign ${campaignId} contact filtering: ${beforeFilterCount} loaded, ${bouncedContacts.length} bounced (${bouncedContacts.map(c => c.email).join(', ')}), ${unsubscribedContacts.length} unsubscribed, ${contacts.length} remaining`);
+      // Also filter against suppression list (catches emails blocked even without a contact record)
+      let suppressedCount = 0;
+      try {
+        const suppressedEmails = await storage.getSuppressedEmails(campaign.organizationId);
+        if (suppressedEmails.size > 0) {
+          const before = contacts.length;
+          contacts = contacts.filter(c => !suppressedEmails.has((c.email || '').toLowerCase()));
+          suppressedCount = before - contacts.length;
+        }
+      } catch (e) { /* non-critical — proceed without suppression check */ }
+
+      if (bouncedContacts.length > 0 || unsubscribedContacts.length > 0 || suppressedCount > 0) {
+        console.log(`[CampaignEngine] Campaign ${campaignId} contact filtering: ${beforeFilterCount} loaded, ${bouncedContacts.length} bounced, ${unsubscribedContacts.length} unsubscribed, ${suppressedCount} suppressed, ${contacts.length} remaining`);
       }
 
       // Filter out contacts with invalid email verification status (if block_invalid is enabled)
