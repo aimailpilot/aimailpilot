@@ -3261,7 +3261,7 @@ Which account should I use and why? If I need to split across accounts, provide 
       const contactIds = contacts.map((c: any) => c.id);
       if (contactIds.length === 0) return res.json({ total: 0, unverified: 0, invalid: 0, risky: 0, valid: 0 });
       const placeholders = contactIds.map(() => '?').join(',');
-      const rows = await storage.rawAll(`SELECT emailVerificationStatus, COUNT(*) as count FROM contacts WHERE id IN (${placeholders}) GROUP BY emailVerificationStatus`, ...contactIds);
+      const rows = await storage.rawAll(`SELECT "emailVerificationStatus", COUNT(*) as count FROM contacts WHERE id IN (${placeholders}) GROUP BY "emailVerificationStatus"`, ...contactIds);
       const counts: Record<string, number> = {};
       for (const row of rows) counts[row.emailVerificationStatus || 'unverified'] = row.count;
       // Check if superadmin has block_invalid enabled
@@ -4548,27 +4548,27 @@ Which account should I use and why? If I need to split across accounts, provide 
           // Lead intelligence smart filters (requires subquery to lead_opportunities)
           if (leadFilter && leadFilter !== 'all') {
             if (leadFilter === 'hot_leads') {
-              conditions.push(`LOWER(c.email) IN (SELECT LOWER(contactEmail) FROM lead_opportunities WHERE organizationId = ? AND bucket = 'hot_lead')`);
+              conditions.push(`LOWER(c.email) IN (SELECT LOWER("contactEmail") FROM lead_opportunities WHERE "organizationId" = ? AND bucket = 'hot_lead')`);
               params.push(orgId);
             } else if (leadFilter === 'warm_leads') {
-              conditions.push(`LOWER(c.email) IN (SELECT LOWER(contactEmail) FROM lead_opportunities WHERE organizationId = ? AND bucket = 'warm_lead')`);
+              conditions.push(`LOWER(c.email) IN (SELECT LOWER("contactEmail") FROM lead_opportunities WHERE "organizationId" = ? AND bucket = 'warm_lead')`);
               params.push(orgId);
             } else if (leadFilter === 'past_customer') {
-              conditions.push(`LOWER(c.email) IN (SELECT LOWER(contactEmail) FROM lead_opportunities WHERE organizationId = ? AND bucket = 'past_customer')`);
+              conditions.push(`LOWER(c.email) IN (SELECT LOWER("contactEmail") FROM lead_opportunities WHERE "organizationId" = ? AND bucket = 'past_customer')`);
               params.push(orgId);
             } else if (leadFilter === 'engaged') {
               // Contacts with opens or clicks or replies in campaigns
-              conditions.push(`(c.totalOpened > 0 OR c.totalClicked > 0 OR c.totalReplied > 0)`);
+              conditions.push(`(c."totalOpened" > 0 OR c."totalClicked" > 0 OR c."totalReplied" > 0)`);
             } else if (leadFilter === 'cold') {
               // No engagement in any campaign and no AI classification as hot/warm
-              conditions.push(`(c.totalOpened = 0 OR c.totalOpened IS NULL) AND (c.totalClicked = 0 OR c.totalClicked IS NULL) AND (c.totalReplied = 0 OR c.totalReplied IS NULL)`);
-              conditions.push(`LOWER(c.email) NOT IN (SELECT LOWER(contactEmail) FROM lead_opportunities WHERE organizationId = ? AND bucket IN ('hot_lead','warm_lead','past_customer'))`);
+              conditions.push(`(c."totalOpened" = 0 OR c."totalOpened" IS NULL) AND (c."totalClicked" = 0 OR c."totalClicked" IS NULL) AND (c."totalReplied" = 0 OR c."totalReplied" IS NULL)`);
+              conditions.push(`LOWER(c.email) NOT IN (SELECT LOWER("contactEmail") FROM lead_opportunities WHERE "organizationId" = ? AND bucket IN ('hot_lead','warm_lead','past_customer'))`);
               params.push(orgId);
             } else if (leadFilter === 'never_contacted') {
-              conditions.push(`(c.totalSent = 0 OR c.totalSent IS NULL)`);
+              conditions.push(`(c."totalSent" = 0 OR c."totalSent" IS NULL)`);
             } else {
               // Generic bucket filter (e.g., 'churned', 'vendor', 'newsletter', etc.)
-              conditions.push(`LOWER(c.email) IN (SELECT LOWER(contactEmail) FROM lead_opportunities WHERE organizationId = ? AND bucket = ?)`);
+              conditions.push(`LOWER(c.email) IN (SELECT LOWER("contactEmail") FROM lead_opportunities WHERE "organizationId" = ? AND bucket = ?)`);
               params.push(orgId, leadFilter);
             }
           }
@@ -4607,7 +4607,7 @@ Which account should I use and why? If I need to split across accounts, provide 
             const ids = advContacts.map((c: any) => c.id);
             if (ids.length > 0) {
               const ph = ids.map(() => '?').join(',');
-              const remarks = await storage.rawAll(`SELECT contactId, notes FROM contact_activities WHERE contactId IN (${ph}) AND id IN (SELECT MAX(id) FROM contact_activities WHERE contactId IN (${ph}) GROUP BY contactId)`, ...ids, ...ids);
+              const remarks = await storage.rawAll(`SELECT "contactId", notes FROM contact_activities WHERE "contactId" IN (${ph}) AND id IN (SELECT MAX(id) FROM contact_activities WHERE "contactId" IN (${ph}) GROUP BY "contactId")`, ...ids, ...ids);
               const map = new Map(remarks.map((r: any) => [r.contactId, r.notes]));
               advContacts.forEach((c: any) => { c.lastRemark = map.get(c.id) || null; });
             }
@@ -4632,9 +4632,9 @@ Which account should I use and why? If I need to split across accounts, provide 
         try {
           const contactIds = contacts.map((c: any) => c.id);
           const placeholders = contactIds.map(() => '?').join(',');
-          const remarks = await storage.rawAll(`SELECT ca.contactId, ca.notes FROM contact_activities ca
-            WHERE ca.contactId IN (${placeholders}) AND ca.id IN (
-              SELECT MAX(ca2.id) FROM contact_activities ca2 WHERE ca2.contactId IN (${placeholders}) GROUP BY ca2.contactId
+          const remarks = await storage.rawAll(`SELECT ca."contactId", ca.notes FROM contact_activities ca
+            WHERE ca."contactId" IN (${placeholders}) AND ca.id IN (
+              SELECT MAX(ca2.id) FROM contact_activities ca2 WHERE ca2."contactId" IN (${placeholders}) GROUP BY ca2."contactId"
             )`, ...contactIds, ...contactIds);
           const remarkMap = new Map(remarks.map((r: any) => [r.contactId, r.notes]));
           contacts.forEach((c: any) => { c.lastRemark = remarkMap.get(c.id) || null; });
@@ -4650,10 +4650,10 @@ Which account should I use and why? If I need to split across accounts, provide 
             const ph = emails.map(() => '?').join(',');
             // Get the BEST (highest confidence) lead classification per email for this org
             const leadData = await storage.rawAll(`
-              SELECT contactEmail, bucket, confidence, aiReasoning, suggestedAction, lastEmailDate, totalEmails, totalReceived, totalSent, accountEmail,
-                     ROW_NUMBER() OVER (PARTITION BY LOWER(contactEmail) ORDER BY confidence DESC) as rn
+              SELECT "contactEmail", bucket, confidence, "aiReasoning", "suggestedAction", "lastEmailDate", "totalEmails", "totalReceived", "totalSent", "accountEmail",
+                     ROW_NUMBER() OVER (PARTITION BY LOWER("contactEmail") ORDER BY confidence DESC) as rn
               FROM lead_opportunities
-              WHERE organizationId = ? AND LOWER(contactEmail) IN (${ph})
+              WHERE "organizationId" = ? AND LOWER("contactEmail") IN (${ph})
             `, orgId, ...emails);
             // Only keep rn=1 (best classification per email)
             const leadMap = new Map<string, any>();
@@ -4718,7 +4718,7 @@ Which account should I use and why? If I need to split across accounts, provide 
 
       // Member role: restrict to their email accounts only
       if (!isAdmin) {
-        const memberAccounts = await storage.rawAll(`SELECT email FROM email_accounts WHERE organizationId = ? AND userId = ?`, orgId, req.user.id) as any[];
+        const memberAccounts = await storage.rawAll(`SELECT email FROM email_accounts WHERE "organizationId" = ? AND "userId" = ?`, orgId, req.user.id) as any[];
         if (memberAccounts.length > 0) {
           const ph = memberAccounts.map(() => '?').join(',');
           conditions.push(`lo.accountEmail IN (${ph})`);
@@ -4809,10 +4809,10 @@ Which account should I use and why? If I need to split across accounts, provide 
   app.get('/api/contacts/filter-options', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.user.organizationId;
-      const companies = (await storage.rawAll(`SELECT DISTINCT company FROM contacts WHERE organizationId = ? AND company IS NOT NULL AND company != '' ORDER BY company LIMIT 200`, orgId)).map((r: any) => r.company);
-      const designations = (await storage.rawAll(`SELECT DISTINCT jobTitle FROM contacts WHERE organizationId = ? AND jobTitle IS NOT NULL AND jobTitle != '' ORDER BY jobTitle LIMIT 200`, orgId)).map((r: any) => r.jobTitle);
-      const cities = (await storage.rawAll(`SELECT DISTINCT city FROM contacts WHERE organizationId = ? AND city IS NOT NULL AND city != '' ORDER BY city LIMIT 200`, orgId)).map((r: any) => r.city);
-      const countries = (await storage.rawAll(`SELECT DISTINCT country FROM contacts WHERE organizationId = ? AND country IS NOT NULL AND country != '' ORDER BY country LIMIT 100`, orgId)).map((r: any) => r.country);
+      const companies = (await storage.rawAll(`SELECT DISTINCT company FROM contacts WHERE "organizationId" = ? AND company IS NOT NULL AND company != '' ORDER BY company LIMIT 200`, orgId)).map((r: any) => r.company);
+      const designations = (await storage.rawAll(`SELECT DISTINCT "jobTitle" FROM contacts WHERE "organizationId" = ? AND "jobTitle" IS NOT NULL AND "jobTitle" != '' ORDER BY "jobTitle" LIMIT 200`, orgId)).map((r: any) => r.jobTitle);
+      const cities = (await storage.rawAll(`SELECT DISTINCT city FROM contacts WHERE "organizationId" = ? AND city IS NOT NULL AND city != '' ORDER BY city LIMIT 200`, orgId)).map((r: any) => r.city);
+      const countries = (await storage.rawAll(`SELECT DISTINCT country FROM contacts WHERE "organizationId" = ? AND country IS NOT NULL AND country != '' ORDER BY country LIMIT 100`, orgId)).map((r: any) => r.country);
       res.json({ companies, designations, cities, countries });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
@@ -4827,12 +4827,12 @@ Which account should I use and why? If I need to split across accounts, provide 
       const orgId = req.user.organizationId;
       const today = new Date().toISOString().split('T')[0];
       const contacts = await storage.rawAll(`SELECT c.*,
-        (SELECT ca.notes FROM contact_activities ca WHERE ca.contactId = c.id ORDER BY ca.createdAt DESC LIMIT 1) as lastRemark,
-        (SELECT ca.type FROM contact_activities ca WHERE ca.contactId = c.id ORDER BY ca.createdAt DESC LIMIT 1) as lastActivityType,
-        (SELECT ca.createdAt FROM contact_activities ca WHERE ca.contactId = c.id ORDER BY ca.createdAt DESC LIMIT 1) as lastActivityDate
-        FROM contacts c WHERE c.organizationId = ? AND c.nextActionDate IS NOT NULL AND c.nextActionDate <= ?
-        AND c.pipelineStage NOT IN ('won', 'lost') AND c.status NOT IN ('bounced', 'unsubscribed')
-        ORDER BY c.nextActionDate ASC LIMIT 200`, orgId, today + 'T23:59:59');
+        (SELECT ca.notes FROM contact_activities ca WHERE ca."contactId" = c.id ORDER BY ca."createdAt" DESC LIMIT 1) as lastRemark,
+        (SELECT ca.type FROM contact_activities ca WHERE ca."contactId" = c.id ORDER BY ca."createdAt" DESC LIMIT 1) as lastActivityType,
+        (SELECT ca."createdAt" FROM contact_activities ca WHERE ca."contactId" = c.id ORDER BY ca."createdAt" DESC LIMIT 1) as lastActivityDate
+        FROM contacts c WHERE c."organizationId" = ? AND c."nextActionDate" IS NOT NULL AND c."nextActionDate" <= ?
+        AND c."pipelineStage" NOT IN ('won', 'lost') AND c.status NOT IN ('bounced', 'unsubscribed')
+        ORDER BY c."nextActionDate" ASC LIMIT 200`, orgId, today + 'T23:59:59');
       res.json(contacts);
     } catch (e: any) {
       res.status(500).json({ message: e.message });
@@ -9237,8 +9237,8 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       try {
         emailsSent = (await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM messages m
-          JOIN contacts c ON c.id = m.contactId
-          WHERE c.organizationId = ? AND c.assignedTo = ? AND m.status = 'sent' AND m.sentAt >= ? AND m.sentAt < ?
+          JOIN contacts c ON c.id = m."contactId"
+          WHERE c."organizationId" = ? AND c."assignedTo" = ? AND m.status = 'sent' AND m."sentAt" >= ? AND m."sentAt" < ?
         `, orgId, userId, startDate, endDate) as any)?.cnt || 0;
       } catch { }
 
@@ -9247,7 +9247,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       try {
         const activities = await storage.rawAll(`
           SELECT type, COUNT(*) as cnt FROM contact_activities
-          WHERE organizationId = ? AND userId = ? AND createdAt >= ? AND createdAt < ?
+          WHERE "organizationId" = ? AND "userId" = ? AND "createdAt" >= ? AND "createdAt" < ?
           GROUP BY type
         `, orgId, userId, startDate, endDate) as any[];
         for (const a of activities) activityMap[a.type] = a.cnt;
@@ -9260,21 +9260,21 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       let dealsLost = 0;
       try {
         dealsWon = (await storage.rawGet(`
-          SELECT COUNT(*) as cnt, SUM(COALESCE(dealValue, 0)) as totalValue
-          FROM contacts WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'won' AND dealClosedAt >= ? AND dealClosedAt < ?
+          SELECT COUNT(*) as cnt, SUM(COALESCE("dealValue", 0)) as totalValue
+          FROM contacts WHERE "organizationId" = ? AND "assignedTo" = ? AND "pipelineStage" = 'won' AND "dealClosedAt" >= ? AND "dealClosedAt" < ?
         `, orgId, userId, startDate, endDate) as any) || { cnt: 0, totalValue: 0 };
         dealsLost = (await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM contacts
-          WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'lost' AND dealClosedAt >= ? AND dealClosedAt < ?
+          WHERE "organizationId" = ? AND "assignedTo" = ? AND "pipelineStage" = 'lost' AND "dealClosedAt" >= ? AND "dealClosedAt" < ?
         `, orgId, userId, startDate, endDate) as any)?.cnt || 0;
       } catch {
         dealsWon = (await storage.rawGet(`
           SELECT COUNT(*) as cnt, 0 as totalValue
-          FROM contacts WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'won'
+          FROM contacts WHERE "organizationId" = ? AND "assignedTo" = ? AND "pipelineStage" = 'won'
         `, orgId, userId) as any) || { cnt: 0, totalValue: 0 };
         dealsLost = (await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM contacts
-          WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'lost'
+          WHERE "organizationId" = ? AND "assignedTo" = ? AND "pipelineStage" = 'lost'
         `, orgId, userId) as any)?.cnt || 0;
       }
 
@@ -9282,18 +9282,18 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       let pipeline: any[] = [];
       try {
         pipeline = await storage.rawAll(`
-          SELECT pipelineStage, COUNT(*) as cnt, SUM(COALESCE(dealValue, 0)) as totalValue
-          FROM contacts WHERE organizationId = ? AND assignedTo = ?
-          AND pipelineStage IN ('new', 'contacted', 'interested', 'meeting_scheduled', 'meeting_done', 'proposal_sent', 'won', 'lost')
-          GROUP BY pipelineStage
+          SELECT "pipelineStage", COUNT(*) as cnt, SUM(COALESCE("dealValue", 0)) as totalValue
+          FROM contacts WHERE "organizationId" = ? AND "assignedTo" = ?
+          AND "pipelineStage" IN ('new', 'contacted', 'interested', 'meeting_scheduled', 'meeting_done', 'proposal_sent', 'won', 'lost')
+          GROUP BY "pipelineStage"
         `, orgId, userId) as any[];
       } catch {
         try {
           pipeline = await storage.rawAll(`
-            SELECT pipelineStage, COUNT(*) as cnt, 0 as totalValue
-            FROM contacts WHERE organizationId = ? AND assignedTo = ?
-            AND pipelineStage IN ('new', 'contacted', 'interested', 'meeting_scheduled', 'meeting_done', 'proposal_sent', 'won', 'lost')
-            GROUP BY pipelineStage
+            SELECT "pipelineStage", COUNT(*) as cnt, 0 as totalValue
+            FROM contacts WHERE "organizationId" = ? AND "assignedTo" = ?
+            AND "pipelineStage" IN ('new', 'contacted', 'interested', 'meeting_scheduled', 'meeting_done', 'proposal_sent', 'won', 'lost')
+            GROUP BY "pipelineStage"
           `, orgId, userId) as any[];
         } catch { }
       }
@@ -9319,8 +9319,8 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       try {
         const overdue = (await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM contacts
-          WHERE organizationId = ? AND assignedTo = ? AND nextActionDate < ? AND nextActionDate IS NOT NULL
-          AND pipelineStage NOT IN ('won', 'lost')
+          WHERE "organizationId" = ? AND "assignedTo" = ? AND "nextActionDate" < ? AND "nextActionDate" IS NOT NULL
+          AND "pipelineStage" NOT IN ('won', 'lost')
         `, orgId, userId, todayStr) as any)?.cnt || 0;
         if (overdue > 0) nudges.push({ type: 'overdue', priority: 'high', title: `${overdue} Overdue Follow-ups`, message: 'Contacts with past-due follow-up dates need attention', count: overdue, actionType: 'contacts' });
       } catch { }
@@ -9330,10 +9330,10 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       try {
         emailsNeedingReply = (await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM unified_inbox ui
-          INNER JOIN email_accounts ea ON ea.id = ui.emailAccountId
-          WHERE ui.organizationId = ? AND ea.userId = ?
-          AND ui.status IN ('unread', 'read') AND ui.repliedAt IS NULL
-          AND (ui.sentByUs IS NULL OR ui.sentByUs = 0)
+          INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
+          WHERE ui."organizationId" = ? AND ea."userId" = ?
+          AND ui.status IN ('unread', 'read') AND ui."repliedAt" IS NULL
+          AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
         `, orgId, userId) as any)?.cnt || 0;
         if (emailsNeedingReply > 0) nudges.push({ type: 'needs_reply', priority: 'high', title: `${emailsNeedingReply} Emails Need Reply`, message: 'Received emails that haven\'t been replied to yet', count: emailsNeedingReply, actionType: 'emails' });
       } catch { }
@@ -9341,12 +9341,12 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       // 3. Unactioned replies (contacts replied to campaign but no activity logged after)
       try {
         const unactioned = (await storage.rawGet(`
-          SELECT COUNT(DISTINCT m.contactId) as cnt
+          SELECT COUNT(DISTINCT m."contactId") as cnt
           FROM messages m
-          JOIN contacts c ON c.id = m.contactId
-          LEFT JOIN contact_activities ca ON ca.contactId = m.contactId AND ca.createdAt > m.repliedAt
-          WHERE c.organizationId = ? AND c.assignedTo = ?
-          AND m.repliedAt IS NOT NULL AND m.repliedAt >= ? AND m.repliedAt < ? AND ca.id IS NULL
+          JOIN contacts c ON c.id = m."contactId"
+          LEFT JOIN contact_activities ca ON ca."contactId" = m."contactId" AND ca."createdAt" > m."repliedAt"
+          WHERE c."organizationId" = ? AND c."assignedTo" = ?
+          AND m."repliedAt" IS NOT NULL AND m."repliedAt" >= ? AND m."repliedAt" < ? AND ca.id IS NULL
         `, orgId, userId, startDate, endDate) as any)?.cnt || 0;
         if (unactioned > 0) nudges.push({ type: 'unactioned_reply', priority: 'high', title: `${unactioned} Unactioned Replies`, message: 'Contacts replied to campaigns but no follow-up activity logged', count: unactioned, actionType: 'contacts' });
       } catch { }
@@ -9356,10 +9356,10 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         const threeDaysAgo = new Date(now); threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
         const stale = (await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM contacts c
-          WHERE c.organizationId = ? AND c.assignedTo = ?
-          AND c.pipelineStage IN ('interested', 'meeting_scheduled', 'meeting_done')
+          WHERE c."organizationId" = ? AND c."assignedTo" = ?
+          AND c."pipelineStage" IN ('interested', 'meeting_scheduled', 'meeting_done')
           AND NOT EXISTS (
-            SELECT 1 FROM contact_activities ca WHERE ca.contactId = c.id AND ca.createdAt >= ?
+            SELECT 1 FROM contact_activities ca WHERE ca."contactId" = c.id AND ca."createdAt" >= ?
           )
         `, orgId, userId, threeDaysAgo.toISOString().split('T')[0]) as any)?.cnt || 0;
         if (stale > 0) nudges.push({ type: 'stale_leads', priority: 'medium', title: `${stale} Stale Hot Leads`, message: 'Hot leads with no activity in 3+ days — reach out before they go cold', count: stale, actionType: 'contacts' });
@@ -9370,9 +9370,9 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         const threeDaysAgo = new Date(now); threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
         const pendingProposals = (await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM contacts c
-          WHERE c.organizationId = ? AND c.assignedTo = ? AND c.pipelineStage = 'proposal_sent'
+          WHERE c."organizationId" = ? AND c."assignedTo" = ? AND c."pipelineStage" = 'proposal_sent'
           AND NOT EXISTS (
-            SELECT 1 FROM contact_activities ca WHERE ca.contactId = c.id AND ca.createdAt >= ?
+            SELECT 1 FROM contact_activities ca WHERE ca."contactId" = c.id AND ca."createdAt" >= ?
           )
         `, orgId, userId, threeDaysAgo.toISOString().split('T')[0]) as any)?.cnt || 0;
         if (pendingProposals > 0) nudges.push({ type: 'pending_proposals', priority: 'medium', title: `${pendingProposals} Proposals Awaiting Response`, message: 'Proposals sent 3+ days ago with no follow-up — time to check in', count: pendingProposals, actionType: 'contacts' });
@@ -9396,11 +9396,11 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       let recentActivities: any[] = [];
       try {
         recentActivities = await storage.rawAll(`
-          SELECT ca.*, c.firstName, c.lastName, c.email as contactEmail, c.company
+          SELECT ca.*, c."firstName", c."lastName", c.email as contactEmail, c.company
           FROM contact_activities ca
-          JOIN contacts c ON c.id = ca.contactId
-          WHERE ca.organizationId = ? AND ca.userId = ?
-          ORDER BY ca.createdAt DESC LIMIT 10
+          JOIN contacts c ON c.id = ca."contactId"
+          WHERE ca."organizationId" = ? AND ca."userId" = ?
+          ORDER BY ca."createdAt" DESC LIMIT 10
         `, orgId, userId) as any[];
       } catch { }
 
@@ -9427,27 +9427,27 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       const offset = parseInt(req.query.offset as string) || 0;
 
       const emails = await storage.rawAll(`
-        SELECT ui.id, ui.fromEmail, ui.fromName, ui.toEmail, ui.subject, ui.snippet, ui.body, ui.bodyHtml,
-               ui.receivedAt, ui.status, ui.campaignId, ui.contactId, ui.replyType,
-               c.firstName as contactFirstName, c.lastName as contactLastName, c.company as contactCompany,
+        SELECT ui.id, ui."fromEmail", ui."fromName", ui."toEmail", ui.subject, ui.snippet, ui.body, ui."bodyHtml",
+               ui."receivedAt", ui.status, ui."campaignId", ui."contactId", ui."replyType",
+               c."firstName" as contactFirstName, c."lastName" as contactLastName, c.company as contactCompany,
                camp.name as campaignName
         FROM unified_inbox ui
-        INNER JOIN email_accounts ea ON ea.id = ui.emailAccountId
-        LEFT JOIN contacts c ON c.id = ui.contactId
-        LEFT JOIN campaigns camp ON camp.id = ui.campaignId
-        WHERE ui.organizationId = ? AND ea.userId = ?
-        AND ui.status IN ('unread', 'read') AND ui.repliedAt IS NULL
-        AND (ui.sentByUs IS NULL OR ui.sentByUs = 0)
-        ORDER BY ui.receivedAt DESC
+        INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
+        LEFT JOIN contacts c ON c.id = ui."contactId"
+        LEFT JOIN campaigns camp ON camp.id = ui."campaignId"
+        WHERE ui."organizationId" = ? AND ea."userId" = ?
+        AND ui.status IN ('unread', 'read') AND ui."repliedAt" IS NULL
+        AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
+        ORDER BY ui."receivedAt" DESC
         LIMIT ? OFFSET ?
       `, orgId, userId, limit, offset) as any[];
 
       const total = (await storage.rawGet(`
         SELECT COUNT(*) as cnt FROM unified_inbox ui
-        INNER JOIN email_accounts ea ON ea.id = ui.emailAccountId
-        WHERE ui.organizationId = ? AND ea.userId = ?
-        AND ui.status IN ('unread', 'read') AND ui.repliedAt IS NULL
-        AND (ui.sentByUs IS NULL OR ui.sentByUs = 0)
+        INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
+        WHERE ui."organizationId" = ? AND ea."userId" = ?
+        AND ui.status IN ('unread', 'read') AND ui."repliedAt" IS NULL
+        AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
       `, orgId, userId) as any)?.cnt || 0;
 
       res.json({ emails, total });
@@ -10435,9 +10435,9 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     try {
       const orgId = req.user.organizationId;
       const stats = await storage.rawAll(`
-        SELECT emailVerificationStatus, COUNT(*) as count
-        FROM contacts WHERE organizationId = ?
-        GROUP BY emailVerificationStatus
+        SELECT "emailVerificationStatus", COUNT(*) as count
+        FROM contacts WHERE "organizationId" = ?
+        GROUP BY "emailVerificationStatus"
       `, orgId);
       const apiKey = await getEmailVerifyApiKey();
       let credits = null;
@@ -10464,7 +10464,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
 
       // Fetch contacts
       const placeholders = contactIds.map(() => '?').join(',');
-      const contacts = await storage.rawAll(`SELECT id, email FROM contacts WHERE id IN (${placeholders}) AND organizationId = ?`, ...contactIds, orgId);
+      const contacts = await storage.rawAll(`SELECT id, email FROM contacts WHERE id IN (${placeholders}) AND "organizationId" = ?`, ...contactIds, orgId);
 
       if (contacts.length === 0) return res.status(404).json({ message: 'No contacts found' });
 
@@ -10477,7 +10477,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       // Update contacts in DB
       let verified = 0, invalid = 0, risky = 0;
       for (const [contactId, result] of results) {
-        await storage.rawRun(`UPDATE contacts SET emailVerificationStatus = ?, emailVerifiedAt = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`, result.status, now, now, contactId, orgId);
+        await storage.rawRun(`UPDATE contacts SET "emailVerificationStatus" = ?, "emailVerifiedAt" = ?, "updatedAt" = ? WHERE id = ? AND "organizationId" = ?`, result.status, now, now, contactId, orgId);
         if (result.status === 'valid') verified++;
         else if (result.status === 'invalid' || result.status === 'disposable' || result.status === 'spamtrap') invalid++;
         else if (result.status === 'risky') risky++;
@@ -10499,11 +10499,11 @@ Generate an appropriate reply to the LATEST email above, considering the full co
 
       let contacts;
       if (listId) {
-        const filter = statusFilter === 'all' ? '' : "AND (emailVerificationStatus = 'unverified' OR emailVerificationStatus IS NULL)";
-        contacts = await storage.rawAll(`SELECT id, email FROM contacts WHERE listId = ? AND organizationId = ? ${filter}`, listId, orgId);
+        const filter = statusFilter === 'all' ? '' : `AND ("emailVerificationStatus" = 'unverified' OR "emailVerificationStatus" IS NULL)`;
+        contacts = await storage.rawAll(`SELECT id, email FROM contacts WHERE "listId" = ? AND "organizationId" = ? ${filter}`, listId, orgId);
       } else {
-        const filter = statusFilter === 'all' ? '' : "AND (emailVerificationStatus = 'unverified' OR emailVerificationStatus IS NULL)";
-        contacts = await storage.rawAll(`SELECT id, email FROM contacts WHERE organizationId = ? ${filter}`, orgId);
+        const filter = statusFilter === 'all' ? '' : `AND ("emailVerificationStatus" = 'unverified' OR "emailVerificationStatus" IS NULL)`;
+        contacts = await storage.rawAll(`SELECT id, email FROM contacts WHERE "organizationId" = ? ${filter}`, orgId);
       }
 
       if (contacts.length === 0) return res.json({ total: 0, verified: 0, invalid: 0, risky: 0, message: 'No contacts to verify' });
@@ -10515,7 +10515,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
 
       let verified = 0, invalid = 0, risky = 0;
       for (const [contactId, result] of results) {
-        await storage.rawRun(`UPDATE contacts SET emailVerificationStatus = ?, emailVerifiedAt = ?, updatedAt = ? WHERE id = ? AND organizationId = ?`, result.status, now, now, contactId, orgId);
+        await storage.rawRun(`UPDATE contacts SET "emailVerificationStatus" = ?, "emailVerifiedAt" = ?, "updatedAt" = ? WHERE id = ? AND "organizationId" = ?`, result.status, now, now, contactId, orgId);
         if (result.status === 'valid') verified++;
         else if (result.status === 'invalid' || result.status === 'disposable' || result.status === 'spamtrap') invalid++;
         else if (result.status === 'risky') risky++;
@@ -10531,7 +10531,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   app.get('/api/contacts/:id/verification', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.user.organizationId;
-      const contact = await storage.rawGet(`SELECT emailVerificationStatus, emailVerifiedAt FROM contacts WHERE id = ? AND organizationId = ?`, req.params.id, orgId);
+      const contact = await storage.rawGet(`SELECT "emailVerificationStatus", "emailVerifiedAt" FROM contacts WHERE id = ? AND "organizationId" = ?`, req.params.id, orgId);
       if (!contact) return res.status(404).json({ message: 'Contact not found' });
       res.json(contact);
     } catch (e: any) {
@@ -10846,7 +10846,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   app.get('/api/context/doc-types', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.user.organizationId;
-      const counts = await storage.rawAll(`SELECT docType, COUNT(*) as cnt FROM org_documents WHERE organizationId = ? GROUP BY docType ORDER BY cnt DESC`, orgId);
+      const counts = await storage.rawAll(`SELECT "docType", COUNT(*) as cnt FROM org_documents WHERE "organizationId" = ? GROUP BY "docType" ORDER BY cnt DESC`, orgId);
       res.json(counts);
     } catch (error: any) {
       res.status(500).json({ message: 'Failed to fetch doc types' });
@@ -10877,12 +10877,12 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       try {
         for (const opp of opportunities as any[]) {
           if (!opp.accountEmail && opp.contactEmail) {
-            const hist = await storage.rawGet(`SELECT accountEmail, emailAccountId FROM email_history WHERE organizationId = ? AND LOWER(fromEmail) = ? AND direction = 'received' LIMIT 1`, orgId, opp.contactEmail.toLowerCase()) as any;
+            const hist = await storage.rawGet(`SELECT "accountEmail", "emailAccountId" FROM email_history WHERE "organizationId" = ? AND LOWER("fromEmail") = ? AND direction = 'received' LIMIT 1`, orgId, opp.contactEmail.toLowerCase()) as any;
             if (hist?.accountEmail) {
               opp.accountEmail = hist.accountEmail;
               if (!opp.emailAccountId) opp.emailAccountId = hist.emailAccountId;
               // Persist the backfill
-              try { await storage.rawRun(`UPDATE lead_opportunities SET accountEmail = ?, emailAccountId = ? WHERE id = ?`, hist.accountEmail, hist.emailAccountId, opp.id); } catch (e) {}
+              try { await storage.rawRun(`UPDATE lead_opportunities SET "accountEmail" = ?, "emailAccountId" = ? WHERE id = ?`, hist.accountEmail, hist.emailAccountId, opp.id); } catch (e) {}
             }
           }
         }
@@ -10932,15 +10932,15 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   app.get('/api/lead-intelligence/debug', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.user.organizationId;
-      const totalRows = await storage.rawGet(`SELECT COUNT(*) as cnt FROM email_history WHERE organizationId = ?`, orgId) as any;
-      const sample = await storage.rawAll(`SELECT id, direction, fromEmail, toEmail, subject, accountEmail FROM email_history WHERE organizationId = ? LIMIT 5`, orgId) as any[];
-      const directionCounts = await storage.rawAll(`SELECT direction, COUNT(*) as cnt FROM email_history WHERE organizationId = ? GROUP BY direction`, orgId) as any[];
+      const totalRows = await storage.rawGet(`SELECT COUNT(*) as cnt FROM email_history WHERE "organizationId" = ?`, orgId) as any;
+      const sample = await storage.rawAll(`SELECT id, direction, "fromEmail", "toEmail", subject, "accountEmail" FROM email_history WHERE "organizationId" = ? LIMIT 5`, orgId) as any[];
+      const directionCounts = await storage.rawAll(`SELECT direction, COUNT(*) as cnt FROM email_history WHERE "organizationId" = ? GROUP BY direction`, orgId) as any[];
       const contactQuery = await storage.rawAll(`
         SELECT
-          CASE WHEN direction = 'sent' THEN LOWER(toEmail) ELSE LOWER(fromEmail) END as contactEmail,
+          CASE WHEN direction = 'sent' THEN LOWER("toEmail") ELSE LOWER("fromEmail") END as contactEmail,
           COUNT(*) as totalEmails
         FROM email_history
-        WHERE organizationId = ?
+        WHERE "organizationId" = ?
         GROUP BY contactEmail
         HAVING contactEmail != '' AND contactEmail IS NOT NULL
         ORDER BY totalEmails DESC
