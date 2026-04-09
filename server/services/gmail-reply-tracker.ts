@@ -908,7 +908,7 @@ export class GmailReplyTracker {
     this.checkingOrgs.add(orgId);
 
     try {
-      const result = await this.checkForReplies(orgId, 1440); // Check last 24 hours
+      const result = await this.checkForReplies(orgId, 15); // Check last 15 min (3× overlap with 5-min cycle — safe, ~100× lighter than 24h)
       this.lastCheckedAt.set(orgId, new Date().toISOString());
       if (result.newReplies > 0) {
         console.log(`[GmailReplyTracker] Auto-check found ${result.newReplies} new replies`);

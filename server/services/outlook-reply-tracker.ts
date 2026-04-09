@@ -660,7 +660,7 @@ export class OutlookReplyTracker {
     }
     this.checkingOrgs.add(orgId);
     try {
-      const result = await this.checkForReplies(orgId, 1440); // Increased from 120 to 1440 (24h) to match Gmail and avoid missed replies
+      const result = await this.checkForReplies(orgId, 15); // Check last 15 min (3× overlap with 5-min cycle — safe, ~100× lighter than 24h)
       this.lastCheckedAt.set(orgId, new Date().toISOString());
       if (result.newReplies > 0) {
         console.log(`[OutlookReplyTracker] Auto-check found ${result.newReplies} new messages for org ${orgId.substring(0, 8)}`);
