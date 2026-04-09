@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > - No changes to Gmail auth, Outlook auth, or OAuth routes
 > - No changes to database init, backup, or guardrail code in storage.ts
 > - No changes to `sendViaMicrosoftGraph` or `sendViaGmailAPI` functions
-> - No changes to `gmail-reply-tracker.ts` or `outlook-reply-tracker.ts` (including per-org `checkingOrgs` lock logic)
+> - No changes to `gmail-reply-tracker.ts` or `outlook-reply-tracker.ts` (including per-org `checkingOrgs` lock logic, and the `15`-minute lookback in `runCheck()` — was `1440` which caused continuous DB saturation with 80 accounts; 15-min gives safe 3× overlap with 5-min poll cycle)
 > - No changes to `warmup-engine.ts` — self-contained warmup service with own token helpers
 > - No changes to `lead-intelligence-engine.ts` — self-contained email history scanner + AI classifier with own token helpers
 > - No changes to Gmail/Outlook threading logic (`gmailThreadId` storage, `executeFollowup` threading block, `sendEmail` threading headers)
@@ -19,6 +19,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > - No changes to `updateCampaignMessage` SQL in storage.ts — must include `gmailThreadId` column
 > - No changes to Step 0 guarantee block in `/api/campaigns/:id/detail` route
 > - No changes to campaign sending/pause/resume flow in routes.ts or campaign-engine.ts
+> - No changes to `processMessageFollowups()` in `followup-engine.ts` — must use bulk-loaded message directly (no per-contact `getCampaignMessage` re-fetch). Pre-loaded campaign must be passed from `processCampaignFollowups` → `processMessageFollowups` → `scheduleFollowup`. Reverting causes N×(2-5s) PG stalls that stall the engine mid-loop (caused 37 follow-ups to not send, 2026-04-09).
 > - **NEVER** use `require('./db')` or import `server/db.ts` — caused 1 day of server crash (drizzle-orm not in production deps)
 > - **NEVER** replace working `storage.getContacts()` calls with raw SQL as the primary path — caused contacts page to show 0 contacts TWICE (2026-04-04). Raw SQL may ONLY be used as an enhancement after `storage.getContacts()` has already fetched data. If raw SQL fails, the storage-fetched data must remain.
 > - **NEVER** bypass `storage` methods for GET endpoints that work — if you must use raw SQL, always keep the working storage method as primary path and raw SQL as enhancement only

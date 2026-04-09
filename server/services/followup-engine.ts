@@ -439,6 +439,14 @@ export class FollowupEngine {
    */
   async processFollowupTriggers(): Promise<void> {
     try {
+      // P10 SAFETY NET: Reset executions stuck in 'processing' for >5 min (crash/timeout recovery)
+      try {
+        await storage.rawRun(
+          `UPDATE followup_executions SET status = 'pending' WHERE status = 'processing' AND "scheduledAt" < ?`,
+          new Date(Date.now() - 5 * 60 * 1000).toISOString()
+        );
+      } catch (e) { /* non-critical */ }
+
       // Get all campaigns with active follow-up sequences
       const activeCampaignFollowups = await storage.getActiveCampaignFollowups();
       
@@ -491,7 +499,7 @@ export class FollowupEngine {
       const totalDone = executions.filter((e: any) =>
         e.status === 'sent' || e.status === 'skipped' || e.status === 'failed'
       ).length;
-      const totalPending = executions.filter((e: any) => e.status === 'pending').length;
+      const totalPending = executions.filter((e: any) => e.status === 'pending' || e.status === 'processing').length;
 
       if (totalDone >= totalExpected && totalPending === 0) {
         await storage.updateCampaign(campaignId, { status: 'completed' });
@@ -906,10 +914,17 @@ export class FollowupEngine {
     }
     
     for (const [campaignId, executions] of byCampaign) {
-      // Check sending window for this campaign before sending any follow-ups
+      // Check campaign status + sending window before sending any follow-ups
       if (campaignId) {
         const campaign = await storage.getCampaign(campaignId);
         if (campaign) {
+          // P2 FIX: Skip follow-ups for paused/cancelled campaigns — user expects "Pause" to stop ALL sending
+          if (campaign.status === 'paused' || campaign.status === 'cancelled' || campaign.status === 'draft') {
+            if (this._checkCount % 60 === 1) {
+              console.log(`[Followup] Skipping ${executions.length} pending follow-ups for campaign ${campaignId}: campaign is ${campaign.status}`);
+            }
+            continue;
+          }
           const sendingConfig = (campaign as any).sendingConfig;
           const windowCheck = this.checkSendingWindow(sendingConfig);
           if (!windowCheck.canSend) {
@@ -963,8 +978,18 @@ export class FollowupEngine {
    */
   private async executeFollowup(executionId: string, preloadedCampaignMsgs?: any[]): Promise<void> {
     try {
+      // P10 FIX: Atomic claim — prevents double-send when overlapping cycles both see "pending"
+      // UPDATE returns the row only if it was still pending; null means another cycle already claimed it
+      const claimed = await storage.rawGet(
+        'UPDATE followup_executions SET status = ? WHERE id = ? AND status = ? RETURNING id',
+        'processing', executionId, 'pending'
+      );
+      if (!claimed) {
+        return; // Already claimed by another cycle or no longer pending
+      }
+
       const execution = await storage.getFollowupExecutionById(executionId);
-      if (!execution || execution.status !== "pending") {
+      if (!execution) {
         return;
       }
 
@@ -986,6 +1011,13 @@ export class FollowupEngine {
           status: "failed",
           errorMessage: "Campaign not found"
         });
+        return;
+      }
+
+      // P2 FIX: Don't send follow-ups for paused/cancelled campaigns
+      if (campaign.status === 'paused' || campaign.status === 'cancelled' || campaign.status === 'draft') {
+        // Don't mark as skipped — leave as pending so they resume when campaign is un-paused
+        console.log(`[Followup] Deferring execution ${executionId} — campaign ${campaign.id} is ${campaign.status}`);
         return;
       }
 
@@ -1340,17 +1372,29 @@ export class FollowupEngine {
 // Create singleton instance
 export const followupEngine = new FollowupEngine();
 
-// Auto-process follow-ups every 60 seconds (to handle minute-level delays)
+// Auto-process follow-ups every 30 seconds (to handle minute-level delays)
 let followupInterval: NodeJS.Timeout | null = null;
+let isProcessing = false; // Overlap lock — prevents concurrent cycles under PG load
 
 export function startFollowupEngine() {
   if (followupInterval) return;
   console.log('[Followup] Starting follow-up engine (checking every 30s)...');
   // Run immediately on start
   followupEngine.processFollowupTriggers().catch(console.error);
-  // Then run every 30 seconds
-  followupInterval = setInterval(() => {
-    followupEngine.processFollowupTriggers().catch(console.error);
+  // Then run every 30 seconds with overlap protection
+  followupInterval = setInterval(async () => {
+    if (isProcessing) {
+      console.log('[Followup] Previous cycle still running, skipping this interval');
+      return;
+    }
+    isProcessing = true;
+    try {
+      await followupEngine.processFollowupTriggers();
+    } catch (e) {
+      console.error('[Followup] Error in follow-up trigger processing:', e);
+    } finally {
+      isProcessing = false;
+    }
   }, 30 * 1000);
 }
 

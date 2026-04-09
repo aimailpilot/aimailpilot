@@ -1,4 +1,4 @@
-# STATUS.md — DO NOT BREAK (45 features confirmed working)
+# STATUS.md — DO NOT BREAK (47 features confirmed working)
 
 > Do NOT modify code for these features unless explicitly asked to fix a bug in that specific feature.
 > When in doubt — **ask before changing**.
@@ -52,6 +52,8 @@
 | 43 | Campaign List Pagination (7/page) | Pagination in `mailmeteor-dashboard.tsx`, `/api/campaigns/count` |
 | 44 | Bounce Suppression (4-layer protection) | `bounce-sync-engine.ts`, `getSuppressedEmails`, bounced filter in `pg-storage.ts` |
 | 45 | Contact Activity Log + Pipeline (PG fix) | `routes.ts:4438-4548` — all camelCase MUST be double-quoted for PG |
+| 46 | Follow-up Engine — No Mid-Loop Stall | `processMessageFollowups()` in `followup-engine.ts` — uses bulk-loaded message, NO per-contact `getCampaignMessage` re-fetch. Pre-loaded campaign passed from `processCampaignFollowups` → `processMessageFollowups` → `scheduleFollowup`. Removing this causes N×(2-5s) DB stalls with slow PG. |
+| 47 | Reply Tracker — 15-min Lookback (not 24h) | `runCheck()` in `gmail-reply-tracker.ts` and `outlook-reply-tracker.ts` — lookback is `15` minutes. Was `1440` (24h) causing continuous DB saturation with 80 accounts. 15-min gives 3× overlap with 5-min poll cycle — no replies missed. Do NOT increase back to 1440. |
 
 ## Golden Rules (NEVER violate)
 
