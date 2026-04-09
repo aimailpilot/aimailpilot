@@ -707,30 +707,28 @@ export class FollowupEngine {
         continue;
       }
 
-      await this.processMessageFollowups(msg, followupSteps, campaignId, executionSet);
+      await this.processMessageFollowups(msg, followupSteps, campaignId, executionSet, campaign);
     }
   }
 
   /**
    * Process follow-ups for a specific message based on triggers
    */
-  private async processMessageFollowups(message: any, followupSteps: any[], campaignId?: string, executionSet?: Set<string>): Promise<void> {
+  private async processMessageFollowups(message: any, followupSteps: any[], campaignId?: string, executionSet?: Set<string>, preloadedCampaign?: any): Promise<void> {
     for (const step of followupSteps) {
       // Skip if already executed — use batch-loaded set for O(1) check
       const execKey = `${message.id}_${step.id}`;
       if (executionSet ? executionSet.has(execKey) : await this.followupAlreadyExecuted(message.id, step.id)) {
         continue;
       }
-      
-      // CRITICAL FIX: Re-fetch the latest message state from DB before evaluating
-      // This prevents stale data issues when reply tracker updates happen between polling cycles
-      const freshMessage = await storage.getCampaignMessage(message.id);
-      if (!freshMessage) continue;
-      
-      const shouldTrigger = await this.evaluateFollowupTrigger(freshMessage, step);
-      
+
+      // Use message already bulk-loaded at cycle start — no per-contact DB re-fetch
+      // Reply/bounce are pre-checked via contactReplied/contactBounced sets in caller
+      // Per-contact re-fetch was causing N×(2-5s) DB stalls with slow PG, stopping mid-loop
+      const shouldTrigger = await this.evaluateFollowupTrigger(message, step);
+
       if (shouldTrigger) {
-        await this.scheduleFollowup(freshMessage, step);
+        await this.scheduleFollowup(message, step, preloadedCampaign);
         // Add to execution set to avoid re-processing in same cycle
         if (executionSet) executionSet.add(execKey);
       }
@@ -829,11 +827,11 @@ export class FollowupEngine {
   /**
    * Schedule a follow-up email
    */
-  private async scheduleFollowup(message: any, step: any): Promise<void> {
+  private async scheduleFollowup(message: any, step: any, preloadedCampaign?: any): Promise<void> {
     try {
       const contact = await storage.getContact(message.contactId);
-      const campaign = await storage.getCampaign(message.campaignId);
-      
+      const campaign = preloadedCampaign || await storage.getCampaign(message.campaignId);
+
       if (!contact || !campaign) {
         console.error("Missing contact or campaign data for follow-up");
         return;
