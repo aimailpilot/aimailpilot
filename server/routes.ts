@@ -9060,8 +9060,8 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         try {
           emailsSent = (await storage.rawGet(`
             SELECT COUNT(*) as cnt FROM messages m
-            JOIN contacts c ON c.id = m.contactId
-            WHERE c.organizationId = ? AND c.assignedTo = ? AND m.status = 'sent' AND m.sentAt >= ? AND m.sentAt < ?
+            JOIN contacts c ON c.id = m."contactId"
+            WHERE c."organizationId" = ? AND c."assignedTo" = ? AND m.status = 'sent' AND m."sentAt" >= ? AND m."sentAt" < ?
           `, orgId, userId, startDate, endDate) as any)?.cnt || 0;
         } catch { /* messages table schema mismatch — skip */ }
 
@@ -9071,7 +9071,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         try {
           const activities = await storage.rawAll(`
             SELECT type, COUNT(*) as cnt FROM contact_activities
-            WHERE organizationId = ? AND userId = ? AND createdAt >= ? AND createdAt < ?
+            WHERE "organizationId" = ? AND "userId" = ? AND "createdAt" >= ? AND "createdAt" < ?
             GROUP BY type
           `, orgId, userId, startDate, endDate) as any[];
           for (const a of activities) activityMap[a.type] = a.cnt;
@@ -9085,17 +9085,17 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         let pipelineStats: any[] = [];
         try {
           pipelineStats = await storage.rawAll(`
-            SELECT pipelineStage, COUNT(*) as cnt, SUM(COALESCE(dealValue, 0)) as totalValue
-            FROM contacts WHERE organizationId = ? AND assignedTo = ?
-            AND pipelineStage IN ('interested', 'meeting_scheduled', 'meeting_done', 'proposal_sent', 'won', 'lost')
-            GROUP BY pipelineStage
+            SELECT "pipelineStage", COUNT(*) as cnt, SUM(COALESCE("dealValue", 0)) as totalValue
+            FROM contacts WHERE "organizationId" = ? AND "assignedTo" = ?
+            AND "pipelineStage" IN ('interested', 'meeting_scheduled', 'meeting_done', 'proposal_sent', 'won', 'lost')
+            GROUP BY "pipelineStage"
           `, orgId, userId) as any[];
         } catch {
           pipelineStats = await storage.rawAll(`
-            SELECT pipelineStage, COUNT(*) as cnt, 0 as totalValue
-            FROM contacts WHERE organizationId = ? AND assignedTo = ?
-            AND pipelineStage IN ('interested', 'meeting_scheduled', 'meeting_done', 'proposal_sent', 'won', 'lost')
-            GROUP BY pipelineStage
+            SELECT "pipelineStage", COUNT(*) as cnt, 0 as totalValue
+            FROM contacts WHERE "organizationId" = ? AND "assignedTo" = ?
+            AND "pipelineStage" IN ('interested', 'meeting_scheduled', 'meeting_done', 'proposal_sent', 'won', 'lost')
+            GROUP BY "pipelineStage"
           `, orgId, userId) as any[];
         }
         const pipeMap: Record<string, { count: number; value: number }> = {};
@@ -9106,22 +9106,22 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         let dealsLost = 0;
         try {
           dealsWon = (await storage.rawGet(`
-            SELECT COUNT(*) as cnt, SUM(COALESCE(dealValue, 0)) as totalValue
-            FROM contacts WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'won' AND dealClosedAt >= ? AND dealClosedAt < ?
+            SELECT COUNT(*) as cnt, SUM(COALESCE("dealValue", 0)) as totalValue
+            FROM contacts WHERE "organizationId" = ? AND "assignedTo" = ? AND "pipelineStage" = 'won' AND "dealClosedAt" >= ? AND "dealClosedAt" < ?
           `, orgId, userId, startDate, endDate) as any) || { cnt: 0, totalValue: 0 };
           dealsLost = (await storage.rawGet(`
             SELECT COUNT(*) as cnt FROM contacts
-            WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'lost' AND dealClosedAt >= ? AND dealClosedAt < ?
+            WHERE "organizationId" = ? AND "assignedTo" = ? AND "pipelineStage" = 'lost' AND "dealClosedAt" >= ? AND "dealClosedAt" < ?
           `, orgId, userId, startDate, endDate) as any)?.cnt || 0;
         } catch {
           // dealClosedAt column may not exist — fall back to counting all won/lost
           dealsWon = (await storage.rawGet(`
             SELECT COUNT(*) as cnt, 0 as totalValue
-            FROM contacts WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'won'
+            FROM contacts WHERE "organizationId" = ? AND "assignedTo" = ? AND "pipelineStage" = 'won'
           `, orgId, userId) as any) || { cnt: 0, totalValue: 0 };
           dealsLost = (await storage.rawGet(`
             SELECT COUNT(*) as cnt FROM contacts
-            WHERE organizationId = ? AND assignedTo = ? AND pipelineStage = 'lost'
+            WHERE "organizationId" = ? AND "assignedTo" = ? AND "pipelineStage" = 'lost'
           `, orgId, userId) as any)?.cnt || 0;
         }
 
@@ -9174,8 +9174,8 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       try {
         overdueActions = (await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM contacts
-          WHERE organizationId = ? AND nextActionDate < ? AND nextActionDate IS NOT NULL
-          AND pipelineStage NOT IN ('won', 'lost')
+          WHERE "organizationId" = ? AND "nextActionDate" < ? AND "nextActionDate" IS NOT NULL
+          AND "pipelineStage" NOT IN ('won', 'lost')
         `, orgId, now.toISOString().split('T')[0]) as any)?.cnt || 0;
       } catch { /* column may not exist */ }
 
@@ -9183,11 +9183,11 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       let unactionedReplies = 0;
       try {
         unactionedReplies = (await storage.rawGet(`
-          SELECT COUNT(DISTINCT m.contactId) as cnt
+          SELECT COUNT(DISTINCT m."contactId") as cnt
           FROM messages m
-          LEFT JOIN contact_activities ca ON ca.contactId = m.contactId AND ca.createdAt > m.repliedAt
-          WHERE m.campaignId IN (SELECT id FROM campaigns WHERE organizationId = ?)
-          AND m.repliedAt IS NOT NULL AND m.repliedAt >= ? AND m.repliedAt < ? AND ca.id IS NULL
+          LEFT JOIN contact_activities ca ON ca."contactId" = m."contactId" AND ca."createdAt" > m."repliedAt"
+          WHERE m."campaignId" IN (SELECT id FROM campaigns WHERE "organizationId" = ?)
+          AND m."repliedAt" IS NOT NULL AND m."repliedAt" >= ? AND m."repliedAt" < ? AND ca.id IS NULL
         `, orgId, startDate, endDate) as any)?.cnt || 0;
       } catch { /* column may not exist */ }
 
