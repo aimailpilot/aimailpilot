@@ -38,8 +38,8 @@
 | 29 | Warmup Engine (send + engage + labels) | `warmup-engine.ts`, warmup routes, `startWarmupEngine()` in `index.ts` |
 | 30 | Inbox Reply with Token Refresh | Token refresh + retry in `POST /api/inbox/:id/reply`, draft save |
 | 31 | Reply Tracker Per-Org Locking | `checkingOrgs` Set in `gmail-reply-tracker.ts` and `outlook-reply-tracker.ts` |
-| 32 | Team Scorecard & Leaderboard | `/api/team/scorecard` route, `team-scorecard.tsx` |
-| 33 | My Dashboard (individual view) | `/api/my/dashboard`, `/api/my/emails-needing-reply`, `my-dashboard.tsx` |
+| 32 | Team Scorecard & Leaderboard | `/api/team/scorecard` route, `team-scorecard.tsx` — all raw SQL must use quoted camelCase + parseInt() on COUNT/SUM |
+| 33 | My Dashboard (individual view) | `/api/my/dashboard`, `/api/my/emails-needing-reply`, `my-dashboard.tsx` — all raw SQL must use quoted camelCase + parseInt() on COUNT/SUM |
 | 34 | Deal Tracking (value, notes, auto-close) | Deal columns in `storage.ts`, deal dialog in `contacts-manager.tsx` |
 | 35 | Follow-up Subject (no Re: when threaded) | Subject logic in `executeFollowup()` in `followup-engine.ts` |
 | 36 | Raw SQL Access | `storage.rawGet/rawAll/rawRun` — the ONLY safe way for custom SQL |
@@ -64,5 +64,6 @@
 - **NEVER** remove 401 retry + force-refresh in `sendEmail()` Gmail path in `followup-engine.ts`
 - All camelCase columns in PostgreSQL raw SQL MUST be double-quoted: `"organizationId"`, `"contactId"`, `"createdAt"`, etc.
 - Raw SQL only via `storage.rawGet/rawAll/rawRun` — auto-converts `?` to `$1,$2` for PG
+- **PostgreSQL returns `COUNT(*)` and `SUM()` as bigint strings** — always wrap with `parseInt()` / `Number()` or JS will string-concatenate instead of add
 - `email_accounts` uses `"isActive" = 1` column (NOT `status = 'active'` — that column does not exist)
 - `fromEmail` in `unified_inbox` stores `"Name <email>"` format — extract email before comparing
