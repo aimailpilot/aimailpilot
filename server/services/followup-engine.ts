@@ -486,16 +486,27 @@ export class FollowupEngine {
       const campaign = await storage.getCampaign(campaignId);
       if (!campaign || campaign.status !== 'following_up') continue;
 
-      // Count total original messages (step 0) and total follow-up steps
-      const campaignMessages = await storage.getCampaignMessages(campaignId, 50000, 0);
-      const step0Messages = campaignMessages.filter((m: any) => (m.stepNumber || 0) === 0);
-      const followupSteps = await storage.getFollowupSteps(cf.sequenceId);
+      // PERFORMANCE FIX #4: Count step-0 messages via targeted query (not 50k fetch)
+      const step0CountRow = await storage.rawGet(
+        'SELECT COUNT(*) as cnt FROM messages WHERE "campaignId" = ? AND ("stepNumber" = 0 OR "stepNumber" IS NULL)',
+        campaignId
+      );
+      const step0Count = parseInt(step0CountRow?.cnt || '0');
+      if (step0Count === 0) continue;
 
-      if (step0Messages.length === 0 || followupSteps.length === 0) continue;
+      // P8 FIX: Aggregate follow-up steps across ALL sequences for this campaign (not just one)
+      // Each campaign can have multiple sequences (one per follow-up step), so we need total across all
+      const allCampaignFollowups = await storage.getCampaignFollowups(campaignId);
+      let totalFollowupSteps = 0;
+      for (const cfLink of allCampaignFollowups) {
+        const steps = await storage.getFollowupSteps((cfLink as any).sequenceId);
+        totalFollowupSteps += steps.length;
+      }
+      if (totalFollowupSteps === 0) continue;
 
       // Count how many executions exist vs how many should exist
       const executions = await storage.getFollowupExecutionsByCampaign(campaignId);
-      const totalExpected = step0Messages.length * followupSteps.length;
+      const totalExpected = step0Count * totalFollowupSteps;
       const totalDone = executions.filter((e: any) =>
         e.status === 'sent' || e.status === 'skipped' || e.status === 'failed'
       ).length;
@@ -503,7 +514,7 @@ export class FollowupEngine {
 
       if (totalDone >= totalExpected && totalPending === 0) {
         await storage.updateCampaign(campaignId, { status: 'completed' });
-        console.log(`[Followup] Campaign ${campaignId} (${campaign.name}): All ${totalDone} follow-up executions complete. Marking campaign as completed.`);
+        console.log(`[Followup] Campaign ${campaignId} (${campaign.name}): All ${totalDone}/${totalExpected} follow-up executions complete (${totalFollowupSteps} steps × ${step0Count} contacts). Marking campaign as completed.`);
       }
     }
   }
@@ -646,30 +657,32 @@ export class FollowupEngine {
       return;
     }
 
-    const campaignMessages = await storage.getCampaignMessages(campaignId, 50000, 0);
+    // PERFORMANCE FIX #4: Targeted queries instead of loading ALL 50k messages
+    // 1. Replied contacts — lightweight: only contactId, no message content
+    const repliedRows = await storage.rawAll(
+      'SELECT DISTINCT "contactId" FROM messages WHERE "campaignId" = ? AND "repliedAt" IS NOT NULL',
+      campaignId
+    );
+    const contactReplied = new Set<string>(repliedRows.map((r: any) => r.contactId));
+
+    // 2. Bounced contacts — lightweight: only contactId (P6 fix: skip follow-ups for bounced)
+    const bouncedRows = await storage.rawAll(
+      'SELECT DISTINCT "contactId" FROM messages WHERE "campaignId" = ? AND "bouncedAt" IS NOT NULL',
+      campaignId
+    );
+    const contactBounced = new Set<string>(bouncedRows.map((r: any) => r.contactId));
+
+    // 3. Step-0 sent messages — only the rows we actually need to evaluate triggers
+    const originalMessages = await storage.rawAll(
+      'SELECT * FROM messages WHERE "campaignId" = ? AND ("stepNumber" = 0 OR "stepNumber" IS NULL) AND status = ? AND "sentAt" IS NOT NULL',
+      campaignId, 'sent'
+    );
+
     const followupSteps = await storage.getFollowupSteps(sequenceId);
-    
+
     // PERFORMANCE: Batch-load all existing executions for this campaign to avoid N+1 queries
     const existingExecutions = await storage.getFollowupExecutionsByCampaign(campaignId);
     const executionSet = new Set(existingExecutions.map((e: any) => `${e.campaignMessageId}_${e.stepId}`));
-    
-    // Build a lookup: contactId -> has any replied message
-    const contactReplied = new Set<string>();
-    // Build a lookup: contactId -> has any bounced message (P6 fix: skip follow-ups for bounced contacts)
-    const contactBounced = new Set<string>();
-    for (const m of campaignMessages) {
-      if ((m as any).repliedAt && (m as any).contactId) {
-        contactReplied.add((m as any).contactId);
-      }
-      if ((m as any).bouncedAt && (m as any).contactId) {
-        contactBounced.add((m as any).contactId);
-      }
-    }
-    
-    // Only evaluate original (step 0) messages that have actually been SENT
-    // CRITICAL: Must check status='sent' AND sentAt exists — without this, queued messages
-    // with null sentAt cause new Date(null)=epoch, bypassing the delay check entirely
-    const originalMessages = campaignMessages.filter((m: any) => (m.stepNumber || 0) === 0 && m.status === 'sent' && m.sentAt);
     
     for (const message of originalMessages) {
       const msg = message as any;
@@ -937,20 +950,12 @@ export class FollowupEngine {
         }
       }
 
-      // Batch-load all campaign messages ONCE for this campaign
-      let campaignMsgs: any[] = [];
-      if (campaignId) {
-        campaignMsgs = await storage.getCampaignMessages(campaignId, 50000, 0);
-      }
-      
-      // Build contactId -> hasReplied lookup
-      const contactReplied = new Set<string>();
-      for (const m of campaignMsgs) {
-        if ((m as any).repliedAt && (m as any).contactId) {
-          contactReplied.add((m as any).contactId);
-        }
-      }
-      
+      // PERFORMANCE FIX #4: Targeted query for replied contacts instead of loading ALL messages
+      const repliedRows = campaignId
+        ? await storage.rawAll('SELECT DISTINCT "contactId" FROM messages WHERE "campaignId" = ? AND "repliedAt" IS NOT NULL', campaignId)
+        : [];
+      const contactReplied = new Set<string>(repliedRows.map((r: any) => r.contactId));
+
       for (const execution of executions) {
         // CRITICAL FIX: Before executing, re-check if contact has replied
         if (execution.contactId && campaignId) {
@@ -966,7 +971,7 @@ export class FollowupEngine {
             }
           }
         }
-        await this.executeFollowup(execution.id, campaignMsgs);
+        await this.executeFollowup(execution.id);
       }
     }
   }
@@ -974,9 +979,10 @@ export class FollowupEngine {
   /**
    * Execute a specific follow-up email
    * @param executionId - the follow-up execution record ID
-   * @param preloadedCampaignMsgs - optional pre-loaded campaign messages to avoid N+1 queries
    */
-  private async executeFollowup(executionId: string, preloadedCampaignMsgs?: any[]): Promise<void> {
+  private async executeFollowup(executionId: string): Promise<void> {
+    let dailyLimitReserved = false;
+    let campaignEmailAccountId: string | null = null;
     try {
       // P10 FIX: Atomic claim — prevents double-send when overlapping cycles both see "pending"
       // UPDATE returns the row only if it was still pending; null means another cycle already claimed it
@@ -1017,8 +1023,32 @@ export class FollowupEngine {
       // P2 FIX: Don't send follow-ups for paused/cancelled campaigns
       if (campaign.status === 'paused' || campaign.status === 'cancelled' || campaign.status === 'draft') {
         // Don't mark as skipped — leave as pending so they resume when campaign is un-paused
+        // Reset back to pending so it's picked up next cycle
+        await storage.rawRun('UPDATE followup_executions SET status = ? WHERE id = ?', 'pending', executionId);
         console.log(`[Followup] Deferring execution ${executionId} — campaign ${campaign.id} is ${campaign.status}`);
         return;
+      }
+
+      // P4 FIX: Atomic daily limit check + reserve
+      // Atomically increments dailySent ONLY if under limit — prevents race between campaign engine + follow-up engine
+      // If send fails later, we decrement to release the reserved slot
+      campaignEmailAccountId = campaign.emailAccountId || null;
+      if (campaignEmailAccountId) {
+        try {
+          const reserved = await storage.rawGet(
+            'UPDATE email_accounts SET "dailySent" = "dailySent" + 1 WHERE id = ? AND "dailySent" < "dailyLimit" RETURNING id, "dailySent", "dailyLimit"',
+            campaign.emailAccountId
+          );
+          if (!reserved) {
+            // Limit reached — defer, don't skip. Will retry next cycle after midnight reset.
+            await storage.rawRun('UPDATE followup_executions SET status = ? WHERE id = ?', 'pending', executionId);
+            // Read current values for logging
+            const acct = await storage.getEmailAccount(campaign.emailAccountId);
+            console.log(`[Followup] Deferring execution ${executionId} — account ${(acct as any)?.email} daily limit reached (${(acct as any)?.dailySent}/${(acct as any)?.dailyLimit})`);
+            return;
+          }
+          dailyLimitReserved = true;
+        } catch (e) { /* non-critical — proceed if check fails */ }
       }
 
       // Suppression list check — skip if contact email is blocked (bounced/unsubscribed)
@@ -1035,17 +1065,13 @@ export class FollowupEngine {
       } catch (e) { /* non-critical */ }
 
       // CRITICAL FIX: Before sending, check if the contact has replied to ANY message in this campaign
-      // This catches replies that arrived between scheduling and execution
-      // Use preloaded campaign messages if available; otherwise load once
-      const allCampaignMsgs = preloadedCampaignMsgs && preloadedCampaignMsgs.length > 0
-        ? preloadedCampaignMsgs
-        : await storage.getCampaignMessages(campaign.id, 50000, 0);
-      const contactMsgs = allCampaignMsgs.filter((m: any) => m.contactId === contact.id);
-      const contactHasReplied = contactMsgs.some((m: any) => !!m.repliedAt);
-      
-      if (contactHasReplied && (step.trigger === 'no_reply' || step.trigger === 'if_no_reply' || step.trigger === 'no_matter_what' || step.trigger === 'time_delay')) {
-        // For no_reply triggers, always skip if any reply exists
-        if (step.trigger === 'no_reply' || step.trigger === 'if_no_reply') {
+      // PERFORMANCE FIX #4: Targeted query — only check this contact's reply status, not all 50k messages
+      if (step.trigger === 'no_reply' || step.trigger === 'if_no_reply') {
+        const replyCheck = await storage.rawGet(
+          'SELECT 1 FROM messages WHERE "campaignId" = ? AND "contactId" = ? AND "repliedAt" IS NOT NULL LIMIT 1',
+          campaign.id, contact.id
+        );
+        if (replyCheck) {
           await storage.updateFollowupExecution(executionId, {
             status: "skipped",
             errorMessage: "Contact already replied to campaign"
@@ -1061,8 +1087,11 @@ export class FollowupEngine {
       // might point to a step-1 message, so always look up the step-0 message.
       let originalMessage: any = campaignMessage;
       if ((campaignMessage as any).stepNumber !== 0 && (campaignMessage as any).stepNumber !== undefined) {
-        // Reuse already-loaded campaign messages for threading lookup
-        const step0Msg = allCampaignMsgs.find((m: any) => m.contactId === contact.id && (m.stepNumber || 0) === 0);
+        // Targeted query: find step-0 message for this specific contact (not all campaign messages)
+        const step0Msg = await storage.rawGet(
+          'SELECT * FROM messages WHERE "campaignId" = ? AND "contactId" = ? AND ("stepNumber" = 0 OR "stepNumber" IS NULL) LIMIT 1',
+          campaign.id, contact.id
+        );
         if (step0Msg) {
           originalMessage = step0Msg;
           console.log(`[Followup] Found step-0 original message ${step0Msg.id} with providerMessageId=${step0Msg.providerMessageId}`);
@@ -1256,6 +1285,21 @@ export class FollowupEngine {
       }
       console.log(`[Followup] Threading: provider=${accountProvider}, subject="${personalizedSubject}", threadLinked=${threadLinked}, threadId=${gmailThreadId || 'none'}, inReplyTo=${originalMessageId || 'none'}`);
 
+      // IDEMPOTENCY GUARD: If a message record already exists for this contact+campaign+step,
+      // the email was already sent (crash between send and status update). Skip to prevent duplicate.
+      const alreadySent = await storage.rawGet(
+        'SELECT 1 FROM messages WHERE "campaignId" = ? AND "contactId" = ? AND "stepNumber" = ? AND status = ? LIMIT 1',
+        campaign.id, contact.id, step.stepNumber || 1, 'sent'
+      );
+      if (alreadySent) {
+        await storage.updateFollowupExecution(executionId, {
+          status: "sent",
+          sentAt: new Date().toISOString()
+        });
+        console.log(`[Followup] Idempotency: step ${step.stepNumber} for ${contact.email} already sent (crash recovery). Marking execution as sent.`);
+        return;
+      }
+
       const emailResult = await this.emailService.sendEmail(campaign.emailAccountId, {
         to: contact.email,
         subject: personalizedSubject,
@@ -1308,16 +1352,37 @@ export class FollowupEngine {
           status: "failed",
           errorMessage: emailResult.error || "Unknown email sending error"
         });
-        
+
+        // Release the reserved daily limit slot since the email didn't actually send
+        if (dailyLimitReserved && campaignEmailAccountId) {
+          try {
+            await storage.rawRun(
+              'UPDATE email_accounts SET "dailySent" = GREATEST("dailySent" - 1, 0) WHERE id = ?',
+              campaignEmailAccountId
+            );
+          } catch (e) { /* non-critical */ }
+        }
+
         console.error(`[Followup] Failed to send follow-up to ${contact.email}:`, emailResult.error);
       }
       
     } catch (error) {
       console.error("Error executing follow-up:", error);
-      await storage.updateFollowupExecution(executionId, {
-        status: "failed",
-        errorMessage: error instanceof Error ? error.message : "Unknown error"
-      });
+      try {
+        await storage.updateFollowupExecution(executionId, {
+          status: "failed",
+          errorMessage: error instanceof Error ? error.message : "Unknown error"
+        });
+      } catch (e) { /* best effort */ }
+      // Release reserved daily limit slot on exception
+      if (dailyLimitReserved && campaignEmailAccountId) {
+        try {
+          await storage.rawRun(
+            'UPDATE email_accounts SET "dailySent" = GREATEST("dailySent" - 1, 0) WHERE id = ?',
+            campaignEmailAccountId
+          );
+        } catch (e) { /* non-critical */ }
+      }
     }
   }
 
