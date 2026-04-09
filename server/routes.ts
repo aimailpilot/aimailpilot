@@ -9058,11 +9058,11 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         // Emails sent — count messages for contacts assigned to this user
         let emailsSent = 0;
         try {
-          emailsSent = (await storage.rawGet(`
+          emailsSent = parseInt((await storage.rawGet(`
             SELECT COUNT(*) as cnt FROM messages m
             JOIN contacts c ON c.id = m."contactId"
             WHERE c."organizationId" = ? AND c."assignedTo" = ? AND m.status = 'sent' AND m."sentAt" >= ? AND m."sentAt" < ?
-          `, orgId, userId, startDate, endDate) as any)?.cnt || 0;
+          `, orgId, userId, startDate, endDate) as any)?.cnt || 0);
         } catch { /* messages table schema mismatch — skip */ }
 
         // Activities by type
@@ -9074,7 +9074,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
             WHERE "organizationId" = ? AND "userId" = ? AND "createdAt" >= ? AND "createdAt" < ?
             GROUP BY type
           `, orgId, userId, startDate, endDate) as any[];
-          for (const a of activities) activityMap[a.type] = a.cnt;
+          for (const a of activities) activityMap[a.type] = parseInt(a.cnt || 0);
           callsMade = activityMap['call'] || 0;
           meetingsDone = activityMap['meeting'] || 0;
           proposalsSent = activityMap['proposal'] || 0;
@@ -9099,30 +9099,32 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           `, orgId, userId) as any[];
         }
         const pipeMap: Record<string, { count: number; value: number }> = {};
-        for (const p of pipelineStats) pipeMap[p.pipelineStage] = { count: p.cnt, value: p.totalValue || 0 };
+        for (const p of pipelineStats) pipeMap[p.pipelineStage] = { count: parseInt(p.cnt || 0), value: Number(p.totalValue || 0) };
 
         // Deals won/lost in this period
         let dealsWon = { cnt: 0, totalValue: 0 };
         let dealsLost = 0;
         try {
-          dealsWon = (await storage.rawGet(`
+          const dwRaw = (await storage.rawGet(`
             SELECT COUNT(*) as cnt, SUM(COALESCE("dealValue", 0)) as totalValue
             FROM contacts WHERE "organizationId" = ? AND "assignedTo" = ? AND "pipelineStage" = 'won' AND "dealClosedAt" >= ? AND "dealClosedAt" < ?
-          `, orgId, userId, startDate, endDate) as any) || { cnt: 0, totalValue: 0 };
-          dealsLost = (await storage.rawGet(`
+          `, orgId, userId, startDate, endDate) as any);
+          dealsWon = { cnt: parseInt(dwRaw?.cnt || 0), totalValue: Number(dwRaw?.totalValue || 0) };
+          dealsLost = parseInt((await storage.rawGet(`
             SELECT COUNT(*) as cnt FROM contacts
             WHERE "organizationId" = ? AND "assignedTo" = ? AND "pipelineStage" = 'lost' AND "dealClosedAt" >= ? AND "dealClosedAt" < ?
-          `, orgId, userId, startDate, endDate) as any)?.cnt || 0;
+          `, orgId, userId, startDate, endDate) as any)?.cnt || 0);
         } catch {
           // dealClosedAt column may not exist — fall back to counting all won/lost
-          dealsWon = (await storage.rawGet(`
+          const dwRaw = (await storage.rawGet(`
             SELECT COUNT(*) as cnt, 0 as totalValue
             FROM contacts WHERE "organizationId" = ? AND "assignedTo" = ? AND "pipelineStage" = 'won'
-          `, orgId, userId) as any) || { cnt: 0, totalValue: 0 };
-          dealsLost = (await storage.rawGet(`
+          `, orgId, userId) as any);
+          dealsWon = { cnt: parseInt(dwRaw?.cnt || 0), totalValue: 0 };
+          dealsLost = parseInt((await storage.rawGet(`
             SELECT COUNT(*) as cnt FROM contacts
             WHERE "organizationId" = ? AND "assignedTo" = ? AND "pipelineStage" = 'lost'
-          `, orgId, userId) as any)?.cnt || 0;
+          `, orgId, userId) as any)?.cnt || 0);
         }
 
         // Hot leads (interested + meeting_scheduled + meeting_done)
@@ -9172,23 +9174,23 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       // Overdue actions (team-wide) — safe if nextActionDate column missing
       let overdueActions = 0;
       try {
-        overdueActions = (await storage.rawGet(`
+        overdueActions = parseInt((await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM contacts
           WHERE "organizationId" = ? AND "nextActionDate" < ? AND "nextActionDate" IS NOT NULL
           AND "pipelineStage" NOT IN ('won', 'lost')
-        `, orgId, now.toISOString().split('T')[0]) as any)?.cnt || 0;
+        `, orgId, now.toISOString().split('T')[0]) as any)?.cnt || 0);
       } catch { /* column may not exist */ }
 
       // Unactioned replies — safe if repliedAt column missing
       let unactionedReplies = 0;
       try {
-        unactionedReplies = (await storage.rawGet(`
+        unactionedReplies = parseInt((await storage.rawGet(`
           SELECT COUNT(DISTINCT m."contactId") as cnt
           FROM messages m
           LEFT JOIN contact_activities ca ON ca."contactId" = m."contactId" AND ca."createdAt" > m."repliedAt"
           WHERE m."campaignId" IN (SELECT id FROM campaigns WHERE "organizationId" = ?)
           AND m."repliedAt" IS NOT NULL AND m."repliedAt" >= ? AND m."repliedAt" < ? AND ca.id IS NULL
-        `, orgId, startDate, endDate) as any)?.cnt || 0;
+        `, orgId, startDate, endDate) as any)?.cnt || 0);
       } catch { /* column may not exist */ }
 
       // Get org createdAt for month picker
@@ -9235,11 +9237,11 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       // ── My Stats ──
       let emailsSent = 0;
       try {
-        emailsSent = (await storage.rawGet(`
+        emailsSent = parseInt((await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM messages m
           JOIN contacts c ON c.id = m."contactId"
           WHERE c."organizationId" = ? AND c."assignedTo" = ? AND m.status = 'sent' AND m."sentAt" >= ? AND m."sentAt" < ?
-        `, orgId, userId, startDate, endDate) as any)?.cnt || 0;
+        `, orgId, userId, startDate, endDate) as any)?.cnt || 0);
       } catch { }
 
       let callsMade = 0, meetingsDone = 0, proposalsSent = 0;
@@ -9250,7 +9252,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           WHERE "organizationId" = ? AND "userId" = ? AND "createdAt" >= ? AND "createdAt" < ?
           GROUP BY type
         `, orgId, userId, startDate, endDate) as any[];
-        for (const a of activities) activityMap[a.type] = a.cnt;
+        for (const a of activities) activityMap[a.type] = parseInt(a.cnt || 0);
         callsMade = activityMap['call'] || 0;
         meetingsDone = activityMap['meeting'] || 0;
         proposalsSent = activityMap['proposal'] || 0;
@@ -9259,23 +9261,25 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       let dealsWon = { cnt: 0, totalValue: 0 };
       let dealsLost = 0;
       try {
-        dealsWon = (await storage.rawGet(`
+        const dwRaw = (await storage.rawGet(`
           SELECT COUNT(*) as cnt, SUM(COALESCE("dealValue", 0)) as totalValue
           FROM contacts WHERE "organizationId" = ? AND "assignedTo" = ? AND "pipelineStage" = 'won' AND "dealClosedAt" >= ? AND "dealClosedAt" < ?
-        `, orgId, userId, startDate, endDate) as any) || { cnt: 0, totalValue: 0 };
-        dealsLost = (await storage.rawGet(`
+        `, orgId, userId, startDate, endDate) as any);
+        dealsWon = { cnt: parseInt(dwRaw?.cnt || 0), totalValue: Number(dwRaw?.totalValue || 0) };
+        dealsLost = parseInt((await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM contacts
           WHERE "organizationId" = ? AND "assignedTo" = ? AND "pipelineStage" = 'lost' AND "dealClosedAt" >= ? AND "dealClosedAt" < ?
-        `, orgId, userId, startDate, endDate) as any)?.cnt || 0;
+        `, orgId, userId, startDate, endDate) as any)?.cnt || 0);
       } catch {
-        dealsWon = (await storage.rawGet(`
+        const dwRaw = (await storage.rawGet(`
           SELECT COUNT(*) as cnt, 0 as totalValue
           FROM contacts WHERE "organizationId" = ? AND "assignedTo" = ? AND "pipelineStage" = 'won'
-        `, orgId, userId) as any) || { cnt: 0, totalValue: 0 };
-        dealsLost = (await storage.rawGet(`
+        `, orgId, userId) as any);
+        dealsWon = { cnt: parseInt(dwRaw?.cnt || 0), totalValue: 0 };
+        dealsLost = parseInt((await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM contacts
           WHERE "organizationId" = ? AND "assignedTo" = ? AND "pipelineStage" = 'lost'
-        `, orgId, userId) as any)?.cnt || 0;
+        `, orgId, userId) as any)?.cnt || 0);
       }
 
       // Pipeline funnel
@@ -9298,7 +9302,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         } catch { }
       }
       const pipeMap: Record<string, { count: number; value: number }> = {};
-      for (const p of pipeline) pipeMap[p.pipelineStage] = { count: p.cnt, value: p.totalValue || 0 };
+      for (const p of pipeline) pipeMap[p.pipelineStage] = { count: parseInt(p.cnt || 0), value: Number(p.totalValue || 0) };
 
       const hotLeads = (pipeMap['interested']?.count || 0) + (pipeMap['meeting_scheduled']?.count || 0) + (pipeMap['meeting_done']?.count || 0);
       const revenue = dealsWon.totalValue || 0;
@@ -9317,64 +9321,64 @@ Generate an appropriate reply to the LATEST email above, considering the full co
 
       // 1. Overdue follow-ups
       try {
-        const overdue = (await storage.rawGet(`
+        const overdue = parseInt((await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM contacts
           WHERE "organizationId" = ? AND "assignedTo" = ? AND "nextActionDate" < ? AND "nextActionDate" IS NOT NULL
           AND "pipelineStage" NOT IN ('won', 'lost')
-        `, orgId, userId, todayStr) as any)?.cnt || 0;
+        `, orgId, userId, todayStr) as any)?.cnt || 0);
         if (overdue > 0) nudges.push({ type: 'overdue', priority: 'high', title: `${overdue} Overdue Follow-ups`, message: 'Contacts with past-due follow-up dates need attention', count: overdue, actionType: 'contacts' });
       } catch { }
 
       // 2. Emails needing reply (received in inbox, status = unread/read but not replied, assigned to this user or from user's email accounts)
       let emailsNeedingReply = 0;
       try {
-        emailsNeedingReply = (await storage.rawGet(`
+        emailsNeedingReply = parseInt((await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM unified_inbox ui
           INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
           WHERE ui."organizationId" = ? AND ea."userId" = ?
           AND ui.status IN ('unread', 'read') AND ui."repliedAt" IS NULL
           AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
-        `, orgId, userId) as any)?.cnt || 0;
+        `, orgId, userId) as any)?.cnt || 0);
         if (emailsNeedingReply > 0) nudges.push({ type: 'needs_reply', priority: 'high', title: `${emailsNeedingReply} Emails Need Reply`, message: 'Received emails that haven\'t been replied to yet', count: emailsNeedingReply, actionType: 'emails' });
       } catch { }
 
       // 3. Unactioned replies (contacts replied to campaign but no activity logged after)
       try {
-        const unactioned = (await storage.rawGet(`
+        const unactioned = parseInt((await storage.rawGet(`
           SELECT COUNT(DISTINCT m."contactId") as cnt
           FROM messages m
           JOIN contacts c ON c.id = m."contactId"
           LEFT JOIN contact_activities ca ON ca."contactId" = m."contactId" AND ca."createdAt" > m."repliedAt"
           WHERE c."organizationId" = ? AND c."assignedTo" = ?
           AND m."repliedAt" IS NOT NULL AND m."repliedAt" >= ? AND m."repliedAt" < ? AND ca.id IS NULL
-        `, orgId, userId, startDate, endDate) as any)?.cnt || 0;
+        `, orgId, userId, startDate, endDate) as any)?.cnt || 0);
         if (unactioned > 0) nudges.push({ type: 'unactioned_reply', priority: 'high', title: `${unactioned} Unactioned Replies`, message: 'Contacts replied to campaigns but no follow-up activity logged', count: unactioned, actionType: 'contacts' });
       } catch { }
 
       // 4. Stale hot leads (interested/meeting stage, no activity in 3+ days)
       try {
         const threeDaysAgo = new Date(now); threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
-        const stale = (await storage.rawGet(`
+        const stale = parseInt((await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM contacts c
           WHERE c."organizationId" = ? AND c."assignedTo" = ?
           AND c."pipelineStage" IN ('interested', 'meeting_scheduled', 'meeting_done')
           AND NOT EXISTS (
             SELECT 1 FROM contact_activities ca WHERE ca."contactId" = c.id AND ca."createdAt" >= ?
           )
-        `, orgId, userId, threeDaysAgo.toISOString().split('T')[0]) as any)?.cnt || 0;
+        `, orgId, userId, threeDaysAgo.toISOString().split('T')[0]) as any)?.cnt || 0);
         if (stale > 0) nudges.push({ type: 'stale_leads', priority: 'medium', title: `${stale} Stale Hot Leads`, message: 'Hot leads with no activity in 3+ days — reach out before they go cold', count: stale, actionType: 'contacts' });
       } catch { }
 
       // 5. Proposals pending (proposal_sent for 3+ days with no update)
       try {
         const threeDaysAgo = new Date(now); threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
-        const pendingProposals = (await storage.rawGet(`
+        const pendingProposals = parseInt((await storage.rawGet(`
           SELECT COUNT(*) as cnt FROM contacts c
           WHERE c."organizationId" = ? AND c."assignedTo" = ? AND c."pipelineStage" = 'proposal_sent'
           AND NOT EXISTS (
             SELECT 1 FROM contact_activities ca WHERE ca."contactId" = c.id AND ca."createdAt" >= ?
           )
-        `, orgId, userId, threeDaysAgo.toISOString().split('T')[0]) as any)?.cnt || 0;
+        `, orgId, userId, threeDaysAgo.toISOString().split('T')[0]) as any)?.cnt || 0);
         if (pendingProposals > 0) nudges.push({ type: 'pending_proposals', priority: 'medium', title: `${pendingProposals} Proposals Awaiting Response`, message: 'Proposals sent 3+ days ago with no follow-up — time to check in', count: pendingProposals, actionType: 'contacts' });
       } catch { }
 
