@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > **IMPORTANT**: Before making any changes, read `status.md`. It lists features that are confirmed working in production and **must not be broken**. Do not modify code for those features unless explicitly asked to fix a bug in them.
 
+> **Before searching the codebase**, read `FILE-INDEX.md` for the file-to-feature map. Go directly to the listed files instead of scanning.
+
 > **DO NOT TOUCH — PROTECTED CODE (violating these rules has caused production outages)**
 > - No changes to tracking code (open/click/reply) in routes.ts, campaign-engine.ts, followup-engine.ts
 > - No changes to Gmail auth, Outlook auth, or OAuth routes
