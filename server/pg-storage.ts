@@ -1078,7 +1078,17 @@ export class PostgresStorage {
         MAX("repliedAt") as "lastRepliedAt"
       FROM messages WHERE "contactId" = $1
     `, [contactId]);
-    return stats || { totalSent: 0, totalOpened: 0, totalClicked: 0, totalReplied: 0 };
+    if (!stats) return { totalSent: 0, totalOpened: 0, totalClicked: 0, totalReplied: 0 };
+    return {
+      totalSent: parseInt(stats.totalSent || 0),
+      totalOpened: parseInt(stats.totalOpened || 0),
+      totalClicked: parseInt(stats.totalClicked || 0),
+      totalReplied: parseInt(stats.totalReplied || 0),
+      lastSentAt: stats.lastSentAt,
+      lastOpenedAt: stats.lastOpenedAt,
+      lastClickedAt: stats.lastClickedAt,
+      lastRepliedAt: stats.lastRepliedAt,
+    };
   }
 
   async getContactReplyContent(contactId: string) {
