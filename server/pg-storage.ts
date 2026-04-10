@@ -2941,8 +2941,7 @@ export class PostgresStorage {
     bounceType?: string; leadStatus?: string; assignedTo?: string; isStarred?: boolean;
     search?: string; viewMode?: string;
   }, limit = 50, offset = 0) {
-    // Exclude large body/bodyHtml columns from list — fetched on detail open
-    let sql = 'SELECT id, "organizationId", "emailAccountId", "campaignId", "messageId", "contactId", "gmailMessageId", "gmailThreadId", "outlookMessageId", "outlookConversationId", "fromEmail", "fromName", "toEmail", subject, snippet, status, provider, "aiDraft", "repliedAt", "repliedBy", "replyContent", "receivedAt", "createdAt", "replyType", "bounceType", "threadId", "inReplyTo", "assignedTo", "leadStatus", "isStarred", "sentByUs", "isWarmup", "forwardedAt", "forwardedTo", "forwardedFrom", "forwardedBy" FROM unified_inbox WHERE "organizationId" = $1';
+    let sql = 'SELECT * FROM unified_inbox WHERE "organizationId" = $1';
     const params: any[] = [organizationId];
     let idx = 2;
 
