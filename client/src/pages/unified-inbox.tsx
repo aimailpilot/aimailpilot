@@ -182,8 +182,11 @@ export default function UnifiedInbox() {
     })();
   }, []);
 
-  const fetchMessages = useCallback(async () => {
-    setLoading(true);
+  // showLoading: only true on first load or explicit filter/page change — NOT on background refresh
+  const isFirstLoad = useRef(true);
+
+  const fetchMessages = useCallback(async (background = false) => {
+    if (!background) setLoading(true);
     try {
       const params = new URLSearchParams();
       if (statusFilter !== 'all') params.set('status', statusFilter);
@@ -210,7 +213,7 @@ export default function UnifiedInbox() {
       setTotal(data.total || 0);
       setUnreadCount(data.unread || 0);
       if (data.stats) setStats(data.stats);
-      
+
       // Track starred IDs from server
       const starred = new Set<string>();
       (data.messages || []).forEach((m: any) => { if (m.isStarred) starred.add(m.id); });
@@ -218,22 +221,24 @@ export default function UnifiedInbox() {
     } catch (err) {
       console.error('Inbox fetch error:', err);
     } finally {
-      setLoading(false);
+      if (!background) setLoading(false);
+      isFirstLoad.current = false;
     }
   }, [statusFilter, replyTypeFilter, searchQuery, page, viewMode, accountFilter, campaignFilter, memberFilter]);
 
-  useEffect(() => { fetchMessages(); }, [fetchMessages]);
+  // Initial load + filter/page changes show spinner
+  useEffect(() => { fetchMessages(false); }, [fetchMessages]);
 
-  // Auto-refresh every 2 minutes (reduced from 30s to avoid UI disruption)
+  // Background refresh every 5 minutes — no spinner, no UI disruption
   useEffect(() => {
-    const interval = setInterval(fetchMessages, 120000);
+    const interval = setInterval(() => fetchMessages(true), 300000);
     return () => clearInterval(interval);
   }, [fetchMessages]);
 
-  // Auto-sync every 3 min
+  // Auto-sync every 5 min (silently in background)
   useEffect(() => {
-    const initialTimeout = setTimeout(() => syncInbox(false), 5000);
-    const syncInterval = setInterval(() => { if (!syncing) syncInbox(false); }, 180000);
+    const initialTimeout = setTimeout(() => syncInbox(false), 8000);
+    const syncInterval = setInterval(() => { if (!syncing) syncInbox(false); }, 300000);
     return () => { clearTimeout(initialTimeout); clearInterval(syncInterval); };
   }, []);
 
