@@ -8093,12 +8093,18 @@ Respond with ONLY a JSON object in this format:
         }
       }
 
-      // Fetch messages + count + stats in parallel
-      const [messages, total, stats] = await Promise.all([
+      // Fetch messages + count + stats in parallel — each with individual error handling
+      const [messagesResult, totalResult, statsResult] = await Promise.allSettled([
         storage.getInboxMessagesEnhanced(req.user.organizationId, filters, parsedLimit, parsedOffset),
         storage.getInboxMessageCountEnhanced(req.user.organizationId, filters),
         storage.getInboxStats(req.user.organizationId),
       ]);
+      const messages = messagesResult.status === 'fulfilled' ? messagesResult.value : [];
+      const total = totalResult.status === 'fulfilled' ? totalResult.value : 0;
+      const stats = statsResult.status === 'fulfilled' ? statsResult.value : { unread: 0, total: 0, replied: 0, archived: 0, positive: 0, negative: 0, ooo: 0, autoReply: 0, bounced: 0, starred: 0, warmup: 0 };
+      if (messagesResult.status === 'rejected') console.error('[Inbox] Messages query failed:', messagesResult.reason?.message || messagesResult.reason);
+      if (totalResult.status === 'rejected') console.error('[Inbox] Count query failed:', totalResult.reason?.message || totalResult.reason);
+      if (statsResult.status === 'rejected') console.error('[Inbox] Stats query failed:', statsResult.reason?.message || statsResult.reason);
       const unread = stats.unread;
 
       // Batch-load all unique contacts, email accounts, and campaigns in parallel (eliminates N+1)
@@ -8139,6 +8145,7 @@ Respond with ONLY a JSON object in this format:
         };
       });
 
+      console.log(`[Inbox] org=${req.user.organizationId.substring(0,8)} messages=${enriched.length} total=${total} filters=${JSON.stringify({status: filters.status, emailAccountId: filters.emailAccountId ? 'set' : 'none'})} role=${role}`);
       res.json({ messages: enriched, total, unread, stats });
     } catch (error) {
       console.error('Enhanced inbox error:', error);

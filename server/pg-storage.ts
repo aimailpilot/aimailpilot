@@ -678,6 +678,8 @@ async function initializeSchema() {
       'CREATE INDEX IF NOT EXISTS idx_events_step ON tracking_events("campaignId", "stepNumber")',
       'CREATE INDEX IF NOT EXISTS idx_api_settings_org ON api_settings("organizationId", "settingKey")',
       'CREATE INDEX IF NOT EXISTS idx_inbox_org ON unified_inbox("organizationId", status)',
+      'CREATE INDEX IF NOT EXISTS idx_inbox_org_received ON unified_inbox("organizationId", "receivedAt" DESC)',  // for default inbox list (All tab)
+      'CREATE INDEX IF NOT EXISTS idx_inbox_org_warmup_received ON unified_inbox("organizationId", "isWarmup", "receivedAt" DESC)',  // for warmup-filtered inbox
       'CREATE INDEX IF NOT EXISTS idx_inbox_account ON unified_inbox("emailAccountId")',
       'CREATE INDEX IF NOT EXISTS idx_inbox_campaign ON unified_inbox("campaignId")',
       'CREATE INDEX IF NOT EXISTS idx_inbox_contact ON unified_inbox("contactId")',
@@ -2981,7 +2983,9 @@ export class PostgresStorage {
 
     sql += ` ORDER BY "receivedAt" DESC LIMIT $${idx++} OFFSET $${idx++}`;
     params.push(limit, offset);
-    return queryAll(sql, params);
+    const results = await queryAll(sql, params);
+    console.log(`[InboxQuery] org=${organizationId.substring(0,8)} rows=${results.length} status=${filters?.status || 'all'} sql_prefix=${sql.substring(0, 80)}`);
+    return results;
   }
 
   async getInboxMessageCountEnhanced(organizationId: string, filters: {
