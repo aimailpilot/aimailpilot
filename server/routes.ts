@@ -3203,20 +3203,17 @@ Which account should I use and why? If I need to split across accounts, provide 
             }
           } catch {}
         }
-        // List name: first try segmentId, then contactIds[0] to detect list
-        if (c.segmentId) {
-          try {
-            const seg = await storage.rawGet('SELECT name FROM contact_lists WHERE id = $1', c.segmentId) as any;
-            if (seg) c.listName = seg.name;
-          } catch {}
-        }
+        // List name: look up via contacts' listId (contactIds stores contact IDs, not list IDs)
         if (!c.listName && c.contactIds?.length) {
-          // contactIds may be list IDs or actual contact IDs — try looking up as a list
           try {
-            const firstId = Array.isArray(c.contactIds) ? c.contactIds[0] : JSON.parse(c.contactIds || '[]')[0];
-            if (firstId) {
-              const seg = await storage.rawGet('SELECT name FROM contact_lists WHERE id = $1', firstId) as any;
-              if (seg) c.listName = seg.name;
+            const ids = Array.isArray(c.contactIds) ? c.contactIds : JSON.parse(c.contactIds || '[]');
+            if (ids.length > 0) {
+              // Sample first contact to find its listId, then get list name
+              const contact = await storage.rawGet('SELECT "listId" FROM contacts WHERE id = $1', ids[0]) as any;
+              if (contact && contact.listId) {
+                const list = await storage.rawGet('SELECT name FROM contact_lists WHERE id = $1', contact.listId) as any;
+                if (list) c.listName = list.name;
+              }
             }
           } catch {}
         }
@@ -3715,11 +3712,11 @@ Which account should I use and why? If I need to split across accounts, provide 
           const sample = contactIds.slice(0, 50);
           const ph = sample.map(() => '?').join(',');
           const listRow = await storage.rawGet(`
-            SELECT c.listId, cl.name as listName, COUNT(*) as cnt
+            SELECT c."listId", cl.name as "listName", COUNT(*) as cnt
             FROM contacts c
-            LEFT JOIN contact_lists cl ON cl.id = c.listId
-            WHERE c.id IN (${ph}) AND c.listId IS NOT NULL AND c.listId != ''
-            GROUP BY c.listId
+            LEFT JOIN contact_lists cl ON cl.id = c."listId"
+            WHERE c.id IN (${ph}) AND c."listId" IS NOT NULL AND c."listId" != ''
+            GROUP BY c."listId", cl.name
             ORDER BY cnt DESC LIMIT 1
           `, ...sample) as any;
           if (listRow && listRow.listId) {

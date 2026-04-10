@@ -1,4 +1,4 @@
-# STATUS.md — DO NOT BREAK (54 features confirmed working)
+# STATUS.md — DO NOT BREAK (61 features confirmed working)
 
 > Do NOT modify code for these features unless explicitly asked to fix a bug in that specific feature.
 > When in doubt — **ask before changing**.
@@ -61,6 +61,13 @@
 | 52 | Follow-up Engine — Multi-Sequence Completion | `checkFollowupCompletion()` in `followup-engine.ts` — aggregates follow-up steps across ALL sequences for a campaign via `getCampaignFollowups()`. Was reading from one sequence only, causing premature completion. |
 | 53 | Follow-up Engine — Account Daily Limit (Atomic) | `executeFollowup()` in `followup-engine.ts` — atomic `UPDATE email_accounts SET dailySent=dailySent+1 WHERE dailySent < dailyLimit RETURNING id` reserves send slot before sending. Decrements on failure. Shares same counter with campaign engine. Do NOT revert to read-then-check pattern. |
 | 54 | Follow-up Engine — Idempotency Guard | `executeFollowup()` in `followup-engine.ts` — checks `SELECT 1 FROM messages WHERE campaignId+contactId+stepNumber+status='sent'` before sending. Prevents duplicate sends on crash recovery between send and status update. |
+| 55 | Inbox Forward — Full Body + Sender Email | Forward endpoint in `routes.ts` — sends full HTML-formatted body with inline border-left quote styling. Captures `forwardedFrom: msg.fromEmail` so original sender's email is visible in forward. |
+| 56 | Inbox Forward Status Indicator | `unified-inbox.tsx` — shows forwarded status card (From/To) after forwarding. `forwardedAt`, `forwardedTo`, `forwardedFrom`, `forwardedBy` columns in `unified_inbox` table (pg-storage.ts). |
+| 57 | Inbox Reply Tab (repliedAt filter) | `getInboxMessagesEnhanced`, `getInboxMessageCountEnhanced`, `getInboxStats` in `pg-storage.ts` — Reply tab filter is `(status = 'replied' OR "repliedAt" IS NOT NULL)`. Do NOT revert to `status = 'replied'` only. |
+| 58 | Bounce False-Positive Override | `POST /api/inbox/:id/unmark-bounce` route in `routes.ts` — manually unmarks bounced emails. `reply-classifier.ts` requires multiple indicators for non-system senders (system senders always bounce at 95% confidence). |
+| 59 | Unified Inbox Mobile Responsive | `unified-inbox.tsx` — fully responsive with Tailwind sm:/md: prefixes. Message list uses compact layout on mobile, desktop-only checkboxes hidden on mobile. |
+| 60 | Campaign Dashboard Mobile Responsive | `mailmeteor-dashboard.tsx` — KPI cards 2-col mobile → 4-col desktop. Campaign table switches to card view on mobile (md: breakpoint). Desktop table preserved with full columns. |
+| 61 | Campaign List — Sender + List Name | `GET /api/campaigns` in `routes.ts` enriches each campaign with `senderEmail`/`senderName` (from email_accounts), `creatorName`/`creatorEmail` (from users), `listName` (from contact_lists via segmentId or contactIds). Desktop table shows "Sent By" avatar column and "List" badge column. |
 
 ## Golden Rules (NEVER violate)
 
@@ -76,3 +83,7 @@
 - **PostgreSQL returns `COUNT(*)` and `SUM()` as bigint strings** — always wrap with `parseInt()` / `Number()` or JS will string-concatenate instead of add
 - `email_accounts` uses `"isActive" = 1` column (NOT `status = 'active'` — that column does not exist)
 - `fromEmail` in `unified_inbox` stores `"Name <email>"` format — extract email before comparing
+- **Inbox Reply tab** filter must be `(status = 'replied' OR "repliedAt" IS NOT NULL)` in all 3 locations in `pg-storage.ts` — `status = 'replied'` alone shows empty Reply tab
+- **Forward endpoint** must set `forwardedFrom: msg.fromEmail` — required so original sender email shows in UI
+- **Bounce classifier** (`reply-classifier.ts`) non-system senders require 3+ indicators to classify as bounce — do NOT lower threshold (legitimate replies were being misclassified)
+- **Campaign enrichment** in `GET /api/campaigns` — `Promise.all` async map with try/catch — do NOT remove (powers "Sent By" and "List" columns)

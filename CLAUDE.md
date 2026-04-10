@@ -34,6 +34,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > - **NEVER** clear contacts/data on API error in the frontend (e.g., `setContacts([])` on fetch failure) — this causes "No contacts yet" display. Keep stale data visible on error; it's better UX than empty state.
 > - **NEVER** modify the return value of `sendViaGmailAPI` — it must return `{ success, messageId, threadId }` for threading to work
 > - When adding new SQL columns, always use `ALTER TABLE ADD COLUMN` with try/catch and update ALL relevant SQL statements (INSERT, UPDATE, SELECT) that touch that table
+> - No changes to Reply tab filter in `pg-storage.ts` (`getInboxMessagesEnhanced`, `getInboxMessageCountEnhanced`, `getInboxStats`) — must be `(status = 'replied' OR "repliedAt" IS NOT NULL)`. Reverting to `status = 'replied'` alone causes empty Reply tab.
+> - No changes to `forwardedFrom` capture in forward endpoint — must set `forwardedFrom: msg.fromEmail` when marking message as forwarded
+> - No changes to bounce classifier thresholds in `reply-classifier.ts` — non-system senders require 3+ indicators. Lowering threshold causes legitimate replies to be misclassified as bounces.
+> - No changes to campaign enrichment `Promise.all` block in `GET /api/campaigns` — powers "Sent By" and "List" columns in campaign dashboard
 
 > **CRITICAL — DATABASE PROTECTION (read this before writing ANY server code)**
 > The production database has been accidentally deleted **4 times**. The following rules are NON-NEGOTIABLE:
