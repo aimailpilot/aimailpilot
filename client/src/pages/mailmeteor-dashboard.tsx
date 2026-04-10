@@ -833,32 +833,32 @@ export default function MailMeteorDashboard() {
 
           {/* Campaigns List */}
           {viewMode === 'dashboard' && currentView === 'campaigns' && (
-            <div className="p-6 space-y-6">
-              {/* KPI Cards */}
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="p-2 sm:p-4 md:p-6 space-y-4 sm:space-y-5 md:space-y-6">
+              {/* KPI Cards - Mobile responsive */}
+              <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 sm:gap-3 md:gap-4">
                 {kpiCards.map((kpi) => (
                   <Card key={kpi.label} className="border-gray-200/60 shadow-sm hover:shadow-md transition-shadow">
-                    <CardContent className="p-4">
-                      <div className="flex items-center justify-between mb-3">
-                        <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">{kpi.label}</span>
-                        <div className={`p-2 rounded-xl ${kpi.lightBg}`}>
-                          <kpi.icon className={`h-4 w-4 ${kpi.lightText}`} />
+                    <CardContent className="p-2.5 sm:p-3 md:p-4">
+                      <div className="flex items-center justify-between mb-2 sm:mb-3">
+                        <span className="text-[9px] sm:text-xs font-medium text-gray-400 uppercase tracking-wide line-clamp-1">{kpi.label}</span>
+                        <div className={`p-1.5 sm:p-2 rounded-lg sm:rounded-xl ${kpi.lightBg} flex-shrink-0`}>
+                          <kpi.icon className={`h-3 sm:h-4 w-3 sm:w-4 ${kpi.lightText}`} />
                         </div>
                       </div>
-                      <div className="text-2xl font-bold text-gray-900">{kpi.value}</div>
+                      <div className="text-lg sm:text-2xl font-bold text-gray-900">{kpi.value}</div>
                     </CardContent>
                   </Card>
                 ))}
               </div>
 
-              {/* Filter Tabs + New button */}
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1 bg-gray-100/80 rounded-lg p-0.5">
+              {/* Filter Tabs + New button - Mobile responsive */}
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2 sm:gap-3">
+                <div className="flex items-center gap-0.5 sm:gap-1 bg-gray-100/80 rounded-lg p-0.5 overflow-x-auto">
                   {filters.map((filter) => (
                     <button
                       key={filter}
                       onClick={() => { setActiveFilter(filter); setCampaignPage(0); }}
-                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
+                      className={`px-2 sm:px-3 py-1 sm:py-1.5 text-[11px] sm:text-xs font-medium rounded-md transition-all whitespace-nowrap flex-shrink-0 ${
                         activeFilter === filter
                           ? 'bg-white text-gray-900 shadow-sm'
                           : 'text-gray-500 hover:text-gray-700'
@@ -868,50 +868,50 @@ export default function MailMeteorDashboard() {
                     </button>
                   ))}
                 </div>
-                <Button size="sm" className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 shadow-sm" onClick={() => setViewMode('campaign')}>
-                  <Plus className="h-3.5 w-3.5 mr-1.5" /> New Campaign
+                <Button size="sm" className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 shadow-sm h-8 sm:h-9 text-xs sm:text-sm gap-1 sm:gap-1.5 flex-shrink-0" onClick={() => setViewMode('campaign')}>
+                  <Plus className="h-3 sm:h-3.5 w-3 sm:w-3.5" /> <span className="hidden sm:inline">New Campaign</span><span className="sm:hidden">New</span>
                 </Button>
               </div>
 
               {/* Campaigns Table */}
               {isLoading ? (
-                <div className="flex items-center justify-center py-16">
+                <div className="flex items-center justify-center py-12 sm:py-16">
                   <div className="flex flex-col items-center gap-3">
                     <div className="w-8 h-8 border-3 border-blue-600 border-t-transparent rounded-full animate-spin" />
-                    <span className="text-sm text-gray-400">Loading campaigns...</span>
+                    <span className="text-xs sm:text-sm text-gray-400">Loading campaigns...</span>
                   </div>
                 </div>
               ) : filteredCampaigns.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-20">
-                  <div className="bg-gray-100 w-16 h-16 rounded-2xl flex items-center justify-center mb-4">
-                    <Target className="h-8 w-8 text-gray-300" />
+                <div className="flex flex-col items-center justify-center py-12 sm:py-20">
+                  <div className="bg-gray-100 w-12 sm:w-16 h-12 sm:h-16 rounded-2xl flex items-center justify-center mb-3 sm:mb-4">
+                    <Target className="h-6 sm:h-8 w-6 sm:w-8 text-gray-300" />
                   </div>
-                  <h3 className="text-base font-semibold text-gray-900 mb-1">No campaigns yet</h3>
-                  <p className="text-sm text-gray-400 mb-6">Create your first email campaign to get started</p>
-                  <Button onClick={() => setViewMode('campaign')} className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700">
-                    <Plus className="h-4 w-4 mr-2" /> Create Campaign
+                  <h3 className="text-sm sm:text-base font-semibold text-gray-900 mb-1">No campaigns yet</h3>
+                  <p className="text-xs sm:text-sm text-gray-400 mb-4 sm:mb-6 text-center px-4">Create your first email campaign to get started</p>
+                  <Button onClick={() => setViewMode('campaign')} className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-xs sm:text-sm h-8 sm:h-9 gap-1 sm:gap-2">
+                    <Plus className="h-3 sm:h-4 w-3 sm:w-4" /> Create Campaign
                   </Button>
                 </div>
               ) : (
-                <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden">
-                  <div className="grid grid-cols-[2fr_80px_60px_65px_65px_65px_65px_80px_44px] gap-2 px-5 py-3 border-b border-gray-100 bg-gray-50/50 text-[11px] font-semibold uppercase tracking-wider text-gray-400">
-                    <div>Campaign</div>
-                    <div>Status</div>
-                    <div className="text-right">Sent</div>
-                    <div className="text-right">Opens</div>
-                    <div className="text-right">Clicks</div>
-                    <div className="text-right">Replies</div>
-                    <div className="text-right">Bounced</div>
-                    <div className="text-right">Date</div>
-                    <div></div>
-                  </div>
+                <>
+                  {/* Desktop Table View */}
+                  <div className="hidden md:block bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden">
+                    <div className="grid grid-cols-[2fr_80px_60px_65px_65px_65px_65px_80px_44px] gap-2 px-4 md:px-5 py-3 border-b border-gray-100 bg-gray-50/50 text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+                      <div>Campaign</div>
+                      <div>Status</div>
+                      <div className="text-right">Sent</div>
+                      <div className="text-right">Opens</div>
+                      <div className="text-right">Clicks</div>
+                      <div className="text-right">Replies</div>
+                      <div className="text-right">Bounced</div>
+                      <div className="text-right">Date</div>
+                      <div></div>
+                    </div>
 
-                  {filteredCampaigns.map((campaign: Campaign) => {
-                    const openRate = campaign.sentCount ? ((campaign.openedCount || 0) / campaign.sentCount) * 100 : 0;
-                    return (
+                    {filteredCampaigns.map((campaign: Campaign) => (
                       <div
                         key={campaign.id}
-                        className="grid grid-cols-[2fr_80px_60px_65px_65px_65px_65px_80px_44px] gap-2 px-5 py-3.5 border-b border-gray-50 hover:bg-blue-50/30 items-center transition-colors group cursor-pointer"
+                        className="grid grid-cols-[2fr_80px_60px_65px_65px_65px_65px_80px_44px] gap-2 px-4 md:px-5 py-3 sm:py-3.5 border-b border-gray-50 hover:bg-blue-50/30 items-center transition-colors group cursor-pointer"
                         onClick={() => { setSelectedCampaignId(campaign.id); setCurrentView('campaign-detail'); }}
                       >
                         <div className="min-w-0">
@@ -920,22 +920,22 @@ export default function MailMeteorDashboard() {
                         </div>
                         <div>{getStatusBadge(campaign.status)}</div>
                         <div className="text-right">
-                          <span className="text-sm font-medium text-gray-700">{(campaign.sentCount || 0).toLocaleString()}</span>
+                          <span className="text-xs sm:text-sm font-medium text-gray-700">{(campaign.sentCount || 0).toLocaleString()}</span>
                         </div>
                         <div className="text-right">
-                          <span className="text-sm font-medium text-gray-700">{formatPercentage(campaign.openedCount || 0, campaign.sentCount || 0)}</span>
+                          <span className="text-xs sm:text-sm font-medium text-gray-700">{formatPercentage(campaign.openedCount || 0, campaign.sentCount || 0)}</span>
                         </div>
                         <div className="text-right">
-                          <span className="text-sm font-medium text-gray-700">{formatPercentage(campaign.clickedCount || 0, campaign.sentCount || 0)}</span>
+                          <span className="text-xs sm:text-sm font-medium text-gray-700">{formatPercentage(campaign.clickedCount || 0, campaign.sentCount || 0)}</span>
                         </div>
                         <div className="text-right">
-                          <span className="text-sm font-medium text-gray-700">{formatPercentage(campaign.repliedCount || 0, campaign.sentCount || 0)}</span>
+                          <span className="text-xs sm:text-sm font-medium text-gray-700">{formatPercentage(campaign.repliedCount || 0, campaign.sentCount || 0)}</span>
                         </div>
                         <div className="text-right">
-                          <span className={`text-sm font-medium ${(campaign.bouncedCount || 0) > 0 ? 'text-red-500' : 'text-gray-700'}`}>{formatPercentage(campaign.bouncedCount || 0, campaign.sentCount || 0)}</span>
+                          <span className={`text-xs sm:text-sm font-medium ${(campaign.bouncedCount || 0) > 0 ? 'text-red-500' : 'text-gray-700'}`}>{formatPercentage(campaign.bouncedCount || 0, campaign.sentCount || 0)}</span>
                         </div>
                         <div className="text-right">
-                          <span className="text-xs text-gray-400">{campaign.createdAt ? formatDate(campaign.createdAt) : '-'}</span>
+                          <span className="text-[10px] sm:text-xs text-gray-400">{campaign.createdAt ? formatDate(campaign.createdAt) : '-'}</span>
                         </div>
                         <div className="opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e: any) => e.stopPropagation()}>
                           <DropdownMenu>
@@ -963,58 +963,127 @@ export default function MailMeteorDashboard() {
                           </DropdownMenu>
                         </div>
                       </div>
-                    );
-                  })}
-                </div>
+                    ))}
+                  </div>
+
+                  {/* Mobile Card View */}
+                  <div className="md:hidden space-y-2 sm:space-y-3">
+                    {filteredCampaigns.map((campaign: Campaign) => (
+                      <div
+                        key={campaign.id}
+                        className="bg-white border border-gray-200 rounded-lg p-3 sm:p-4 cursor-pointer hover:bg-blue-50/30 transition-colors"
+                        onClick={() => { setSelectedCampaignId(campaign.id); setCurrentView('campaign-detail'); }}
+                      >
+                        <div className="flex items-start justify-between gap-2 mb-2 sm:mb-3">
+                          <div className="flex-1 min-w-0">
+                            <h3 className="font-semibold text-xs sm:text-sm text-gray-900 truncate">{campaign.name}</h3>
+                            {campaign.description && <p className="text-[10px] sm:text-xs text-gray-400 truncate mt-0.5">{campaign.description}</p>}
+                          </div>
+                          <div className="flex-shrink-0">{getStatusBadge(campaign.status)}</div>
+                        </div>
+
+                        <div className="grid grid-cols-3 gap-2 sm:gap-3 text-center text-[10px] sm:text-xs mb-2 sm:mb-3 py-2 sm:py-3 bg-gray-50 rounded">
+                          <div>
+                            <div className="text-gray-400 font-medium mb-0.5">Sent</div>
+                            <div className="font-semibold text-gray-900">{(campaign.sentCount || 0).toLocaleString()}</div>
+                          </div>
+                          <div>
+                            <div className="text-gray-400 font-medium mb-0.5">Opens</div>
+                            <div className="font-semibold text-gray-900">{formatPercentage(campaign.openedCount || 0, campaign.sentCount || 0)}</div>
+                          </div>
+                          <div>
+                            <div className="text-gray-400 font-medium mb-0.5">Replies</div>
+                            <div className="font-semibold text-gray-900">{formatPercentage(campaign.repliedCount || 0, campaign.sentCount || 0)}</div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between text-[10px] sm:text-xs text-gray-400">
+                          <span>{campaign.createdAt ? formatDate(campaign.createdAt) : '-'}</span>
+                          <button onClick={(e) => { e.stopPropagation(); }} className="flex-shrink-0">
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button variant="ghost" size="sm" className="h-6 w-6 p-0">
+                                  <MoreHorizontal className="h-3 w-3" />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end">
+                                {(campaign.status === 'active' || campaign.status === 'following_up') && (
+                                  <DropdownMenuItem onClick={() => handlePause(campaign.id)}>
+                                    <Pause className="h-3 w-3 mr-2" /> Pause
+                                  </DropdownMenuItem>
+                                )}
+                                {campaign.status === 'paused' && (
+                                  <DropdownMenuItem onClick={() => handleResume(campaign.id)}>
+                                    <Play className="h-3 w-3 mr-2" /> Resume
+                                  </DropdownMenuItem>
+                                )}
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem onClick={() => handleDelete(campaign.id)} className="text-red-600">
+                                  <Trash2 className="h-3 w-3 mr-2" /> Delete
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
               )}
 
-              {/* Pagination */}
+              {/* Pagination - Mobile responsive */}
               {!isLoading && totalCampaigns > campaignsPerPage && (
-                <div className="flex items-center justify-between pt-2">
-                  <span className="text-xs text-gray-400">
-                    Showing {campaignPage * campaignsPerPage + 1}–{Math.min((campaignPage + 1) * campaignsPerPage, totalCampaigns)} of {totalCampaigns} campaigns
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-3 pt-2 sm:pt-3">
+                  <span className="text-[10px] sm:text-xs text-gray-400 order-1 sm:order-none">
+                    Showing {campaignPage * campaignsPerPage + 1}–{Math.min((campaignPage + 1) * campaignsPerPage, totalCampaigns)} of {totalCampaigns}
                   </span>
-                  <div className="flex items-center gap-1">
+                  <div className="flex items-center gap-1 sm:gap-2 order-2 sm:order-none overflow-x-auto">
                     <Button
                       variant="outline"
                       size="sm"
-                      className="h-7 px-2.5 text-xs"
+                      className="h-6 sm:h-7 px-1.5 sm:px-2.5 text-[10px] sm:text-xs flex-shrink-0"
                       disabled={campaignPage === 0}
                       onClick={() => setCampaignPage((p: number) => Math.max(0, p - 1))}
                     >
-                      Previous
+                      <span className="hidden sm:inline">Previous</span><span className="sm:hidden">←</span>
                     </Button>
-                    {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
-                      let page: number;
-                      if (totalPages <= 7) {
-                        page = i;
-                      } else if (campaignPage < 3) {
-                        page = i;
-                      } else if (campaignPage > totalPages - 4) {
-                        page = totalPages - 7 + i;
-                      } else {
-                        page = campaignPage - 3 + i;
-                      }
-                      return (
-                        <Button
-                          key={page}
-                          variant={page === campaignPage ? "default" : "outline"}
-                          size="sm"
-                          className={`h-7 w-7 p-0 text-xs ${page === campaignPage ? 'bg-blue-600 text-white' : ''}`}
-                          onClick={() => setCampaignPage(page)}
-                        >
-                          {page + 1}
-                        </Button>
-                      );
-                    })}
+                    <div className="hidden sm:flex items-center gap-1">
+                      {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
+                        let page: number;
+                        if (totalPages <= 7) {
+                          page = i;
+                        } else if (campaignPage < 3) {
+                          page = i;
+                        } else if (campaignPage > totalPages - 4) {
+                          page = totalPages - 7 + i;
+                        } else {
+                          page = campaignPage - 3 + i;
+                        }
+                        return (
+                          <Button
+                            key={page}
+                            variant={page === campaignPage ? "default" : "outline"}
+                            size="sm"
+                            className={`h-7 w-7 p-0 text-xs flex-shrink-0 ${page === campaignPage ? 'bg-blue-600 text-white' : ''}`}
+                            onClick={() => setCampaignPage(page)}
+                          >
+                            {page + 1}
+                          </Button>
+                        );
+                      })}
+                    </div>
+                    {/* Mobile: simple page indicator */}
+                    <span className="sm:hidden text-[10px] text-gray-600 px-1.5 font-medium flex-shrink-0">
+                      {campaignPage + 1}/{totalPages}
+                    </span>
                     <Button
                       variant="outline"
                       size="sm"
-                      className="h-7 px-2.5 text-xs"
+                      className="h-6 sm:h-7 px-1.5 sm:px-2.5 text-[10px] sm:text-xs flex-shrink-0"
                       disabled={campaignPage >= totalPages - 1}
                       onClick={() => setCampaignPage((p: number) => Math.min(totalPages - 1, p + 1))}
                     >
-                      Next
+                      <span className="hidden sm:inline">Next</span><span className="sm:hidden">→</span>
                     </Button>
                   </div>
                 </div>
