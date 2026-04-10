@@ -3157,85 +3157,31 @@ Which account should I use and why? If I need to split across accounts, provide 
         campaigns = await storage.getCampaignsForUser(req.user.organizationId, req.user.id, limit, offset);
       }
       
-      const campaignList = campaigns as any[];
-
-      // Batch-load all unique email accounts, users, and first contacts in parallel
-      const emailAccountIds = Array.from(new Set(campaignList.map((c: any) => c.emailAccountId).filter(Boolean))) as string[];
-      const creatorIds = Array.from(new Set(campaignList.map((c: any) => c.createdBy).filter(Boolean))) as string[];
-
-      // First contact IDs (one per campaign, for list name lookup)
-      const firstContactIds: string[] = [];
-      for (const c of campaignList) {
-        try {
-          const ids = Array.isArray(c.contactIds) ? c.contactIds : JSON.parse(c.contactIds || '[]');
-          if (ids[0]) firstContactIds.push(ids[0]);
-        } catch {}
-      }
-      const uniqueFirstContactIds = Array.from(new Set(firstContactIds)) as string[];
-
-      // Parallel batch fetches
-      const [accountsArr, creatorsArr, firstContactsArr] = await Promise.all([
-        Promise.all(emailAccountIds.map((id: string) => storage.getEmailAccount(id).catch(() => null))),
-        Promise.all(creatorIds.map((id: string) => storage.getUser(id).catch(() => null))),
-        uniqueFirstContactIds.length > 0
-          ? storage.rawAll(`SELECT id, "listId" FROM contacts WHERE id = ANY($1)`, [uniqueFirstContactIds]).catch(() => [] as any[])
-          : Promise.resolve([] as any[]),
-      ]);
-
-      const accountsById: Record<string, any> = {};
-      accountsArr.filter(Boolean).forEach((a: any) => { accountsById[a.id] = a; });
-      const creatorsById: Record<string, any> = {};
-      creatorsArr.filter(Boolean).forEach((u: any) => { creatorsById[u.id] = u; });
-      const contactListIdMap: Record<string, string> = {};
-      (firstContactsArr as any[]).filter(Boolean).forEach((c: any) => { if (c.listId) contactListIdMap[c.id] = c.listId; });
-
-      // Batch-load list names for all unique listIds
-      const listIds = Array.from(new Set(Object.values(contactListIdMap))) as string[];
-      const listsById: Record<string, string> = {};
-      if (listIds.length > 0) {
-        try {
-          const listRows = await storage.rawAll(`SELECT id, name FROM contact_lists WHERE id = ANY($1)`, [listIds]) as any[];
-          listRows.forEach((l: any) => { listsById[l.id] = l.name; });
-        } catch {}
-      }
-
-      // Auto-fix stale sentCount (fire-and-forget, non-blocking)
-      for (const c of campaignList) {
+      // Auto-fix stale sentCount for campaigns that have messages but sentCount=0
+      // Uses lightweight single-SQL aggregation instead of loading all messages
+      for (const c of campaigns as any[]) {
         if ((c.sentCount || 0) === 0 && (c.status === 'active' || c.status === 'completed')) {
-          storage.getCampaignMessageStats(c.id).then((stats: any) => {
+          try {
+            const stats = await storage.getCampaignMessageStats(c.id);
             if (stats.sent > 0) {
-              storage.updateCampaign(c.id, {
+              await storage.updateCampaign(c.id, {
                 sentCount: stats.sent, bouncedCount: stats.bounced,
                 openedCount: stats.opened, clickedCount: stats.clicked, repliedCount: stats.replied,
                 totalRecipients: Math.max(c.totalRecipients || 0, stats.sent + stats.bounced),
-              }).catch(() => {});
+              });
               c.sentCount = stats.sent;
+              c.bouncedCount = stats.bounced;
+              c.openedCount = stats.opened;
+              c.clickedCount = stats.clicked;
+              c.repliedCount = stats.replied;
+              c.totalRecipients = Math.max(c.totalRecipients || 0, stats.sent + stats.bounced);
+              console.log(`[Campaigns] Auto-fixed stats for ${c.id}: sent=${stats.sent}`);
             }
-          }).catch(() => {});
+          } catch (e) { /* ignore per-campaign errors */ }
         }
       }
-
-      // Map enrichment in memory (no more per-campaign DB calls)
-      const enriched = campaignList.map((c: any) => {
-        const acct = c.emailAccountId ? accountsById[c.emailAccountId] : null;
-        if (acct) { c.senderEmail = acct.email; c.senderName = acct.displayName || acct.email; }
-        const creator = c.createdBy ? creatorsById[c.createdBy] : null;
-        if (creator) {
-          c.creatorName = [creator.firstName, creator.lastName].filter(Boolean).join(' ') || creator.email;
-          c.creatorEmail = creator.email;
-        }
-        // List name via first contact's listId
-        try {
-          const ids = Array.isArray(c.contactIds) ? c.contactIds : JSON.parse(c.contactIds || '[]');
-          const firstId = ids[0];
-          if (firstId && contactListIdMap[firstId]) {
-            c.listName = listsById[contactListIdMap[firstId]] || null;
-          }
-        } catch {}
-        return c;
-      });
-
-      res.json(enriched);
+      
+      res.json(campaigns);
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch campaigns' });
     }
@@ -3727,11 +3673,11 @@ Which account should I use and why? If I need to split across accounts, provide 
           const sample = contactIds.slice(0, 50);
           const ph = sample.map(() => '?').join(',');
           const listRow = await storage.rawGet(`
-            SELECT c."listId", cl.name as "listName", COUNT(*) as cnt
+            SELECT c.listId, cl.name as listName, COUNT(*) as cnt
             FROM contacts c
-            LEFT JOIN contact_lists cl ON cl.id = c."listId"
-            WHERE c.id IN (${ph}) AND c."listId" IS NOT NULL AND c."listId" != ''
-            GROUP BY c."listId", cl.name
+            LEFT JOIN contact_lists cl ON cl.id = c.listId
+            WHERE c.id IN (${ph}) AND c.listId IS NOT NULL AND c.listId != ''
+            GROUP BY c.listId
             ORDER BY cnt DESC LIMIT 1
           `, ...sample) as any;
           if (listRow && listRow.listId) {
@@ -8093,59 +8039,39 @@ Respond with ONLY a JSON object in this format:
         }
       }
 
-      // Fetch messages + count + stats in parallel — each with individual error handling
-      const [messagesResult, totalResult, statsResult] = await Promise.allSettled([
-        storage.getInboxMessagesEnhanced(req.user.organizationId, filters, parsedLimit, parsedOffset),
-        storage.getInboxMessageCountEnhanced(req.user.organizationId, filters),
-        storage.getInboxStats(req.user.organizationId),
-      ]);
-      const messages = messagesResult.status === 'fulfilled' ? messagesResult.value : [];
-      const total = totalResult.status === 'fulfilled' ? totalResult.value : 0;
-      const stats = statsResult.status === 'fulfilled' ? statsResult.value : { unread: 0, total: 0, replied: 0, archived: 0, positive: 0, negative: 0, ooo: 0, autoReply: 0, bounced: 0, starred: 0, warmup: 0 };
-      if (messagesResult.status === 'rejected') console.error('[Inbox] Messages query failed:', messagesResult.reason?.message || messagesResult.reason);
-      if (totalResult.status === 'rejected') console.error('[Inbox] Count query failed:', totalResult.reason?.message || totalResult.reason);
-      if (statsResult.status === 'rejected') console.error('[Inbox] Stats query failed:', statsResult.reason?.message || statsResult.reason);
+      const messages = await storage.getInboxMessagesEnhanced(req.user.organizationId, filters, parsedLimit, parsedOffset);
+      const total = await storage.getInboxMessageCountEnhanced(req.user.organizationId, filters);
+      const stats = await storage.getInboxStats(req.user.organizationId);
       const unread = stats.unread;
 
-      // Batch-load all unique contacts, email accounts, and campaigns in parallel (eliminates N+1)
-      const contactIds = Array.from(new Set(messages.map((m: any) => m.contactId).filter(Boolean))) as string[];
-      const fromEmails = Array.from(new Set(messages.filter((m: any) => !m.contactId && m.fromEmail).map((m: any) => m.fromEmail))) as string[];
-      const accountIds = Array.from(new Set(messages.map((m: any) => m.emailAccountId).filter(Boolean))) as string[];
-      const campaignIds = Array.from(new Set(messages.map((m: any) => m.campaignId).filter(Boolean))) as string[];
+      // Enrich messages (individual try/catch to prevent one bad message from crashing the whole endpoint)
+      const enriched = await Promise.all(messages.map(async (m: any) => {
+        try {
+          let contact = null;
+          if (m.contactId) contact = await storage.getContact(m.contactId);
+          if (!contact && m.fromEmail) contact = await storage.getContactByEmail(req.user.organizationId, m.fromEmail);
+          let accountOwner = null;
+          if (isAdmin && m.emailAccountId) {
+            const acct = await storage.getEmailAccount(m.emailAccountId);
+            if (acct && (acct as any).userId) {
+              const owner = await storage.getUser((acct as any).userId);
+              if (owner) accountOwner = { id: owner.id, email: owner.email, firstName: (owner as any).firstName, lastName: (owner as any).lastName };
+            }
+          }
+          let campaign = null;
+          if (m.campaignId) campaign = await storage.getCampaign(m.campaignId);
+          return {
+            ...m,
+            contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company, jobTitle: contact.jobTitle, status: contact.status, score: contact.score, leadStatus: (contact as any).leadStatus } : null,
+            campaign: campaign ? { id: campaign.id, name: campaign.name } : null,
+            accountOwner,
+          };
+        } catch (enrichErr) {
+          console.error(`[Enhanced Inbox] Failed to enrich message ${m.id}:`, enrichErr);
+          return { ...m, contact: null, campaign: null, accountOwner: null };
+        }
+      }));
 
-      const [contactsById, contactsByEmail, accountsById, campaignsById] = await Promise.all([
-        Promise.all(contactIds.map((id: string) => storage.getContact(id).catch(() => null))).then(arr =>
-          Object.fromEntries(arr.filter(Boolean).map((c: any) => [c.id, c]))),
-        Promise.all(fromEmails.map((email: string) => storage.getContactByEmail(req.user.organizationId, email).catch(() => null))).then(arr =>
-          Object.fromEntries(arr.filter(Boolean).map((c: any) => [c.email, c]))),
-        isAdmin ? Promise.all(accountIds.map((id: string) => storage.getEmailAccount(id).catch(() => null))).then(arr =>
-          Object.fromEntries(arr.filter(Boolean).map((a: any) => [a.id, a]))) : Promise.resolve({}),
-        Promise.all(campaignIds.map((id: string) => storage.getCampaign(id).catch(() => null))).then(arr =>
-          Object.fromEntries(arr.filter(Boolean).map((c: any) => [c.id, c]))),
-      ]);
-
-      // Batch-load account owners for admin
-      const ownerIds = isAdmin ? Array.from(new Set(Object.values(accountsById).map((a: any) => a.userId).filter(Boolean))) as string[] : [];
-      const ownersById: Record<string, any> = {};
-      if (ownerIds.length > 0) {
-        const owners = await Promise.all(ownerIds.map((id: string) => storage.getUser(id).catch(() => null)));
-        owners.filter(Boolean).forEach((u: any) => { ownersById[u.id] = u; });
-      }
-
-      const enriched = messages.map((m: any) => {
-        const contact = (m.contactId && contactsById[m.contactId]) || (m.fromEmail && contactsByEmail[m.fromEmail]) || null;
-        const acct = isAdmin && m.emailAccountId ? accountsById[m.emailAccountId] : null;
-        const accountOwner = acct?.userId ? ownersById[acct.userId] : null;
-        const campaign = m.campaignId ? campaignsById[m.campaignId] : null;
-        return {
-          ...m,
-          contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company, jobTitle: contact.jobTitle, status: contact.status, score: contact.score, leadStatus: (contact as any).leadStatus } : null,
-          campaign: campaign ? { id: campaign.id, name: campaign.name } : null,
-          accountOwner: accountOwner ? { id: accountOwner.id, email: accountOwner.email, firstName: (accountOwner as any).firstName, lastName: (accountOwner as any).lastName } : null,
-        };
-      });
-
-      console.log(`[Inbox] org=${req.user.organizationId.substring(0,8)} messages=${enriched.length} total=${total} filters=${JSON.stringify({status: filters.status, emailAccountId: filters.emailAccountId ? 'set' : 'none'})} role=${role}`);
       res.json({ messages: enriched, total, unread, stats });
     } catch (error) {
       console.error('Enhanced inbox error:', error);
@@ -8845,14 +8771,12 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   // Unmark a message as bounced — clears bounceType, resets status to read
   app.post('/api/inbox/:id/unmark-bounce', requireAuth, async (req: any, res) => {
     try {
-      await storage.rawRun(
-        'UPDATE unified_inbox SET "bounceType" = $1, status = $2 WHERE id = $3',
-        '', 'read', req.params.id
-      );
+      const msg: any = await storage.getInboxMessage(req.params.id);
+      if (!msg) return res.status(404).json({ message: 'Message not found' });
+      await storage.updateInboxMessage(req.params.id, { bounceType: '', status: 'read' });
       res.json({ success: true });
-    } catch (error: any) {
-      console.error('Unmark bounce error:', error?.message || error);
-      res.status(500).json({ message: 'Failed to unmark bounce', detail: error?.message });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to unmark bounce' });
     }
   });
 

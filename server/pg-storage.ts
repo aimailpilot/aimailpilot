@@ -9,16 +9,10 @@ import crypto from 'crypto';
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL?.includes('azure') ? { rejectUnauthorized: false } : undefined,
-  max: 30,  // increased from 10 to handle concurrent reply trackers + campaign engine
-  min: 2,
+  max: 10,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000,  // increased from 5s to 10s to reduce false timeouts
-  query_timeout: 60000,            // increased from 30s to 60s for slow complex queries
-});
-
-// Log pool events for debugging
-pool.on('connect', () => {
-  console.debug(`[PG] Pool: ${pool.totalCount} total, ${pool.idleCount} idle`);
+  connectionTimeoutMillis: 5000,  // fail fast — 5s per attempt
+  query_timeout: 30000,           // max 30s per query
 });
 
 pool.on('error', (err) => {
@@ -642,7 +636,6 @@ async function initializeSchema() {
     const indexes = [
       'CREATE INDEX IF NOT EXISTS idx_contacts_org ON contacts("organizationId")',
       'CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts("organizationId", email)',
-      'CREATE INDEX IF NOT EXISTS idx_contacts_email_lower ON contacts("organizationId", (LOWER(email)))',  // for case-insensitive lookup
       'CREATE INDEX IF NOT EXISTS idx_contacts_list ON contacts("listId")',
       'CREATE INDEX IF NOT EXISTS idx_contacts_assigned ON contacts("assignedTo")',
       'CREATE INDEX IF NOT EXISTS idx_contacts_industry ON contacts(industry)',
@@ -670,7 +663,6 @@ async function initializeSchema() {
       'CREATE INDEX IF NOT EXISTS idx_messages_campaign_step ON messages("campaignId", "stepNumber")',
       'CREATE INDEX IF NOT EXISTS idx_messages_provider_id ON messages("providerMessageId")',
       'CREATE INDEX IF NOT EXISTS idx_messages_campaign_status ON messages("campaignId", status)',
-      'CREATE INDEX IF NOT EXISTS idx_messages_org_sent_provider ON messages("campaignId", "sentAt" DESC, "providerMessageId") WHERE status IN (\'sent\', \'failed\', \'sending\', \'bounced\') AND "providerMessageId" IS NOT NULL',  // for getAllRecentCampaignMessages
       'CREATE INDEX IF NOT EXISTS idx_events_campaign ON tracking_events("campaignId")',
       'CREATE INDEX IF NOT EXISTS idx_events_message ON tracking_events("messageId")',
       'CREATE INDEX IF NOT EXISTS idx_events_tracking ON tracking_events("trackingId")',
@@ -678,8 +670,6 @@ async function initializeSchema() {
       'CREATE INDEX IF NOT EXISTS idx_events_step ON tracking_events("campaignId", "stepNumber")',
       'CREATE INDEX IF NOT EXISTS idx_api_settings_org ON api_settings("organizationId", "settingKey")',
       'CREATE INDEX IF NOT EXISTS idx_inbox_org ON unified_inbox("organizationId", status)',
-      'CREATE INDEX IF NOT EXISTS idx_inbox_org_received ON unified_inbox("organizationId", "receivedAt" DESC)',  // for default inbox list (All tab)
-      'CREATE INDEX IF NOT EXISTS idx_inbox_org_warmup_received ON unified_inbox("organizationId", "isWarmup", "receivedAt" DESC)',  // for warmup-filtered inbox
       'CREATE INDEX IF NOT EXISTS idx_inbox_account ON unified_inbox("emailAccountId")',
       'CREATE INDEX IF NOT EXISTS idx_inbox_campaign ON unified_inbox("campaignId")',
       'CREATE INDEX IF NOT EXISTS idx_inbox_contact ON unified_inbox("contactId")',
@@ -757,12 +747,6 @@ async function initializeSchema() {
       `);
     } catch (e) { /* trigger already exists */ }
 
-    // Add isWarmup column if not exists (migration for existing deployments)
-    try {
-      await client.query('ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "isWarmup" INTEGER DEFAULT 0');
-      await client.query('CREATE INDEX IF NOT EXISTS idx_inbox_warmup ON unified_inbox("organizationId", "isWarmup")');
-    } catch (e) { console.error('[PG] isWarmup migration error:', e); }
-
     await client.query('COMMIT');
     console.log('[PG] Schema initialized successfully');
   } catch (e) {
@@ -772,32 +756,6 @@ async function initializeSchema() {
   } finally {
     client.release();
   }
-
-  // Backfill warmup flag OUTSIDE the schema transaction to avoid locking unified_inbox during startup.
-  // Uses LIMIT 500 batch to avoid long-running locks that block inbox queries.
-  // Fire-and-forget: does not block server start.
-  pool.query(`
-    UPDATE unified_inbox ui SET "isWarmup" = 1
-    WHERE ui.id IN (
-      SELECT ui2.id FROM unified_inbox ui2
-      WHERE COALESCE(ui2."isWarmup", 0) = 0
-        AND EXISTS (
-          SELECT 1 FROM email_accounts ea
-          WHERE ea."organizationId" = ui2."organizationId"
-            AND LOWER(ea.email) = LOWER(CASE WHEN ui2."fromEmail" LIKE '%<%>%'
-              THEN substring(ui2."fromEmail" from '<([^>]+)>') ELSE ui2."fromEmail" END)
-        )
-        AND EXISTS (
-          SELECT 1 FROM email_accounts ea2
-          WHERE ea2."organizationId" = ui2."organizationId"
-            AND LOWER(ea2.email) = LOWER(CASE WHEN ui2."toEmail" LIKE '%<%>%'
-              THEN substring(ui2."toEmail" from '<([^>]+)>') ELSE COALESCE(ui2."toEmail",'') END)
-        )
-      LIMIT 500
-    )
-  `).then(r => {
-    if (r.rowCount && r.rowCount > 0) console.log(`[PG] isWarmup backfill: marked ${r.rowCount} warmup messages`);
-  }).catch(e => console.error('[PG] isWarmup backfill error:', e));
 }
 
 // ========== PostgresStorage Class ==========
@@ -1700,9 +1658,6 @@ export class PostgresStorage {
   }
 
   async getAllRecentCampaignMessages(orgId: string) {
-    // Fetch only messages from last 30 days to reduce data transfer (reply trackers only care about recent)
-    // LIMIT reduced from 50000 to 5000 to prevent timeout on large orgs
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
     return queryAll(`
       SELECT m.*, ct.email as "contactEmail", c.name as "campaignName" FROM messages m
       INNER JOIN campaigns c ON m."campaignId" = c.id
@@ -1710,10 +1665,9 @@ export class PostgresStorage {
       WHERE c."organizationId" = $1
       AND m.status IN ('sent', 'failed', 'sending', 'bounced')
       AND m."providerMessageId" IS NOT NULL
-      AND m."sentAt" > $2
       ORDER BY m."sentAt" DESC
-      LIMIT 5000
-    `, [orgId, thirtyDaysAgo]);
+      LIMIT 50000
+    `, [orgId]);
   }
 
   // ========== Unsubscribes ==========
@@ -2092,11 +2046,8 @@ export class PostgresStorage {
   }
 
   async getInboxMessage(id: string) { return queryOne('SELECT * FROM unified_inbox WHERE id = $1', [id]); }
-
-  // Lightweight lookups for reply trackers — exclude body/bodyHtml to reduce data transfer
-  private readonly inboxLightCols = 'id, "organizationId", "emailAccountId", "campaignId", "messageId", "contactId", "gmailMessageId", "gmailThreadId", "outlookMessageId", "outlookConversationId", "fromEmail", "fromName", "toEmail", subject, snippet, status, provider, "repliedAt", "replyType", "bounceType", "threadId", "inReplyTo", "receivedAt", "createdAt", "isWarmup", "sentByUs"';
-  async getInboxMessageByGmailId(gmailMessageId: string) { return queryOne(`SELECT ${this.inboxLightCols} FROM unified_inbox WHERE "gmailMessageId" = $1`, [gmailMessageId]); }
-  async getInboxMessageByOutlookId(outlookMessageId: string) { return queryOne(`SELECT ${this.inboxLightCols} FROM unified_inbox WHERE "outlookMessageId" = $1`, [outlookMessageId]); }
+  async getInboxMessageByGmailId(gmailMessageId: string) { return queryOne('SELECT * FROM unified_inbox WHERE "gmailMessageId" = $1', [gmailMessageId]); }
+  async getInboxMessageByOutlookId(outlookMessageId: string) { return queryOne('SELECT * FROM unified_inbox WHERE "outlookMessageId" = $1', [outlookMessageId]); }
 
   async createInboxMessage(msg: any) {
     const id = genId(); const ts = now();
@@ -2104,13 +2055,13 @@ export class PostgresStorage {
       "gmailMessageId", "gmailThreadId", "outlookMessageId", "outlookConversationId",
       "fromEmail", "fromName", "toEmail", subject, snippet, body, "bodyHtml",
       status, provider, "aiDraft", "repliedAt", "receivedAt", "createdAt",
-      "replyType", "bounceType", "threadId", "inReplyTo", "assignedTo", "leadStatus", "sentByUs", "isWarmup")
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)`,
+      "replyType", "bounceType", "threadId", "inReplyTo", "assignedTo", "leadStatus", "sentByUs")
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)`,
       [id, msg.organizationId, msg.emailAccountId || null, msg.campaignId || null, msg.messageId || null, msg.contactId || null,
       msg.gmailMessageId || null, msg.gmailThreadId || null, msg.outlookMessageId || null, msg.outlookConversationId || null,
       msg.fromEmail, msg.fromName || '', msg.toEmail || '', msg.subject || '', msg.snippet || '', msg.body || '', msg.bodyHtml || '',
       msg.status || 'unread', msg.provider || '', msg.aiDraft || null, msg.repliedAt || null, msg.receivedAt || ts, ts,
-      msg.replyType || '', msg.bounceType || '', msg.threadId || null, msg.inReplyTo || null, msg.assignedTo || null, msg.leadStatus || '', msg.sentByUs || 0, msg.isWarmup || 0]
+      msg.replyType || '', msg.bounceType || '', msg.threadId || null, msg.inReplyTo || null, msg.assignedTo || null, msg.leadStatus || '', msg.sentByUs || 0]
     );
     return this.getInboxMessage(id);
   }
@@ -2945,19 +2896,28 @@ export class PostgresStorage {
     const params: any[] = [organizationId];
     let idx = 2;
 
-    // Use indexed isWarmup column instead of expensive string-extraction subquery
+    // Warmup detection: both fromEmail AND toEmail are org email accounts
+    // fromEmail may store "Name <email>" format — extract just the email part
+    const extractFrom = `LOWER(CASE WHEN "fromEmail" LIKE '%<%>%' THEN substring("fromEmail" from '<([^>]+)>') ELSE "fromEmail" END)`;
+    const extractTo = `LOWER(CASE WHEN "toEmail" LIKE '%<%>%' THEN substring("toEmail" from '<([^>]+)>') ELSE COALESCE("toEmail",'') END)`;
+    const orgEmails = `(SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
+    const warmupExclude = ` AND NOT (${extractFrom} IN ${orgEmails} AND ${extractTo} IN ${orgEmails})`;
+    const warmupOnly = ` AND ${extractFrom} IN ${orgEmails} AND ${extractTo} IN ${orgEmails}`;
+
     if (filters?.status === 'warmup') {
-      sql += ' AND "isWarmup" = 1';
+      sql += warmupOnly;
     } else if (filters?.status === 'bounced') {
-      sql += ` AND (status = 'bounced' OR "bounceType" != '') AND COALESCE("isWarmup", 0) = 0`;
+      sql += ` AND (status = 'bounced' OR "bounceType" != '')` + warmupExclude;
     } else if (filters?.status === 'unsubscribed') {
       sql += ` AND "replyType" = 'unsubscribe'`;
     } else if (filters?.status === 'replied') {
-      sql += ` AND (status = 'replied' OR "repliedAt" IS NOT NULL) AND COALESCE("isWarmup", 0) = 0`;
+      // Include both messages we replied to (status='replied') AND incoming replies tracked via repliedAt
+      sql += ` AND (status = 'replied' OR "repliedAt" IS NOT NULL)` + warmupExclude;
     } else if (filters?.status && filters.status !== 'all') {
-      sql += ` AND status = $${idx++} AND COALESCE("isWarmup", 0) = 0`; params.push(filters.status);
+      sql += ` AND status = $${idx++}` + warmupExclude; params.push(filters.status);
     } else {
-      sql += ' AND COALESCE("isWarmup", 0) = 0';
+      // "all" view — exclude warmup emails so they don't clutter inbox
+      sql += warmupExclude;
     }
     if (filters?.emailAccountId) {
       const accountIds = filters.emailAccountId.split(',').map(id => id.trim()).filter(Boolean);
@@ -2982,9 +2942,7 @@ export class PostgresStorage {
 
     sql += ` ORDER BY "receivedAt" DESC LIMIT $${idx++} OFFSET $${idx++}`;
     params.push(limit, offset);
-    const results = await queryAll(sql, params);
-    console.log(`[InboxQuery] org=${organizationId.substring(0,8)} rows=${results.length} status=${filters?.status || 'all'} sql_prefix=${sql.substring(0, 80)}`);
-    return results;
+    return queryAll(sql, params);
   }
 
   async getInboxMessageCountEnhanced(organizationId: string, filters: {
@@ -2995,18 +2953,24 @@ export class PostgresStorage {
     const params: any[] = [organizationId];
     let idx = 2;
 
+    const extractFromC = `LOWER(CASE WHEN "fromEmail" LIKE '%<%>%' THEN substring("fromEmail" from '<([^>]+)>') ELSE "fromEmail" END)`;
+    const extractToC = `LOWER(CASE WHEN "toEmail" LIKE '%<%>%' THEN substring("toEmail" from '<([^>]+)>') ELSE COALESCE("toEmail",'') END)`;
+    const orgEmailsC = `(SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
+    const warmupExcludeCount = ` AND NOT (${extractFromC} IN ${orgEmailsC} AND ${extractToC} IN ${orgEmailsC})`;
+    const warmupOnlyCount = ` AND ${extractFromC} IN ${orgEmailsC} AND ${extractToC} IN ${orgEmailsC}`;
+
     if (filters?.status === 'warmup') {
-      sql += ' AND "isWarmup" = 1';
+      sql += warmupOnlyCount;
     } else if (filters?.status === 'bounced') {
-      sql += ` AND (status = 'bounced' OR "bounceType" != '') AND COALESCE("isWarmup", 0) = 0`;
+      sql += ` AND (status = 'bounced' OR "bounceType" != '')` + warmupExcludeCount;
     } else if (filters?.status === 'unsubscribed') {
       sql += ` AND "replyType" = 'unsubscribe'`;
     } else if (filters?.status === 'replied') {
-      sql += ` AND (status = 'replied' OR "repliedAt" IS NOT NULL) AND COALESCE("isWarmup", 0) = 0`;
+      sql += ` AND (status = 'replied' OR "repliedAt" IS NOT NULL)` + warmupExcludeCount;
     } else if (filters?.status && filters.status !== 'all') {
-      sql += ` AND status = $${idx++} AND COALESCE("isWarmup", 0) = 0`; params.push(filters.status);
+      sql += ` AND status = $${idx++}` + warmupExcludeCount; params.push(filters.status);
     } else {
-      sql += ' AND COALESCE("isWarmup", 0) = 0';
+      sql += warmupExcludeCount;
     }
     if (filters?.emailAccountId) {
       const accountIds = filters.emailAccountId.split(',').map(id => id.trim()).filter(Boolean);
@@ -3029,36 +2993,25 @@ export class PostgresStorage {
   }
 
   async getInboxStats(organizationId: string) {
-    // Single aggregated query using indexed isWarmup column — no subqueries
-    const row = await queryOne(`
-      SELECT
-        COUNT(*) FILTER (WHERE COALESCE("isWarmup", 0) = 0) as total,
-        COUNT(*) FILTER (WHERE status = 'unread' AND COALESCE("isWarmup", 0) = 0) as unread,
-        COUNT(*) FILTER (WHERE (status = 'replied' OR "repliedAt" IS NOT NULL) AND COALESCE("isWarmup", 0) = 0) as replied,
-        COUNT(*) FILTER (WHERE status = 'archived') as archived,
-        COUNT(*) FILTER (WHERE "replyType" = 'positive') as positive,
-        COUNT(*) FILTER (WHERE "replyType" = 'negative') as negative,
-        COUNT(*) FILTER (WHERE "replyType" = 'ooo') as ooo,
-        COUNT(*) FILTER (WHERE "replyType" = 'auto_reply') as "autoReply",
-        COUNT(*) FILTER (WHERE "bounceType" != '' AND "bounceType" IS NOT NULL AND COALESCE("isWarmup", 0) = 0) as bounced,
-        COUNT(*) FILTER (WHERE "isStarred" = 1) as starred,
-        COUNT(*) FILTER (WHERE "isWarmup" = 1) as warmup
-      FROM unified_inbox WHERE "organizationId" = $1
-    `, [organizationId]);
+    // Warmup detection: both fromEmail AND toEmail are org email accounts
+    const exF = `LOWER(CASE WHEN "fromEmail" LIKE '%<%>%' THEN substring("fromEmail" from '<([^>]+)>') ELSE "fromEmail" END)`;
+    const exT = `LOWER(CASE WHEN "toEmail" LIKE '%<%>%' THEN substring("toEmail" from '<([^>]+)>') ELSE COALESCE("toEmail",'') END)`;
+    const oE = `(SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
+    const warmupExcludeSql = `AND NOT (${exF} IN ${oE} AND ${exT} IN ${oE})`;
+    const warmupOnlySql = `AND ${exF} IN ${oE} AND ${exT} IN ${oE}`;
 
-    return {
-      total: parseInt(row.total || '0'),
-      unread: parseInt(row.unread || '0'),
-      replied: parseInt(row.replied || '0'),
-      archived: parseInt(row.archived || '0'),
-      positive: parseInt(row.positive || '0'),
-      negative: parseInt(row.negative || '0'),
-      ooo: parseInt(row.ooo || '0'),
-      autoReply: parseInt(row.autoReply || '0'),
-      bounced: parseInt(row.bounced || '0'),
-      starred: parseInt(row.starred || '0'),
-      warmup: parseInt(row.warmup || '0'),
-    };
+    const total = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 ${warmupExcludeSql}`, [organizationId])).c);
+    const unread = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'unread' ${warmupExcludeSql}`, [organizationId])).c);
+    const replied = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND (status = 'replied' OR "repliedAt" IS NOT NULL) ${warmupExcludeSql}`, [organizationId])).c);
+    const archived = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'archived'`, [organizationId])).c);
+    const positive = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'positive'`, [organizationId])).c);
+    const negative = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'negative'`, [organizationId])).c);
+    const ooo = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'ooo'`, [organizationId])).c);
+    const autoReply = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'auto_reply'`, [organizationId])).c);
+    const bounced = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND ("bounceType" != '' AND "bounceType" IS NOT NULL) ${warmupExcludeSql}`, [organizationId])).c);
+    const starred = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "isStarred" = 1`, [organizationId])).c);
+    const warmup = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 ${warmupOnlySql}`, [organizationId])).c);
+    return { total, unread, replied, archived, positive, negative, ooo, autoReply, bounced, starred, warmup };
   }
 
   // ========== DATABASE EXPORT/IMPORT ==========

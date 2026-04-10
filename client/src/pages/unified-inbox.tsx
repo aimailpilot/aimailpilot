@@ -182,11 +182,8 @@ export default function UnifiedInbox() {
     })();
   }, []);
 
-  // showLoading: only true on first load or explicit filter/page change — NOT on background refresh
-  const isFirstLoad = useRef(true);
-
-  const fetchMessages = useCallback(async (background = false) => {
-    if (!background) setLoading(true);
+  const fetchMessages = useCallback(async () => {
+    setLoading(true);
     try {
       const params = new URLSearchParams();
       if (statusFilter !== 'all') params.set('status', statusFilter);
@@ -213,33 +210,30 @@ export default function UnifiedInbox() {
       setTotal(data.total || 0);
       setUnreadCount(data.unread || 0);
       if (data.stats) setStats(data.stats);
-
+      
       // Track starred IDs from server
       const starred = new Set<string>();
       (data.messages || []).forEach((m: any) => { if (m.isStarred) starred.add(m.id); });
       setStarredIds(starred);
     } catch (err) {
       console.error('Inbox fetch error:', err);
-      // Keep stale data visible on error — never clear messages to empty
     } finally {
-      if (!background) setLoading(false);
-      isFirstLoad.current = false;
+      setLoading(false);
     }
   }, [statusFilter, replyTypeFilter, searchQuery, page, viewMode, accountFilter, campaignFilter, memberFilter]);
 
-  // Initial load + filter/page changes show spinner
-  useEffect(() => { fetchMessages(false); }, [fetchMessages]);
+  useEffect(() => { fetchMessages(); }, [fetchMessages]);
 
-  // Background refresh every 5 minutes — no spinner, no UI disruption
+  // Auto-refresh every 2 minutes (reduced from 30s to avoid UI disruption)
   useEffect(() => {
-    const interval = setInterval(() => fetchMessages(true), 300000);
+    const interval = setInterval(fetchMessages, 120000);
     return () => clearInterval(interval);
   }, [fetchMessages]);
 
-  // Auto-sync every 5 min (silently in background)
+  // Auto-sync every 3 min
   useEffect(() => {
-    const initialTimeout = setTimeout(() => syncInbox(false), 8000);
-    const syncInterval = setInterval(() => { if (!syncing) syncInbox(false); }, 300000);
+    const initialTimeout = setTimeout(() => syncInbox(false), 5000);
+    const syncInterval = setInterval(() => { if (!syncing) syncInbox(false); }, 180000);
     return () => { clearTimeout(initialTimeout); clearInterval(syncInterval); };
   }, []);
 
@@ -625,82 +619,80 @@ export default function UnifiedInbox() {
     const leadBadge = getLeadStatusBadge(selectedMessage.leadStatus);
 
     return (
-      <div className="h-full flex flex-col bg-gray-50 md:flex-row md:gap-0">
-        {/* Top bar - Mobile optimized */}
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between px-3 sm:px-4 py-2 sm:py-2.5 border-b bg-white shadow-sm gap-2 sm:gap-0">
-          <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
-            <Button variant="ghost" size="sm" onClick={() => { setSelectedMessage(null); setThreadMessages([]); }} className="gap-1.5 text-gray-600 hover:text-gray-900 h-8 px-2">
-              <ArrowLeft className="h-3.5 w-3.5 sm:h-4 sm:w-4" /> <span className="hidden sm:inline">Back</span>
+      <div className="h-full flex flex-col bg-gray-50">
+        {/* Top bar */}
+        <div className="flex items-center justify-between px-4 py-2.5 border-b bg-white shadow-sm">
+          <div className="flex items-center gap-2 flex-wrap">
+            <Button variant="ghost" size="sm" onClick={() => { setSelectedMessage(null); setThreadMessages([]); }} className="gap-1.5 text-gray-600 hover:text-gray-900">
+              <ArrowLeft className="h-4 w-4" /> Back
             </Button>
-            <div className="h-5 w-px bg-gray-200 hidden sm:block" />
-            <Badge variant="outline" className={`${s.className} gap-0.5 sm:gap-1 text-[9px] sm:text-[10px]`}>{s.icon}{s.label}</Badge>
+            <div className="h-5 w-px bg-gray-200" />
+            <Badge variant="outline" className={`${s.className} gap-1 text-[10px]`}>{s.icon}{s.label}</Badge>
             {replyBadge && (
-              <Badge variant="outline" className={`${replyBadge.className} gap-0.5 sm:gap-1 text-[9px] sm:text-[10px]`}>{replyBadge.icon}<span className="hidden sm:inline">{replyBadge.label}</span></Badge>
+              <Badge variant="outline" className={`${replyBadge.className} gap-1 text-[10px]`}>{replyBadge.icon}{replyBadge.label}</Badge>
             )}
             {leadBadge && (
-              <Badge variant="outline" className={`${leadBadge.className} gap-0.5 sm:gap-1 text-[9px] sm:text-[10px]`}>{leadBadge.icon}<span className="hidden sm:inline">{leadBadge.label}</span></Badge>
+              <Badge variant="outline" className={`${leadBadge.className} gap-1 text-[10px]`}>{leadBadge.icon}{leadBadge.label}</Badge>
             )}
             {selectedMessage.provider && (
               <Tooltip>
                 <TooltipTrigger>
-                  <div className={`w-4 h-4 sm:w-5 sm:h-5 rounded-full flex items-center justify-center flex-shrink-0 ${selectedMessage.provider === 'gmail' ? 'bg-red-50' : 'bg-blue-50'}`}>
+                  <div className={`w-5 h-5 rounded-full flex items-center justify-center ${selectedMessage.provider === 'gmail' ? 'bg-red-50' : 'bg-blue-50'}`}>
                     {getProviderIcon(selectedMessage.provider)}
                   </div>
                 </TooltipTrigger>
                 <TooltipContent>{selectedMessage.provider === 'gmail' ? 'Gmail' : 'Outlook'}</TooltipContent>
               </Tooltip>
             )}
-          </div>
-          <div className="flex items-center gap-1 ml-auto sm:ml-0 min-w-0 overflow-x-auto">
-          <div className="flex items-center gap-1 flex-shrink-0">
-            {/* Reply Type Classification - hidden on mobile */}
-            <div className="hidden sm:block">
-              <Select value={selectedMessage.replyType || ''} onValueChange={(v) => classifyMessage(selectedMessage.id, v)}>
-                <SelectTrigger className="w-[110px] h-7 text-[10px]">
-                  <SelectValue placeholder="Classify" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="positive"><span className="flex items-center gap-1"><ThumbsUp className="h-3 w-3 text-emerald-600" /> Positive</span></SelectItem>
-                  <SelectItem value="negative"><span className="flex items-center gap-1"><ThumbsDown className="h-3 w-3 text-red-600" /> Negative</span></SelectItem>
-                  <SelectItem value="ooo"><span className="flex items-center gap-1"><Coffee className="h-3 w-3 text-amber-600" /> OOO</span></SelectItem>
-                  <SelectItem value="auto_reply"><span className="flex items-center gap-1"><Bot className="h-3 w-3 text-gray-600" /> Auto-reply</span></SelectItem>
-                  <SelectItem value="general"><span className="flex items-center gap-1"><MessageCircle className="h-3 w-3 text-sky-600" /> General</span></SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            {/* Lead Status - hidden on mobile */}
-            <div className="hidden sm:block">
-              <Select value={selectedMessage.leadStatus || ''} onValueChange={(v) => updateLeadStatus(selectedMessage.id, v)}>
-                <SelectTrigger className="w-[120px] h-7 text-[10px]">
-                  <SelectValue placeholder="Lead Status" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="interested"><span className="flex items-center gap-1"><Heart className="h-3 w-3" /> Interested</span></SelectItem>
-                  <SelectItem value="meeting_scheduled"><span className="flex items-center gap-1"><Calendar className="h-3 w-3" /> Meeting</span></SelectItem>
-                  <SelectItem value="follow_up"><span className="flex items-center gap-1"><PhoneForwarded className="h-3 w-3" /> Follow Up</span></SelectItem>
-                  <SelectItem value="closed"><span className="flex items-center gap-1"><Check className="h-3 w-3" /> Closed</span></SelectItem>
-                  <SelectItem value="not_interested"><span className="flex items-center gap-1"><XSquare className="h-3 w-3" /> Not Interested</span></SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            {/* Assign - hidden on mobile */}
-            {isAdmin && teamMembers.length > 0 && (
-              <div className="hidden sm:block">
-                <Select value={selectedMessage.assignedTo || ''} onValueChange={(v) => assignMessage(selectedMessage.id, v)}>
-                  <SelectTrigger className="w-[110px] h-7 text-[10px]">
-                    <SelectValue placeholder="Assign" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {teamMembers.map((m: any) => (
-                      <SelectItem key={m.userId} value={m.userId}>
-                        {m.firstName || m.email?.split('@')[0]}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+            {selectedMessage.campaign && (
+              <Badge variant="outline" className="bg-violet-50 text-violet-700 border-violet-200 text-[10px] gap-1">
+                <Tag className="h-2.5 w-2.5" /> {selectedMessage.campaign.name}
+              </Badge>
             )}
-            <div className="h-5 w-px bg-gray-200 mx-1 hidden sm:block" />
+          </div>
+          <div className="flex items-center gap-1">
+            {/* Reply Type Classification */}
+            <Select value={selectedMessage.replyType || ''} onValueChange={(v) => classifyMessage(selectedMessage.id, v)}>
+              <SelectTrigger className="w-[110px] h-7 text-[10px]">
+                <SelectValue placeholder="Classify" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="positive"><span className="flex items-center gap-1"><ThumbsUp className="h-3 w-3 text-emerald-600" /> Positive</span></SelectItem>
+                <SelectItem value="negative"><span className="flex items-center gap-1"><ThumbsDown className="h-3 w-3 text-red-600" /> Negative</span></SelectItem>
+                <SelectItem value="ooo"><span className="flex items-center gap-1"><Coffee className="h-3 w-3 text-amber-600" /> OOO</span></SelectItem>
+                <SelectItem value="auto_reply"><span className="flex items-center gap-1"><Bot className="h-3 w-3 text-gray-600" /> Auto-reply</span></SelectItem>
+                <SelectItem value="general"><span className="flex items-center gap-1"><MessageCircle className="h-3 w-3 text-sky-600" /> General</span></SelectItem>
+              </SelectContent>
+            </Select>
+            {/* Lead Status */}
+            <Select value={selectedMessage.leadStatus || ''} onValueChange={(v) => updateLeadStatus(selectedMessage.id, v)}>
+              <SelectTrigger className="w-[120px] h-7 text-[10px]">
+                <SelectValue placeholder="Lead Status" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="interested"><span className="flex items-center gap-1"><Heart className="h-3 w-3" /> Interested</span></SelectItem>
+                <SelectItem value="meeting_scheduled"><span className="flex items-center gap-1"><Calendar className="h-3 w-3" /> Meeting</span></SelectItem>
+                <SelectItem value="follow_up"><span className="flex items-center gap-1"><PhoneForwarded className="h-3 w-3" /> Follow Up</span></SelectItem>
+                <SelectItem value="closed"><span className="flex items-center gap-1"><Check className="h-3 w-3" /> Closed</span></SelectItem>
+                <SelectItem value="not_interested"><span className="flex items-center gap-1"><XSquare className="h-3 w-3" /> Not Interested</span></SelectItem>
+              </SelectContent>
+            </Select>
+            {/* Assign */}
+            {isAdmin && teamMembers.length > 0 && (
+              <Select value={selectedMessage.assignedTo || ''} onValueChange={(v) => assignMessage(selectedMessage.id, v)}>
+                <SelectTrigger className="w-[110px] h-7 text-[10px]">
+                  <SelectValue placeholder="Assign" />
+                </SelectTrigger>
+                <SelectContent>
+                  {teamMembers.map((m: any) => (
+                    <SelectItem key={m.userId} value={m.userId}>
+                      {m.firstName || m.email?.split('@')[0]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+            <div className="h-5 w-px bg-gray-200 mx-1" />
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => toggleStar(selectedMessage.id)}>
@@ -728,34 +720,33 @@ export default function UnifiedInbox() {
               <TooltipContent>Delete</TooltipContent>
             </Tooltip>
           </div>
-          </div>
         </div>
 
         {/* Two-panel: message + optional contact sidebar */}
         <div className="flex-1 flex overflow-hidden">
           {/* Main message area */}
           <div className="flex-1 flex flex-col overflow-hidden">
-            {/* Message header - Mobile optimized */}
-            <div className="px-3 sm:px-6 py-3 sm:py-4 bg-white border-b">
-              <h2 className="text-base sm:text-lg font-semibold text-gray-900 mb-2 sm:mb-3 leading-tight line-clamp-3">{selectedMessage.subject || '(No Subject)'}</h2>
-              <div className="flex items-start gap-2 sm:gap-3">
-                <Avatar className="h-8 sm:h-10 w-8 sm:w-10 flex-shrink-0">
-                  <AvatarFallback className="bg-gradient-to-br from-blue-500 to-indigo-600 text-white text-xs sm:text-sm font-semibold">
+            {/* Message header */}
+            <div className="px-6 py-4 bg-white border-b">
+              <h2 className="text-lg font-semibold text-gray-900 mb-3 leading-tight">{selectedMessage.subject || '(No Subject)'}</h2>
+              <div className="flex items-start gap-3">
+                <Avatar className="h-10 w-10 flex-shrink-0">
+                  <AvatarFallback className="bg-gradient-to-br from-blue-500 to-indigo-600 text-white text-sm font-semibold">
                     {getInitials(selectedMessage.fromName, selectedMessage.fromEmail)}
                   </AvatarFallback>
                 </Avatar>
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-1 sm:gap-2 flex-wrap">
-                    <span className="font-semibold text-gray-900 text-xs sm:text-sm truncate">{selectedMessage.fromName || selectedMessage.fromEmail}</span>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-semibold text-gray-900 text-sm">{selectedMessage.fromName || selectedMessage.fromEmail}</span>
                     {selectedMessage.fromName && (
-                      <button onClick={() => copyToClipboard(selectedMessage.fromEmail)} className="text-[10px] sm:text-xs text-gray-400 hover:text-gray-600 flex items-center gap-0.5 whitespace-nowrap">
-                        <Copy className="h-2.5 w-2.5 opacity-50" />
+                      <button onClick={() => copyToClipboard(selectedMessage.fromEmail)} className="text-xs text-gray-400 hover:text-gray-600 flex items-center gap-0.5">
+                        &lt;{selectedMessage.fromEmail}&gt; <Copy className="h-2.5 w-2.5 opacity-50" />
                       </button>
                     )}
                   </div>
-                  <div className="text-[10px] sm:text-xs text-gray-400 mt-0.5 flex flex-col sm:flex-row sm:items-center sm:gap-2 gap-1">
-                    <span className="flex items-center gap-1"><Clock className="h-2.5 sm:h-3 w-2.5 sm:w-3" /> {fmtFullDate(selectedMessage.receivedAt)}</span>
-                    <span className="truncate">To: {selectedMessage.toEmail}</span>
+                  <div className="text-xs text-gray-400 mt-0.5 flex items-center gap-2 flex-wrap">
+                    <span className="flex items-center gap-1"><Clock className="h-3 w-3" /> {fmtFullDate(selectedMessage.receivedAt)}</span>
+                    <span>To: {selectedMessage.toEmail}</span>
                   </div>
                   {contact && (
                     <button onClick={() => setShowContactInfo(!showContactInfo)}
@@ -1049,68 +1040,71 @@ export default function UnifiedInbox() {
   // ============ INBOX LIST VIEW ============
   return (
     <div className="h-full flex flex-col bg-white">
-      {/* Header - Mobile optimized */}
-      <div className="px-2 sm:px-4 py-2 sm:py-3 border-b bg-white">
-        <div className="flex items-center justify-between mb-2 sm:mb-2.5 gap-2">
-          <div className="flex items-center gap-1.5 sm:gap-3 min-w-0">
-            <h2 className="text-base sm:text-lg font-bold text-gray-900 flex items-center gap-1 sm:gap-2">
-              <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center flex-shrink-0">
-                <Inbox className="h-3.5 sm:h-4.5 w-3.5 sm:w-4.5 text-white" />
+      {/* Header */}
+      <div className="px-4 py-3 border-b bg-white">
+        <div className="flex items-center justify-between mb-2.5">
+          <div className="flex items-center gap-3">
+            <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center">
+                <Inbox className="h-4.5 w-4.5 text-white" />
               </div>
-              <span className="hidden sm:inline">Inbox</span>
+              Inbox
             </h2>
-            {unreadCount > 0 && <Badge className="bg-blue-600 text-white font-bold text-[10px] sm:text-xs flex-shrink-0">{unreadCount}</Badge>}
+            {unreadCount > 0 && <Badge className="bg-blue-600 text-white font-bold text-xs">{unreadCount}</Badge>}
           </div>
-          <div className="flex items-center gap-1 sm:gap-2 flex-shrink-0">
-            {/* Stats mini badges - hidden on mobile */}
+          <div className="flex items-center gap-2">
+            {/* Stats mini badges */}
             {stats && (
-              <div className="hidden lg:flex items-center gap-1 sm:gap-1.5">
-                {stats.positive > 0 && <Badge variant="outline" className="bg-emerald-50 text-emerald-600 border-emerald-200 text-[8px] sm:text-[9px] gap-0.5"><ThumbsUp className="h-2 sm:h-2.5 w-2 sm:w-2.5" /><span className="hidden sm:inline">{stats.positive}</span></Badge>}
-                {stats.bounced > 0 && <Badge variant="outline" className="bg-red-50 text-red-600 border-red-200 text-[8px] sm:text-[9px] gap-0.5"><XCircle className="h-2 sm:h-2.5 w-2 sm:w-2.5" /><span className="hidden sm:inline">{stats.bounced}</span></Badge>}
-                {stats.ooo > 0 && <Badge variant="outline" className="bg-amber-50 text-amber-600 border-amber-200 text-[8px] sm:text-[9px] gap-0.5"><Coffee className="h-2 sm:h-2.5 w-2 sm:w-2.5" /><span className="hidden sm:inline">{stats.ooo}</span></Badge>}
+              <div className="hidden md:flex items-center gap-1.5 mr-2">
+                {stats.positive > 0 && <Badge variant="outline" className="bg-emerald-50 text-emerald-600 border-emerald-200 text-[9px] gap-0.5"><ThumbsUp className="h-2.5 w-2.5" />{stats.positive}</Badge>}
+                {stats.bounced > 0 && <Badge variant="outline" className="bg-red-50 text-red-600 border-red-200 text-[9px] gap-0.5"><XCircle className="h-2.5 w-2.5" />{stats.bounced}</Badge>}
+                {stats.ooo > 0 && <Badge variant="outline" className="bg-amber-50 text-amber-600 border-amber-200 text-[9px] gap-0.5"><Coffee className="h-2.5 w-2.5" />{stats.ooo}</Badge>}
               </div>
             )}
-            <Button variant="outline" size="sm" onClick={() => syncInbox(true)} disabled={syncing} className="gap-1 sm:gap-1.5 h-7 sm:h-8 px-2 sm:px-3 text-xs sm:text-sm">
-              <RefreshCw className={`h-3 sm:h-3.5 w-3 sm:w-3.5 ${syncing ? 'animate-spin' : ''} flex-shrink-0`} />
-              <span className="hidden sm:inline">{syncing ? 'Syncing' : 'Sync'}</span>
+            <Button variant="outline" size="sm" onClick={() => syncInbox(true)} disabled={syncing} className="gap-1.5 h-8">
+              <RefreshCw className={`h-3.5 w-3.5 ${syncing ? 'animate-spin' : ''}`} />
+              {syncing ? 'Syncing' : 'Sync'}
             </Button>
           </div>
         </div>
 
-        {/* View Mode Tabs - Mobile optimized */}
-        <div className="flex items-center gap-0.5 sm:gap-1 mb-2 sm:mb-2.5 overflow-x-auto">
+        {/* View Mode Tabs */}
+        <div className="flex items-center gap-1 mb-2.5">
           {[
             { value: 'unified' as const, label: 'Unified', icon: <Inbox className="h-3 w-3" /> },
             { value: 'account' as const, label: 'By Account', icon: <Mail className="h-3 w-3" /> },
             { value: 'campaign' as const, label: 'By Campaign', icon: <Target className="h-3 w-3" /> },
           ].map(v => (
             <button key={v.value} onClick={() => { setViewMode(v.value); setPage(0); }}
-              className={`flex items-center gap-1 px-2 sm:px-3 py-1 sm:py-1.5 rounded-lg text-[11px] sm:text-xs font-medium transition-all whitespace-nowrap flex-shrink-0 ${viewMode === v.value ? 'bg-indigo-600 text-white shadow-sm' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
-              {v.icon} <span className="hidden sm:inline">{v.label}</span>
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${viewMode === v.value ? 'bg-indigo-600 text-white shadow-sm' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+              {v.icon} {v.label}
             </button>
           ))}
         </div>
 
-        {/* Filters row - Mobile optimized */}
-        <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
-          <div className="relative flex-1 min-w-[140px] sm:max-w-xs">
-            <Search className="absolute left-2 sm:left-2.5 top-1/2 -translate-y-1/2 h-3 sm:h-3.5 w-3 sm:w-3.5 text-gray-400 flex-shrink-0" />
-            <Input className="pl-7 sm:pl-8 h-7 sm:h-8 text-xs sm:text-sm border-gray-200" placeholder="Search..." value={searchQuery}
+        {/* Filters row */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="relative flex-1 min-w-[180px] max-w-xs">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400" />
+            <Input className="pl-8 h-8 text-sm border-gray-200" placeholder="Search inbox..." value={searchQuery}
               onChange={e => { setSearchQuery(e.target.value); setPage(0); }} />
           </div>
 
-          {/* Status filter pills - Mobile optimized */}
-          <div className="flex items-center gap-0.5 sm:gap-1 flex-wrap overflow-x-auto">
+          {/* Status filter pills */}
+          <div className="flex items-center gap-1 flex-wrap">
             {[
               { value: 'all', label: 'All', count: stats?.total },
               { value: 'unread', label: 'Unread', count: stats?.unread },
+              { value: 'read', label: 'Read' },
               { value: 'replied', label: 'Replied', count: stats?.replied },
               { value: 'bounced', label: 'Bounced', count: stats?.bounced },
               { value: 'archived', label: 'Archived' },
+              { value: 'unsubscribed', label: 'Unsub' },
+              { value: 'warmup', label: 'Warmup', count: stats?.warmup },
             ].map(f => (
               <button key={f.value} onClick={() => { setStatusFilter(f.value); setPage(0); }}
-                className={`px-1.5 sm:px-2.5 py-0.5 sm:py-1 rounded-full text-[10px] sm:text-xs font-medium transition-all whitespace-nowrap flex-shrink-0 ${statusFilter === f.value ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
-                {f.label}{f.count ? <span className="hidden sm:inline"> ({f.count})</span> : ''}
+                className={`px-2.5 py-1 rounded-full text-xs font-medium transition-all ${statusFilter === f.value ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                {f.label}{f.count ? ` (${f.count})` : ''}
               </button>
             ))}
           </div>
@@ -1221,7 +1215,7 @@ export default function UnifiedInbox() {
               <span className="text-[10px] text-gray-400 uppercase tracking-wide font-medium">{total} message{total !== 1 ? 's' : ''}</span>
             </div>
 
-            {/* Messages - Mobile optimized */}
+            {/* Messages */}
             <div className="divide-y divide-gray-100">
               {messages.map(msg => {
                 const isUnread = msg.status === 'unread';
@@ -1232,9 +1226,9 @@ export default function UnifiedInbox() {
 
                 return (
                   <div key={msg.id}
-                    className={`group flex items-start gap-1.5 sm:gap-3 px-2 sm:px-4 py-2 sm:py-2.5 cursor-pointer transition-all hover:bg-blue-50/40 ${isUnread ? 'bg-blue-50/20' : ''} ${isSelected ? 'bg-blue-100/30' : ''}`}>
-                    {/* Checkbox + Star - Hidden on mobile */}
-                    <div className="hidden sm:flex flex-col items-center gap-1 pt-0.5 flex-shrink-0">
+                    className={`group flex items-start gap-3 px-4 py-2.5 cursor-pointer transition-all hover:bg-blue-50/40 ${isUnread ? 'bg-blue-50/20' : ''} ${isSelected ? 'bg-blue-100/30' : ''}`}>
+                    {/* Checkbox + Star */}
+                    <div className="flex flex-col items-center gap-1 pt-0.5 flex-shrink-0">
                       <input type="checkbox" checked={isSelected} onChange={() => toggleSelect(msg.id)} className="w-3.5 h-3.5 rounded border-gray-300" />
                       <button onClick={(e) => { e.stopPropagation(); toggleStar(msg.id); }} className={`p-0.5 transition-opacity ${isStarred ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
                         {isStarred ? <Star className="h-3 w-3 text-yellow-500 fill-yellow-400" /> : <Star className="h-3 w-3 text-gray-300 hover:text-yellow-400" />}
@@ -1242,62 +1236,65 @@ export default function UnifiedInbox() {
                     </div>
 
                     {/* Avatar */}
-                    <Avatar className="h-6 sm:h-8 w-6 sm:w-8 flex-shrink-0 mt-0 sm:mt-0.5" onClick={() => openMessage(msg)}>
+                    <Avatar className="h-8 w-8 flex-shrink-0 mt-0.5" onClick={() => openMessage(msg)}>
                       <AvatarFallback className={`text-[10px] font-semibold ${msg.provider === 'gmail' ? 'bg-gradient-to-br from-red-400 to-red-500 text-white' : 'bg-gradient-to-br from-blue-400 to-blue-500 text-white'}`}>
                         {getInitials(msg.fromName, msg.fromEmail)}
                       </AvatarFallback>
                     </Avatar>
 
-                    {/* Content - Mobile optimized */}
+                    {/* Content */}
                     <div className="flex-1 min-w-0" onClick={() => openMessage(msg)}>
-                      <div className="flex items-center gap-1 mb-0.5 flex-wrap">
-                        <span className={`text-xs sm:text-sm truncate ${isUnread ? 'font-bold text-gray-900' : 'font-medium text-gray-700'}`}>
-                          {msg.sentByUs ? `To: ${msg.toEmail.split('@')[0]}` : (msg.fromName || msg.fromEmail.split('@')[0])}
+                      <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
+                        <span className={`text-sm truncate ${isUnread ? 'font-bold text-gray-900' : 'font-medium text-gray-700'}`}>
+                          {msg.sentByUs ? `To: ${msg.toEmail}` : (msg.fromName || msg.fromEmail)}
                         </span>
                         {msg.contact?.company && (
-                          <span className="hidden lg:flex text-[8px] sm:text-[9px] text-gray-400 items-center gap-0.5 bg-gray-100 px-1 sm:px-1.5 py-0 rounded-full flex-shrink-0">
-                            <Building className="h-1.5 w-1.5 sm:h-2 sm:w-2" /> {msg.contact.company}
+                          <span className="hidden sm:flex text-[9px] text-gray-400 items-center gap-0.5 bg-gray-100 px-1.5 py-0 rounded-full">
+                            <Building className="h-2 w-2" /> {msg.contact.company}
                           </span>
                         )}
-                        <div className={`w-3 h-3 sm:w-4 sm:h-4 rounded-full flex items-center justify-center flex-shrink-0 ${msg.provider === 'gmail' ? 'bg-red-50' : 'bg-blue-50'}`}>
+                        <div className={`w-4 h-4 rounded-full flex items-center justify-center flex-shrink-0 ${msg.provider === 'gmail' ? 'bg-red-50' : 'bg-blue-50'}`}>
                           {getProviderIcon(msg.provider)}
                         </div>
                         {replyBadge && (
-                          <Badge variant="outline" className={`${replyBadge.className} text-[8px] sm:text-[9px] px-1 sm:px-1.5 py-0 gap-0.5 flex-shrink-0`}>
-                            {replyBadge.icon}<span className="hidden sm:inline">{replyBadge.label}</span>
+                          <Badge variant="outline" className={`${replyBadge.className} text-[9px] px-1.5 py-0 gap-0.5`}>
+                            {replyBadge.icon}{replyBadge.label}
                           </Badge>
                         )}
                         {leadBadge && (
-                          <Badge variant="outline" className={`${leadBadge.className} text-[8px] sm:text-[9px] px-1 sm:px-1.5 py-0 gap-0.5 hidden md:flex flex-shrink-0`}>
-                            {leadBadge.icon}
+                          <Badge variant="outline" className={`${leadBadge.className} text-[9px] px-1.5 py-0 gap-0.5`}>
+                            {leadBadge.icon}{leadBadge.label}
                           </Badge>
                         )}
+                        {msg.campaignId && (
+                          <span className="text-[9px] text-violet-500 bg-violet-50 px-1.5 py-0 rounded-full">{msg.campaign?.name || 'Campaign'}</span>
+                        )}
                       </div>
-                      <div className={`text-xs sm:text-sm truncate ${isUnread ? 'font-semibold text-gray-800' : 'text-gray-600'}`}>
+                      <div className={`text-sm truncate ${isUnread ? 'font-semibold text-gray-800' : 'text-gray-600'}`}>
                         {msg.subject || '(No Subject)'}
                       </div>
-                      <div className="text-[10px] sm:text-xs text-gray-400 truncate mt-0.5 line-clamp-2">{msg.snippet}</div>
+                      <div className="text-xs text-gray-400 truncate mt-0.5 max-w-[90%]">{msg.snippet}</div>
                     </div>
 
-                    {/* Right side - Mobile optimized */}
-                    <div className="flex flex-col items-end gap-0.5 sm:gap-1 flex-shrink-0 pt-0 sm:pt-0.5">
-                      <span className={`text-[9px] sm:text-[11px] whitespace-nowrap ${isUnread ? 'text-blue-600 font-semibold' : 'text-gray-400'}`}>
+                    {/* Right side */}
+                    <div className="flex flex-col items-end gap-1 flex-shrink-0 pt-0.5">
+                      <span className={`text-[11px] whitespace-nowrap ${isUnread ? 'text-blue-600 font-semibold' : 'text-gray-400'}`}>
                         {fmtDate(msg.receivedAt)}
                       </span>
-                      <div className="flex items-center gap-0.5 sm:gap-1">
-                        {isUnread && <div className="w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full bg-blue-500" />}
-                        {msg.status === 'replied' && <Reply className="h-2.5 sm:h-3 w-2.5 sm:w-3 text-green-500" />}
-                        {msg.status === 'forwarded' && <Forward className="h-2.5 sm:h-3 w-2.5 sm:w-3 text-blue-500" />}
-                        {msg.bounceType && <XCircle className="h-2.5 sm:h-3 w-2.5 sm:w-3 text-red-500" />}
-                        {msg.aiDraft && <Sparkles className="h-2.5 sm:h-3 w-2.5 sm:w-3 text-purple-400" />}
-                        {msg.assignedTo && <UserCheck className="h-2.5 sm:h-3 w-2.5 sm:w-3 text-indigo-400" />}
+                      <div className="flex items-center gap-1">
+                        {isUnread && <div className="w-2 h-2 rounded-full bg-blue-500" />}
+                        {msg.status === 'replied' && <Reply className="h-3 w-3 text-green-500" title="Replied" />}
+                        {msg.status === 'forwarded' && <Forward className="h-3 w-3 text-blue-500" title="Forwarded" />}
+                        {msg.bounceType && <XCircle className="h-3 w-3 text-red-500" />}
+                        {msg.aiDraft && <Sparkles className="h-3 w-3 text-purple-400" />}
+                        {msg.assignedTo && <UserCheck className="h-3 w-3 text-indigo-400" />}
                       </div>
                       <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button onClick={(e) => { e.stopPropagation(); archiveMessage(msg.id); }} className="p-0.5 sm:p-1 hover:bg-gray-200 rounded-md">
-                          <Archive className="h-2.5 sm:h-3 w-2.5 sm:w-3 text-gray-400 hover:text-gray-600" />
+                        <button onClick={(e) => { e.stopPropagation(); archiveMessage(msg.id); }} className="p-1 hover:bg-gray-200 rounded-md">
+                          <Archive className="h-3 w-3 text-gray-400 hover:text-gray-600" />
                         </button>
-                        <button onClick={(e) => { e.stopPropagation(); deleteMessage(msg.id); }} className="p-0.5 sm:p-1 hover:bg-red-100 rounded-md">
-                          <Trash2 className="h-2.5 sm:h-3 w-2.5 sm:w-3 text-gray-400 hover:text-red-500" />
+                        <button onClick={(e) => { e.stopPropagation(); deleteMessage(msg.id); }} className="p-1 hover:bg-red-100 rounded-md">
+                          <Trash2 className="h-3 w-3 text-gray-400 hover:text-red-500" />
                         </button>
                       </div>
                     </div>
@@ -1309,17 +1306,17 @@ export default function UnifiedInbox() {
         )}
       </div>
 
-      {/* Pagination - Mobile optimized */}
+      {/* Pagination */}
       {total > pageSize && (
-        <div className="flex items-center justify-between px-2 sm:px-4 py-2 sm:py-2.5 border-t bg-white text-xs sm:text-sm">
-          <span className="text-[10px] sm:text-xs text-gray-500 truncate">{page * pageSize + 1}–{Math.min((page + 1) * pageSize, total)} of {total}</span>
-          <div className="flex items-center gap-0.5 sm:gap-1">
-            <Button variant="ghost" size="sm" className="h-6 w-6 sm:h-7 sm:w-7 p-0" disabled={page === 0} onClick={() => setPage(p => p - 1)}>
-              <ChevronLeft className="h-3 sm:h-4 w-3 sm:w-4" />
+        <div className="flex items-center justify-between px-4 py-2.5 border-t bg-white">
+          <span className="text-xs text-gray-500">{page * pageSize + 1}–{Math.min((page + 1) * pageSize, total)} of {total}</span>
+          <div className="flex items-center gap-1">
+            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={page === 0} onClick={() => setPage(p => p - 1)}>
+              <ChevronLeft className="h-4 w-4" />
             </Button>
-            <span className="text-[10px] sm:text-xs text-gray-600 px-1 sm:px-2">{page + 1}/{totalPages}</span>
-            <Button variant="ghost" size="sm" className="h-6 w-6 sm:h-7 sm:w-7 p-0" disabled={page >= totalPages - 1} onClick={() => setPage(p => p + 1)}>
-              <ChevronRight className="h-3 sm:h-4 w-3 sm:w-4" />
+            <span className="text-xs text-gray-600 px-2">{page + 1}/{totalPages}</span>
+            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" disabled={page >= totalPages - 1} onClick={() => setPage(p => p + 1)}>
+              <ChevronRight className="h-4 w-4" />
             </Button>
           </div>
         </div>
