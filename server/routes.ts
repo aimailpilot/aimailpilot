@@ -3157,68 +3157,83 @@ Which account should I use and why? If I need to split across accounts, provide 
         campaigns = await storage.getCampaignsForUser(req.user.organizationId, req.user.id, limit, offset);
       }
       
-      // Auto-fix stale sentCount for campaigns that have messages but sentCount=0
-      // Uses lightweight single-SQL aggregation instead of loading all messages
-      for (const c of campaigns as any[]) {
+      const campaignList = campaigns as any[];
+
+      // Batch-load all unique email accounts, users, and first contacts in parallel
+      const emailAccountIds = Array.from(new Set(campaignList.map((c: any) => c.emailAccountId).filter(Boolean))) as string[];
+      const creatorIds = Array.from(new Set(campaignList.map((c: any) => c.createdBy).filter(Boolean))) as string[];
+
+      // First contact IDs (one per campaign, for list name lookup)
+      const firstContactIds: string[] = [];
+      for (const c of campaignList) {
+        try {
+          const ids = Array.isArray(c.contactIds) ? c.contactIds : JSON.parse(c.contactIds || '[]');
+          if (ids[0]) firstContactIds.push(ids[0]);
+        } catch {}
+      }
+      const uniqueFirstContactIds = Array.from(new Set(firstContactIds)) as string[];
+
+      // Parallel batch fetches
+      const [accountsArr, creatorsArr, firstContactsArr] = await Promise.all([
+        Promise.all(emailAccountIds.map((id: string) => storage.getEmailAccount(id).catch(() => null))),
+        Promise.all(creatorIds.map((id: string) => storage.getUser(id).catch(() => null))),
+        uniqueFirstContactIds.length > 0
+          ? storage.rawAll(`SELECT id, "listId" FROM contacts WHERE id = ANY($1)`, [uniqueFirstContactIds]).catch(() => [] as any[])
+          : Promise.resolve([] as any[]),
+      ]);
+
+      const accountsById: Record<string, any> = {};
+      accountsArr.filter(Boolean).forEach((a: any) => { accountsById[a.id] = a; });
+      const creatorsById: Record<string, any> = {};
+      creatorsArr.filter(Boolean).forEach((u: any) => { creatorsById[u.id] = u; });
+      const contactListIdMap: Record<string, string> = {};
+      (firstContactsArr as any[]).filter(Boolean).forEach((c: any) => { if (c.listId) contactListIdMap[c.id] = c.listId; });
+
+      // Batch-load list names for all unique listIds
+      const listIds = Array.from(new Set(Object.values(contactListIdMap))) as string[];
+      const listsById: Record<string, string> = {};
+      if (listIds.length > 0) {
+        try {
+          const listRows = await storage.rawAll(`SELECT id, name FROM contact_lists WHERE id = ANY($1)`, [listIds]) as any[];
+          listRows.forEach((l: any) => { listsById[l.id] = l.name; });
+        } catch {}
+      }
+
+      // Auto-fix stale sentCount (fire-and-forget, non-blocking)
+      for (const c of campaignList) {
         if ((c.sentCount || 0) === 0 && (c.status === 'active' || c.status === 'completed')) {
-          try {
-            const stats = await storage.getCampaignMessageStats(c.id);
+          storage.getCampaignMessageStats(c.id).then((stats: any) => {
             if (stats.sent > 0) {
-              await storage.updateCampaign(c.id, {
+              storage.updateCampaign(c.id, {
                 sentCount: stats.sent, bouncedCount: stats.bounced,
                 openedCount: stats.opened, clickedCount: stats.clicked, repliedCount: stats.replied,
                 totalRecipients: Math.max(c.totalRecipients || 0, stats.sent + stats.bounced),
-              });
+              }).catch(() => {});
               c.sentCount = stats.sent;
-              c.bouncedCount = stats.bounced;
-              c.openedCount = stats.opened;
-              c.clickedCount = stats.clicked;
-              c.repliedCount = stats.replied;
-              c.totalRecipients = Math.max(c.totalRecipients || 0, stats.sent + stats.bounced);
-              console.log(`[Campaigns] Auto-fixed stats for ${c.id}: sent=${stats.sent}`);
             }
-          } catch (e) { /* ignore per-campaign errors */ }
+          }).catch(() => {});
         }
       }
-      
-      // Enrich campaigns with sender info and list name
-      const enriched = await Promise.all((campaigns as any[]).map(async (c: any) => {
-        // Sender: email account display name + email
-        if (c.emailAccountId) {
-          try {
-            const acct = await storage.getEmailAccount(c.emailAccountId) as any;
-            if (acct) {
-              c.senderEmail = acct.email;
-              c.senderName = acct.displayName || acct.email;
-            }
-          } catch {}
+
+      // Map enrichment in memory (no more per-campaign DB calls)
+      const enriched = campaignList.map((c: any) => {
+        const acct = c.emailAccountId ? accountsById[c.emailAccountId] : null;
+        if (acct) { c.senderEmail = acct.email; c.senderName = acct.displayName || acct.email; }
+        const creator = c.createdBy ? creatorsById[c.createdBy] : null;
+        if (creator) {
+          c.creatorName = [creator.firstName, creator.lastName].filter(Boolean).join(' ') || creator.email;
+          c.creatorEmail = creator.email;
         }
-        // Creator name from users table
-        if (c.createdBy) {
-          try {
-            const creator = await storage.getUser(c.createdBy) as any;
-            if (creator) {
-              c.creatorName = [creator.firstName, creator.lastName].filter(Boolean).join(' ') || creator.email;
-              c.creatorEmail = creator.email;
-            }
-          } catch {}
-        }
-        // List name: look up via contacts' listId (contactIds stores contact IDs, not list IDs)
-        if (!c.listName && c.contactIds?.length) {
-          try {
-            const ids = Array.isArray(c.contactIds) ? c.contactIds : JSON.parse(c.contactIds || '[]');
-            if (ids.length > 0) {
-              // Sample first contact to find its listId, then get list name
-              const contact = await storage.rawGet('SELECT "listId" FROM contacts WHERE id = $1', ids[0]) as any;
-              if (contact && contact.listId) {
-                const list = await storage.rawGet('SELECT name FROM contact_lists WHERE id = $1', contact.listId) as any;
-                if (list) c.listName = list.name;
-              }
-            }
-          } catch {}
-        }
+        // List name via first contact's listId
+        try {
+          const ids = Array.isArray(c.contactIds) ? c.contactIds : JSON.parse(c.contactIds || '[]');
+          const firstId = ids[0];
+          if (firstId && contactListIdMap[firstId]) {
+            c.listName = listsById[contactListIdMap[firstId]] || null;
+          }
+        } catch {}
         return c;
-      }));
+      });
 
       res.json(enriched);
     } catch (error) {
