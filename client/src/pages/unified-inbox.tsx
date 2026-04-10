@@ -716,6 +716,7 @@ export default function UnifiedInbox() {
               <TooltipContent>Delete</TooltipContent>
             </Tooltip>
           </div>
+          </div>
         </div>
 
         {/* Two-panel: message + optional contact sidebar */}
