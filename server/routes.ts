@@ -8458,6 +8458,7 @@ Respond with ONLY a JSON object in this format:
           status: 'forwarded',
           forwardedAt: new Date().toISOString(),
           forwardedTo: to,
+          forwardedFrom: msg.fromEmail, // Store original sender's email
           forwardedBy: req.user.email || req.user.id,
         });
 
@@ -8502,6 +8503,7 @@ Respond with ONLY a JSON object in this format:
           status: 'forwarded',
           forwardedAt: new Date().toISOString(),
           forwardedTo: to,
+          forwardedFrom: msg.fromEmail, // Store original sender's email
           forwardedBy: req.user.email || req.user.id,
         });
 

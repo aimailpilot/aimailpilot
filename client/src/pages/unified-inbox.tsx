@@ -53,6 +53,7 @@ interface InboxMessage {
   repliedBy?: string;
   forwardedAt?: string;
   forwardedTo?: string;
+  forwardedFrom?: string;
   forwardedBy?: string;
   receivedAt: string;
   createdAt: string;
@@ -829,13 +830,18 @@ export default function UnifiedInbox() {
                           <Forward className="h-3 w-3" /> Forwarded {selectedMessage.forwardedBy && <span className="text-cyan-500">({selectedMessage.forwardedBy})</span>}
                           {selectedMessage.forwardedAt && <span className="text-cyan-400 ml-auto">{new Date(selectedMessage.forwardedAt).toLocaleString()}</span>}
                         </div>
-                        {selectedMessage.forwardedTo && (
-                          <div className="px-5 pb-4">
+                        <div className="px-5 pb-4 space-y-2">
+                          {selectedMessage.forwardedFrom && (
+                            <div className="text-xs text-cyan-700 bg-white/70 rounded-lg p-3 border border-cyan-100">
+                              <span className="font-medium">From:</span> {selectedMessage.forwardedFrom}
+                            </div>
+                          )}
+                          {selectedMessage.forwardedTo && (
                             <div className="text-xs text-cyan-700 bg-white/70 rounded-lg p-3 border border-cyan-100">
                               <span className="font-medium">To:</span> {selectedMessage.forwardedTo}
                             </div>
-                          </div>
-                        )}
+                          )}
+                        </div>
                       </div>
                     )}
                   </div>

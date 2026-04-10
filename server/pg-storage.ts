@@ -439,7 +439,11 @@ async function initializeSchema() {
         "leadStatus" TEXT DEFAULT '',
         "isStarred" INTEGER DEFAULT 0,
         labels JSONB DEFAULT '[]',
-        "sentByUs" INTEGER DEFAULT 0
+        "sentByUs" INTEGER DEFAULT 0,
+        "forwardedAt" TEXT,
+        "forwardedTo" TEXT,
+        "forwardedFrom" TEXT,
+        "forwardedBy" TEXT
       );
 
       CREATE TABLE IF NOT EXISTS org_members (
@@ -2067,9 +2071,10 @@ export class PostgresStorage {
     if (!existing) throw new Error('Inbox message not found');
     const m = { ...existing, ...data } as any;
     await execute(
-      'UPDATE unified_inbox SET status=$1, "aiDraft"=$2, "repliedAt"=$3, "replyContent"=$4, "repliedBy"=$5, "replyType"=$6, "bounceType"=$7, "threadId"=$8, "assignedTo"=$9, "leadStatus"=$10, "isStarred"=$11 WHERE id=$12',
+      'UPDATE unified_inbox SET status=$1, "aiDraft"=$2, "repliedAt"=$3, "replyContent"=$4, "repliedBy"=$5, "replyType"=$6, "bounceType"=$7, "threadId"=$8, "assignedTo"=$9, "leadStatus"=$10, "isStarred"=$11, "forwardedAt"=$12, "forwardedTo"=$13, "forwardedFrom"=$14, "forwardedBy"=$15 WHERE id=$16',
       [m.status, m.aiDraft || null, m.repliedAt || null, m.replyContent || null, m.repliedBy || null,
-      m.replyType || '', m.bounceType || '', m.threadId || null, m.assignedTo || null, m.leadStatus || '', m.isStarred || 0, id]
+      m.replyType || '', m.bounceType || '', m.threadId || null, m.assignedTo || null, m.leadStatus || '', m.isStarred || 0,
+      m.forwardedAt || null, m.forwardedTo || null, m.forwardedFrom || null, m.forwardedBy || null, id]
     );
     return this.getInboxMessage(id);
   }
