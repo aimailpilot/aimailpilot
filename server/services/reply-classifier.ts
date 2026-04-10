@@ -128,18 +128,44 @@ export interface ClassificationResult {
 export function classifyReply(subject: string, body: string, fromEmail: string, fromName?: string): ClassificationResult {
   const fullText = `${subject || ''} ${body || ''}`.toLowerCase();
   const senderFull = `${fromName || ''} ${fromEmail || ''}`.toLowerCase();
+  const subjectLower = (subject || '').toLowerCase();
 
   // 1. Check bounce first (highest priority - system messages)
+  // BUT: require HIGH confidence - system sender OR multiple bounce indicators
   const isBounceAddress = BOUNCE_SENDER_PATTERNS.some(p => p.test(senderFull));
   const hasBounceContent = BOUNCE_PATTERNS.some(p => p.test(fullText));
-  
-  if (isBounceAddress || hasBounceContent) {
+
+  if (isBounceAddress) {
+    // System sender (MAILER-DAEMON, etc.) = almost certain bounce
     let bounceType: 'hard' | 'soft' | 'blocked' | 'mailbox_full' = 'hard';
     if (/mailbox (full|quota|exceeded|over)/i.test(fullText)) bounceType = 'mailbox_full';
-    else if (/blocked|rejected|spam|blacklist/i.test(fullText)) bounceType = 'blocked';
+    else if (/blocked|rejected|spam|blacklist|policy/i.test(fullText)) bounceType = 'blocked';
     else if (/temporary|try again|transient|4\d\d /i.test(fullText)) bounceType = 'soft';
-    
-    return { replyType: 'bounce', bounceType, confidence: isBounceAddress ? 0.95 : 0.85, reason: 'Bounce message detected' };
+
+    return { replyType: 'bounce', bounceType, confidence: 0.95, reason: 'System bounce message detected' };
+  }
+
+  // For non-system senders, only classify as bounce if there's VERY STRONG evidence:
+  // 1. Subject is a DSN (Delivery Status Notification) OR
+  // 2. Body has SMTP codes (5xx/4xx) AND bounce keywords OR
+  // 3. Body has 3+ distinct bounce indicators
+  if (hasBounceContent && !isBounceAddress) {
+    const hasSmtpCodes = /5\d\d |4\d\d /.test(fullText);
+    const bounceKeywordCount = (fullText.match(/undeliverable|delivery failed|could not be delivered|address rejected|user unknown|no such user|account disabled|recipient rejected|mailbox.*full|mailbox.*quota/gi) || []).length;
+    const isDsnSubject = /delivery status notification|failure notice|returned mail|mail delivery|bounce/i.test(subjectLower);
+
+    // High confidence bounce detection for non-system senders:
+    // - DSN subject + bounce content, OR
+    // - SMTP codes + bounce keywords, OR
+    // - 3+ distinct bounce keywords
+    if ((isDsnSubject && hasBounceContent) || (hasSmtpCodes && bounceKeywordCount >= 1) || (bounceKeywordCount >= 3)) {
+      let bounceType: 'hard' | 'soft' | 'blocked' | 'mailbox_full' = 'hard';
+      if (/mailbox (full|quota|exceeded|over)/i.test(fullText)) bounceType = 'mailbox_full';
+      else if (/blocked|rejected|spam|blacklist|policy/i.test(fullText)) bounceType = 'blocked';
+      else if (/temporary|try again|transient|4\d\d /i.test(fullText)) bounceType = 'soft';
+
+      return { replyType: 'bounce', bounceType, confidence: 0.80, reason: 'Bounce message detected' };
+    }
   }
 
   // 2. Check OOO

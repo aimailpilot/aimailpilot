@@ -8405,8 +8405,16 @@ Respond with ONLY a JSON object in this format:
       const provider = msg.provider;
       const fwdSubject = msg.subject?.startsWith('Fwd:') ? msg.subject : `Fwd: ${msg.subject}`;
       const senderEmail = msg.toEmail || settings.gmail_email || '';
-      const fullBody = (fwdBody || '') +
-        `\n\n---------- Forwarded message ----------\nFrom: ${msg.fromName || msg.fromEmail} <${msg.fromEmail}>\nSubject: ${msg.subject}\n\n${msg.body || msg.snippet || ''}`;
+
+      // Convert plain text newlines to <br> tags for HTML email
+      const userNote = fwdBody ? fwdBody.replace(/\n/g, '<br>') : '';
+      const originalBody = (msg.body || msg.snippet || '').replace(/\n/g, '<br>');
+      const fullBody = `${userNote}${userNote ? '<br><br>' : ''}<div style="border-left: 3px solid #ccc; padding-left: 12px; color: #666; margin-top: 16px;">
+<div style="font-size: 12px; color: #999; margin-bottom: 8px;">---------- Forwarded message ----------</div>
+<div style="font-size: 13px; margin-bottom: 4px;"><strong>From:</strong> ${msg.fromName || msg.fromEmail} &lt;${msg.fromEmail}&gt;</div>
+<div style="font-size: 13px; margin-bottom: 12px;"><strong>Subject:</strong> ${msg.subject || '(no subject)'}</div>
+<div style="font-size: 13px; line-height: 1.6;">${originalBody}</div>
+</div>`;
 
       if (provider === 'gmail') {
         const senderPrefix = `gmail_sender_${senderEmail}_`;
@@ -8444,6 +8452,15 @@ Respond with ONLY a JSON object in this format:
           const errText = await sendResp.text();
           return res.status(500).json({ message: `Gmail forward failed: ${errText}` });
         }
+
+        // Mark as forwarded
+        await storage.updateInboxMessage(msg.id, {
+          status: 'forwarded',
+          forwardedAt: new Date().toISOString(),
+          forwardedTo: to,
+          forwardedBy: req.user.email || req.user.id,
+        });
+
         return res.json({ success: true });
 
       } else if (provider === 'outlook') {
@@ -8479,6 +8496,15 @@ Respond with ONLY a JSON object in this format:
           const errText = await graphResp.text();
           return res.status(500).json({ message: `Outlook forward failed: ${errText}` });
         }
+
+        // Mark as forwarded
+        await storage.updateInboxMessage(msg.id, {
+          status: 'forwarded',
+          forwardedAt: new Date().toISOString(),
+          forwardedTo: to,
+          forwardedBy: req.user.email || req.user.id,
+        });
+
         return res.json({ success: true });
       }
 
