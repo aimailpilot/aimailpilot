@@ -9,10 +9,16 @@ import crypto from 'crypto';
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL?.includes('azure') ? { rejectUnauthorized: false } : undefined,
-  max: 10,
+  max: 30,  // increased from 10 to handle concurrent reply trackers + campaign engine
+  min: 2,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 5000,  // fail fast — 5s per attempt
-  query_timeout: 30000,           // max 30s per query
+  connectionTimeoutMillis: 10000,  // increased from 5s to 10s to reduce false timeouts
+  query_timeout: 60000,            // increased from 30s to 60s for slow complex queries
+});
+
+// Log pool events for debugging
+pool.on('connect', () => {
+  console.debug(`[PG] Pool: ${pool.totalCount} total, ${pool.idleCount} idle`);
 });
 
 pool.on('error', (err) => {
@@ -636,6 +642,7 @@ async function initializeSchema() {
     const indexes = [
       'CREATE INDEX IF NOT EXISTS idx_contacts_org ON contacts("organizationId")',
       'CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts("organizationId", email)',
+      'CREATE INDEX IF NOT EXISTS idx_contacts_email_lower ON contacts("organizationId", (LOWER(email)))',  // for case-insensitive lookup
       'CREATE INDEX IF NOT EXISTS idx_contacts_list ON contacts("listId")',
       'CREATE INDEX IF NOT EXISTS idx_contacts_assigned ON contacts("assignedTo")',
       'CREATE INDEX IF NOT EXISTS idx_contacts_industry ON contacts(industry)',
@@ -663,6 +670,7 @@ async function initializeSchema() {
       'CREATE INDEX IF NOT EXISTS idx_messages_campaign_step ON messages("campaignId", "stepNumber")',
       'CREATE INDEX IF NOT EXISTS idx_messages_provider_id ON messages("providerMessageId")',
       'CREATE INDEX IF NOT EXISTS idx_messages_campaign_status ON messages("campaignId", status)',
+      'CREATE INDEX IF NOT EXISTS idx_messages_org_sent_provider ON messages("campaignId", "sentAt" DESC, "providerMessageId") WHERE status IN (\'sent\', \'failed\', \'sending\', \'bounced\') AND "providerMessageId" IS NOT NULL',  // for getAllRecentCampaignMessages
       'CREATE INDEX IF NOT EXISTS idx_events_campaign ON tracking_events("campaignId")',
       'CREATE INDEX IF NOT EXISTS idx_events_message ON tracking_events("messageId")',
       'CREATE INDEX IF NOT EXISTS idx_events_tracking ON tracking_events("trackingId")',
@@ -1681,6 +1689,9 @@ export class PostgresStorage {
   }
 
   async getAllRecentCampaignMessages(orgId: string) {
+    // Fetch only messages from last 30 days to reduce data transfer (reply trackers only care about recent)
+    // LIMIT reduced from 50000 to 5000 to prevent timeout on large orgs
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
     return queryAll(`
       SELECT m.*, ct.email as "contactEmail", c.name as "campaignName" FROM messages m
       INNER JOIN campaigns c ON m."campaignId" = c.id
@@ -1688,9 +1699,10 @@ export class PostgresStorage {
       WHERE c."organizationId" = $1
       AND m.status IN ('sent', 'failed', 'sending', 'bounced')
       AND m."providerMessageId" IS NOT NULL
+      AND m."sentAt" > $2
       ORDER BY m."sentAt" DESC
-      LIMIT 50000
-    `, [orgId]);
+      LIMIT 5000
+    `, [orgId, thirtyDaysAgo]);
   }
 
   // ========== Unsubscribes ==========
@@ -2069,8 +2081,11 @@ export class PostgresStorage {
   }
 
   async getInboxMessage(id: string) { return queryOne('SELECT * FROM unified_inbox WHERE id = $1', [id]); }
-  async getInboxMessageByGmailId(gmailMessageId: string) { return queryOne('SELECT * FROM unified_inbox WHERE "gmailMessageId" = $1', [gmailMessageId]); }
-  async getInboxMessageByOutlookId(outlookMessageId: string) { return queryOne('SELECT * FROM unified_inbox WHERE "outlookMessageId" = $1', [outlookMessageId]); }
+
+  // Lightweight lookups for reply trackers — exclude body/bodyHtml to reduce data transfer
+  private readonly inboxLightCols = 'id, "organizationId", "emailAccountId", "campaignId", "messageId", "contactId", "gmailMessageId", "gmailThreadId", "outlookMessageId", "outlookConversationId", "fromEmail", "fromName", "toEmail", subject, snippet, status, provider, "repliedAt", "replyType", "bounceType", "threadId", "inReplyTo", "receivedAt", "createdAt", "isWarmup", "sentByUs"';
+  async getInboxMessageByGmailId(gmailMessageId: string) { return queryOne(`SELECT ${this.inboxLightCols} FROM unified_inbox WHERE "gmailMessageId" = $1`, [gmailMessageId]); }
+  async getInboxMessageByOutlookId(outlookMessageId: string) { return queryOne(`SELECT ${this.inboxLightCols} FROM unified_inbox WHERE "outlookMessageId" = $1`, [outlookMessageId]); }
 
   async createInboxMessage(msg: any) {
     const id = genId(); const ts = now();

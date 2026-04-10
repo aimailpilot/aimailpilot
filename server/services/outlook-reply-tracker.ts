@@ -358,17 +358,20 @@ export class OutlookReplyTracker {
               for (const email of foundEmails) {
                 const emailLower = email.toLowerCase();
                 if (emailLower.includes('mailer-daemon') || emailLower.includes('postmaster') || emailLower.includes('noreply')) continue;
-                
+
                 try {
                   const contact = await storage.getContactByEmail(orgId, emailLower);
                   if (contact && (contact as any).status !== 'bounced') {
                     await storage.updateContact((contact as any).id, { status: 'bounced' });
                     console.log(`[OutlookReplyTracker] BOUNCE DETECTED (${accountEmail}): ${email} (subject: ${msg.subject})`);
-                    
+
                     try {
-                      const allMsgs = await storage.getAllRecentCampaignMessages(orgId);
-                      const contactMsg = allMsgs.find((m: any) => m.contactId === (contact as any).id);
-                      if (contactMsg) bouncedMsg = contactMsg;
+                      // Only fetch messages for this specific contact, not all org messages
+                      const contactMsgs = await (storage as any).rawAll(
+                        'SELECT * FROM messages WHERE "contactId" = $1 ORDER BY "createdAt" DESC LIMIT 1',
+                        [(contact as any).id]
+                      );
+                      if (contactMsgs?.length > 0) bouncedMsg = contactMsgs[0];
                     } catch (e) {}
                   }
                 } catch (e) {
