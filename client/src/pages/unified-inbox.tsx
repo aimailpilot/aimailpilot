@@ -427,10 +427,17 @@ export default function UnifiedInbox() {
 
   const unmarkBounce = async (id: string) => {
     try {
-      await fetch(`/api/inbox/${id}/unmark-bounce`, { method: 'POST', credentials: 'include' });
-      setMessages(prev => prev.map(m => m.id === id ? { ...m, bounceType: '', status: 'read' as const } : m));
-      if (selectedMessage?.id === id) setSelectedMessage(prev => prev ? { ...prev, bounceType: '', status: 'read' } : null);
-    } catch {}
+      const resp = await fetch(`/api/inbox/${id}/unmark-bounce`, { method: 'POST', credentials: 'include' });
+      if (resp.ok) {
+        setMessages(prev => prev.map(m => m.id === id ? { ...m, bounceType: '', status: 'read' as const } : m));
+        if (selectedMessage?.id === id) setSelectedMessage(prev => prev ? { ...prev, bounceType: '', status: 'read' } : null);
+      } else {
+        alert('Failed to unmark bounce');
+      }
+    } catch (err) {
+      console.error('Unmark bounce error:', err);
+      alert('Error unmarking bounce');
+    }
   };
 
   const sendForward = async () => {
