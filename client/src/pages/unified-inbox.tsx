@@ -645,50 +645,56 @@ export default function UnifiedInbox() {
               </Tooltip>
             )}
           </div>
-          <div className="flex items-center gap-1 ml-auto sm:ml-0">
-          <div className="flex items-center gap-1">
-            {/* Reply Type Classification */}
-            <Select value={selectedMessage.replyType || ''} onValueChange={(v) => classifyMessage(selectedMessage.id, v)}>
-              <SelectTrigger className="w-[110px] h-7 text-[10px]">
-                <SelectValue placeholder="Classify" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="positive"><span className="flex items-center gap-1"><ThumbsUp className="h-3 w-3 text-emerald-600" /> Positive</span></SelectItem>
-                <SelectItem value="negative"><span className="flex items-center gap-1"><ThumbsDown className="h-3 w-3 text-red-600" /> Negative</span></SelectItem>
-                <SelectItem value="ooo"><span className="flex items-center gap-1"><Coffee className="h-3 w-3 text-amber-600" /> OOO</span></SelectItem>
-                <SelectItem value="auto_reply"><span className="flex items-center gap-1"><Bot className="h-3 w-3 text-gray-600" /> Auto-reply</span></SelectItem>
-                <SelectItem value="general"><span className="flex items-center gap-1"><MessageCircle className="h-3 w-3 text-sky-600" /> General</span></SelectItem>
-              </SelectContent>
-            </Select>
-            {/* Lead Status */}
-            <Select value={selectedMessage.leadStatus || ''} onValueChange={(v) => updateLeadStatus(selectedMessage.id, v)}>
-              <SelectTrigger className="w-[120px] h-7 text-[10px]">
-                <SelectValue placeholder="Lead Status" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="interested"><span className="flex items-center gap-1"><Heart className="h-3 w-3" /> Interested</span></SelectItem>
-                <SelectItem value="meeting_scheduled"><span className="flex items-center gap-1"><Calendar className="h-3 w-3" /> Meeting</span></SelectItem>
-                <SelectItem value="follow_up"><span className="flex items-center gap-1"><PhoneForwarded className="h-3 w-3" /> Follow Up</span></SelectItem>
-                <SelectItem value="closed"><span className="flex items-center gap-1"><Check className="h-3 w-3" /> Closed</span></SelectItem>
-                <SelectItem value="not_interested"><span className="flex items-center gap-1"><XSquare className="h-3 w-3" /> Not Interested</span></SelectItem>
-              </SelectContent>
-            </Select>
-            {/* Assign */}
-            {isAdmin && teamMembers.length > 0 && (
-              <Select value={selectedMessage.assignedTo || ''} onValueChange={(v) => assignMessage(selectedMessage.id, v)}>
+          <div className="flex items-center gap-1 ml-auto sm:ml-0 min-w-0 overflow-x-auto">
+          <div className="flex items-center gap-1 flex-shrink-0">
+            {/* Reply Type Classification - hidden on mobile */}
+            <div className="hidden sm:block">
+              <Select value={selectedMessage.replyType || ''} onValueChange={(v) => classifyMessage(selectedMessage.id, v)}>
                 <SelectTrigger className="w-[110px] h-7 text-[10px]">
-                  <SelectValue placeholder="Assign" />
+                  <SelectValue placeholder="Classify" />
                 </SelectTrigger>
                 <SelectContent>
-                  {teamMembers.map((m: any) => (
-                    <SelectItem key={m.userId} value={m.userId}>
-                      {m.firstName || m.email?.split('@')[0]}
-                    </SelectItem>
-                  ))}
+                  <SelectItem value="positive"><span className="flex items-center gap-1"><ThumbsUp className="h-3 w-3 text-emerald-600" /> Positive</span></SelectItem>
+                  <SelectItem value="negative"><span className="flex items-center gap-1"><ThumbsDown className="h-3 w-3 text-red-600" /> Negative</span></SelectItem>
+                  <SelectItem value="ooo"><span className="flex items-center gap-1"><Coffee className="h-3 w-3 text-amber-600" /> OOO</span></SelectItem>
+                  <SelectItem value="auto_reply"><span className="flex items-center gap-1"><Bot className="h-3 w-3 text-gray-600" /> Auto-reply</span></SelectItem>
+                  <SelectItem value="general"><span className="flex items-center gap-1"><MessageCircle className="h-3 w-3 text-sky-600" /> General</span></SelectItem>
                 </SelectContent>
               </Select>
+            </div>
+            {/* Lead Status - hidden on mobile */}
+            <div className="hidden sm:block">
+              <Select value={selectedMessage.leadStatus || ''} onValueChange={(v) => updateLeadStatus(selectedMessage.id, v)}>
+                <SelectTrigger className="w-[120px] h-7 text-[10px]">
+                  <SelectValue placeholder="Lead Status" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="interested"><span className="flex items-center gap-1"><Heart className="h-3 w-3" /> Interested</span></SelectItem>
+                  <SelectItem value="meeting_scheduled"><span className="flex items-center gap-1"><Calendar className="h-3 w-3" /> Meeting</span></SelectItem>
+                  <SelectItem value="follow_up"><span className="flex items-center gap-1"><PhoneForwarded className="h-3 w-3" /> Follow Up</span></SelectItem>
+                  <SelectItem value="closed"><span className="flex items-center gap-1"><Check className="h-3 w-3" /> Closed</span></SelectItem>
+                  <SelectItem value="not_interested"><span className="flex items-center gap-1"><XSquare className="h-3 w-3" /> Not Interested</span></SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {/* Assign - hidden on mobile */}
+            {isAdmin && teamMembers.length > 0 && (
+              <div className="hidden sm:block">
+                <Select value={selectedMessage.assignedTo || ''} onValueChange={(v) => assignMessage(selectedMessage.id, v)}>
+                  <SelectTrigger className="w-[110px] h-7 text-[10px]">
+                    <SelectValue placeholder="Assign" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {teamMembers.map((m: any) => (
+                      <SelectItem key={m.userId} value={m.userId}>
+                        {m.firstName || m.email?.split('@')[0]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             )}
-            <div className="h-5 w-px bg-gray-200 mx-1" />
+            <div className="h-5 w-px bg-gray-200 mx-1 hidden sm:block" />
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => toggleStar(selectedMessage.id)}>

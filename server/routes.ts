@@ -8838,15 +8838,14 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   // Unmark a message as bounced — clears bounceType, resets status to read
   app.post('/api/inbox/:id/unmark-bounce', requireAuth, async (req: any, res) => {
     try {
-      // Direct update — avoids the double getInboxMessage call in updateInboxMessage
       await storage.rawRun(
-        'UPDATE unified_inbox SET "bounceType" = $1, status = $2 WHERE id = $3 AND "organizationId" = $4',
-        '', 'read', req.params.id, req.user.organizationId
+        'UPDATE unified_inbox SET "bounceType" = $1, status = $2 WHERE id = $3',
+        '', 'read', req.params.id
       );
       res.json({ success: true });
-    } catch (error) {
-      console.error('Unmark bounce error:', error);
-      res.status(500).json({ message: 'Failed to unmark bounce' });
+    } catch (error: any) {
+      console.error('Unmark bounce error:', error?.message || error);
+      res.status(500).json({ message: 'Failed to unmark bounce', detail: error?.message });
     }
   });
 
