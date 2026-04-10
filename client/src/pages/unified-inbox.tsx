@@ -87,6 +87,7 @@ interface InboxStats {
   autoReply: number;
   bounced: number;
   starred: number;
+  warmup: number;
 }
 
 export default function UnifiedInbox() {
@@ -125,6 +126,15 @@ export default function UnifiedInbox() {
   const [showReplyBox, setShowReplyBox] = useState(false);
   const [sendingReply, setSendingReply] = useState(false);
   const replyEditorRef = useRef<HTMLDivElement>(null);
+
+  // Forward state
+  const [showForwardBox, setShowForwardBox] = useState(false);
+  const [forwardTo, setForwardTo] = useState('');
+  const [forwardCc, setForwardCc] = useState('');
+  const [forwardBcc, setForwardBcc] = useState('');
+  const [showForwardCcBcc, setShowForwardCcBcc] = useState(false);
+  const [sendingForward, setSendingForward] = useState(false);
+  const forwardEditorRef = useRef<HTMLDivElement>(null);
 
   // AI Assistant
   const [aiDrafting, setAiDrafting] = useState(false);
@@ -247,6 +257,8 @@ export default function UnifiedInbox() {
   const openMessage = async (msg: InboxMessage) => {
     setSelectedMessage(msg);
     setShowReplyBox(false);
+    setShowForwardBox(false);
+    setForwardTo(''); setForwardCc(''); setForwardBcc('');
     setShowAiPanel(false);
     setShowContactInfo(false);
     setShowLeadPanel(false);
@@ -406,6 +418,40 @@ export default function UnifiedInbox() {
       alert('Failed to send reply. Your reply has been saved as a draft.');
     } finally {
       setSendingReply(false);
+    }
+  };
+
+  const unmarkBounce = async (id: string) => {
+    try {
+      await fetch(`/api/inbox/${id}/unmark-bounce`, { method: 'POST', credentials: 'include' });
+      setMessages(prev => prev.map(m => m.id === id ? { ...m, bounceType: '', status: 'read' as const } : m));
+      if (selectedMessage?.id === id) setSelectedMessage(prev => prev ? { ...prev, bounceType: '', status: 'read' } : null);
+    } catch {}
+  };
+
+  const sendForward = async () => {
+    if (!selectedMessage || !forwardTo.trim()) return;
+    setSendingForward(true);
+    try {
+      const fwdHtml = forwardEditorRef.current?.innerHTML || '';
+      const resp = await fetch(`/api/inbox/${selectedMessage.id}/forward`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ to: forwardTo, cc: forwardCc || undefined, bcc: forwardBcc || undefined, body: fwdHtml }),
+      });
+      if (resp.ok) {
+        setShowForwardBox(false);
+        setForwardTo(''); setForwardCc(''); setForwardBcc('');
+        if (forwardEditorRef.current) forwardEditorRef.current.innerHTML = '';
+      } else {
+        const err = await resp.json();
+        alert(err.message || 'Failed to forward email');
+      }
+    } catch {
+      alert('Failed to forward email');
+    } finally {
+      setSendingForward(false);
     }
   };
 
@@ -773,8 +819,7 @@ export default function UnifiedInbox() {
               <div className="px-6 pb-3">
                 <div className="flex items-center gap-2 flex-wrap">
                   <Button size="sm" onClick={() => {
-                    setShowReplyBox(true); setShowAiPanel(false);
-                    // Load saved draft if available
+                    setShowReplyBox(true); setShowForwardBox(false); setShowAiPanel(false);
                     if (selectedMessage?.replyContent && selectedMessage.status !== 'replied') {
                       setTimeout(() => {
                         if (replyEditorRef.current && !replyEditorRef.current.innerHTML.trim()) {
@@ -784,6 +829,9 @@ export default function UnifiedInbox() {
                     }
                   }} className="gap-1.5 bg-blue-600 hover:bg-blue-700">
                     <Reply className="h-3.5 w-3.5" /> Reply{selectedMessage?.replyContent && selectedMessage.status !== 'replied' ? ' (Draft)' : ''}
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => { setShowForwardBox(true); setShowReplyBox(false); setShowAiPanel(false); }} className="gap-1.5">
+                    <Forward className="h-3.5 w-3.5" /> Forward
                   </Button>
                   <Button size="sm" variant="outline" onClick={() => setShowAiPanel(!showAiPanel)} className="gap-1.5 border-purple-200 text-purple-700 hover:bg-purple-50">
                     <Sparkles className="h-3.5 w-3.5" /> AI Draft
@@ -796,6 +844,12 @@ export default function UnifiedInbox() {
                       }, 100);
                     }} className="gap-1.5 text-amber-600 border-amber-200 hover:bg-amber-50">
                       <Brain className="h-3.5 w-3.5" /> Use Saved AI Draft
+                    </Button>
+                  )}
+                  {(selectedMessage.bounceType || selectedMessage.replyType === 'bounce') && (
+                    <Button size="sm" variant="outline" onClick={() => unmarkBounce(selectedMessage.id)}
+                      className="gap-1.5 text-orange-600 border-orange-200 hover:bg-orange-50 ml-auto">
+                      <XCircle className="h-3.5 w-3.5" /> Unmark as Bounced
                     </Button>
                   )}
                 </div>
@@ -840,6 +894,55 @@ export default function UnifiedInbox() {
                       <Button onClick={generateAiDraft} disabled={aiDrafting} className="w-full bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white gap-2">
                         {aiDrafting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
                         {aiDrafting ? 'Generating draft...' : 'Generate AI Reply'}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Forward Box */}
+              {showForwardBox && (
+                <div className="px-6 pb-6">
+                  <div className="bg-white rounded-xl border shadow-sm overflow-hidden">
+                    <div className="flex items-center gap-2 px-4 py-2 bg-gray-50 border-b text-xs text-gray-500">
+                      <Forward className="h-3.5 w-3.5 text-blue-500" />
+                      <span>Forwarding: <strong className="text-gray-700">{selectedMessage.subject}</strong></span>
+                      <button onClick={() => setShowForwardBox(false)} className="ml-auto p-0.5 hover:bg-gray-200 rounded"><X className="h-3.5 w-3.5" /></button>
+                    </div>
+                    <div className="px-4 py-2 space-y-2 border-b">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-gray-500 w-8">To</span>
+                        <input type="text" value={forwardTo} onChange={e => setForwardTo(e.target.value)}
+                          placeholder="recipient@example.com, another@example.com"
+                          className="flex-1 text-sm border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-400" />
+                        <button onClick={() => setShowForwardCcBcc(!showForwardCcBcc)}
+                          className="text-xs text-blue-500 hover:underline whitespace-nowrap">CC / BCC</button>
+                      </div>
+                      {showForwardCcBcc && (<>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-gray-500 w-8">CC</span>
+                          <input type="text" value={forwardCc} onChange={e => setForwardCc(e.target.value)}
+                            placeholder="cc@example.com"
+                            className="flex-1 text-sm border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-400" />
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-gray-500 w-8">BCC</span>
+                          <input type="text" value={forwardBcc} onChange={e => setForwardBcc(e.target.value)}
+                            placeholder="bcc@example.com"
+                            className="flex-1 text-sm border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-400" />
+                        </div>
+                      </>)}
+                    </div>
+                    <div ref={forwardEditorRef} contentEditable
+                      className="min-h-[100px] max-h-[200px] overflow-y-auto px-4 py-3 text-sm text-gray-700 focus:outline-none leading-relaxed"
+                      data-placeholder="Add a note (optional)..." />
+                    <div className="px-4 py-2 border-t bg-gray-50 text-xs text-gray-400 italic">
+                      ── Original message from {selectedMessage.fromName || selectedMessage.fromEmail} will be appended ──
+                    </div>
+                    <div className="flex items-center justify-between px-4 py-2.5 border-t bg-gray-50">
+                      <Button variant="ghost" size="sm" className="text-gray-500" onClick={() => setShowForwardBox(false)}>Cancel</Button>
+                      <Button size="sm" onClick={sendForward} disabled={sendingForward || !forwardTo.trim()} className="bg-blue-600 hover:bg-blue-700 gap-1.5">
+                        {sendingForward ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Forward className="h-3.5 w-3.5" />} Forward
                       </Button>
                     </div>
                   </div>

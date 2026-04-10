@@ -2905,6 +2905,9 @@ export class PostgresStorage {
       sql += ` AND (status = 'bounced' OR "bounceType" != '')` + warmupExclude;
     } else if (filters?.status === 'unsubscribed') {
       sql += ` AND "replyType" = 'unsubscribe'`;
+    } else if (filters?.status === 'replied') {
+      // Include both messages we replied to (status='replied') AND incoming replies tracked via repliedAt
+      sql += ` AND (status = 'replied' OR "repliedAt" IS NOT NULL)` + warmupExclude;
     } else if (filters?.status && filters.status !== 'all') {
       sql += ` AND status = $${idx++}` + warmupExclude; params.push(filters.status);
     } else {
@@ -2957,6 +2960,8 @@ export class PostgresStorage {
       sql += ` AND (status = 'bounced' OR "bounceType" != '')` + warmupExcludeCount;
     } else if (filters?.status === 'unsubscribed') {
       sql += ` AND "replyType" = 'unsubscribe'`;
+    } else if (filters?.status === 'replied') {
+      sql += ` AND (status = 'replied' OR "repliedAt" IS NOT NULL)` + warmupExcludeCount;
     } else if (filters?.status && filters.status !== 'all') {
       sql += ` AND status = $${idx++}` + warmupExcludeCount; params.push(filters.status);
     } else {
@@ -2992,7 +2997,7 @@ export class PostgresStorage {
 
     const total = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 ${warmupExcludeSql}`, [organizationId])).c);
     const unread = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'unread' ${warmupExcludeSql}`, [organizationId])).c);
-    const replied = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'replied' ${warmupExcludeSql}`, [organizationId])).c);
+    const replied = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND (status = 'replied' OR "repliedAt" IS NOT NULL) ${warmupExcludeSql}`, [organizationId])).c);
     const archived = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'archived'`, [organizationId])).c);
     const positive = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'positive'`, [organizationId])).c);
     const negative = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'negative'`, [organizationId])).c);

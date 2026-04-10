@@ -21,11 +21,12 @@ import { scanOrgEmailHistory, analyzeOrgLeads, runFullLeadIntelligence, BUCKET_L
 const loggedInUsers = new Set<string>();
 
 // Helper to create raw email for Gmail API send
-function createRawEmail(opts: { from: string; to: string; subject: string; body: string; inReplyTo?: string; threadId?: string }): string {
-  const boundary = `boundary_${Date.now()}`;
+function createRawEmail(opts: { from: string; to: string; cc?: string; bcc?: string; subject: string; body: string; inReplyTo?: string; threadId?: string }): string {
   let raw = '';
   raw += `From: ${opts.from}\r\n`;
   raw += `To: ${opts.to}\r\n`;
+  if (opts.cc) raw += `Cc: ${opts.cc}\r\n`;
+  if (opts.bcc) raw += `Bcc: ${opts.bcc}\r\n`;
   raw += `Subject: ${opts.subject}\r\n`;
   raw += `MIME-Version: 1.0\r\n`;
   raw += `Content-Type: text/html; charset="UTF-8"\r\n`;
@@ -8391,6 +8392,103 @@ Respond with ONLY a JSON object in this format:
     }
   });
 
+  // Forward message with optional CC/BCC
+  app.post('/api/inbox/:id/forward', requireAuth, async (req: any, res) => {
+    try {
+      const msg: any = await storage.getInboxMessage(req.params.id);
+      if (!msg) return res.status(404).json({ message: 'Message not found' });
+
+      const { to, cc, bcc, body: fwdBody } = req.body;
+      if (!to) return res.status(400).json({ message: 'To address is required' });
+
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      const provider = msg.provider;
+      const fwdSubject = msg.subject?.startsWith('Fwd:') ? msg.subject : `Fwd: ${msg.subject}`;
+      const senderEmail = msg.toEmail || settings.gmail_email || '';
+      const fullBody = (fwdBody || '') +
+        `\n\n---------- Forwarded message ----------\nFrom: ${msg.fromName || msg.fromEmail} <${msg.fromEmail}>\nSubject: ${msg.subject}\n\n${msg.body || msg.snippet || ''}`;
+
+      if (provider === 'gmail') {
+        const senderPrefix = `gmail_sender_${senderEmail}_`;
+        let accessToken = settings[`${senderPrefix}access_token`] || settings.gmail_access_token;
+        const refreshToken = settings[`${senderPrefix}refresh_token`] || settings.gmail_refresh_token;
+        if (!accessToken && !refreshToken) return res.status(400).json({ message: 'Gmail not connected.' });
+
+        const rawMessage = createRawEmail({ from: senderEmail, to, cc, bcc, subject: fwdSubject, body: fullBody });
+
+        let sendResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ raw: rawMessage }),
+        });
+
+        if (sendResp.status === 401 && refreshToken) {
+          let clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID || '';
+          let clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET || '';
+          try {
+            const oauth2 = createOAuth2Client({ clientId, clientSecret, redirectUri: '' });
+            oauth2.setCredentials({ refresh_token: refreshToken });
+            const { credentials } = await oauth2.refreshAccessToken();
+            if (credentials.access_token) {
+              accessToken = credentials.access_token;
+              sendResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ raw: rawMessage }),
+              });
+            }
+          } catch { /* ignore */ }
+        }
+
+        if (!sendResp.ok) {
+          const errText = await sendResp.text();
+          return res.status(500).json({ message: `Gmail forward failed: ${errText}` });
+        }
+        return res.json({ success: true });
+
+      } else if (provider === 'outlook') {
+        // Outlook forward via Graph API
+        const emailAccountId = msg.emailAccountId;
+        if (!emailAccountId) return res.status(400).json({ message: 'No email account linked to this message' });
+        const account = await storage.getEmailAccount(emailAccountId) as any;
+        if (!account) return res.status(400).json({ message: 'Email account not found' });
+        const settingsForAccount = await storage.getApiSettings(req.user.organizationId);
+        const outlookPrefix = `outlook_sender_${account.email}_`;
+        let token = settingsForAccount[`${outlookPrefix}access_token`] || settingsForAccount.outlook_access_token;
+        if (!token) return res.status(400).json({ message: 'Outlook not connected.' });
+
+        const toRecipients = to.split(',').map((e: string) => ({ emailAddress: { address: e.trim() } }));
+        const ccRecipients = cc ? cc.split(',').map((e: string) => ({ emailAddress: { address: e.trim() } })) : [];
+        const bccRecipients = bcc ? bcc.split(',').map((e: string) => ({ emailAddress: { address: e.trim() } })) : [];
+
+        const graphResp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: {
+              subject: fwdSubject,
+              body: { contentType: 'HTML', content: fullBody.replace(/\n/g, '<br>') },
+              toRecipients,
+              ccRecipients,
+              bccRecipients,
+            }
+          }),
+        });
+
+        if (!graphResp.ok) {
+          const errText = await graphResp.text();
+          return res.status(500).json({ message: `Outlook forward failed: ${errText}` });
+        }
+        return res.json({ success: true });
+      }
+
+      return res.status(400).json({ message: 'Unsupported provider for forward' });
+    } catch (error) {
+      console.error('[Inbox Forward] Error:', error);
+      res.status(500).json({ message: 'Failed to forward message' });
+    }
+  });
+
   // ========== AI DRAFT FOR INBOX REPLY ==========
   app.post('/api/inbox/:id/ai-draft', requireAuth, async (req: any, res) => {
     try {
@@ -8639,6 +8737,18 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       res.json({ success: true });
     } catch (error) {
       res.status(500).json({ message: 'Failed to star message' });
+    }
+  });
+
+  // Unmark a message as bounced — clears bounceType, resets status to read
+  app.post('/api/inbox/:id/unmark-bounce', requireAuth, async (req: any, res) => {
+    try {
+      const msg: any = await storage.getInboxMessage(req.params.id);
+      if (!msg) return res.status(404).json({ message: 'Message not found' });
+      await storage.updateInboxMessage(req.params.id, { bounceType: '', status: 'read' });
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to unmark bounce' });
     }
   });
 
