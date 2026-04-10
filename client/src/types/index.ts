@@ -32,12 +32,20 @@ export interface Campaign {
   emailAccountId?: string;
   templateId?: string;
   contactIds?: string[];
+  segmentId?: string;
   trackOpens?: boolean;
   trackClicks?: boolean;
   includeUnsubscribe?: boolean;
   scheduledAt?: string;
   createdAt: string;
   updatedAt: string;
+  // Enriched fields from API
+  createdBy?: string;
+  creatorName?: string;
+  creatorEmail?: string;
+  senderEmail?: string;
+  senderName?: string;
+  listName?: string;
 }
 
 export interface CampaignMessage {

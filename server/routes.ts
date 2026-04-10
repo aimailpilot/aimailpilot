@@ -3181,7 +3181,49 @@ Which account should I use and why? If I need to split across accounts, provide 
         }
       }
       
-      res.json(campaigns);
+      // Enrich campaigns with sender info and list name
+      const enriched = await Promise.all((campaigns as any[]).map(async (c: any) => {
+        // Sender: email account display name + email
+        if (c.emailAccountId) {
+          try {
+            const acct = await storage.getEmailAccount(c.emailAccountId) as any;
+            if (acct) {
+              c.senderEmail = acct.email;
+              c.senderName = acct.displayName || acct.email;
+            }
+          } catch {}
+        }
+        // Creator name from users table
+        if (c.createdBy) {
+          try {
+            const creator = await storage.getUser(c.createdBy) as any;
+            if (creator) {
+              c.creatorName = [creator.firstName, creator.lastName].filter(Boolean).join(' ') || creator.email;
+              c.creatorEmail = creator.email;
+            }
+          } catch {}
+        }
+        // List name: first try segmentId, then contactIds[0] to detect list
+        if (c.segmentId) {
+          try {
+            const seg = await storage.rawGet('SELECT name FROM contact_lists WHERE id = $1', c.segmentId) as any;
+            if (seg) c.listName = seg.name;
+          } catch {}
+        }
+        if (!c.listName && c.contactIds?.length) {
+          // contactIds may be list IDs or actual contact IDs — try looking up as a list
+          try {
+            const firstId = Array.isArray(c.contactIds) ? c.contactIds[0] : JSON.parse(c.contactIds || '[]')[0];
+            if (firstId) {
+              const seg = await storage.rawGet('SELECT name FROM contact_lists WHERE id = $1', firstId) as any;
+              if (seg) c.listName = seg.name;
+            }
+          } catch {}
+        }
+        return c;
+      }));
+
+      res.json(enriched);
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch campaigns' });
     }

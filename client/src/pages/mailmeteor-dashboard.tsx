@@ -896,12 +896,12 @@ export default function MailMeteorDashboard() {
                 <>
                   {/* Desktop Table View */}
                   <div className="hidden md:block bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden">
-                    <div className="grid grid-cols-[2fr_80px_60px_65px_65px_65px_65px_80px_44px] gap-2 px-4 md:px-5 py-3 border-b border-gray-100 bg-gray-50/50 text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+                    <div className="grid grid-cols-[2fr_90px_90px_60px_65px_65px_65px_65px_44px] gap-2 px-4 md:px-5 py-3 border-b border-gray-100 bg-gray-50/50 text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider text-gray-400">
                       <div>Campaign</div>
-                      <div>Status</div>
+                      <div>Sent By</div>
+                      <div>List</div>
                       <div className="text-right">Sent</div>
                       <div className="text-right">Opens</div>
-                      <div className="text-right">Clicks</div>
                       <div className="text-right">Replies</div>
                       <div className="text-right">Bounced</div>
                       <div className="text-right">Date</div>
@@ -911,22 +911,54 @@ export default function MailMeteorDashboard() {
                     {filteredCampaigns.map((campaign: Campaign) => (
                       <div
                         key={campaign.id}
-                        className="grid grid-cols-[2fr_80px_60px_65px_65px_65px_65px_80px_44px] gap-2 px-4 md:px-5 py-3 sm:py-3.5 border-b border-gray-50 hover:bg-blue-50/30 items-center transition-colors group cursor-pointer"
+                        className="grid grid-cols-[2fr_90px_90px_60px_65px_65px_65px_65px_44px] gap-2 px-4 md:px-5 py-3 sm:py-3.5 border-b border-gray-50 hover:bg-blue-50/30 items-center transition-colors group cursor-pointer"
                         onClick={() => { setSelectedCampaignId(campaign.id); setCurrentView('campaign-detail'); }}
                       >
                         <div className="min-w-0">
                           <div className="font-semibold text-sm text-gray-900 truncate">{campaign.name}</div>
-                          {campaign.description && <div className="text-xs text-gray-400 truncate mt-0.5">{campaign.description}</div>}
+                          {(campaign as any).senderEmail && (
+                            <div className="text-[10px] text-gray-400 truncate mt-0.5 flex items-center gap-1">
+                              <Mail className="h-2.5 w-2.5 flex-shrink-0" />
+                              {(campaign as any).senderEmail}
+                            </div>
+                          )}
                         </div>
-                        <div>{getStatusBadge(campaign.status)}</div>
+                        {/* Sent By — creator avatar + name */}
+                        <div className="min-w-0">
+                          {(campaign as any).creatorName ? (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <div className="flex items-center gap-1.5">
+                                  <div className="w-6 h-6 rounded-full bg-gradient-to-br from-indigo-400 to-purple-500 flex items-center justify-center flex-shrink-0">
+                                    <span className="text-[9px] font-bold text-white">
+                                      {((campaign as any).creatorName as string).split(' ').map((p: string) => p[0]).slice(0, 2).join('')}
+                                    </span>
+                                  </div>
+                                  <span className="text-xs text-gray-600 truncate">{((campaign as any).creatorName as string).split(' ')[0]}</span>
+                                </div>
+                              </TooltipTrigger>
+                              <TooltipContent>{(campaign as any).creatorName} &lt;{(campaign as any).creatorEmail}&gt;</TooltipContent>
+                            </Tooltip>
+                          ) : <span className="text-xs text-gray-300">—</span>}
+                        </div>
+                        {/* List name */}
+                        <div className="min-w-0">
+                          {(campaign as any).listName ? (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span className="text-[10px] text-indigo-600 bg-indigo-50 border border-indigo-100 px-1.5 py-0.5 rounded-full truncate block max-w-[80px]">
+                                  {(campaign as any).listName}
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent>{(campaign as any).listName}</TooltipContent>
+                            </Tooltip>
+                          ) : <span className="text-xs text-gray-300">—</span>}
+                        </div>
                         <div className="text-right">
                           <span className="text-xs sm:text-sm font-medium text-gray-700">{(campaign.sentCount || 0).toLocaleString()}</span>
                         </div>
                         <div className="text-right">
                           <span className="text-xs sm:text-sm font-medium text-gray-700">{formatPercentage(campaign.openedCount || 0, campaign.sentCount || 0)}</span>
-                        </div>
-                        <div className="text-right">
-                          <span className="text-xs sm:text-sm font-medium text-gray-700">{formatPercentage(campaign.clickedCount || 0, campaign.sentCount || 0)}</span>
                         </div>
                         <div className="text-right">
                           <span className="text-xs sm:text-sm font-medium text-gray-700">{formatPercentage(campaign.repliedCount || 0, campaign.sentCount || 0)}</span>
@@ -974,15 +1006,41 @@ export default function MailMeteorDashboard() {
                         className="bg-white border border-gray-200 rounded-lg p-3 sm:p-4 cursor-pointer hover:bg-blue-50/30 transition-colors"
                         onClick={() => { setSelectedCampaignId(campaign.id); setCurrentView('campaign-detail'); }}
                       >
-                        <div className="flex items-start justify-between gap-2 mb-2 sm:mb-3">
+                        <div className="flex items-start justify-between gap-2 mb-2">
                           <div className="flex-1 min-w-0">
                             <h3 className="font-semibold text-xs sm:text-sm text-gray-900 truncate">{campaign.name}</h3>
-                            {campaign.description && <p className="text-[10px] sm:text-xs text-gray-400 truncate mt-0.5">{campaign.description}</p>}
+                            {/* Sender email on mobile */}
+                            {(campaign as any).senderEmail && (
+                              <p className="text-[10px] text-gray-400 truncate mt-0.5 flex items-center gap-1">
+                                <Mail className="h-2.5 w-2.5 flex-shrink-0" />{(campaign as any).senderEmail}
+                              </p>
+                            )}
                           </div>
-                          <div className="flex-shrink-0">{getStatusBadge(campaign.status)}</div>
+                          <div className="flex items-center gap-1.5 flex-shrink-0">
+                            {getStatusBadge(campaign.status)}
+                          </div>
                         </div>
 
-                        <div className="grid grid-cols-3 gap-2 sm:gap-3 text-center text-[10px] sm:text-xs mb-2 sm:mb-3 py-2 sm:py-3 bg-gray-50 rounded">
+                        {/* Creator + List row */}
+                        <div className="flex items-center gap-3 mb-2 flex-wrap">
+                          {(campaign as any).creatorName && (
+                            <div className="flex items-center gap-1">
+                              <div className="w-5 h-5 rounded-full bg-gradient-to-br from-indigo-400 to-purple-500 flex items-center justify-center flex-shrink-0">
+                                <span className="text-[8px] font-bold text-white">
+                                  {((campaign as any).creatorName as string).split(' ').map((p: string) => p[0]).slice(0, 2).join('')}
+                                </span>
+                              </div>
+                              <span className="text-[10px] text-gray-600">{((campaign as any).creatorName as string).split(' ')[0]}</span>
+                            </div>
+                          )}
+                          {(campaign as any).listName && (
+                            <span className="text-[9px] text-indigo-600 bg-indigo-50 border border-indigo-100 px-1.5 py-0.5 rounded-full truncate max-w-[120px]">
+                              {(campaign as any).listName}
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-3 gap-2 text-center text-[10px] sm:text-xs mb-2 py-2 bg-gray-50 rounded">
                           <div>
                             <div className="text-gray-400 font-medium mb-0.5">Sent</div>
                             <div className="font-semibold text-gray-900">{(campaign.sentCount || 0).toLocaleString()}</div>
@@ -997,7 +1055,7 @@ export default function MailMeteorDashboard() {
                           </div>
                         </div>
 
-                        <div className="flex items-center justify-between text-[10px] sm:text-xs text-gray-400">
+                        <div className="flex items-center justify-between text-[10px] text-gray-400">
                           <span>{campaign.createdAt ? formatDate(campaign.createdAt) : '-'}</span>
                           <button onClick={(e) => { e.stopPropagation(); }} className="flex-shrink-0">
                             <DropdownMenu>
