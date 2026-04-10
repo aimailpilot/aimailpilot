@@ -1,4 +1,4 @@
-# STATUS.md — DO NOT BREAK (47 features confirmed working)
+# STATUS.md — DO NOT BREAK (54 features confirmed working)
 
 > Do NOT modify code for these features unless explicitly asked to fix a bug in that specific feature.
 > When in doubt — **ask before changing**.
@@ -54,6 +54,13 @@
 | 45 | Contact Activity Log + Pipeline (PG fix) | `routes.ts:4438-4548` — all camelCase MUST be double-quoted for PG |
 | 46 | Follow-up Engine — No Mid-Loop Stall | `processMessageFollowups()` in `followup-engine.ts` — uses bulk-loaded message, NO per-contact `getCampaignMessage` re-fetch. Pre-loaded campaign passed from `processCampaignFollowups` → `processMessageFollowups` → `scheduleFollowup`. Removing this causes N×(2-5s) DB stalls with slow PG. |
 | 47 | Reply Tracker — 15-min Lookback (not 24h) | `runCheck()` in `gmail-reply-tracker.ts` and `outlook-reply-tracker.ts` — lookback is `15` minutes. Was `1440` (24h) causing continuous DB saturation with 80 accounts. 15-min gives 3× overlap with 5-min poll cycle — no replies missed. Do NOT increase back to 1440. |
+| 48 | Follow-up Engine — Paused Campaign Guard | `processScheduledFollowups()` and `executeFollowup()` in `followup-engine.ts` — both check `campaign.status`. If paused/cancelled/draft, execution is deferred (stays `pending`) not skipped — resumes naturally when campaign un-paused. |
+| 49 | Follow-up Engine — Overlap Lock | `startFollowupEngine()` in `followup-engine.ts` — `isProcessing` boolean prevents concurrent 30s cycles. If previous cycle still running when next interval fires, it skips and logs. |
+| 50 | Follow-up Engine — Atomic Execution Claim | `executeFollowup()` in `followup-engine.ts` — `UPDATE SET status='processing' WHERE status='pending' RETURNING id` atomically claims execution. Null return = already claimed. 5-min stuck-processing recovery in `processFollowupTriggers()`. Do NOT revert to non-atomic read-then-check. |
+| 51 | Follow-up Engine — Targeted DB Queries | `processCampaignFollowups()`, `processScheduledFollowups()`, `executeFollowup()` in `followup-engine.ts` — all 50k message fetches replaced with targeted indexed queries for replied/bounced sets and per-contact lookups. Do NOT restore `getCampaignMessages(campaignId, 50000, 0)` in these paths. |
+| 52 | Follow-up Engine — Multi-Sequence Completion | `checkFollowupCompletion()` in `followup-engine.ts` — aggregates follow-up steps across ALL sequences for a campaign via `getCampaignFollowups()`. Was reading from one sequence only, causing premature completion. |
+| 53 | Follow-up Engine — Account Daily Limit (Atomic) | `executeFollowup()` in `followup-engine.ts` — atomic `UPDATE email_accounts SET dailySent=dailySent+1 WHERE dailySent < dailyLimit RETURNING id` reserves send slot before sending. Decrements on failure. Shares same counter with campaign engine. Do NOT revert to read-then-check pattern. |
+| 54 | Follow-up Engine — Idempotency Guard | `executeFollowup()` in `followup-engine.ts` — checks `SELECT 1 FROM messages WHERE campaignId+contactId+stepNumber+status='sent'` before sending. Prevents duplicate sends on crash recovery between send and status update. |
 
 ## Golden Rules (NEVER violate)
 

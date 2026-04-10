@@ -2870,17 +2870,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
         : allAccounts.filter((a: any) => a.userId === req.user.id);
       
       const accountQuotas = accounts.map((a: any) => {
-        const quota = smtpEmailService.getDailyQuota(a.id, a.provider);
+        // Read from DB (email_accounts.dailySent / dailyLimit) — source of truth for all providers
+        // Gmail OAuth, Outlook OAuth, and SMTP all increment email_accounts.dailySent atomically
+        const dailyLimit = a.dailyLimit || 500;
+        const dailySent = a.dailySent || 0;
+        const remaining = Math.max(0, dailyLimit - dailySent);
         return {
           id: a.id,
           email: a.email,
           displayName: a.displayName || a.email,
           provider: a.provider,
           isActive: a.isActive,
-          dailyLimit: quota.daily,
-          dailySent: quota.sent,
-          remaining: quota.remaining,
-          usagePercent: quota.daily > 0 ? Math.round((quota.sent / quota.daily) * 100) : 0,
+          dailyLimit,
+          dailySent,
+          remaining,
+          usagePercent: dailyLimit > 0 ? Math.round((dailySent / dailyLimit) * 100) : 0,
           resetTime: 'Midnight UTC',
         };
       });

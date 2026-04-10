@@ -225,72 +225,40 @@ For a 3000-contact campaign with Step 2 at 3 days:
 
 ## 7. Known Edge Cases & Potential Issues
 
-### 7.1 CONFIRMED BUGS (fixed in this session)
-- ✅ **Null sentAt bypass**: Messages with `sentAt=null` evaluated by follow-up engine → `new Date(null)=epoch` → 3-day delay check thought 56 years passed → follow-ups fired immediately. **Fixed**: Filter requires `status='sent' AND sentAt exists`.
-- ✅ **Resume shortcut skipping contacts**: `sentCount > 0` treated as "all Step 1 done" → only 8/92 contacts sent, resume went to `following_up`, remaining 84 never got Step 1. **Fixed**: Resume always calls `startCampaign()`.
+### 7.1 CONFIRMED BUGS (all fixed)
+- ✅ **Null sentAt bypass**: Messages with `sentAt=null` evaluated by follow-up engine — `new Date(null)=epoch` — 3-day delay thought 56 years passed, follow-ups fired immediately. **Fixed**: Filter requires `status='sent' AND sentAt exists`.
+- ✅ **Resume shortcut skipping contacts**: `sentCount > 0` treated as "all Step 1 done" — only 8/92 contacts sent. **Fixed**: Resume always calls `startCampaign()`.
+- ✅ **P2: Follow-ups firing on paused campaigns**: `processScheduledFollowups()` and `executeFollowup()` now check `campaign.status`. Paused/cancelled/draft — execution stays `pending` (deferred, not skipped) for natural resume on un-pause.
+- ✅ **P4: No account daily limit for follow-ups**: `executeFollowup()` atomically reserves a send slot via `UPDATE email_accounts SET dailySent=dailySent+1 WHERE dailySent < dailyLimit RETURNING id`. Decrements on send failure. Shares counter with campaign engine sends.
+- ✅ **P6: No bounce check for follow-ups**: `processCampaignFollowups()` builds `contactBounced` set and creates `skipped` execution records for all steps when original message bounced.
+- ✅ **P8: Completion check wrong with multiple sequences**: `checkFollowupCompletion()` now aggregates steps across ALL sequences via `getCampaignFollowups(campaignId)`. `totalExpected = step0Count x totalFollowupSteps` across all sequences.
+- ✅ **P10: Double-send race condition**: `executeFollowup()` uses atomic `UPDATE SET status='processing' WHERE status='pending' RETURNING id` claim. Null return = already claimed. 5-min stuck-processing recovery in `processFollowupTriggers()`.
+- ✅ **50k message fetch per cycle**: All three `getCampaignMessages(campaignId, 50000, 0)` calls replaced with targeted indexed queries. ~100-1000x DB load reduction.
+- ✅ **Idempotency gap**: `executeFollowup()` checks for existing sent message record before sending. Prevents duplicate sends on crash recovery.
+- ✅ **Overlapping engine cycles**: `startFollowupEngine()` uses `isProcessing` boolean lock — overlapping 30s cycles skip instead of running concurrently.
 
-### 7.2 POTENTIAL ISSUES (not yet fixed)
+### 7.2 REMAINING ISSUES (not yet fixed)
 
 #### P1: Scheduled campaigns lost on server restart
 - `scheduleCampaign()` uses `setTimeout` — in-memory only
 - If server restarts before scheduled time, campaign stays `scheduled` forever
-- **Fix needed**: Polling loop on boot should check for `status='scheduled'` campaigns where `scheduledAt < now`
+- **Fix needed**: Boot-time check for `status='scheduled'` campaigns where `scheduledAt < now`
+- **Risk**: High blast radius — accidental mass-send on restart if buggy. Needs careful testing before deploying.
 
-#### P2: Follow-ups fire on paused campaigns
-- `getActiveCampaignFollowups()` has no campaign status filter
-- `processCampaignFollowups()` only checks sending window, not campaign status
-- A paused campaign's follow-ups will still fire if the sending window is open
-- **Debatable**: Maybe desired — pausing Step 1 shouldn't block Step 2 for already-sent contacts. But user might expect pause to pause everything.
+#### P3: Daily limit counter race (campaign engine only)
+- `autopilotDailySent` in `sendBatched()` resets to 0 when window sleep ends — in-memory, lost on restart
+- Account-level `dailySent` (DB-backed, reset at UTC midnight) is the real safety net
+- **Blocked**: Inside protected `sendBatched()` in campaign-engine.ts
 
-#### P3: Daily limit counter race condition
-- `autopilotDailySent` resets to 0 when window sleep ends (line 760, 798)
-- But if campaign pauses at 400/day limit, sleeps until next day, and account daily limit also resets, the campaign may send `maxPerDay` MORE than intended because `autopilotDailySent` reset happens independently
-- The account-level `dailySent` counter (DB-backed, reset hourly) is the real safety net
+#### P5: Reply check is point-in-time for Step 1
+- `repliedContactIds` set built once at campaign start — stale mid-loop for long campaigns
+- **Low risk**: Reply tracker has 15-min lookback; window is very narrow
+- **Blocked**: Inside protected `sendBatched()` in campaign-engine.ts
 
-#### P4: No account daily limit enforcement for follow-ups
-- Campaign engine checks `accountDailyLimit` per email in `sendBatched()`
-- Follow-up engine's `executeFollowup()` does NOT check account daily limit
-- High-volume follow-ups could exceed the email account's daily sending limit
-- **Fix needed**: Check `emailAccount.dailySent < dailyLimit` before sending follow-up
+#### P7: Multiple follow-up sequences per campaign (architecture)
+- Each follow-up step is a separate sequence + campaign_followup link (campaign-creator.tsx:450)
+- Works correctly — not a bug, just unusual architecture worth knowing
 
-#### P5: Reply check is point-in-time
-- `repliedContactIds` set is built once at campaign start (line 679-693)
-- If a contact replies AFTER this set is built but BEFORE their email is sent, they'll still get the email
-- Mitigation: Follow-up engine re-checks reply before execution. But for Step 1, no mid-loop re-check.
-- **Low risk**: 30s polling interval means reply tracker might not have processed the reply yet anyway
-
-#### P6: No bounce check for follow-ups
-- If a contact's Step 1 email bounced, follow-ups still fire
-- `evaluateFollowupTrigger` doesn't check `message.bouncedAt` for `no_reply` trigger
-- Contact is marked `bounced` in contacts table, but follow-up engine doesn't check contact status
-- **Fix needed**: Skip follow-ups for contacts where the original message bounced
-
-#### P7: Multiple follow-up sequences per campaign
-- Each follow-up step creates a SEPARATE sequence + campaign_followup link (campaign-creator.tsx:450)
-- `getActiveCampaignFollowups()` returns ALL sequences for a campaign
-- `processCampaignFollowups()` is called once PER sequence
-- Each sequence has only 1 step, but the step's `stepNumber` determines its position
-- This works but means Step 2 and Step 3 are in different sequences evaluated independently
-
-#### P8: Completion check may be wrong with multiple sequences
-- `checkFollowupCompletion()` reads `followupSteps` from ONE sequence (line 484)
-- But there are multiple sequences (one per follow-up step)
-- `totalExpected = step0Messages.length * followupSteps.length` — if `followupSteps.length = 1` (one step per sequence), this only counts for that one sequence
-- Campaign may be marked `completed` when only one sequence is done
-- **Potential fix**: Count executions across ALL sequences for the campaign
-
-#### P9: sendingConfig not preserved across server restart for in-progress campaigns
-- `sendBatched()` receives `sendingConfig` as a parameter — held in memory
-- On server restart, the send loop is lost
-- Resume route reads `campaign.sendingConfig` from DB — this was saved at campaign creation
-- This should work, but only if `sendingConfig` was persisted to DB (line 3258)
-
-#### P10: No deduplication guard in executeFollowup
-- `processScheduledFollowups()` can theoretically call `executeFollowup()` for the same execution twice if polling cycles overlap
-- Mitigation: `execution.status !== "pending"` check at line 944 → second call finds `sent` → returns
-- But there's a race window between the check and the status update
-
----
 
 ## 8. Sending Config Schema
 
@@ -353,9 +321,10 @@ interface FollowupStep {
 | Status | Meaning |
 |--------|---------|
 | `pending` | Scheduled, waiting for `scheduledAt` time |
+| `processing` | Atomically claimed by engine cycle — in-flight. Reset to `pending` after 5 min if stuck (crash recovery). |
 | `sent` | Follow-up email successfully sent |
-| `skipped` | Skipped (contact replied, or other skip condition) |
-| `failed` | Failed to send |
+| `skipped` | Skipped (contact replied, bounced, campaign paused, or daily limit reached) |
+| `failed` | Failed to send (error logged in `errorMessage`) |
 
 ---
 
@@ -371,13 +340,16 @@ interface FollowupStep {
 - [ ] Contact not already processed for this step (dedup)
 
 ### Before firing a follow-up:
-- [ ] Original message has `status='sent'` AND `sentAt` is not null
-- [ ] Configured delay has elapsed since reference time
-- [ ] Reference time = previous step's sentAt (not step 0 for Step 2+)
-- [ ] Previous step has been sent (for Step 2+)
-- [ ] Trigger condition met (e.g., no reply)
-- [ ] Execution doesn't already exist for this message+step
-- [ ] Contact hasn't replied to ANY message in campaign
-- [ ] Within sending window
-- [x] ~~Under account daily limit~~ **NOT CHECKED** (P4)
-- [x] ~~Contact not bounced~~ **NOT CHECKED** (P6)
+- [x] Original message has `status='sent'` AND `sentAt` is not null
+- [x] Configured delay has elapsed since reference time
+- [x] Reference time = previous step's sentAt (not step 0 for Step 2+)
+- [x] Previous step has been sent (for Step 2+)
+- [x] Trigger condition met (e.g., no reply)
+- [x] Execution doesn't already exist for this message+step (executionSet O(1) lookup)
+- [x] Contact hasn't replied to ANY message in campaign (targeted query + re-check at execution)
+- [x] Contact not bounced (contactBounced set — P6 fix)
+- [x] Within sending window (day + time check)
+- [x] Campaign not paused/cancelled (P2 fix — both scheduler and executor)
+- [x] Under account daily limit (atomic reserve — P4 fix)
+- [x] No duplicate send (idempotency guard — message existence check before send)
+- [x] No double-claim (atomic processing status — P10 fix)
