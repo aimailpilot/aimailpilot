@@ -220,6 +220,7 @@ export default function UnifiedInbox() {
       setStarredIds(starred);
     } catch (err) {
       console.error('Inbox fetch error:', err);
+      // Keep stale data visible on error — never clear messages to empty
     } finally {
       if (!background) setLoading(false);
       isFirstLoad.current = false;

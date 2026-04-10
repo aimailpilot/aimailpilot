@@ -759,23 +759,6 @@ async function initializeSchema() {
     try {
       await client.query('ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "isWarmup" INTEGER DEFAULT 0');
       await client.query('CREATE INDEX IF NOT EXISTS idx_inbox_warmup ON unified_inbox("organizationId", "isWarmup")');
-      // Backfill existing warmup messages: both from/to are org email accounts
-      await client.query(`
-        UPDATE unified_inbox ui SET "isWarmup" = 1
-        WHERE COALESCE("isWarmup", 0) = 0
-          AND EXISTS (
-            SELECT 1 FROM email_accounts ea
-            WHERE ea."organizationId" = ui."organizationId"
-              AND LOWER(ea.email) = LOWER(CASE WHEN ui."fromEmail" LIKE '%<%>%'
-                THEN substring(ui."fromEmail" from '<([^>]+)>') ELSE ui."fromEmail" END)
-          )
-          AND EXISTS (
-            SELECT 1 FROM email_accounts ea2
-            WHERE ea2."organizationId" = ui."organizationId"
-              AND LOWER(ea2.email) = LOWER(CASE WHEN ui."toEmail" LIKE '%<%>%'
-                THEN substring(ui."toEmail" from '<([^>]+)>') ELSE COALESCE(ui."toEmail",'') END)
-          )
-      `);
     } catch (e) { console.error('[PG] isWarmup migration error:', e); }
 
     await client.query('COMMIT');
@@ -787,6 +770,32 @@ async function initializeSchema() {
   } finally {
     client.release();
   }
+
+  // Backfill warmup flag OUTSIDE the schema transaction to avoid locking unified_inbox during startup.
+  // Uses LIMIT 500 batch to avoid long-running locks that block inbox queries.
+  // Fire-and-forget: does not block server start.
+  pool.query(`
+    UPDATE unified_inbox ui SET "isWarmup" = 1
+    WHERE ui.id IN (
+      SELECT ui2.id FROM unified_inbox ui2
+      WHERE COALESCE(ui2."isWarmup", 0) = 0
+        AND EXISTS (
+          SELECT 1 FROM email_accounts ea
+          WHERE ea."organizationId" = ui2."organizationId"
+            AND LOWER(ea.email) = LOWER(CASE WHEN ui2."fromEmail" LIKE '%<%>%'
+              THEN substring(ui2."fromEmail" from '<([^>]+)>') ELSE ui2."fromEmail" END)
+        )
+        AND EXISTS (
+          SELECT 1 FROM email_accounts ea2
+          WHERE ea2."organizationId" = ui2."organizationId"
+            AND LOWER(ea2.email) = LOWER(CASE WHEN ui2."toEmail" LIKE '%<%>%'
+              THEN substring(ui2."toEmail" from '<([^>]+)>') ELSE COALESCE(ui2."toEmail",'') END)
+        )
+      LIMIT 500
+    )
+  `).then(r => {
+    if (r.rowCount && r.rowCount > 0) console.log(`[PG] isWarmup backfill: marked ${r.rowCount} warmup messages`);
+  }).catch(e => console.error('[PG] isWarmup backfill error:', e));
 }
 
 // ========== PostgresStorage Class ==========
