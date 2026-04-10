@@ -8078,38 +8078,51 @@ Respond with ONLY a JSON object in this format:
         }
       }
 
-      const messages = await storage.getInboxMessagesEnhanced(req.user.organizationId, filters, parsedLimit, parsedOffset);
-      const total = await storage.getInboxMessageCountEnhanced(req.user.organizationId, filters);
-      const stats = await storage.getInboxStats(req.user.organizationId);
+      // Fetch messages + count + stats in parallel
+      const [messages, total, stats] = await Promise.all([
+        storage.getInboxMessagesEnhanced(req.user.organizationId, filters, parsedLimit, parsedOffset),
+        storage.getInboxMessageCountEnhanced(req.user.organizationId, filters),
+        storage.getInboxStats(req.user.organizationId),
+      ]);
       const unread = stats.unread;
 
-      // Enrich messages (individual try/catch to prevent one bad message from crashing the whole endpoint)
-      const enriched = await Promise.all(messages.map(async (m: any) => {
-        try {
-          let contact = null;
-          if (m.contactId) contact = await storage.getContact(m.contactId);
-          if (!contact && m.fromEmail) contact = await storage.getContactByEmail(req.user.organizationId, m.fromEmail);
-          let accountOwner = null;
-          if (isAdmin && m.emailAccountId) {
-            const acct = await storage.getEmailAccount(m.emailAccountId);
-            if (acct && (acct as any).userId) {
-              const owner = await storage.getUser((acct as any).userId);
-              if (owner) accountOwner = { id: owner.id, email: owner.email, firstName: (owner as any).firstName, lastName: (owner as any).lastName };
-            }
-          }
-          let campaign = null;
-          if (m.campaignId) campaign = await storage.getCampaign(m.campaignId);
-          return {
-            ...m,
-            contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company, jobTitle: contact.jobTitle, status: contact.status, score: contact.score, leadStatus: (contact as any).leadStatus } : null,
-            campaign: campaign ? { id: campaign.id, name: campaign.name } : null,
-            accountOwner,
-          };
-        } catch (enrichErr) {
-          console.error(`[Enhanced Inbox] Failed to enrich message ${m.id}:`, enrichErr);
-          return { ...m, contact: null, campaign: null, accountOwner: null };
-        }
-      }));
+      // Batch-load all unique contacts, email accounts, and campaigns in parallel (eliminates N+1)
+      const contactIds = Array.from(new Set(messages.map((m: any) => m.contactId).filter(Boolean))) as string[];
+      const fromEmails = Array.from(new Set(messages.filter((m: any) => !m.contactId && m.fromEmail).map((m: any) => m.fromEmail))) as string[];
+      const accountIds = Array.from(new Set(messages.map((m: any) => m.emailAccountId).filter(Boolean))) as string[];
+      const campaignIds = Array.from(new Set(messages.map((m: any) => m.campaignId).filter(Boolean))) as string[];
+
+      const [contactsById, contactsByEmail, accountsById, campaignsById] = await Promise.all([
+        Promise.all(contactIds.map((id: string) => storage.getContact(id).catch(() => null))).then(arr =>
+          Object.fromEntries(arr.filter(Boolean).map((c: any) => [c.id, c]))),
+        Promise.all(fromEmails.map((email: string) => storage.getContactByEmail(req.user.organizationId, email).catch(() => null))).then(arr =>
+          Object.fromEntries(arr.filter(Boolean).map((c: any) => [c.email, c]))),
+        isAdmin ? Promise.all(accountIds.map((id: string) => storage.getEmailAccount(id).catch(() => null))).then(arr =>
+          Object.fromEntries(arr.filter(Boolean).map((a: any) => [a.id, a]))) : Promise.resolve({}),
+        Promise.all(campaignIds.map((id: string) => storage.getCampaign(id).catch(() => null))).then(arr =>
+          Object.fromEntries(arr.filter(Boolean).map((c: any) => [c.id, c]))),
+      ]);
+
+      // Batch-load account owners for admin
+      const ownerIds = isAdmin ? Array.from(new Set(Object.values(accountsById).map((a: any) => a.userId).filter(Boolean))) as string[] : [];
+      const ownersById: Record<string, any> = {};
+      if (ownerIds.length > 0) {
+        const owners = await Promise.all(ownerIds.map((id: string) => storage.getUser(id).catch(() => null)));
+        owners.filter(Boolean).forEach((u: any) => { ownersById[u.id] = u; });
+      }
+
+      const enriched = messages.map((m: any) => {
+        const contact = (m.contactId && contactsById[m.contactId]) || (m.fromEmail && contactsByEmail[m.fromEmail]) || null;
+        const acct = isAdmin && m.emailAccountId ? accountsById[m.emailAccountId] : null;
+        const accountOwner = acct?.userId ? ownersById[acct.userId] : null;
+        const campaign = m.campaignId ? campaignsById[m.campaignId] : null;
+        return {
+          ...m,
+          contact: contact ? { id: contact.id, email: contact.email, firstName: contact.firstName, lastName: contact.lastName, company: contact.company, jobTitle: contact.jobTitle, status: contact.status, score: contact.score, leadStatus: (contact as any).leadStatus } : null,
+          campaign: campaign ? { id: campaign.id, name: campaign.name } : null,
+          accountOwner: accountOwner ? { id: accountOwner.id, email: accountOwner.email, firstName: (accountOwner as any).firstName, lastName: (accountOwner as any).lastName } : null,
+        };
+      });
 
       res.json({ messages: enriched, total, unread, stats });
     } catch (error) {
@@ -8810,11 +8823,14 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   // Unmark a message as bounced — clears bounceType, resets status to read
   app.post('/api/inbox/:id/unmark-bounce', requireAuth, async (req: any, res) => {
     try {
-      const msg: any = await storage.getInboxMessage(req.params.id);
-      if (!msg) return res.status(404).json({ message: 'Message not found' });
-      await storage.updateInboxMessage(req.params.id, { bounceType: '', status: 'read' });
+      // Direct update — avoids the double getInboxMessage call in updateInboxMessage
+      await storage.rawRun(
+        'UPDATE unified_inbox SET "bounceType" = $1, status = $2 WHERE id = $3 AND "organizationId" = $4',
+        '', 'read', req.params.id, req.user.organizationId
+      );
       res.json({ success: true });
     } catch (error) {
+      console.error('Unmark bounce error:', error);
       res.status(500).json({ message: 'Failed to unmark bounce' });
     }
   });

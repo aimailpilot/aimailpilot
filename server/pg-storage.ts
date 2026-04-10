@@ -2896,13 +2896,28 @@ export class PostgresStorage {
     const params: any[] = [organizationId];
     let idx = 2;
 
-    // Warmup detection: both fromEmail AND toEmail are org email accounts
-    // fromEmail may store "Name <email>" format — extract just the email part
+    // Pre-fetch org email accounts once (avoids correlated subquery per-row)
+    const orgEmailRows = await queryAll('SELECT LOWER(email) as email FROM email_accounts WHERE "organizationId" = $1', [organizationId]);
+    const orgEmailList: string[] = orgEmailRows.map((r: any) => r.email);
+
     const extractFrom = `LOWER(CASE WHEN "fromEmail" LIKE '%<%>%' THEN substring("fromEmail" from '<([^>]+)>') ELSE "fromEmail" END)`;
     const extractTo = `LOWER(CASE WHEN "toEmail" LIKE '%<%>%' THEN substring("toEmail" from '<([^>]+)>') ELSE COALESCE("toEmail",'') END)`;
-    const orgEmails = `(SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
-    const warmupExclude = ` AND NOT (${extractFrom} IN ${orgEmails} AND ${extractTo} IN ${orgEmails})`;
-    const warmupOnly = ` AND ${extractFrom} IN ${orgEmails} AND ${extractTo} IN ${orgEmails}`;
+
+    let warmupExclude = '';
+    let warmupOnly = '';
+    if (orgEmailList.length > 0) {
+      const emailPh = orgEmailList.map(() => `$${idx++}`).join(',');
+      params.push(...orgEmailList);
+      // Duplicate the list for the second IN clause (toEmail)
+      const emailPh2 = orgEmailList.map(() => `$${idx++}`).join(',');
+      params.push(...orgEmailList);
+      warmupExclude = ` AND NOT (${extractFrom} IN (${emailPh}) AND ${extractTo} IN (${emailPh2}))`;
+      const emailPh3 = orgEmailList.map(() => `$${idx++}`).join(',');
+      params.push(...orgEmailList);
+      const emailPh4 = orgEmailList.map(() => `$${idx++}`).join(',');
+      params.push(...orgEmailList);
+      warmupOnly = ` AND ${extractFrom} IN (${emailPh3}) AND ${extractTo} IN (${emailPh4})`;
+    }
 
     if (filters?.status === 'warmup') {
       sql += warmupOnly;
@@ -2953,11 +2968,22 @@ export class PostgresStorage {
     const params: any[] = [organizationId];
     let idx = 2;
 
+    const orgEmailRowsC = await queryAll('SELECT LOWER(email) as email FROM email_accounts WHERE "organizationId" = $1', [organizationId]);
+    const orgEmailListC: string[] = orgEmailRowsC.map((r: any) => r.email);
+
     const extractFromC = `LOWER(CASE WHEN "fromEmail" LIKE '%<%>%' THEN substring("fromEmail" from '<([^>]+)>') ELSE "fromEmail" END)`;
     const extractToC = `LOWER(CASE WHEN "toEmail" LIKE '%<%>%' THEN substring("toEmail" from '<([^>]+)>') ELSE COALESCE("toEmail",'') END)`;
-    const orgEmailsC = `(SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
-    const warmupExcludeCount = ` AND NOT (${extractFromC} IN ${orgEmailsC} AND ${extractToC} IN ${orgEmailsC})`;
-    const warmupOnlyCount = ` AND ${extractFromC} IN ${orgEmailsC} AND ${extractToC} IN ${orgEmailsC}`;
+
+    let warmupExcludeCount = '';
+    let warmupOnlyCount = '';
+    if (orgEmailListC.length > 0) {
+      const ep1 = orgEmailListC.map(() => `$${idx++}`).join(','); params.push(...orgEmailListC);
+      const ep2 = orgEmailListC.map(() => `$${idx++}`).join(','); params.push(...orgEmailListC);
+      warmupExcludeCount = ` AND NOT (${extractFromC} IN (${ep1}) AND ${extractToC} IN (${ep2}))`;
+      const ep3 = orgEmailListC.map(() => `$${idx++}`).join(','); params.push(...orgEmailListC);
+      const ep4 = orgEmailListC.map(() => `$${idx++}`).join(','); params.push(...orgEmailListC);
+      warmupOnlyCount = ` AND ${extractFromC} IN (${ep3}) AND ${extractToC} IN (${ep4})`;
+    }
 
     if (filters?.status === 'warmup') {
       sql += warmupOnlyCount;
@@ -2993,25 +3019,56 @@ export class PostgresStorage {
   }
 
   async getInboxStats(organizationId: string) {
-    // Warmup detection: both fromEmail AND toEmail are org email accounts
+    // Pre-fetch org emails once to avoid correlated subquery per-row
+    const orgEmailRowsSt = await queryAll('SELECT LOWER(email) as email FROM email_accounts WHERE "organizationId" = $1', [organizationId]);
+    const orgEmailsSt: string[] = orgEmailRowsSt.map((r: any) => r.email);
+
     const exF = `LOWER(CASE WHEN "fromEmail" LIKE '%<%>%' THEN substring("fromEmail" from '<([^>]+)>') ELSE "fromEmail" END)`;
     const exT = `LOWER(CASE WHEN "toEmail" LIKE '%<%>%' THEN substring("toEmail" from '<([^>]+)>') ELSE COALESCE("toEmail",'') END)`;
-    const oE = `(SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
-    const warmupExcludeSql = `AND NOT (${exF} IN ${oE} AND ${exT} IN ${oE})`;
-    const warmupOnlySql = `AND ${exF} IN ${oE} AND ${exT} IN ${oE}`;
 
-    const total = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 ${warmupExcludeSql}`, [organizationId])).c);
-    const unread = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'unread' ${warmupExcludeSql}`, [organizationId])).c);
-    const replied = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND (status = 'replied' OR "repliedAt" IS NOT NULL) ${warmupExcludeSql}`, [organizationId])).c);
-    const archived = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'archived'`, [organizationId])).c);
-    const positive = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'positive'`, [organizationId])).c);
-    const negative = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'negative'`, [organizationId])).c);
-    const ooo = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'ooo'`, [organizationId])).c);
-    const autoReply = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'auto_reply'`, [organizationId])).c);
-    const bounced = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND ("bounceType" != '' AND "bounceType" IS NOT NULL) ${warmupExcludeSql}`, [organizationId])).c);
-    const starred = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "isStarred" = 1`, [organizationId])).c);
-    const warmup = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 ${warmupOnlySql}`, [organizationId])).c);
-    return { total, unread, replied, archived, positive, negative, ooo, autoReply, bounced, starred, warmup };
+    let warmupExcludeSql = '';
+    let warmupOnlySql = '';
+    const stParams: any[] = [organizationId];
+    let stIdx = 2;
+    if (orgEmailsSt.length > 0) {
+      const ep1 = orgEmailsSt.map(() => `$${stIdx++}`).join(','); stParams.push(...orgEmailsSt);
+      const ep2 = orgEmailsSt.map(() => `$${stIdx++}`).join(','); stParams.push(...orgEmailsSt);
+      warmupExcludeSql = `AND NOT (${exF} IN (${ep1}) AND ${exT} IN (${ep2}))`;
+      const ep3 = orgEmailsSt.map(() => `$${stIdx++}`).join(','); stParams.push(...orgEmailsSt);
+      const ep4 = orgEmailsSt.map(() => `$${stIdx++}`).join(','); stParams.push(...orgEmailsSt);
+      warmupOnlySql = `AND ${exF} IN (${ep3}) AND ${exT} IN (${ep4})`;
+    }
+
+    // Single aggregated query — replaces 11 sequential COUNT queries
+    const row = await queryOne(`
+      SELECT
+        COUNT(*) FILTER (WHERE NOT (${exF} = ANY($2::text[]) AND ${exT} = ANY($3::text[]))) as total,
+        COUNT(*) FILTER (WHERE status = 'unread' AND NOT (${exF} = ANY($2::text[]) AND ${exT} = ANY($3::text[]))) as unread,
+        COUNT(*) FILTER (WHERE (status = 'replied' OR "repliedAt" IS NOT NULL) AND NOT (${exF} = ANY($2::text[]) AND ${exT} = ANY($3::text[]))) as replied,
+        COUNT(*) FILTER (WHERE status = 'archived') as archived,
+        COUNT(*) FILTER (WHERE "replyType" = 'positive') as positive,
+        COUNT(*) FILTER (WHERE "replyType" = 'negative') as negative,
+        COUNT(*) FILTER (WHERE "replyType" = 'ooo') as ooo,
+        COUNT(*) FILTER (WHERE "replyType" = 'auto_reply') as "autoReply",
+        COUNT(*) FILTER (WHERE ("bounceType" != '' AND "bounceType" IS NOT NULL) AND NOT (${exF} = ANY($2::text[]) AND ${exT} = ANY($3::text[]))) as bounced,
+        COUNT(*) FILTER (WHERE "isStarred" = 1) as starred,
+        COUNT(*) FILTER (WHERE ${exF} = ANY($2::text[]) AND ${exT} = ANY($3::text[])) as warmup
+      FROM unified_inbox WHERE "organizationId" = $1
+    `, [organizationId, orgEmailsSt, orgEmailsSt]);
+
+    return {
+      total: parseInt(row.total || '0'),
+      unread: parseInt(row.unread || '0'),
+      replied: parseInt(row.replied || '0'),
+      archived: parseInt(row.archived || '0'),
+      positive: parseInt(row.positive || '0'),
+      negative: parseInt(row.negative || '0'),
+      ooo: parseInt(row.ooo || '0'),
+      autoReply: parseInt(row.autoReply || '0'),
+      bounced: parseInt(row.bounced || '0'),
+      starred: parseInt(row.starred || '0'),
+      warmup: parseInt(row.warmup || '0'),
+    };
   }
 
   // ========== DATABASE EXPORT/IMPORT ==========

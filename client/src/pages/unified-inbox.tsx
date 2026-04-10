@@ -1274,8 +1274,8 @@ export default function UnifiedInbox() {
                       </span>
                       <div className="flex items-center gap-0.5 sm:gap-1">
                         {isUnread && <div className="w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full bg-blue-500" />}
-                        {msg.status === 'replied' && <Reply className="h-2.5 sm:h-3 w-2.5 sm:w-3 text-green-500" title="Replied" />}
-                        {msg.status === 'forwarded' && <Forward className="h-2.5 sm:h-3 w-2.5 sm:w-3 text-blue-500" title="Forwarded" />}
+                        {msg.status === 'replied' && <Reply className="h-2.5 sm:h-3 w-2.5 sm:w-3 text-green-500" />}
+                        {msg.status === 'forwarded' && <Forward className="h-2.5 sm:h-3 w-2.5 sm:w-3 text-blue-500" />}
                         {msg.bounceType && <XCircle className="h-2.5 sm:h-3 w-2.5 sm:w-3 text-red-500" />}
                         {msg.aiDraft && <Sparkles className="h-2.5 sm:h-3 w-2.5 sm:w-3 text-purple-400" />}
                         {msg.assignedTo && <UserCheck className="h-2.5 sm:h-3 w-2.5 sm:w-3 text-indigo-400" />}
