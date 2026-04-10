@@ -754,7 +754,7 @@ async function initializeSchema() {
       // Backfill existing warmup messages: both from/to are org email accounts
       await client.query(`
         UPDATE unified_inbox ui SET "isWarmup" = 1
-        WHERE "isWarmup" = 0
+        WHERE COALESCE("isWarmup", 0) = 0
           AND EXISTS (
             SELECT 1 FROM email_accounts ea
             WHERE ea."organizationId" = ui."organizationId"
@@ -2924,15 +2924,15 @@ export class PostgresStorage {
     if (filters?.status === 'warmup') {
       sql += ' AND "isWarmup" = 1';
     } else if (filters?.status === 'bounced') {
-      sql += ` AND (status = 'bounced' OR "bounceType" != '') AND "isWarmup" = 0`;
+      sql += ` AND (status = 'bounced' OR "bounceType" != '') AND COALESCE("isWarmup", 0) = 0`;
     } else if (filters?.status === 'unsubscribed') {
       sql += ` AND "replyType" = 'unsubscribe'`;
     } else if (filters?.status === 'replied') {
-      sql += ` AND (status = 'replied' OR "repliedAt" IS NOT NULL) AND "isWarmup" = 0`;
+      sql += ` AND (status = 'replied' OR "repliedAt" IS NOT NULL) AND COALESCE("isWarmup", 0) = 0`;
     } else if (filters?.status && filters.status !== 'all') {
-      sql += ` AND status = $${idx++} AND "isWarmup" = 0`; params.push(filters.status);
+      sql += ` AND status = $${idx++} AND COALESCE("isWarmup", 0) = 0`; params.push(filters.status);
     } else {
-      sql += ' AND "isWarmup" = 0';
+      sql += ' AND COALESCE("isWarmup", 0) = 0';
     }
     if (filters?.emailAccountId) {
       const accountIds = filters.emailAccountId.split(',').map(id => id.trim()).filter(Boolean);
@@ -2971,15 +2971,15 @@ export class PostgresStorage {
     if (filters?.status === 'warmup') {
       sql += ' AND "isWarmup" = 1';
     } else if (filters?.status === 'bounced') {
-      sql += ` AND (status = 'bounced' OR "bounceType" != '') AND "isWarmup" = 0`;
+      sql += ` AND (status = 'bounced' OR "bounceType" != '') AND COALESCE("isWarmup", 0) = 0`;
     } else if (filters?.status === 'unsubscribed') {
       sql += ` AND "replyType" = 'unsubscribe'`;
     } else if (filters?.status === 'replied') {
-      sql += ` AND (status = 'replied' OR "repliedAt" IS NOT NULL) AND "isWarmup" = 0`;
+      sql += ` AND (status = 'replied' OR "repliedAt" IS NOT NULL) AND COALESCE("isWarmup", 0) = 0`;
     } else if (filters?.status && filters.status !== 'all') {
-      sql += ` AND status = $${idx++} AND "isWarmup" = 0`; params.push(filters.status);
+      sql += ` AND status = $${idx++} AND COALESCE("isWarmup", 0) = 0`; params.push(filters.status);
     } else {
-      sql += ' AND "isWarmup" = 0';
+      sql += ' AND COALESCE("isWarmup", 0) = 0';
     }
     if (filters?.emailAccountId) {
       const accountIds = filters.emailAccountId.split(',').map(id => id.trim()).filter(Boolean);
@@ -3005,15 +3005,15 @@ export class PostgresStorage {
     // Single aggregated query using indexed isWarmup column — no subqueries
     const row = await queryOne(`
       SELECT
-        COUNT(*) FILTER (WHERE "isWarmup" = 0) as total,
-        COUNT(*) FILTER (WHERE status = 'unread' AND "isWarmup" = 0) as unread,
-        COUNT(*) FILTER (WHERE (status = 'replied' OR "repliedAt" IS NOT NULL) AND "isWarmup" = 0) as replied,
+        COUNT(*) FILTER (WHERE COALESCE("isWarmup", 0) = 0) as total,
+        COUNT(*) FILTER (WHERE status = 'unread' AND COALESCE("isWarmup", 0) = 0) as unread,
+        COUNT(*) FILTER (WHERE (status = 'replied' OR "repliedAt" IS NOT NULL) AND COALESCE("isWarmup", 0) = 0) as replied,
         COUNT(*) FILTER (WHERE status = 'archived') as archived,
         COUNT(*) FILTER (WHERE "replyType" = 'positive') as positive,
         COUNT(*) FILTER (WHERE "replyType" = 'negative') as negative,
         COUNT(*) FILTER (WHERE "replyType" = 'ooo') as ooo,
         COUNT(*) FILTER (WHERE "replyType" = 'auto_reply') as "autoReply",
-        COUNT(*) FILTER (WHERE "bounceType" != '' AND "bounceType" IS NOT NULL AND "isWarmup" = 0) as bounced,
+        COUNT(*) FILTER (WHERE "bounceType" != '' AND "bounceType" IS NOT NULL AND COALESCE("isWarmup", 0) = 0) as bounced,
         COUNT(*) FILTER (WHERE "isStarred" = 1) as starred,
         COUNT(*) FILTER (WHERE "isWarmup" = 1) as warmup
       FROM unified_inbox WHERE "organizationId" = $1
