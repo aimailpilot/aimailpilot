@@ -9356,10 +9356,13 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         // Hot leads (interested + meeting_scheduled + meeting_done)
         const hotLeads = (pipeMap['interested']?.count || 0) + (pipeMap['meeting_scheduled']?.count || 0) + (pipeMap['meeting_done']?.count || 0);
 
-        // Not replied — emails sent but contact hasn't sent a real human reply back
-        // A contact is "not replied" if they have NO inbox message with replyType = positive/negative/general
+        // Not replied — contacts emailed 3+ days ago who haven't replied (gives them time)
+        // Excludes auto_reply/OOO from being counted as "replied" (only real human replies count)
         let notReplied = 0;
         try {
+          const threeDaysAgo = new Date(now);
+          threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+          const notRepliedCutoff = threeDaysAgo.toISOString().split('T')[0];
           notReplied = parseInt((await storage.rawGet(`
             SELECT COUNT(DISTINCT m."contactId") as cnt FROM messages m
             JOIN contacts c ON c.id = m."contactId"
@@ -9370,7 +9373,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
               SELECT 1 FROM messages m2 WHERE m2."contactId" = m."contactId"
               AND m2."campaignId" = m."campaignId" AND m2.status = 'replied'
             )
-          `, orgId, userId, startDate, endDate) as any)?.cnt || 0);
+          `, orgId, userId, startDate, notRepliedCutoff) as any)?.cnt || 0);
         } catch { /* messages table schema mismatch — skip */ }
 
         const revenue = dealsWon.totalValue || 0;
@@ -9476,7 +9479,10 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       }
 
       if (type === 'not_replied') {
-        // Contacts whose emails were sent but no reply received in messages table
+        // Contacts emailed 3+ days ago who haven't replied (gives time to respond)
+        const threeDaysAgo = new Date(now);
+        threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+        const notRepliedCutoff = threeDaysAgo.toISOString().split('T')[0];
         const contacts = await storage.rawAll(`
           SELECT DISTINCT ON (m."contactId")
             c.id, c."firstName", c."lastName", c.email, c.company, c."pipelineStage",
@@ -9492,7 +9498,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
             AND m2."campaignId" = m."campaignId" AND m2.status = 'replied'
           )
           ORDER BY m."contactId", m."sentAt" ASC
-        `, orgId, userId, startDate, endDate) as any[];
+        `, orgId, userId, startDate, notRepliedCutoff) as any[];
         return res.json({ contacts: contacts || [] });
       }
 
