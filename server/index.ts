@@ -5,6 +5,7 @@ import { setupVite, serveStatic, log } from "./vite";
 import { startFollowupEngine } from "./services/followup-engine";
 import { startWarmupEngine } from "./services/warmup-engine";
 import { campaignEngine } from "./services/campaign-engine";
+import { classifyReply, classifyReplyWithAI } from "./services/reply-classifier";
 import { storage, initStorage } from "./storage";
 
 // Global error handling to prevent silent crashes on Azure
@@ -76,6 +77,70 @@ app.use((req, res, next) => {
       }
     }, 10000);
     
+    // One-time reclassification of 'general' inbox messages on boot
+    // Runs 30s after startup to not block initial load
+    setTimeout(async () => {
+      try {
+        log('[Reclassify] Starting one-time reclassification of general inbox messages...');
+        // Get all orgs that have messages
+        const orgs = await storage.rawAll(`SELECT DISTINCT "organizationId" FROM unified_inbox WHERE "replyType" = 'general' LIMIT 20`) as any[];
+        let totalReclassified = 0;
+
+        for (const org of orgs) {
+          const orgId = org.organizationId;
+          // Get general-classified messages for this org
+          const generalMsgs = await storage.rawAll(`
+            SELECT id, subject, body, snippet, "fromEmail", "fromName"
+            FROM unified_inbox
+            WHERE "organizationId" = ? AND "replyType" = 'general'
+            AND ("sentByUs" IS NULL OR "sentByUs" = 0)
+            LIMIT 1000
+          `, orgId) as any[];
+
+          let orgReclassified = 0;
+          for (const msg of generalMsgs) {
+            // Re-run strengthened rule engine
+            const ruleResult = classifyReply(msg.subject || '', msg.body || msg.snippet || '', msg.fromEmail, msg.fromName);
+            if (ruleResult.replyType !== 'general') {
+              try {
+                await storage.rawRun(`UPDATE unified_inbox SET "replyType" = ? WHERE id = ?`, ruleResult.replyType, msg.id);
+                orgReclassified++;
+              } catch { }
+            }
+          }
+
+          // AI reclassification for remaining general messages (batch of 100 max)
+          if (orgReclassified < generalMsgs.length) {
+            const remaining = await storage.rawAll(`
+              SELECT id, subject, body, snippet, "fromEmail"
+              FROM unified_inbox
+              WHERE "organizationId" = ? AND "replyType" = 'general'
+              AND ("sentByUs" IS NULL OR "sentByUs" = 0)
+              LIMIT 100
+            `, orgId) as any[];
+
+            for (const msg of remaining) {
+              try {
+                const aiResult = await classifyReplyWithAI(msg.subject || '', msg.body || msg.snippet || '', msg.fromEmail, orgId, storage);
+                if (aiResult.confidence >= 0.7 && aiResult.replyType !== 'general') {
+                  await storage.rawRun(`UPDATE unified_inbox SET "replyType" = ? WHERE id = ?`, aiResult.replyType, msg.id);
+                  orgReclassified++;
+                }
+              } catch { /* skip individual AI failures */ }
+            }
+          }
+
+          totalReclassified += orgReclassified;
+          if (orgReclassified > 0) {
+            log(`[Reclassify] Org ${orgId}: reclassified ${orgReclassified}/${generalMsgs.length} messages`);
+          }
+        }
+        log(`[Reclassify] Done. Total reclassified: ${totalReclassified}`);
+      } catch (e) {
+        console.error('[Reclassify] Boot reclassification error:', e);
+      }
+    }, 30000);
+
     // Daily reset of email account send counters (check every hour, reset at midnight UTC)
     let lastResetDay = new Date().getUTCDate();
     setInterval(async () => {
