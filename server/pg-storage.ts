@@ -747,6 +747,19 @@ async function initializeSchema() {
       `);
     } catch (e) { /* trigger already exists */ }
 
+    // Ensure columns added after initial schema creation exist
+    const alterColumns = [
+      'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "forwardedAt" TEXT',
+      'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "forwardedTo" TEXT',
+      'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "forwardedFrom" TEXT',
+      'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "forwardedBy" TEXT',
+      'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "repliedBy" TEXT',
+      'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "replyContent" TEXT',
+    ];
+    for (const alt of alterColumns) {
+      try { await client.query(alt); } catch (e) { /* column already exists */ }
+    }
+
     await client.query('COMMIT');
     console.log('[PG] Schema initialized successfully');
   } catch (e) {
