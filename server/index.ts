@@ -77,29 +77,35 @@ app.use((req, res, next) => {
       }
     }, 10000);
     
-    // One-time reclassification of 'general' inbox messages on boot
+    // One-time reclassification of unclassified + general inbox messages on boot
     // Runs 30s after startup to not block initial load
     setTimeout(async () => {
       try {
-        log('[Reclassify] Starting one-time reclassification of general inbox messages...');
-        // Get all orgs that have messages
-        const orgs = await storage.rawAll(`SELECT DISTINCT "organizationId" FROM unified_inbox WHERE "replyType" = 'general' LIMIT 20`) as any[];
+        log('[Reclassify] Starting boot reclassification of inbox messages...');
+        // Get all orgs that have unclassified or general messages
+        const orgs = await storage.rawAll(`
+          SELECT DISTINCT "organizationId" FROM unified_inbox
+          WHERE ("replyType" IS NULL OR "replyType" = '' OR "replyType" = 'general')
+          AND ("sentByUs" IS NULL OR "sentByUs" = 0)
+          LIMIT 20
+        `) as any[];
         let totalReclassified = 0;
 
         for (const org of orgs) {
           const orgId = org.organizationId;
-          // Get general-classified messages for this org
-          const generalMsgs = await storage.rawAll(`
-            SELECT id, subject, body, snippet, "fromEmail", "fromName"
+          // Get ALL unclassified messages (NULL, empty, or general)
+          const unclassifiedMsgs = await storage.rawAll(`
+            SELECT id, subject, body, snippet, "fromEmail", "fromName", "replyType"
             FROM unified_inbox
-            WHERE "organizationId" = ? AND "replyType" = 'general'
+            WHERE "organizationId" = ?
+            AND ("replyType" IS NULL OR "replyType" = '' OR "replyType" = 'general')
             AND ("sentByUs" IS NULL OR "sentByUs" = 0)
-            LIMIT 1000
+            LIMIT 2000
           `, orgId) as any[];
 
           let orgReclassified = 0;
-          for (const msg of generalMsgs) {
-            // Re-run strengthened rule engine
+          for (const msg of unclassifiedMsgs) {
+            // Re-run strengthened rule engine on ALL unclassified
             const ruleResult = classifyReply(msg.subject || '', msg.body || msg.snippet || '', msg.fromEmail, msg.fromName);
             if (ruleResult.replyType !== 'general') {
               try {
@@ -109,33 +115,12 @@ app.use((req, res, next) => {
             }
           }
 
-          // AI reclassification for remaining general messages (batch of 100 max)
-          if (orgReclassified < generalMsgs.length) {
-            const remaining = await storage.rawAll(`
-              SELECT id, subject, body, snippet, "fromEmail"
-              FROM unified_inbox
-              WHERE "organizationId" = ? AND "replyType" = 'general'
-              AND ("sentByUs" IS NULL OR "sentByUs" = 0)
-              LIMIT 100
-            `, orgId) as any[];
-
-            for (const msg of remaining) {
-              try {
-                const aiResult = await classifyReplyWithAI(msg.subject || '', msg.body || msg.snippet || '', msg.fromEmail, orgId, storage);
-                if (aiResult.confidence >= 0.7 && aiResult.replyType !== 'general') {
-                  await storage.rawRun(`UPDATE unified_inbox SET "replyType" = ? WHERE id = ?`, aiResult.replyType, msg.id);
-                  orgReclassified++;
-                }
-              } catch { /* skip individual AI failures */ }
-            }
-          }
-
           totalReclassified += orgReclassified;
           if (orgReclassified > 0) {
-            log(`[Reclassify] Org ${orgId}: reclassified ${orgReclassified}/${generalMsgs.length} messages`);
+            log(`[Reclassify] Org ${orgId}: rule-engine reclassified ${orgReclassified}/${unclassifiedMsgs.length} messages`);
           }
         }
-        log(`[Reclassify] Done. Total reclassified: ${totalReclassified}`);
+        log(`[Reclassify] Boot done. Total reclassified by rules: ${totalReclassified}`);
       } catch (e) {
         console.error('[Reclassify] Boot reclassification error:', e);
       }

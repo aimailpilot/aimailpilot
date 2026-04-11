@@ -82,6 +82,20 @@ export default function MyDashboard() {
   const [loadingEmails, setLoadingEmails] = useState(false);
   const [selectedEmail, setSelectedEmail] = useState<EmailNeedingReply | null>(null);
   const [errorMsg, setErrorMsg] = useState<string>('');
+  const [reclassifying, setReclassifying] = useState(false);
+  const [reclassifyMsg, setReclassifyMsg] = useState('');
+
+  const triggerAIReclassify = async () => {
+    setReclassifying(true);
+    setReclassifyMsg('');
+    try {
+      const res = await fetch('/api/inbox/reclassify', { method: 'POST', credentials: 'include' });
+      const json = await res.json();
+      setReclassifyMsg(json.message || 'Started');
+      setTimeout(() => { fetchDashboard(); setReclassifyMsg(''); }, 15000);
+    } catch (e) { setReclassifyMsg('Failed to start'); }
+    setReclassifying(false);
+  };
 
   const fetchDashboard = async () => {
     setLoading(true);
@@ -246,6 +260,10 @@ export default function MyDashboard() {
           <Button variant="outline" size="sm" onClick={fetchDashboard} className="ml-2">
             <RefreshCw className={`h-3.5 w-3.5 mr-1 ${loading ? "animate-spin" : ""}`} /> Refresh
           </Button>
+          <Button variant="outline" size="sm" onClick={triggerAIReclassify} disabled={reclassifying} className="ml-1 border-purple-300 text-purple-700 hover:bg-purple-50">
+            <Zap className={`h-3.5 w-3.5 mr-1 ${reclassifying ? "animate-pulse" : ""}`} /> AI Refine
+          </Button>
+          {reclassifyMsg && <span className="text-xs text-purple-600 ml-2">{reclassifyMsg}</span>}
         </div>
       </div>
 

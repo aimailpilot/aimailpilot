@@ -9784,43 +9784,88 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     const role = req.user.role;
     if (role !== 'owner' && role !== 'admin') return res.status(403).json({ message: 'Admin only' });
 
-    res.json({ message: 'Reclassification started in background' });
+    // Count how many need reclassification
+    const totalCount = parseInt((await storage.rawGet(`
+      SELECT COUNT(*) as cnt FROM unified_inbox
+      WHERE "organizationId" = ?
+      AND ("replyType" IS NULL OR "replyType" = '' OR "replyType" = 'general')
+      AND ("sentByUs" IS NULL OR "sentByUs" = 0)
+    `, orgId) as any)?.cnt || 0);
+
+    res.json({ message: `Reclassification started for ${totalCount} messages. Rules first, then AI for remaining.` });
 
     // Run async after response
     (async () => {
       try {
-        // Get all messages that were classified as 'general' (most likely to contain missed auto-replies)
-        const generalMsgs = await storage.rawAll(`
+        // Phase 1: Rule-based reclassification on ALL unclassified (NULL, empty, general)
+        const msgs = await storage.rawAll(`
           SELECT id, subject, body, snippet, "fromEmail", "fromName", "replyType"
           FROM unified_inbox
-          WHERE "organizationId" = ? AND "replyType" IN ('general', '')
+          WHERE "organizationId" = ?
+          AND ("replyType" IS NULL OR "replyType" = '' OR "replyType" = 'general')
           AND ("sentByUs" IS NULL OR "sentByUs" = 0)
-          LIMIT 500
+          LIMIT 5000
         `, orgId) as any[];
 
-        let reclassified = 0;
-        for (const msg of generalMsgs) {
-          // First try stronger rule-based
+        let ruleReclassified = 0;
+        for (const msg of msgs) {
           const ruleResult = classifyReply(msg.subject || '', msg.body || msg.snippet || '', msg.fromEmail, msg.fromName);
           if (ruleResult.replyType !== 'general') {
-            await storage.classifyReply(msg.id, ruleResult.replyType);
-            reclassified++;
-            continue;
+            try {
+              await storage.rawRun(`UPDATE unified_inbox SET "replyType" = ? WHERE id = ?`, ruleResult.replyType, msg.id);
+              ruleReclassified++;
+            } catch { }
           }
-          // Then try AI for remaining general messages
+        }
+        console.log(`[Reclassify] Phase 1 (rules): ${ruleReclassified}/${msgs.length} reclassified for org ${orgId}`);
+
+        // Phase 2: AI reclassification for remaining general/unclassified (limit 200)
+        const remaining = await storage.rawAll(`
+          SELECT id, subject, body, snippet, "fromEmail", "fromName"
+          FROM unified_inbox
+          WHERE "organizationId" = ?
+          AND ("replyType" IS NULL OR "replyType" = '' OR "replyType" = 'general')
+          AND ("sentByUs" IS NULL OR "sentByUs" = 0)
+          LIMIT 200
+        `, orgId) as any[];
+
+        let aiReclassified = 0;
+        for (const msg of remaining) {
           try {
             const aiResult = await classifyReplyWithAI(msg.subject || '', msg.body || msg.snippet || '', msg.fromEmail, orgId, storage);
-            if (aiResult.confidence >= 0.7 && aiResult.replyType !== 'general') {
-              await storage.classifyReply(msg.id, aiResult.replyType);
-              reclassified++;
+            if (aiResult.confidence >= 0.6 && aiResult.replyType !== 'general') {
+              await storage.rawRun(`UPDATE unified_inbox SET "replyType" = ? WHERE id = ?`, aiResult.replyType, msg.id);
+              aiReclassified++;
             }
           } catch { /* skip individual failures */ }
         }
-        console.log(`[Reclassify] Reclassified ${reclassified}/${generalMsgs.length} messages for org ${orgId}`);
+        console.log(`[Reclassify] Phase 2 (AI): ${aiReclassified}/${remaining.length} reclassified for org ${orgId}`);
+        console.log(`[Reclassify] Total: ${ruleReclassified + aiReclassified} messages reclassified`);
       } catch (e: any) {
         console.error('[Reclassify] Error:', e.message);
       }
     })();
+  });
+
+  // ── Reclassify status check ──
+  app.get('/api/inbox/reclassify/status', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const breakdown = await storage.rawAll(`
+        SELECT "replyType", COUNT(*) as cnt FROM unified_inbox
+        WHERE "organizationId" = ? AND ("sentByUs" IS NULL OR "sentByUs" = 0)
+        GROUP BY "replyType" ORDER BY cnt DESC
+      `, orgId) as any[];
+      const remaining = parseInt((await storage.rawGet(`
+        SELECT COUNT(*) as cnt FROM unified_inbox
+        WHERE "organizationId" = ?
+        AND ("replyType" IS NULL OR "replyType" = '' OR "replyType" = 'general')
+        AND ("sentByUs" IS NULL OR "sentByUs" = 0)
+      `, orgId) as any)?.cnt || 0);
+      res.json({ breakdown, remaining });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
   });
 
   app.get('/api/team/members', requireAuth, async (req: any, res) => {

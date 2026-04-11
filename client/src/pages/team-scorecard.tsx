@@ -78,6 +78,21 @@ export default function TeamScorecard({ onBack }: TeamScorecardProps) {
   const [drilldown, setDrilldown] = useState<DrilldownModal | null>(null);
   const [drilldownContacts, setDrilldownContacts] = useState<DrilldownContact[]>([]);
   const [drilldownLoading, setDrilldownLoading] = useState(false);
+  const [reclassifying, setReclassifying] = useState(false);
+  const [reclassifyMsg, setReclassifyMsg] = useState('');
+
+  const triggerAIReclassify = async () => {
+    setReclassifying(true);
+    setReclassifyMsg('');
+    try {
+      const res = await fetch('/api/inbox/reclassify', { method: 'POST', credentials: 'include' });
+      const json = await res.json();
+      setReclassifyMsg(json.message || 'Started');
+      // Refresh scorecard after a delay to let background processing start
+      setTimeout(() => { fetchScorecard(); setReclassifyMsg(''); }, 15000);
+    } catch (e) { setReclassifyMsg('Failed to start'); }
+    setReclassifying(false);
+  };
 
   const fetchScorecard = async () => {
     setLoading(true);
@@ -230,6 +245,10 @@ export default function TeamScorecard({ onBack }: TeamScorecardProps) {
           <Button variant="outline" size="sm" onClick={fetchScorecard} className="ml-2">
             <RefreshCw className={`h-3.5 w-3.5 mr-1 ${loading ? "animate-spin" : ""}`} /> Refresh
           </Button>
+          <Button variant="outline" size="sm" onClick={triggerAIReclassify} disabled={reclassifying} className="ml-1 border-purple-300 text-purple-700 hover:bg-purple-50">
+            <Zap className={`h-3.5 w-3.5 mr-1 ${reclassifying ? "animate-pulse" : ""}`} /> AI Refine
+          </Button>
+          {reclassifyMsg && <span className="text-xs text-purple-600 ml-2">{reclassifyMsg}</span>}
         </div>
       </div>
 
