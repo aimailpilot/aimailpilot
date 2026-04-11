@@ -2083,12 +2083,26 @@ export class PostgresStorage {
     const existing = await this.getInboxMessage(id);
     if (!existing) throw new Error('Inbox message not found');
     const m = { ...existing, ...data } as any;
+    // Only SET columns that are known to exist — forward columns may not exist in older schemas
     await execute(
-      'UPDATE unified_inbox SET status=$1, "aiDraft"=$2, "repliedAt"=$3, "replyContent"=$4, "repliedBy"=$5, "replyType"=$6, "bounceType"=$7, "threadId"=$8, "assignedTo"=$9, "leadStatus"=$10, "isStarred"=$11, "forwardedAt"=$12, "forwardedTo"=$13, "forwardedFrom"=$14, "forwardedBy"=$15 WHERE id=$16',
-      [m.status, m.aiDraft || null, m.repliedAt || null, m.replyContent || null, m.repliedBy || null,
-      m.replyType || '', m.bounceType || '', m.threadId || null, m.assignedTo || null, m.leadStatus || '', m.isStarred || 0,
-      m.forwardedAt || null, m.forwardedTo || null, m.forwardedFrom || null, m.forwardedBy || null, id]
+      'UPDATE unified_inbox SET status=$1, "aiDraft"=$2, "repliedAt"=$3, "replyType"=$4, "bounceType"=$5, "threadId"=$6, "assignedTo"=$7, "leadStatus"=$8, "isStarred"=$9 WHERE id=$10',
+      [m.status, m.aiDraft || null, m.repliedAt || null,
+      m.replyType || '', m.bounceType || '', m.threadId || null, m.assignedTo || null, m.leadStatus || '', m.isStarred || 0, id]
     );
+    // Update forward/reply columns separately — these may not exist yet in production
+    const extraCols = [
+      { col: '"replyContent"', val: m.replyContent || null },
+      { col: '"repliedBy"', val: m.repliedBy || null },
+      { col: '"forwardedAt"', val: m.forwardedAt || null },
+      { col: '"forwardedTo"', val: m.forwardedTo || null },
+      { col: '"forwardedFrom"', val: m.forwardedFrom || null },
+      { col: '"forwardedBy"', val: m.forwardedBy || null },
+    ];
+    for (const { col, val } of extraCols) {
+      if (val !== null && val !== undefined) {
+        try { await execute(`UPDATE unified_inbox SET ${col}=$1 WHERE id=$2`, [val, id]); } catch (e) { /* column may not exist */ }
+      }
+    }
     return this.getInboxMessage(id);
   }
 
