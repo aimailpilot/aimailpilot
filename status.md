@@ -68,6 +68,10 @@
 | 59 | Unified Inbox Mobile Responsive | `unified-inbox.tsx` — fully responsive with Tailwind sm:/md: prefixes. Message list uses compact layout on mobile, desktop-only checkboxes hidden on mobile. |
 | 60 | Campaign Dashboard Mobile Responsive | `mailmeteor-dashboard.tsx` — KPI cards 2-col mobile → 4-col desktop. Campaign table switches to card view on mobile (md: breakpoint). Desktop table preserved with full columns. |
 | 61 | Campaign List — Sender + List Name | `GET /api/campaigns` in `routes.ts` enriches each campaign with `senderEmail`/`senderName` (from email_accounts), `creatorName`/`creatorEmail` (from users), `listName` (from contact_lists via segmentId or contactIds). Desktop table shows "Sent By" avatar column and "List" badge column. |
+| 62 | Reply Classification — Rule-Based + AI | `reply-classifier.ts` with 30+ strengthened patterns (OOO, auto_reply, positive, negative, bounce). `classifyReplyWithAI()` uses Azure OpenAI for borderline `general` cases. `isHumanReply()` helper identifies actionable replies (positive/negative/general/unsubscribe, excludes OOO/auto_reply/bounce). |
+| 63 | Inbox Reply Filtering (Exclude Auto-Replies) | `unified_inbox` messages excluded from "Emails Need Reply" if `replyType IN ('ooo', 'auto_reply', 'bounce')`. Only `positive`, `negative`, `general` count as real replies. Boot reclassifier processes NULL/empty/general messages via rules + AI. |
+| 64 | Scorecard "Not Replied" — 3-Day Lookback | Scorecard counts contacts emailed **3+ days ago** without reply (gives time to respond). Uses `messages` table `repliedAt IS NULL` check. Short periods (Today/This Week) show 0 or very low numbers as expected. |
+| 65 | AI Refine Button — Two-Phase Reclassification | Team Scorecard + My Dashboard get purple "AI Refine" button. Phase 1: rules-based reclassification (5000 msgs). Phase 2: Azure OpenAI batch (200 msgs). Progress message shown; auto-refreshes dashboard after 15s. |
 
 ## Golden Rules (NEVER violate)
 
@@ -87,3 +91,7 @@
 - **Forward endpoint** must set `forwardedFrom: msg.fromEmail` — required so original sender email shows in UI
 - **Bounce classifier** (`reply-classifier.ts`) non-system senders require 3+ indicators to classify as bounce — do NOT lower threshold (legitimate replies were being misclassified)
 - **Campaign enrichment** in `GET /api/campaigns` — `Promise.all` async map with try/catch — do NOT remove (powers "Sent By" and "List" columns)
+- **Reply classification rules** in `reply-classifier.ts` — 30+ strengthened patterns for OOO, auto_reply, positive, negative, bounce. Do NOT weaken patterns or lower thresholds. Non-system senders require 3+ indicators for bounce classification (legitimate replies were being misclassified). Do NOT change `isHumanReply()` logic which identifies actionable replies.
+- **Boot reclassification** in `server/index.ts` — targets `("replyType" IS NULL OR "replyType" = '' OR "replyType" = 'general')` at 30s startup delay. Do NOT change delay timing or message limits. Do NOT remove AI reclassification fallback for borderline cases.
+- **Inbox reply filter** — "Emails Need Reply" and "Not Replied" filters must exclude non-human replies: `replyType IN ('positive', 'negative', 'general')` only. Do NOT revert to include-based filters. OOO/auto_reply/bounce must always be excluded.
+- **Scorecard "Not Replied" cutoff** in `routes.ts` — must enforce 3-day lookback via `notRepliedCutoff` to allow reply time. Do NOT remove cutoff or revert to all-time counts. Gives accurate signal for aged emails.

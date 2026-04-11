@@ -23,7 +23,7 @@
 | `server/services/gmail-reply-tracker.ts` | Gmail inbox sync — reply/bounce/open detection |
 | `server/services/outlook-reply-tracker.ts` | Outlook Graph inbox sync — reply/bounce/open detection |
 | `server/services/bounce-sync-engine.ts` | 5-source bounce scanner + suppression list sync |
-| `server/services/reply-classifier.ts` | Auto-classify replies: positive/negative/bounce/OOO/unsub |
+| `server/services/reply-classifier.ts` | Auto-classify replies: positive/negative/bounce/OOO/auto_reply/unsub — 30+ rule patterns + Azure OpenAI for borderline cases |
 | `server/services/smtp-email-service.ts` | SMTP provider abstraction (SendGrid, Elastic, generic) |
 | `server/services/personalization-engine.ts` | Variable substitution ({{firstName}}, custom fields) |
 | `server/services/email-rating-engine.ts` | Contact scoring via Azure OpenAI |
@@ -84,6 +84,7 @@
 | **Follow-ups** | `server/services/followup-engine.ts` | `followup-builder.tsx` |
 | **Inbox sync** | `gmail-reply-tracker.ts`, `outlook-reply-tracker.ts` | `unified-inbox.tsx` |
 | **Inbox display** | `server/routes.ts` (`/api/inbox/enhanced`), `pg-storage.ts` (`getInboxMessagesEnhanced`) | `unified-inbox.tsx` |
+| **Reply classification** | `server/routes.ts` (auto-classify loop, `POST /api/inbox/reclassify`), `reply-classifier.ts` (30+ rules + Azure OpenAI) | `team-scorecard.tsx`, `my-dashboard.tsx` (AI Refine button) |
 | **Bounce / suppression** | `bounce-sync-engine.ts`, `reply-classifier.ts`, `pg-storage.ts` | `unified-inbox.tsx` (Bounced tab) |
 | **Warmup engine** | `server/services/warmup-engine.ts` | `warmup-monitoring.tsx` |
 | **Contact management** | `server/routes.ts` (~lines 4468-4965), `pg-storage.ts` | `contacts-manager.tsx` |
@@ -109,7 +110,8 @@
 | Campaign not sending | `server/services/campaign-engine.ts`, `server/routes.ts` (`campaigns/send`) |
 | Follow-up threading | `server/services/followup-engine.ts` (`executeFollowup`, `sendEmail`) |
 | Inbox not syncing | `gmail-reply-tracker.ts`, `outlook-reply-tracker.ts` |
-| False bounces | `pg-storage.ts` (`getInboxMessagesEnhanced`), `reply-classifier.ts` |
+| False bounces / replies | `reply-classifier.ts` (strengthened patterns), `server/routes.ts` (auto-classify + `POST /api/inbox/reclassify`), `pg-storage.ts` |
+| Inbox reply counts wrong | `server/routes.ts` (filter: `replyType IN ('positive', 'negative', 'general')`), `reply-classifier.ts` |
 | Warmup not working | `warmup-engine.ts` (token + daily counter reset) |
 | Contact activities/pipeline | `server/routes.ts` (~lines 4838-4930) — quote all camelCase for PG |
 | Email account tokens 401 | `server/routes.ts` (`getGmailAccessToken`, `getOutlookAccessToken`) |

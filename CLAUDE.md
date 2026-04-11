@@ -37,6 +37,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > - No changes to Reply tab filter in `pg-storage.ts` (`getInboxMessagesEnhanced`, `getInboxMessageCountEnhanced`, `getInboxStats`) — must be `(status = 'replied' OR "repliedAt" IS NOT NULL)`. Reverting to `status = 'replied'` alone causes empty Reply tab.
 > - No changes to `forwardedFrom` capture in forward endpoint — must set `forwardedFrom: msg.fromEmail` when marking message as forwarded
 > - No changes to bounce classifier thresholds in `reply-classifier.ts` — non-system senders require 3+ indicators. Lowering threshold causes legitimate replies to be misclassified as bounces.
+> - No changes to reply classification rules in `reply-classifier.ts` — 30+ strengthened patterns for OOO, auto_reply, positive, negative, bounce. Do NOT weaken patterns or lower thresholds. Do NOT change `isHumanReply()` logic which identifies actionable replies (positive/negative/general/unsubscribe, excludes OOO/auto_reply/bounce).
+> - No changes to boot reclassification in `server/index.ts` — targets `("replyType" IS NULL OR "replyType" = '' OR "replyType" = 'general')` at 30s startup delay. Do NOT remove AI reclassification fallback for borderline cases.
+> - No changes to inbox reply filter logic — "Emails Need Reply" and "Not Replied" must use `replyType IN ('positive', 'negative', 'general')` to exclude OOO/auto_reply/bounce. Do NOT revert to include-based filters (caused 11k false positives).
+> - No changes to scorecard "Not Replied" 3-day lookback — enforced via `notRepliedCutoff` cutoff in `/api/team/scorecard`. Do NOT remove cutoff or revert to all-time counts — gives accurate signal for aged emails.
 > - No changes to campaign enrichment `Promise.all` block in `GET /api/campaigns` — powers "Sent By" and "List" columns in campaign dashboard
 
 > **CRITICAL — DATABASE PROTECTION (read this before writing ANY server code)**
