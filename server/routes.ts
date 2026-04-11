@@ -9357,7 +9357,8 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         const hotLeads = (pipeMap['interested']?.count || 0) + (pipeMap['meeting_scheduled']?.count || 0) + (pipeMap['meeting_done']?.count || 0);
 
         // Not replied — contacts emailed 3+ days ago who haven't replied (gives them time)
-        // Excludes auto_reply/OOO from being counted as "replied" (only real human replies count)
+        // Not period-bound: always shows all contacts awaiting reply (3+ days old) regardless of selected period
+        // This avoids the bug where period=today makes startDate > notRepliedCutoff → zero results
         let notReplied = 0;
         try {
           const threeDaysAgo = new Date(now);
@@ -9367,13 +9368,13 @@ Generate an appropriate reply to the LATEST email above, considering the full co
             SELECT COUNT(DISTINCT m."contactId") as cnt FROM messages m
             JOIN contacts c ON c.id = m."contactId"
             WHERE c."organizationId" = ? AND c."assignedTo" = ? AND m.status = 'sent'
-            AND m."sentAt" >= ? AND m."sentAt" < ?
+            AND m."sentAt" < ?
             AND m."repliedAt" IS NULL
             AND NOT EXISTS (
               SELECT 1 FROM messages m2 WHERE m2."contactId" = m."contactId"
               AND m2."campaignId" = m."campaignId" AND m2.status = 'replied'
             )
-          `, orgId, userId, startDate, notRepliedCutoff) as any)?.cnt || 0);
+          `, orgId, userId, notRepliedCutoff) as any)?.cnt || 0);
         } catch { /* messages table schema mismatch — skip */ }
 
         const revenue = dealsWon.totalValue || 0;
@@ -9480,6 +9481,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
 
       if (type === 'not_replied') {
         // Contacts emailed 3+ days ago who haven't replied (gives time to respond)
+        // Not period-bound: shows all awaiting contacts regardless of selected period
         const threeDaysAgo = new Date(now);
         threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
         const notRepliedCutoff = threeDaysAgo.toISOString().split('T')[0];
@@ -9491,14 +9493,14 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           FROM messages m
           JOIN contacts c ON c.id = m."contactId"
           WHERE c."organizationId" = ? AND c."assignedTo" = ? AND m.status = 'sent'
-          AND m."sentAt" >= ? AND m."sentAt" < ?
+          AND m."sentAt" < ?
           AND m."repliedAt" IS NULL
           AND NOT EXISTS (
             SELECT 1 FROM messages m2 WHERE m2."contactId" = m."contactId"
             AND m2."campaignId" = m."campaignId" AND m2.status = 'replied'
           )
           ORDER BY m."contactId", m."sentAt" ASC
-        `, orgId, userId, startDate, notRepliedCutoff) as any[];
+        `, orgId, userId, notRepliedCutoff) as any[];
         return res.json({ contacts: contacts || [] });
       }
 
