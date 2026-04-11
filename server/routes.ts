@@ -9356,8 +9356,8 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         // Hot leads (interested + meeting_scheduled + meeting_done)
         const hotLeads = (pipeMap['interested']?.count || 0) + (pipeMap['meeting_scheduled']?.count || 0) + (pipeMap['meeting_done']?.count || 0);
 
-        // Not replied — emails sent to contacts assigned to this user, where no REAL human reply received
-        // Excludes contacts whose only inbox messages are ooo/auto_reply/bounce
+        // Not replied — emails sent but contact hasn't sent a real human reply back
+        // A contact is "not replied" if they have NO inbox message with replyType = positive/negative/general
         let notReplied = 0;
         try {
           notReplied = parseInt((await storage.rawGet(`
@@ -9365,11 +9365,10 @@ Generate an appropriate reply to the LATEST email above, considering the full co
             JOIN contacts c ON c.id = m."contactId"
             WHERE c."organizationId" = ? AND c."assignedTo" = ? AND m.status = 'sent'
             AND m."sentAt" >= ? AND m."sentAt" < ?
+            AND m."repliedAt" IS NULL
             AND NOT EXISTS (
-              SELECT 1 FROM unified_inbox ui
-              WHERE ui."contactId" = m."contactId"
-              AND (ui."replyType" IS NULL OR ui."replyType" NOT IN ('ooo', 'auto_reply', 'bounce'))
-              AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
+              SELECT 1 FROM messages m2 WHERE m2."contactId" = m."contactId"
+              AND m2."campaignId" = m."campaignId" AND m2.status = 'replied'
             )
           `, orgId, userId, startDate, endDate) as any)?.cnt || 0);
         } catch { /* messages table schema mismatch — skip */ }
@@ -9477,8 +9476,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       }
 
       if (type === 'not_replied') {
-        // Contacts whose emails were sent but no REAL human reply received
-        // Excludes contacts who only sent OOO/auto_reply/bounce messages back
+        // Contacts whose emails were sent but no reply received in messages table
         const contacts = await storage.rawAll(`
           SELECT DISTINCT ON (m."contactId")
             c.id, c."firstName", c."lastName", c.email, c.company, c."pipelineStage",
@@ -9488,11 +9486,10 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           JOIN contacts c ON c.id = m."contactId"
           WHERE c."organizationId" = ? AND c."assignedTo" = ? AND m.status = 'sent'
           AND m."sentAt" >= ? AND m."sentAt" < ?
+          AND m."repliedAt" IS NULL
           AND NOT EXISTS (
-            SELECT 1 FROM unified_inbox ui
-            WHERE ui."contactId" = m."contactId"
-            AND (ui."replyType" IS NULL OR ui."replyType" NOT IN ('ooo', 'auto_reply', 'bounce'))
-            AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
+            SELECT 1 FROM messages m2 WHERE m2."contactId" = m."contactId"
+            AND m2."campaignId" = m."campaignId" AND m2.status = 'replied'
           )
           ORDER BY m."contactId", m."sentAt" ASC
         `, orgId, userId, startDate, endDate) as any[];
@@ -9643,7 +9640,8 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         if (overdue > 0) nudges.push({ type: 'overdue', priority: 'high', title: `${overdue} Overdue Follow-ups`, message: 'Contacts with past-due follow-up dates need attention', count: overdue, actionType: 'contacts' });
       } catch { }
 
-      // 2. Emails needing reply — real human replies only (exclude OOO, auto_reply, bounce, unclassified system messages)
+      // 2. Emails needing reply — only CLASSIFIED human replies (positive, negative, general)
+      // Excludes: OOO, auto_reply, bounce, and unclassified (NULL/empty) messages
       let emailsNeedingReply = 0;
       try {
         emailsNeedingReply = parseInt((await storage.rawGet(`
@@ -9652,7 +9650,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           WHERE ui."organizationId" = ? AND ea."userId" = ?
           AND ui.status IN ('unread', 'read') AND ui."repliedAt" IS NULL
           AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
-          AND (ui."replyType" IS NULL OR ui."replyType" NOT IN ('ooo', 'auto_reply', 'bounce'))
+          AND ui."replyType" IN ('positive', 'negative', 'general')
         `, orgId, userId) as any)?.cnt || 0);
         if (emailsNeedingReply > 0) nudges.push({ type: 'needs_reply', priority: 'high', title: `${emailsNeedingReply} Emails Need Reply`, message: 'Real human replies that haven\'t been responded to yet', count: emailsNeedingReply, actionType: 'emails' });
       } catch { }
@@ -9757,7 +9755,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         WHERE ui."organizationId" = ? AND ea."userId" = ?
         AND ui.status IN ('unread', 'read') AND ui."repliedAt" IS NULL
         AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
-        AND (ui."replyType" IS NULL OR ui."replyType" NOT IN ('ooo', 'auto_reply', 'bounce'))
+        AND ui."replyType" IN ('positive', 'negative', 'general')
         ORDER BY ui."receivedAt" DESC
         LIMIT ? OFFSET ?
       `, orgId, userId, limit, offset) as any[];
@@ -9768,7 +9766,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         WHERE ui."organizationId" = ? AND ea."userId" = ?
         AND ui.status IN ('unread', 'read') AND ui."repliedAt" IS NULL
         AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
-        AND (ui."replyType" IS NULL OR ui."replyType" NOT IN ('ooo', 'auto_reply', 'bounce'))
+        AND ui."replyType" IN ('positive', 'negative', 'general')
       `, orgId, userId) as any)?.cnt || 0;
 
       res.json({ emails, total });
