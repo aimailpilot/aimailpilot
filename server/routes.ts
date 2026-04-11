@@ -8291,11 +8291,25 @@ Respond with ONLY a JSON object in this format:
         const refreshToken = settings[`${outlookPrefix}refresh_token`] || settings.microsoft_refresh_token;
         if (!accessToken && !refreshToken) return res.status(400).json({ message: 'Outlook not connected. Please re-authenticate.' });
 
-        let replyResp = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${msg.outlookMessageId}/reply`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ comment: replyBody }),
-        });
+        // If no outlookMessageId, fall back to sendMail instead of /reply endpoint
+        const useReplyEndpoint = !!msg.outlookMessageId;
+        let replyResp = useReplyEndpoint
+          ? await fetch(`https://graph.microsoft.com/v1.0/me/messages/${msg.outlookMessageId}/reply`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ comment: replyBody }),
+            })
+          : await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                message: {
+                  subject: msg.subject?.startsWith('Re:') ? msg.subject : `Re: ${msg.subject}`,
+                  body: { contentType: 'HTML', content: replyBody },
+                  toRecipients: [{ emailAddress: { address: msg.fromEmail } }],
+                }
+              }),
+            });
 
         // 401 → refresh token and retry once
         if (replyResp.status === 401 && refreshToken) {
@@ -8336,11 +8350,23 @@ Respond with ONLY a JSON object in this format:
                     await storage.setApiSetting(req.user.organizationId, 'microsoft_token_expiry', String(exp));
                   }
                   // Retry send
-                  replyResp = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${msg.outlookMessageId}/reply`, {
-                    method: 'POST',
-                    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ comment: replyBody }),
-                  });
+                  replyResp = useReplyEndpoint
+                    ? await fetch(`https://graph.microsoft.com/v1.0/me/messages/${msg.outlookMessageId}/reply`, {
+                        method: 'POST',
+                        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ comment: replyBody }),
+                      })
+                    : await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+                        method: 'POST',
+                        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          message: {
+                            subject: msg.subject?.startsWith('Re:') ? msg.subject : `Re: ${msg.subject}`,
+                            body: { contentType: 'HTML', content: replyBody },
+                            toRecipients: [{ emailAddress: { address: msg.fromEmail } }],
+                          }
+                        }),
+                      });
                 }
               }
             } catch (refreshErr) {
@@ -8394,9 +8420,9 @@ Respond with ONLY a JSON object in this format:
         // No provider match — can't send reply without Gmail or Outlook connected
         res.status(400).json({ message: 'Could not determine reply provider. Connect Gmail or Outlook first.' });
       }
-    } catch (error) {
-      console.error('Reply error:', error);
-      res.status(500).json({ message: 'Failed to send reply' });
+    } catch (error: any) {
+      console.error('[Inbox Reply] Unexpected error:', error);
+      res.status(500).json({ message: `Failed to send reply: ${error?.message || error}` });
     }
   });
 
@@ -8425,13 +8451,17 @@ Respond with ONLY a JSON object in this format:
       const fwdSubject = msg.subject?.startsWith('Fwd:') ? msg.subject : `Fwd: ${msg.subject}`;
       const senderEmail = msg.toEmail || settings.gmail_email || '';
 
-      // Convert plain text newlines to <br> tags for HTML email
+      // Build forwarded message body with full original email context
       const userNote = fwdBody ? fwdBody.replace(/\n/g, '<br>') : '';
-      const originalBody = (msg.body || msg.snippet || '').replace(/\n/g, '<br>');
-      const fullBody = `${userNote}${userNote ? '<br><br>' : ''}<div style="border-left: 3px solid #ccc; padding-left: 12px; color: #666; margin-top: 16px;">
-<div style="font-size: 12px; color: #999; margin-bottom: 8px;">---------- Forwarded message ----------</div>
-<div style="font-size: 13px; margin-bottom: 4px;"><strong>From:</strong> ${msg.fromName || msg.fromEmail} &lt;${msg.fromEmail}&gt;</div>
-<div style="font-size: 13px; margin-bottom: 12px;"><strong>Subject:</strong> ${msg.subject || '(no subject)'}</div>
+      const originalBody = msg.bodyHtml || (msg.body || msg.snippet || '').replace(/\n/g, '<br>');
+      const originalDate = msg.receivedAt ? new Date(msg.receivedAt).toLocaleString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+      const fullBody = `${userNote}${userNote ? '<br><br>' : ''}<div style="border-left: 3px solid #ccc; padding-left: 12px; color: #555; margin-top: 16px; font-family: Arial, sans-serif;">
+<div style="font-size: 12px; color: #999; margin-bottom: 10px; font-style: italic;">---------- Forwarded message ----------</div>
+<div style="font-size: 13px; margin-bottom: 4px;"><strong>From:</strong> ${msg.fromName ? `${msg.fromName} &lt;${msg.fromEmail}&gt;` : msg.fromEmail}</div>
+<div style="font-size: 13px; margin-bottom: 4px;"><strong>Date:</strong> ${originalDate}</div>
+<div style="font-size: 13px; margin-bottom: 4px;"><strong>Subject:</strong> ${msg.subject || '(no subject)'}</div>
+<div style="font-size: 13px; margin-bottom: 10px;"><strong>To:</strong> ${msg.toEmail || senderEmail}</div>
+<br>
 <div style="font-size: 13px; line-height: 1.6;">${originalBody}</div>
 </div>`;
 
@@ -8491,8 +8521,29 @@ Respond with ONLY a JSON object in this format:
         if (!account) return res.status(400).json({ message: 'Email account not found' });
         const settingsForAccount = await storage.getApiSettings(req.user.organizationId);
         const outlookPrefix = `outlook_sender_${account.email}_`;
-        let token = settingsForAccount[`${outlookPrefix}access_token`] || settingsForAccount.outlook_access_token;
-        if (!token) return res.status(400).json({ message: 'Outlook not connected.' });
+        let token = settingsForAccount[`${outlookPrefix}access_token`] || settingsForAccount.microsoft_access_token;
+        const refreshTok = settingsForAccount[`${outlookPrefix}refresh_token`] || settingsForAccount.microsoft_refresh_token;
+        if (!token && !refreshTok) return res.status(400).json({ message: 'Outlook not connected.' });
+        // Refresh token if missing access token
+        if (!token && refreshTok) {
+          try {
+            let clientId = settingsForAccount.microsoft_oauth_client_id || process.env.MICROSOFT_CLIENT_ID || '';
+            let clientSecret = settingsForAccount.microsoft_oauth_client_secret || process.env.MICROSOFT_CLIENT_SECRET || '';
+            const body = new URLSearchParams({
+              client_id: clientId, client_secret: clientSecret,
+              refresh_token: refreshTok, grant_type: 'refresh_token',
+              scope: 'openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/SMTP.Send',
+            });
+            const tokenResp = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+              method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString(),
+            });
+            if (tokenResp.ok) {
+              const tokens = await tokenResp.json() as any;
+              if (tokens.access_token) token = tokens.access_token;
+            }
+          } catch (e) { console.error('[Inbox Forward] Token refresh failed:', e); }
+        }
+        if (!token) return res.status(400).json({ message: 'Outlook token expired. Please re-authenticate.' });
 
         const toRecipients = to.split(',').map((e: string) => ({ emailAddress: { address: e.trim() } }));
         const ccRecipients = cc ? cc.split(',').map((e: string) => ({ emailAddress: { address: e.trim() } })) : [];
@@ -8530,9 +8581,9 @@ Respond with ONLY a JSON object in this format:
       }
 
       return res.status(400).json({ message: 'Unsupported provider for forward' });
-    } catch (error) {
-      console.error('[Inbox Forward] Error:', error);
-      res.status(500).json({ message: 'Failed to forward message' });
+    } catch (error: any) {
+      console.error('[Inbox Forward] Unexpected error:', error);
+      res.status(500).json({ message: `Failed to forward message: ${error?.message || error}` });
     }
   });
 
