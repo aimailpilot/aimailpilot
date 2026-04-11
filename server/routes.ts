@@ -9,7 +9,7 @@ import { campaignEngine } from "./services/campaign-engine";
 import { gmailReplyTracker } from "./services/gmail-reply-tracker";
 import { outlookReplyTracker } from "./services/outlook-reply-tracker";
 import { calculateContactRating, batchRecalculateRatings } from "./services/email-rating-engine";
-import { classifyReply, classifyBounce } from "./services/reply-classifier";
+import { classifyReply, classifyBounce, classifyReplyWithAI, isHumanReply } from "./services/reply-classifier";
 import { verifySingleEmail, verifyBatch, checkCredits, getEmailVerifyApiKey } from "./services/email-verifier";
 import { OAuth2Client } from 'google-auth-library';
 import { runWarmupNow, runOrgWarmupDirect } from "./services/warmup-engine";
@@ -7907,14 +7907,28 @@ Respond with ONLY a JSON object in this format:
         console.error('[InboxSync] Campaign recalculation error:', e);
       }
 
-      // v12: Auto-classify new unclassified inbox messages
+      // v13: Auto-classify new unclassified inbox messages (rule-based + AI for borderline)
       try {
         const unclassified = await storage.getInboxMessagesEnhanced(orgId, { replyType: '' }, 100, 0) as any[];
         let autoClassified = 0;
         for (const msg of unclassified) {
           if (msg.replyType && msg.replyType !== '') continue;
           if (msg.sentByUs) continue; // Don't classify our own sent messages
-          const result = classifyReply(msg.subject || '', msg.body || msg.snippet || '', msg.fromEmail, msg.fromName);
+          let result = classifyReply(msg.subject || '', msg.body || msg.snippet || '', msg.fromEmail, msg.fromName);
+
+          // For 'general' low-confidence results, use AI to reclassify (catches missed auto-replies/OOO)
+          if (result.replyType === 'general' && result.confidence <= 0.5) {
+            try {
+              const aiResult = await classifyReplyWithAI(msg.subject || '', msg.body || msg.snippet || '', msg.fromEmail, orgId, storage);
+              if (aiResult.confidence >= 0.7) {
+                result = aiResult; // AI is confident — use its classification
+                console.log(`[InboxSync] AI reclassified ${msg.fromEmail}: general → ${aiResult.replyType}`);
+              }
+            } catch (aiErr: any) {
+              console.error('[InboxSync] AI classify error:', aiErr.message);
+            }
+          }
+
           await storage.classifyReply(msg.id, result.replyType);
           if (result.bounceType) await storage.setBounceType(msg.id, result.bounceType);
           // Auto-actions based on classification
@@ -7926,8 +7940,8 @@ Respond with ONLY a JSON object in this format:
             } else if (result.replyType === 'positive') {
               await storage.updateContactLeadStatus(msg.contactId, 'interested');
             }
-            // Create notification for positive replies
-            if (result.replyType === 'positive' || result.replyType === 'general') {
+            // Only notify for actual human replies (not OOO/auto_reply/bounce)
+            if (isHumanReply(result.replyType)) {
               await storage.createNotification(orgId, {
                 type: 'reply',
                 title: `New ${result.replyType} reply from ${msg.fromName || msg.fromEmail}`,
@@ -9342,7 +9356,8 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         // Hot leads (interested + meeting_scheduled + meeting_done)
         const hotLeads = (pipeMap['interested']?.count || 0) + (pipeMap['meeting_scheduled']?.count || 0) + (pipeMap['meeting_done']?.count || 0);
 
-        // Not replied — emails sent to contacts assigned to this user, where no reply received
+        // Not replied — emails sent to contacts assigned to this user, where no REAL human reply received
+        // Excludes contacts whose only inbox messages are ooo/auto_reply/bounce
         let notReplied = 0;
         try {
           notReplied = parseInt((await storage.rawGet(`
@@ -9350,10 +9365,11 @@ Generate an appropriate reply to the LATEST email above, considering the full co
             JOIN contacts c ON c.id = m."contactId"
             WHERE c."organizationId" = ? AND c."assignedTo" = ? AND m.status = 'sent'
             AND m."sentAt" >= ? AND m."sentAt" < ?
-            AND m."repliedAt" IS NULL
             AND NOT EXISTS (
-              SELECT 1 FROM messages m2 WHERE m2."contactId" = m."contactId"
-              AND m2."campaignId" = m."campaignId" AND m2.status = 'replied'
+              SELECT 1 FROM unified_inbox ui
+              WHERE ui."contactId" = m."contactId"
+              AND (ui."replyType" IS NULL OR ui."replyType" NOT IN ('ooo', 'auto_reply', 'bounce'))
+              AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
             )
           `, orgId, userId, startDate, endDate) as any)?.cnt || 0);
         } catch { /* messages table schema mismatch — skip */ }
@@ -9461,7 +9477,8 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       }
 
       if (type === 'not_replied') {
-        // Contacts whose emails were sent but no reply, with days since sent
+        // Contacts whose emails were sent but no REAL human reply received
+        // Excludes contacts who only sent OOO/auto_reply/bounce messages back
         const contacts = await storage.rawAll(`
           SELECT DISTINCT ON (m."contactId")
             c.id, c."firstName", c."lastName", c.email, c.company, c."pipelineStage",
@@ -9471,10 +9488,11 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           JOIN contacts c ON c.id = m."contactId"
           WHERE c."organizationId" = ? AND c."assignedTo" = ? AND m.status = 'sent'
           AND m."sentAt" >= ? AND m."sentAt" < ?
-          AND m."repliedAt" IS NULL
           AND NOT EXISTS (
-            SELECT 1 FROM messages m2 WHERE m2."contactId" = m."contactId"
-            AND m2."campaignId" = m."campaignId" AND m2.status = 'replied'
+            SELECT 1 FROM unified_inbox ui
+            WHERE ui."contactId" = m."contactId"
+            AND (ui."replyType" IS NULL OR ui."replyType" NOT IN ('ooo', 'auto_reply', 'bounce'))
+            AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
           )
           ORDER BY m."contactId", m."sentAt" ASC
         `, orgId, userId, startDate, endDate) as any[];
@@ -9625,7 +9643,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         if (overdue > 0) nudges.push({ type: 'overdue', priority: 'high', title: `${overdue} Overdue Follow-ups`, message: 'Contacts with past-due follow-up dates need attention', count: overdue, actionType: 'contacts' });
       } catch { }
 
-      // 2. Emails needing reply (received in inbox, status = unread/read but not replied, assigned to this user or from user's email accounts)
+      // 2. Emails needing reply — real human replies only (exclude OOO, auto_reply, bounce, unclassified system messages)
       let emailsNeedingReply = 0;
       try {
         emailsNeedingReply = parseInt((await storage.rawGet(`
@@ -9634,8 +9652,9 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           WHERE ui."organizationId" = ? AND ea."userId" = ?
           AND ui.status IN ('unread', 'read') AND ui."repliedAt" IS NULL
           AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
+          AND (ui."replyType" IS NULL OR ui."replyType" NOT IN ('ooo', 'auto_reply', 'bounce'))
         `, orgId, userId) as any)?.cnt || 0);
-        if (emailsNeedingReply > 0) nudges.push({ type: 'needs_reply', priority: 'high', title: `${emailsNeedingReply} Emails Need Reply`, message: 'Received emails that haven\'t been replied to yet', count: emailsNeedingReply, actionType: 'emails' });
+        if (emailsNeedingReply > 0) nudges.push({ type: 'needs_reply', priority: 'high', title: `${emailsNeedingReply} Emails Need Reply`, message: 'Real human replies that haven\'t been responded to yet', count: emailsNeedingReply, actionType: 'emails' });
       } catch { }
 
       // 3. Unactioned replies (contacts replied to campaign but no activity logged after)
@@ -9738,6 +9757,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         WHERE ui."organizationId" = ? AND ea."userId" = ?
         AND ui.status IN ('unread', 'read') AND ui."repliedAt" IS NULL
         AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
+        AND (ui."replyType" IS NULL OR ui."replyType" NOT IN ('ooo', 'auto_reply', 'bounce'))
         ORDER BY ui."receivedAt" DESC
         LIMIT ? OFFSET ?
       `, orgId, userId, limit, offset) as any[];
@@ -9748,6 +9768,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         WHERE ui."organizationId" = ? AND ea."userId" = ?
         AND ui.status IN ('unread', 'read') AND ui."repliedAt" IS NULL
         AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
+        AND (ui."replyType" IS NULL OR ui."replyType" NOT IN ('ooo', 'auto_reply', 'bounce'))
       `, orgId, userId) as any)?.cnt || 0;
 
       res.json({ emails, total });
@@ -9755,6 +9776,51 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       console.error('[EmailsNeedingReply] Error:', error.message);
       res.status(500).json({ message: 'Failed to fetch emails' });
     }
+  });
+
+  // ── Reclassify existing inbox messages using AI (admin trigger) ──
+  app.post('/api/inbox/reclassify', requireAuth, async (req: any, res) => {
+    const orgId = req.user.organizationId;
+    const role = req.user.role;
+    if (role !== 'owner' && role !== 'admin') return res.status(403).json({ message: 'Admin only' });
+
+    res.json({ message: 'Reclassification started in background' });
+
+    // Run async after response
+    (async () => {
+      try {
+        // Get all messages that were classified as 'general' (most likely to contain missed auto-replies)
+        const generalMsgs = await storage.rawAll(`
+          SELECT id, subject, body, snippet, "fromEmail", "fromName", "replyType"
+          FROM unified_inbox
+          WHERE "organizationId" = ? AND "replyType" IN ('general', '')
+          AND ("sentByUs" IS NULL OR "sentByUs" = 0)
+          LIMIT 500
+        `, orgId) as any[];
+
+        let reclassified = 0;
+        for (const msg of generalMsgs) {
+          // First try stronger rule-based
+          const ruleResult = classifyReply(msg.subject || '', msg.body || msg.snippet || '', msg.fromEmail, msg.fromName);
+          if (ruleResult.replyType !== 'general') {
+            await storage.classifyReply(msg.id, ruleResult.replyType);
+            reclassified++;
+            continue;
+          }
+          // Then try AI for remaining general messages
+          try {
+            const aiResult = await classifyReplyWithAI(msg.subject || '', msg.body || msg.snippet || '', msg.fromEmail, orgId, storage);
+            if (aiResult.confidence >= 0.7 && aiResult.replyType !== 'general') {
+              await storage.classifyReply(msg.id, aiResult.replyType);
+              reclassified++;
+            }
+          } catch { /* skip individual failures */ }
+        }
+        console.log(`[Reclassify] Reclassified ${reclassified}/${generalMsgs.length} messages for org ${orgId}`);
+      } catch (e: any) {
+        console.error('[Reclassify] Error:', e.message);
+      }
+    })();
   });
 
   app.get('/api/team/members', requireAuth, async (req: any, res) => {
