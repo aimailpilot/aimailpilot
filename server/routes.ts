@@ -9342,6 +9342,22 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         // Hot leads (interested + meeting_scheduled + meeting_done)
         const hotLeads = (pipeMap['interested']?.count || 0) + (pipeMap['meeting_scheduled']?.count || 0) + (pipeMap['meeting_done']?.count || 0);
 
+        // Not replied — emails sent to contacts assigned to this user, where no reply received
+        let notReplied = 0;
+        try {
+          notReplied = parseInt((await storage.rawGet(`
+            SELECT COUNT(DISTINCT m."contactId") as cnt FROM messages m
+            JOIN contacts c ON c.id = m."contactId"
+            WHERE c."organizationId" = ? AND c."assignedTo" = ? AND m.status = 'sent'
+            AND m."sentAt" >= ? AND m."sentAt" < ?
+            AND m."repliedAt" IS NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM messages m2 WHERE m2."contactId" = m."contactId"
+              AND m2."campaignId" = m."campaignId" AND m2.status = 'replied'
+            )
+          `, orgId, userId, startDate, endDate) as any)?.cnt || 0);
+        } catch { /* messages table schema mismatch — skip */ }
+
         const revenue = dealsWon.totalValue || 0;
         const wonCount = dealsWon.cnt || 0;
         const winRate = (wonCount + dealsLost) > 0 ? Math.round((wonCount / (wonCount + dealsLost)) * 100) : 0;
@@ -9356,6 +9372,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           meetingsDone,
           proposalsSent,
           hotLeads,
+          notReplied,
           dealsWon: wonCount,
           dealsLost,
           revenue,
@@ -9378,6 +9395,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         meetingsDone: scorecard.reduce((s, m) => s + m.meetingsDone, 0),
         proposalsSent: scorecard.reduce((s, m) => s + m.proposalsSent, 0),
         hotLeads: scorecard.reduce((s, m) => s + m.hotLeads, 0),
+        notReplied: scorecard.reduce((s, m) => s + (m.notReplied || 0), 0),
         dealsWon: scorecard.reduce((s, m) => s + m.dealsWon, 0),
         dealsLost: scorecard.reduce((s, m) => s + m.dealsLost, 0),
         revenue: scorecard.reduce((s, m) => s + m.revenue, 0),
@@ -9416,6 +9434,72 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     } catch (error: any) {
       console.error('[Scorecard] Error:', error.message);
       res.status(500).json({ message: 'Failed to fetch scorecard' });
+    }
+  });
+
+  // ── Scorecard Drill-Down — not-replied contacts or hot leads for a user ──
+  app.get('/api/team/scorecard/drilldown', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const { userId, type, period } = req.query as Record<string, string>;
+
+      const now = new Date();
+      let startDate = '2000-01-01';
+      let endDate = '9999-12-31';
+      const monthMatch = period?.match(/^(\d{4})-(\d{2})$/);
+      if (period === 'today') {
+        startDate = now.toISOString().split('T')[0];
+      } else if (period === 'week') {
+        const d = new Date(now); d.setDate(d.getDate() - 7);
+        startDate = d.toISOString().split('T')[0];
+      } else if (monthMatch) {
+        const year = parseInt(monthMatch[1]);
+        const month = parseInt(monthMatch[2]);
+        startDate = `${year}-${String(month).padStart(2, '0')}-01`;
+        const nextMonth = month === 12 ? new Date(year + 1, 0, 1) : new Date(year, month, 1);
+        endDate = nextMonth.toISOString().split('T')[0];
+      }
+
+      if (type === 'not_replied') {
+        // Contacts whose emails were sent but no reply, with days since sent
+        const contacts = await storage.rawAll(`
+          SELECT DISTINCT ON (m."contactId")
+            c.id, c."firstName", c."lastName", c.email, c.company, c."pipelineStage",
+            m."sentAt", m.subject,
+            EXTRACT(DAY FROM (NOW() - m."sentAt"::timestamptz))::int AS "daysSinceSent"
+          FROM messages m
+          JOIN contacts c ON c.id = m."contactId"
+          WHERE c."organizationId" = ? AND c."assignedTo" = ? AND m.status = 'sent'
+          AND m."sentAt" >= ? AND m."sentAt" < ?
+          AND m."repliedAt" IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM messages m2 WHERE m2."contactId" = m."contactId"
+            AND m2."campaignId" = m."campaignId" AND m2.status = 'replied'
+          )
+          ORDER BY m."contactId", m."sentAt" ASC
+        `, orgId, userId, startDate, endDate) as any[];
+        return res.json({ contacts: contacts || [] });
+      }
+
+      if (type === 'hot_leads') {
+        // Contacts in hot lead pipeline stages assigned to this user
+        const contacts = await storage.rawAll(`
+          SELECT c.id, c."firstName", c."lastName", c.email, c.company, c."pipelineStage",
+            c."dealValue", c."nextActionDate",
+            lo.bucket AS "leadBucket", lo.confidence AS "leadConfidence", lo."suggestedAction"
+          FROM contacts c
+          LEFT JOIN lead_opportunities lo ON LOWER(lo."contactEmail") = LOWER(c.email) AND lo."organizationId" = ?
+          WHERE c."organizationId" = ? AND c."assignedTo" = ?
+          AND c."pipelineStage" IN ('interested', 'meeting_scheduled', 'meeting_done')
+          ORDER BY c."pipelineStage", c."firstName"
+        `, orgId, orgId, userId) as any[];
+        return res.json({ contacts: contacts || [] });
+      }
+
+      res.status(400).json({ message: 'Invalid type. Use not_replied or hot_leads' });
+    } catch (error: any) {
+      console.error('[Scorecard Drilldown] Error:', error.message);
+      res.status(500).json({ message: 'Failed to fetch drill-down data' });
     }
   });
 

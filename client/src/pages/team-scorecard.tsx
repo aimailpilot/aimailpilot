@@ -5,7 +5,7 @@ import {
   Trophy, Mail, Phone, Users, Target, TrendingUp, TrendingDown,
   Calendar, AlertTriangle, MessageSquare, ArrowLeft, RefreshCw,
   Crown, Medal, Award, Zap, IndianRupee, BarChart3, Clock,
-  Send, Briefcase, CheckCircle2, XCircle, Flame
+  Send, Briefcase, CheckCircle2, XCircle, Flame, X, MailX
 } from "lucide-react";
 
 interface ScorecardMember {
@@ -18,6 +18,7 @@ interface ScorecardMember {
   meetingsDone: number;
   proposalsSent: number;
   hotLeads: number;
+  notReplied: number;
   dealsWon: number;
   dealsLost: number;
   revenue: number;
@@ -33,6 +34,7 @@ interface ScorecardData {
     meetingsDone: number;
     proposalsSent: number;
     hotLeads: number;
+    notReplied: number;
     dealsWon: number;
     dealsLost: number;
     revenue: number;
@@ -43,6 +45,28 @@ interface ScorecardData {
   orgCreatedAt?: string;
 }
 
+interface DrilldownContact {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  company?: string;
+  pipelineStage?: string;
+  sentAt?: string;
+  subject?: string;
+  daysSinceSent?: number;
+  dealValue?: number;
+  nextActionDate?: string;
+  leadBucket?: string;
+  suggestedAction?: string;
+}
+
+interface DrilldownModal {
+  userId: string;
+  userName: string;
+  type: 'not_replied' | 'hot_leads';
+}
+
 interface TeamScorecardProps {
   onBack?: () => void;
 }
@@ -51,6 +75,9 @@ export default function TeamScorecard({ onBack }: TeamScorecardProps) {
   const [data, setData] = useState<ScorecardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState<string>("today");
+  const [drilldown, setDrilldown] = useState<DrilldownModal | null>(null);
+  const [drilldownContacts, setDrilldownContacts] = useState<DrilldownContact[]>([]);
+  const [drilldownLoading, setDrilldownLoading] = useState(false);
 
   const fetchScorecard = async () => {
     setLoading(true);
@@ -62,6 +89,20 @@ export default function TeamScorecard({ onBack }: TeamScorecardProps) {
   };
 
   useEffect(() => { fetchScorecard(); }, [period]);
+
+  const openDrilldown = async (member: ScorecardMember, type: 'not_replied' | 'hot_leads') => {
+    setDrilldown({ userId: member.userId, userName: member.userName, type });
+    setDrilldownContacts([]);
+    setDrilldownLoading(true);
+    try {
+      const res = await fetch(`/api/team/scorecard/drilldown?userId=${member.userId}&type=${type}&period=${period}`, { credentials: "include" });
+      if (res.ok) {
+        const json = await res.json();
+        setDrilldownContacts(json.contacts || []);
+      }
+    } catch (e) { console.error("Drilldown fetch failed:", e); }
+    setDrilldownLoading(false);
+  };
 
   const formatCurrency = (val: number) => {
     if (val >= 10000000) return `₹${(val / 10000000).toFixed(1)}Cr`;
@@ -77,9 +118,29 @@ export default function TeamScorecard({ onBack }: TeamScorecardProps) {
     return <span className="text-sm font-bold text-gray-400 w-5 text-center">{idx + 1}</span>;
   };
 
+  const getStageBadge = (stage?: string) => {
+    const map: Record<string, string> = {
+      interested: 'bg-blue-100 text-blue-700',
+      meeting_scheduled: 'bg-purple-100 text-purple-700',
+      meeting_done: 'bg-indigo-100 text-indigo-700',
+      proposal_sent: 'bg-amber-100 text-amber-700',
+      won: 'bg-green-100 text-green-700',
+      lost: 'bg-red-100 text-red-600',
+    };
+    const label: Record<string, string> = {
+      interested: 'Interested',
+      meeting_scheduled: 'Meeting Scheduled',
+      meeting_done: 'Meeting Done',
+      proposal_sent: 'Proposal Sent',
+      won: 'Won',
+      lost: 'Lost',
+    };
+    if (!stage || !map[stage]) return null;
+    return <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${map[stage]}`}>{label[stage]}</span>;
+  };
+
   const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-  // Generate month options from org creation date to now
   const getMonthOptions = () => {
     const options: { key: string; label: string }[] = [];
     const createdAt = data?.orgCreatedAt ? new Date(data.orgCreatedAt) : new Date();
@@ -206,7 +267,7 @@ export default function TeamScorecard({ onBack }: TeamScorecardProps) {
 
       <div className="grid grid-cols-4 gap-3">
         <SummaryCard icon={<Flame className="h-5 w-5 text-orange-600" />} label="Hot Leads" value={teamTotals.hotLeads} bg="bg-orange-50" />
-        <SummaryCard icon={<Briefcase className="h-5 w-5 text-indigo-600" />} label="Proposals Sent" value={teamTotals.proposalsSent} bg="bg-indigo-50" />
+        <SummaryCard icon={<MailX className="h-5 w-5 text-rose-600" />} label="Not Replied" value={teamTotals.notReplied || 0} bg="bg-rose-50" />
         <SummaryCard icon={<CheckCircle2 className="h-5 w-5 text-green-600" />} label="Deals Won" value={teamTotals.dealsWon} bg="bg-green-50" />
         <SummaryCard icon={<XCircle className="h-5 w-5 text-red-500" />} label="Deals Lost" value={teamTotals.dealsLost} bg="bg-red-50" />
       </div>
@@ -227,6 +288,9 @@ export default function TeamScorecard({ onBack }: TeamScorecardProps) {
                 <th className="px-4 py-3 text-[11px] font-semibold text-gray-500 uppercase">Team Member</th>
                 <th className="px-4 py-3 text-[11px] font-semibold text-gray-500 uppercase text-center">
                   <div className="flex items-center justify-center gap-1"><Send className="h-3 w-3" /> Emails</div>
+                </th>
+                <th className="px-4 py-3 text-[11px] font-semibold text-gray-500 uppercase text-center">
+                  <div className="flex items-center justify-center gap-1"><MailX className="h-3 w-3" /> Not Replied</div>
                 </th>
                 <th className="px-4 py-3 text-[11px] font-semibold text-gray-500 uppercase text-center">
                   <div className="flex items-center justify-center gap-1"><Phone className="h-3 w-3" /> Calls</div>
@@ -260,13 +324,36 @@ export default function TeamScorecard({ onBack }: TeamScorecardProps) {
                     <span className={`font-semibold ${member.emailsSent > 0 ? "text-blue-700" : "text-gray-300"}`}>{member.emailsSent}</span>
                   </td>
                   <td className="px-4 py-3 text-center">
+                    {(member.notReplied || 0) > 0 ? (
+                      <button
+                        onClick={() => openDrilldown(member, 'not_replied')}
+                        className="font-semibold text-rose-600 underline underline-offset-2 hover:text-rose-800 transition"
+                        title="Click to see who hasn't replied"
+                      >
+                        {member.notReplied}
+                      </button>
+                    ) : (
+                      <span className="text-gray-300">0</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-center">
                     <span className={`font-semibold ${member.callsMade > 0 ? "text-green-700" : "text-gray-300"}`}>{member.callsMade}</span>
                   </td>
                   <td className="px-4 py-3 text-center">
                     <span className={`font-semibold ${member.meetingsDone > 0 ? "text-purple-700" : "text-gray-300"}`}>{member.meetingsDone}</span>
                   </td>
                   <td className="px-4 py-3 text-center">
-                    <span className={`font-semibold ${member.hotLeads > 0 ? "text-orange-600" : "text-gray-300"}`}>{member.hotLeads}</span>
+                    {(member.hotLeads || 0) > 0 ? (
+                      <button
+                        onClick={() => openDrilldown(member, 'hot_leads')}
+                        className="font-semibold text-orange-600 underline underline-offset-2 hover:text-orange-800 transition"
+                        title="Click to see hot leads"
+                      >
+                        {member.hotLeads}
+                      </button>
+                    ) : (
+                      <span className="text-gray-300">0</span>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-center">
                     <span className={`font-semibold ${member.dealsWon > 0 ? "text-green-700" : "text-gray-300"}`}>{member.dealsWon}</span>
@@ -288,12 +375,115 @@ export default function TeamScorecard({ onBack }: TeamScorecardProps) {
                 </tr>
               ))}
               {scorecard.length === 0 && (
-                <tr><td colSpan={9} className="px-4 py-8 text-center text-gray-400">No team members found</td></tr>
+                <tr><td colSpan={10} className="px-4 py-8 text-center text-gray-400">No team members found</td></tr>
               )}
             </tbody>
           </table>
         </div>
       </div>
+
+      {/* Drill-down Modal */}
+      {drilldown && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setDrilldown(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col m-4" onClick={e => e.stopPropagation()}>
+            {/* Modal Header */}
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+              <div>
+                <h3 className="text-base font-bold text-gray-900">
+                  {drilldown.type === 'not_replied' ? (
+                    <span className="flex items-center gap-2"><MailX className="h-4 w-4 text-rose-600" /> Not Replied — {drilldown.userName}</span>
+                  ) : (
+                    <span className="flex items-center gap-2"><Flame className="h-4 w-4 text-orange-600" /> Hot Leads — {drilldown.userName}</span>
+                  )}
+                </h3>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  {drilldown.type === 'not_replied'
+                    ? 'Contacts who received emails but haven\'t replied'
+                    : 'Contacts in active pipeline stages'}
+                </p>
+              </div>
+              <button onClick={() => setDrilldown(null)} className="p-1.5 rounded-lg hover:bg-gray-100 transition">
+                <X className="h-4 w-4 text-gray-500" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="overflow-y-auto flex-1">
+              {drilldownLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <RefreshCw className="h-5 w-5 animate-spin text-blue-500" />
+                </div>
+              ) : drilldownContacts.length === 0 ? (
+                <div className="text-center py-12 text-gray-400 text-sm">No contacts found</div>
+              ) : drilldown.type === 'not_replied' ? (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-gray-50 text-left">
+                      <th className="px-4 py-2.5 text-[11px] font-semibold text-gray-500 uppercase">Contact</th>
+                      <th className="px-4 py-2.5 text-[11px] font-semibold text-gray-500 uppercase">Subject</th>
+                      <th className="px-4 py-2.5 text-[11px] font-semibold text-gray-500 uppercase text-center">Days Waiting</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {drilldownContacts.map((c) => (
+                      <tr key={c.id} className="border-t border-gray-50 hover:bg-gray-50/50">
+                        <td className="px-4 py-3">
+                          <div className="font-medium text-gray-900">{[c.firstName, c.lastName].filter(Boolean).join(' ') || c.email}</div>
+                          <div className="text-[11px] text-gray-400">{c.email}</div>
+                          {c.company && <div className="text-[11px] text-gray-400">{c.company}</div>}
+                        </td>
+                        <td className="px-4 py-3 text-gray-600 text-xs max-w-[180px] truncate">{c.subject || '—'}</td>
+                        <td className="px-4 py-3 text-center">
+                          {c.daysSinceSent != null ? (
+                            <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                              c.daysSinceSent >= 7 ? 'bg-red-100 text-red-700' :
+                              c.daysSinceSent >= 3 ? 'bg-amber-100 text-amber-700' :
+                              'bg-blue-100 text-blue-700'
+                            }`}>
+                              {c.daysSinceSent === 0 ? 'Today' : `${c.daysSinceSent}d`}
+                            </span>
+                          ) : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-gray-50 text-left">
+                      <th className="px-4 py-2.5 text-[11px] font-semibold text-gray-500 uppercase">Contact</th>
+                      <th className="px-4 py-2.5 text-[11px] font-semibold text-gray-500 uppercase">Stage</th>
+                      <th className="px-4 py-2.5 text-[11px] font-semibold text-gray-500 uppercase">Next Action</th>
+                      <th className="px-4 py-2.5 text-[11px] font-semibold text-gray-500 uppercase text-right">Deal Value</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {drilldownContacts.map((c) => (
+                      <tr key={c.id} className="border-t border-gray-50 hover:bg-gray-50/50">
+                        <td className="px-4 py-3">
+                          <div className="font-medium text-gray-900">{[c.firstName, c.lastName].filter(Boolean).join(' ') || c.email}</div>
+                          <div className="text-[11px] text-gray-400">{c.email}</div>
+                          {c.company && <div className="text-[11px] text-gray-400">{c.company}</div>}
+                        </td>
+                        <td className="px-4 py-3">{getStageBadge(c.pipelineStage)}</td>
+                        <td className="px-4 py-3 text-xs text-gray-500">
+                          {c.nextActionDate ? new Date(c.nextActionDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }) : '—'}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          {c.dealValue ? (
+                            <span className="text-xs font-semibold text-emerald-700">{formatCurrency(c.dealValue)}</span>
+                          ) : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -305,7 +495,7 @@ function SummaryCard({ icon, label, value, bg, isString }: { icon: React.ReactNo
         {icon}
         <span className="text-[11px] text-gray-500 font-medium uppercase tracking-wide">{label}</span>
       </div>
-      <div className="text-2xl font-bold text-gray-900">{isString ? value : value.toLocaleString()}</div>
+      <div className="text-2xl font-bold text-gray-900">{isString ? value : (value as number).toLocaleString()}</div>
     </div>
   );
 }
