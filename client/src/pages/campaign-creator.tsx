@@ -68,6 +68,7 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
   // Campaign fields
   const [emailAccountId, setEmailAccountId] = useState('');
   const [campaignName, setCampaignName] = useState('');
+  const [nameManuallyEdited, setNameManuallyEdited] = useState(false);
   const [isEditingName, setIsEditingName] = useState(false);
   const nameInputRef = useRef<HTMLInputElement>(null);
   const [selectedContacts, setSelectedContacts] = useState<string[]>([]);
@@ -693,7 +694,7 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
               <input
                 ref={nameInputRef}
                 value={campaignName}
-                onChange={e => setCampaignName(e.target.value)}
+                onChange={e => { setCampaignName(e.target.value); setNameManuallyEdited(true); }}
                 onBlur={() => setIsEditingName(false)}
                 onKeyDown={e => { if (e.key === 'Enter') setIsEditingName(false); }}
                 className="text-xl font-bold text-gray-900 bg-transparent border-b-2 border-blue-500 outline-none py-0.5 min-w-[200px]"
@@ -908,7 +909,19 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
                 <span className="text-sm text-gray-400 w-16 flex-shrink-0">Subject</span>
                 <input
                   value={activeStep?.subject || ''}
-                  onChange={e => updateActiveStep({ subject: e.target.value })}
+                  onChange={e => {
+                    const val = e.target.value;
+                    updateActiveStep({ subject: val });
+                    // Auto-populate campaign name from subject (step 1 only, if not manually edited)
+                    if (activeStepIndex === 0 && !nameManuallyEdited) {
+                      if (val.trim()) {
+                        const words = val.trim().split(/\s+/).slice(0, 6).join(' ');
+                        setCampaignName(words.length > 50 ? words.substring(0, 47) + '...' : words);
+                      } else {
+                        setCampaignName('');
+                      }
+                    }
+                  }}
                   placeholder="Enter your email subject"
                   className="flex-1 text-sm bg-transparent border-0 outline-none text-gray-900 placeholder:text-gray-300"
                 />
