@@ -3180,7 +3180,26 @@ Which account should I use and why? If I need to split across accounts, provide 
           } catch (e) { /* ignore per-campaign errors */ }
         }
       }
-      
+
+      // Enrich campaigns with creator name — batch load unique creators
+      try {
+        const creatorIds = [...new Set((campaigns as any[]).map(c => c.createdBy).filter(Boolean))];
+        const creators: Record<string, any> = {};
+        for (const uid of creatorIds) {
+          try {
+            const u = await storage.getUser(uid);
+            if (u) creators[uid] = u;
+          } catch (e) { /* skip */ }
+        }
+        for (const c of campaigns as any[]) {
+          const creator = c.createdBy ? creators[c.createdBy] : null;
+          if (creator) {
+            c.creatorName = `${(creator as any).firstName || ''} ${(creator as any).lastName || ''}`.trim() || (creator as any).email;
+            c.creatorEmail = (creator as any).email;
+          }
+        }
+      } catch (e) { /* enrichment failure is non-fatal */ }
+
       res.json(campaigns);
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch campaigns' });

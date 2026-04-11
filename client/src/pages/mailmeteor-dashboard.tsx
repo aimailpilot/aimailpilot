@@ -915,7 +915,27 @@ export default function MailMeteorDashboard() {
                         onClick={() => { setSelectedCampaignId(campaign.id); setCurrentView('campaign-detail'); }}
                       >
                         <div className="min-w-0">
-                          <div className="font-semibold text-sm text-gray-900 truncate">{campaign.name}</div>
+                          <div className="flex items-center gap-1.5">
+                            <div className="font-semibold text-sm text-gray-900 truncate">{campaign.name}</div>
+                            <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-medium flex-shrink-0 ${
+                              campaign.status === 'active' || campaign.status === 'following_up' ? 'bg-green-50 text-green-700 border border-green-200' :
+                              campaign.status === 'paused' ? 'bg-yellow-50 text-yellow-700 border border-yellow-200' :
+                              campaign.status === 'completed' ? 'bg-blue-50 text-blue-700 border border-blue-200' :
+                              campaign.status === 'draft' ? 'bg-gray-50 text-gray-500 border border-gray-200' :
+                              campaign.status === 'scheduled' ? 'bg-purple-50 text-purple-700 border border-purple-200' :
+                              'bg-gray-50 text-gray-500 border border-gray-200'
+                            }`}>
+                              <span className={`w-1.5 h-1.5 rounded-full ${
+                                campaign.status === 'active' || campaign.status === 'following_up' ? 'bg-green-500' :
+                                campaign.status === 'paused' ? 'bg-yellow-500' :
+                                campaign.status === 'completed' ? 'bg-blue-500' :
+                                campaign.status === 'draft' ? 'bg-gray-400' :
+                                campaign.status === 'scheduled' ? 'bg-purple-500' :
+                                'bg-gray-400'
+                              }`} />
+                              {campaign.status === 'following_up' ? 'Active' : campaign.status.charAt(0).toUpperCase() + campaign.status.slice(1)}
+                            </span>
+                          </div>
                           {(campaign as any).senderEmail && (
                             <div className="text-[10px] text-gray-400 truncate mt-0.5 flex items-center gap-1">
                               <Mail className="h-2.5 w-2.5 flex-shrink-0" />
