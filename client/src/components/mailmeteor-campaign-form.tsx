@@ -29,6 +29,8 @@ interface MailMeteorCampaignFormProps {
 
 export function MailMeteorCampaignForm({ onSuccess }: MailMeteorCampaignFormProps) {
   const [subject, setSubject] = useState("");
+  const [campaignName, setCampaignName] = useState("New campaign");
+  const [nameManuallyEdited, setNameManuallyEdited] = useState(false);
   const [content, setContent] = useState("");
   const [selectedAccount, setSelectedAccount] = useState("");
   const [recipientList, setRecipientList] = useState("");
@@ -349,7 +351,7 @@ export function MailMeteorCampaignForm({ onSuccess }: MailMeteorCampaignFormProp
         : 100; // Default 100 per hour
 
       const campaignData = {
-        name: subject, // Use subject as campaign name
+        name: campaignName || subject, // Use auto-generated or manually edited campaign name
         subject,
         content,
         emailAccountId: selectedAccount,
@@ -401,6 +403,20 @@ export function MailMeteorCampaignForm({ onSuccess }: MailMeteorCampaignFormProp
     <div className="flex h-full">
       {/* Main Composer */}
       <div className="flex-1 p-6 space-y-6">
+        {/* Campaign Name Field */}
+        <div className="flex items-center space-x-4">
+          <Label className="text-sm text-gray-700 w-16">Name</Label>
+          <Input
+            value={campaignName}
+            onChange={(e) => {
+              setCampaignName(e.target.value);
+              setNameManuallyEdited(true);
+            }}
+            placeholder="Campaign name"
+            className="flex-1 font-medium"
+          />
+        </div>
+
         {/* From Field - MailMeteor Style */}
         <div className="flex items-center space-x-4">
           <Label className="text-sm text-gray-700 w-16">From</Label>
@@ -464,7 +480,17 @@ export function MailMeteorCampaignForm({ onSuccess }: MailMeteorCampaignFormProp
           <Label className="text-sm text-gray-700 w-16">Subject</Label>
           <Input
             value={subject}
-            onChange={(e) => setSubject(e.target.value)}
+            onChange={(e) => {
+              const val = e.target.value;
+              setSubject(val);
+              if (!nameManuallyEdited && val.trim()) {
+                // Auto-generate short campaign name: take first 6 words, max 50 chars
+                const words = val.trim().split(/\s+/).slice(0, 6).join(' ');
+                setCampaignName(words.length > 50 ? words.substring(0, 47) + '...' : words);
+              } else if (!nameManuallyEdited && !val.trim()) {
+                setCampaignName('New campaign');
+              }
+            }}
             placeholder="Enter your email subject"
             className="flex-1"
             data-testid="input-subject"
