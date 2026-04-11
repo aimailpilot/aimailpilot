@@ -3692,11 +3692,11 @@ Which account should I use and why? If I need to split across accounts, provide 
           const sample = contactIds.slice(0, 50);
           const ph = sample.map(() => '?').join(',');
           const listRow = await storage.rawGet(`
-            SELECT c.listId, cl.name as listName, COUNT(*) as cnt
+            SELECT c."listId", cl.name as "listName", COUNT(*) as cnt
             FROM contacts c
-            LEFT JOIN contact_lists cl ON cl.id = c.listId
-            WHERE c.id IN (${ph}) AND c.listId IS NOT NULL AND c.listId != ''
-            GROUP BY c.listId
+            LEFT JOIN contact_lists cl ON cl.id = c."listId"
+            WHERE c.id IN (${ph}) AND c."listId" IS NOT NULL AND c."listId" != ''
+            GROUP BY c."listId", cl.name
             ORDER BY cnt DESC LIMIT 1
           `, ...sample) as any;
           if (listRow && listRow.listId) {
