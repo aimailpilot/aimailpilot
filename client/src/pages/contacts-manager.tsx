@@ -2201,7 +2201,7 @@ export default function ContactsManager() {
                     </Button>
                   </div>
                 </div>
-                {detailContact.emailRating || detailContact.emailRatingGrade ? (
+                {detailContact.emailRatingUpdatedAt ? (
                   <div className="space-y-2">
                     <div className="flex items-center gap-3">
                       <div className="flex-shrink-0">
@@ -3902,12 +3902,12 @@ export default function ContactsManager() {
                               contact.emailVerificationStatus === 'spamtrap' ? 'bg-red-700' : 'bg-gray-300'
                             }`} />
                           )}
-                          {contact.emailRating > 0 && (
-                            <span title={`Rating: ${contact.emailRating}/100 (${contact.emailRatingGrade})`} className={`text-[9px] font-bold px-1 py-0 rounded ${
-                              contact.emailRating >= 75 ? 'bg-emerald-100 text-emerald-700' :
-                              contact.emailRating >= 50 ? 'bg-yellow-100 text-yellow-700' :
-                              contact.emailRating >= 25 ? 'bg-orange-100 text-orange-700' : 'bg-red-100 text-red-600'
-                            }`}>{contact.emailRatingGrade}</span>
+                          {contact.emailRatingUpdatedAt && (
+                            <span title={`Rating: ${contact.emailRating ?? 0}/100 (${contact.emailRatingGrade || 'F'})`} className={`text-[9px] font-bold px-1 py-0 rounded ${
+                              (contact.emailRating ?? 0) >= 75 ? 'bg-emerald-100 text-emerald-700' :
+                              (contact.emailRating ?? 0) >= 50 ? 'bg-yellow-100 text-yellow-700' :
+                              (contact.emailRating ?? 0) >= 25 ? 'bg-orange-100 text-orange-700' : 'bg-red-100 text-red-600'
+                            }`}>{contact.emailRatingGrade || 'F'}</span>
                           )}
                         </div>
                       ) : (
