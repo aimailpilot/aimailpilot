@@ -5909,13 +5909,22 @@ Example response:
       `, orgId) as any[];
       // Find contacts in this list that DO have messages
       const contactsWithMessages = await storage.rawAll(`
-        SELECT DISTINCT m."recipientEmail", COUNT(*) as msgCount
+        SELECT m."recipientEmail", COUNT(*)::int as "msgCount"
         FROM messages m
         JOIN campaigns c ON m."campaignId" = c.id
         WHERE c."organizationId" = ? AND m."recipientEmail" IS NOT NULL
         GROUP BY m."recipientEmail"
         ORDER BY COUNT(*) DESC LIMIT 5
       `, orgId) as any[];
+      // Find a contact in current org that matches a recipient email (to prove rating works)
+      let proofContact = null;
+      if (contactsWithMessages?.length > 0) {
+        const topEmail = contactsWithMessages[0].recipientEmail;
+        proofContact = await storage.rawGet(`
+          SELECT id, email, "firstName", "lastName", "emailRating", "emailRatingGrade"
+          FROM contacts WHERE LOWER(email) = LOWER(?) AND "organizationId" = ? LIMIT 1
+        `, topEmail, orgId) as any;
+      }
       res.json({
         queriedId: cid,
         contact: row,
@@ -5925,7 +5934,8 @@ Example response:
         totalMessagesInDB: parseInt(totalMsgs?.cnt || 0),
         messagesInOrg: parseInt(orgMsgs?.cnt || 0),
         sampleRecipientsInOrg: sampleEmails?.map((s: any) => s.recipientEmail),
-        topContactsWithMessages: contactsWithMessages?.map((s: any) => ({ email: s.recipientEmail, count: parseInt(s.msgCount || 0) })),
+        topContactsWithMessages: contactsWithMessages?.map((s: any) => ({ email: s.recipientEmail, count: parseInt(s.msgCount || '0') })),
+        proofContact: proofContact ? { id: proofContact.id, email: proofContact.email, name: `${proofContact.firstName || ''} ${proofContact.lastName || ''}`.trim(), rating: proofContact.emailRating, grade: proofContact.emailRatingGrade } : null,
         sampleContactIds: sampleIds,
       });
     } catch (error: any) {
