@@ -759,6 +759,7 @@ async function initializeSchema() {
       'ALTER TABLE contacts ADD COLUMN IF NOT EXISTS "emailRatingGrade" TEXT DEFAULT \'\'',
       'ALTER TABLE contacts ADD COLUMN IF NOT EXISTS "emailRatingDetails" JSONB DEFAULT \'{}\'',
       'ALTER TABLE contacts ADD COLUMN IF NOT EXISTS "emailRatingUpdatedAt" TEXT',
+      'ALTER TABLE messages ADD COLUMN IF NOT EXISTS "recipientEmail" TEXT',
     ];
     for (const alt of alterColumns) {
       try { await client.query(alt); } catch (e) { /* column already exists */ }
@@ -772,6 +773,24 @@ async function initializeSchema() {
     throw e;
   } finally {
     client.release();
+  }
+
+  // Backfill recipientEmail on messages where contactId still resolves to a contact
+  try {
+    const needsBackfill = await queryOne(`SELECT COUNT(*) as cnt FROM messages WHERE "recipientEmail" IS NULL AND "contactId" IS NOT NULL`);
+    const cnt = parseInt((needsBackfill as any)?.cnt || '0');
+    if (cnt > 0) {
+      console.log(`[PG] Backfilling recipientEmail for ${cnt} messages...`);
+      await execute(`
+        UPDATE messages SET "recipientEmail" = c.email
+        FROM contacts c WHERE messages."contactId" = c.id
+        AND messages."recipientEmail" IS NULL
+      `);
+      const remaining = await queryOne(`SELECT COUNT(*) as cnt FROM messages WHERE "recipientEmail" IS NULL AND "contactId" IS NOT NULL`);
+      console.log(`[PG] Backfill done. ${parseInt((remaining as any)?.cnt || '0')} messages still have no recipientEmail (orphaned contactIds)`);
+    }
+  } catch (e) {
+    console.error('[PG] recipientEmail backfill error (non-fatal):', e);
   }
 }
 
@@ -1101,29 +1120,47 @@ export class PostgresStorage {
       FROM messages WHERE "contactId" = $1
     `, [contactId]);
 
-    // If no messages found by contactId, try matching by email (handles re-imported contacts with new IDs)
+    // If no messages found by contactId, try matching by recipientEmail (handles re-imported contacts with new IDs)
     if (!stats || parseInt(stats.totalSent || 0) === 0) {
       try {
         const contact = await queryOne('SELECT email, "organizationId" FROM contacts WHERE id = $1', [contactId]);
         if (contact?.email) {
-          // Look for messages linked to ANY contactId that has the same email in the contacts table
+          // Match messages directly by recipientEmail column (backfilled from contacts)
           const emailStats = await queryOne(`
             SELECT
               COUNT(*) as "totalSent",
-              SUM(CASE WHEN m."openedAt" IS NOT NULL THEN 1 ELSE 0 END) as "totalOpened",
-              SUM(CASE WHEN m."clickedAt" IS NOT NULL THEN 1 ELSE 0 END) as "totalClicked",
-              SUM(CASE WHEN m."repliedAt" IS NOT NULL THEN 1 ELSE 0 END) as "totalReplied",
-              MAX(m."sentAt") as "lastSentAt",
-              MAX(m."openedAt") as "lastOpenedAt",
-              MAX(m."clickedAt") as "lastClickedAt",
-              MAX(m."repliedAt") as "lastRepliedAt"
-            FROM messages m
-            WHERE m."contactId" IN (
-              SELECT id FROM contacts WHERE LOWER(email) = LOWER($1) AND "organizationId" = $2
-            )
-          `, [contact.email, contact.organizationId]);
+              SUM(CASE WHEN "openedAt" IS NOT NULL THEN 1 ELSE 0 END) as "totalOpened",
+              SUM(CASE WHEN "clickedAt" IS NOT NULL THEN 1 ELSE 0 END) as "totalClicked",
+              SUM(CASE WHEN "repliedAt" IS NOT NULL THEN 1 ELSE 0 END) as "totalReplied",
+              MAX("sentAt") as "lastSentAt",
+              MAX("openedAt") as "lastOpenedAt",
+              MAX("clickedAt") as "lastClickedAt",
+              MAX("repliedAt") as "lastRepliedAt"
+            FROM messages
+            WHERE LOWER("recipientEmail") = LOWER($1)
+          `, [contact.email]);
           if (emailStats && parseInt(emailStats.totalSent || 0) > 0) {
             stats = emailStats;
+          } else {
+            // Second fallback: match via old contactIds that share the same email
+            const oldIdStats = await queryOne(`
+              SELECT
+                COUNT(*) as "totalSent",
+                SUM(CASE WHEN m."openedAt" IS NOT NULL THEN 1 ELSE 0 END) as "totalOpened",
+                SUM(CASE WHEN m."clickedAt" IS NOT NULL THEN 1 ELSE 0 END) as "totalClicked",
+                SUM(CASE WHEN m."repliedAt" IS NOT NULL THEN 1 ELSE 0 END) as "totalReplied",
+                MAX(m."sentAt") as "lastSentAt",
+                MAX(m."openedAt") as "lastOpenedAt",
+                MAX(m."clickedAt") as "lastClickedAt",
+                MAX(m."repliedAt") as "lastRepliedAt"
+              FROM messages m
+              WHERE m."contactId" IN (
+                SELECT id FROM contacts WHERE LOWER(email) = LOWER($1) AND "organizationId" = $2
+              )
+            `, [contact.email, contact.organizationId]);
+            if (oldIdStats && parseInt(oldIdStats.totalSent || 0) > 0) {
+              stats = oldIdStats;
+            }
           }
         }
       } catch (e) {
@@ -1458,11 +1495,11 @@ export class PostgresStorage {
   async createCampaignMessage(message: any) {
     const id = genId();
     await execute(
-      `INSERT INTO messages (id, "campaignId", "contactId", subject, content, status, "trackingId", "emailAccountId", "stepNumber", "sentAt", "openedAt", "clickedAt", "repliedAt", "bouncedAt", "errorMessage", "providerMessageId", "createdAt")
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+      `INSERT INTO messages (id, "campaignId", "contactId", subject, content, status, "trackingId", "emailAccountId", "stepNumber", "sentAt", "openedAt", "clickedAt", "repliedAt", "bouncedAt", "errorMessage", "providerMessageId", "recipientEmail", "createdAt")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
       [id, message.campaignId, message.contactId || null, message.subject || '', message.content || '', message.status || 'sending',
       message.trackingId || null, message.emailAccountId || null, message.stepNumber || 0,
-      toSqlDate(message.sentAt), toSqlDate(message.openedAt), toSqlDate(message.clickedAt), toSqlDate(message.repliedAt), toSqlDate(message.bouncedAt), message.errorMessage || null, message.providerMessageId || null, now()]
+      toSqlDate(message.sentAt), toSqlDate(message.openedAt), toSqlDate(message.clickedAt), toSqlDate(message.repliedAt), toSqlDate(message.bouncedAt), message.errorMessage || null, message.providerMessageId || null, message.recipientEmail || null, now()]
     );
     return this.getCampaignMessage(id);
   }

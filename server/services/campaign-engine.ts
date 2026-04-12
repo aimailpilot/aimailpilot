@@ -950,6 +950,7 @@ export class CampaignEngine {
           emailAccountId: emailAccount.id,
           stepNumber,
           messageId,
+          recipientEmail: contact.email,
         });
 
         // Send email — try API methods first (Gmail API / Microsoft Graph), fall back to SMTP

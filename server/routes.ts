@@ -5881,10 +5881,16 @@ Example response:
       console.log('[RatingCheck] Stats:', JSON.stringify(stats));
       // Also check messages directly
       const msgById = await storage.rawGet('SELECT COUNT(*) as cnt FROM messages WHERE "contactId" = ?', cid) as any;
-      // Check if contact exists anywhere
-      const anyContact = await storage.rawGet('SELECT id, email FROM contacts WHERE id = ? LIMIT 1', cid) as any;
       // Check total messages in system
       const totalMsgs = await storage.rawGet('SELECT COUNT(*) as cnt FROM messages') as any;
+      // Check messages by recipientEmail
+      let msgsByEmail = 0;
+      if (row?.email) {
+        const emailMatch = await storage.rawGet('SELECT COUNT(*) as cnt FROM messages WHERE LOWER("recipientEmail") = LOWER(?)', row.email) as any;
+        msgsByEmail = parseInt(emailMatch?.cnt || 0);
+      }
+      // Check backfill status
+      const backfillStatus = await storage.rawGet('SELECT COUNT(*) as total, SUM(CASE WHEN "recipientEmail" IS NOT NULL THEN 1 ELSE 0 END) as filled FROM messages') as any;
       // If no contact found, check first few contact IDs to see format
       let sampleIds = null;
       if (!row) {
@@ -5896,7 +5902,12 @@ Example response:
         contact: row,
         stats,
         messagesByContactId: parseInt(msgById?.cnt || 0),
+        messagesByRecipientEmail: msgsByEmail,
         totalMessagesInDB: parseInt(totalMsgs?.cnt || 0),
+        recipientEmailBackfill: {
+          totalMessages: parseInt(backfillStatus?.total || 0),
+          withRecipientEmail: parseInt(backfillStatus?.filled || 0),
+        },
         sampleContactIds: sampleIds,
       });
     } catch (error: any) {

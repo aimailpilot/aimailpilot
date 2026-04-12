@@ -1330,6 +1330,7 @@ export class FollowupEngine {
           trackingId: trackingId,
           providerMessageId: emailResult.messageId,
           emailAccountId: campaign.emailAccountId,
+          recipientEmail: contact.email,
         });
         
         // Update campaign sent count
