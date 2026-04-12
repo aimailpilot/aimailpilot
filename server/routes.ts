@@ -5808,7 +5808,7 @@ Example response:
   // ========== EMAIL RATING ==========
 
   // Calculate rating for a single contact
-  app.post('/api/contacts/:id/rating', async (req: any, res) => {
+  app.post('/api/contacts/:id/rating', requireAuth, async (req: any, res) => {
     try {
       const { useAI } = req.body || {};
       const result = await calculateContactRating(req.params.id, {
@@ -5823,7 +5823,7 @@ Example response:
   });
 
   // Get engagement stats for a contact (without recalculating)
-  app.get('/api/contacts/:id/engagement', async (req: any, res) => {
+  app.get('/api/contacts/:id/engagement', requireAuth, async (req: any, res) => {
     try {
       const stats = await storage.getContactEngagementStats(req.params.id);
       const contact = await storage.getContact(req.params.id);
@@ -5840,7 +5840,7 @@ Example response:
   });
 
   // Batch recalculate ratings for all contacts
-  app.post('/api/contacts/batch-rating', async (req: any, res) => {
+  app.post('/api/contacts/batch-rating', requireAuth, async (req: any, res) => {
     try {
       const { useAI } = req.body || {};
       const result = await batchRecalculateRatings(req.user.organizationId, { useAI });
