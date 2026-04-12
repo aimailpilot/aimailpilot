@@ -760,6 +760,7 @@ async function initializeSchema() {
       'ALTER TABLE contacts ADD COLUMN IF NOT EXISTS "emailRatingDetails" JSONB DEFAULT \'{}\'',
       'ALTER TABLE contacts ADD COLUMN IF NOT EXISTS "emailRatingUpdatedAt" TEXT',
       'ALTER TABLE messages ADD COLUMN IF NOT EXISTS "recipientEmail" TEXT',
+      'ALTER TABLE messages ADD COLUMN IF NOT EXISTS "messageId" TEXT',
     ];
     for (const alt of alterColumns) {
       try { await client.query(alt); } catch (e) { /* column already exists */ }
