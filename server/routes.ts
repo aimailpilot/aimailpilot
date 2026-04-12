@@ -5873,16 +5873,34 @@ Example response:
   // Check rating status for a contact (diagnostic)
   app.get('/api/contacts/:id/rating-check', requireAuth, async (req: any, res) => {
     try {
-      const row = await storage.rawGet('SELECT id, email, "emailRating", "emailRatingGrade", "emailRatingUpdatedAt" FROM contacts WHERE id = ?', req.params.id) as any;
-      const stats = await storage.getContactEngagementStats(req.params.id);
-      // Also check messages directly by contactId and by email
-      const msgById = await storage.rawGet('SELECT COUNT(*) as cnt FROM messages WHERE "contactId" = ?', req.params.id) as any;
-      let msgByEmail = null;
-      if (row?.email) {
-        msgByEmail = await storage.rawGet('SELECT COUNT(*) as cnt FROM messages m INNER JOIN contacts c ON c.id = m."contactId" WHERE LOWER(c.email) = LOWER(?)', row.email) as any;
+      const cid = req.params.id;
+      console.log('[RatingCheck] Checking contact:', cid);
+      const row = await storage.rawGet('SELECT id, email, "emailRating", "emailRatingGrade", "emailRatingUpdatedAt" FROM contacts WHERE id = ?', cid) as any;
+      console.log('[RatingCheck] Contact row:', row ? `${row.id} / ${row.email}` : 'NULL');
+      const stats = await storage.getContactEngagementStats(cid);
+      console.log('[RatingCheck] Stats:', JSON.stringify(stats));
+      // Also check messages directly
+      const msgById = await storage.rawGet('SELECT COUNT(*) as cnt FROM messages WHERE "contactId" = ?', cid) as any;
+      // Check if contact exists anywhere
+      const anyContact = await storage.rawGet('SELECT id, email FROM contacts WHERE id = ? LIMIT 1', cid) as any;
+      // Check total messages in system
+      const totalMsgs = await storage.rawGet('SELECT COUNT(*) as cnt FROM messages') as any;
+      // If no contact found, check first few contact IDs to see format
+      let sampleIds = null;
+      if (!row) {
+        const samples = await storage.rawAll('SELECT id, email FROM contacts LIMIT 3') as any[];
+        sampleIds = samples?.map((s: any) => ({ id: s.id, email: s.email }));
       }
-      res.json({ contact: row, stats, messagesByContactId: parseInt(msgById?.cnt || 0), messagesByEmail: parseInt(msgByEmail?.cnt || 0) });
+      res.json({
+        queriedId: cid,
+        contact: row,
+        stats,
+        messagesByContactId: parseInt(msgById?.cnt || 0),
+        totalMessagesInDB: parseInt(totalMsgs?.cnt || 0),
+        sampleContactIds: sampleIds,
+      });
     } catch (error: any) {
+      console.error('[RatingCheck] Error:', error.message);
       res.status(500).json({ error: error.message });
     }
   });
