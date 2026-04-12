@@ -1269,6 +1269,12 @@ export class FollowupEngine {
         }
       }
 
+      // Fallback: use stored RFC Message-ID from step-0 message if Gmail API fetch didn't return one
+      if (!originalMessageId && originalMessage.messageId) {
+        originalMessageId = originalMessage.messageId;
+        console.log(`[Followup] Threading fallback: using stored messageId=${originalMessageId} for In-Reply-To/References`);
+      }
+
       // Fallback: if threading is broken (no threadId for Gmail, no In-Reply-To for Outlook),
       // add "Re:" prefix so email clients can still group by subject as a last resort
       const threadLinked = (isGmailAccount && !!gmailThreadId) || (!isGmailAccount && !!originalMessageId);

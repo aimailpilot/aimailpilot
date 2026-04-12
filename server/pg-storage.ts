@@ -1495,11 +1495,11 @@ export class PostgresStorage {
   async createCampaignMessage(message: any) {
     const id = genId();
     await execute(
-      `INSERT INTO messages (id, "campaignId", "contactId", subject, content, status, "trackingId", "emailAccountId", "stepNumber", "sentAt", "openedAt", "clickedAt", "repliedAt", "bouncedAt", "errorMessage", "providerMessageId", "recipientEmail", "createdAt")
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+      `INSERT INTO messages (id, "campaignId", "contactId", subject, content, status, "trackingId", "emailAccountId", "stepNumber", "sentAt", "openedAt", "clickedAt", "repliedAt", "bouncedAt", "errorMessage", "providerMessageId", "recipientEmail", "messageId", "createdAt")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
       [id, message.campaignId, message.contactId || null, message.subject || '', message.content || '', message.status || 'sending',
       message.trackingId || null, message.emailAccountId || null, message.stepNumber || 0,
-      toSqlDate(message.sentAt), toSqlDate(message.openedAt), toSqlDate(message.clickedAt), toSqlDate(message.repliedAt), toSqlDate(message.bouncedAt), message.errorMessage || null, message.providerMessageId || null, message.recipientEmail || null, now()]
+      toSqlDate(message.sentAt), toSqlDate(message.openedAt), toSqlDate(message.clickedAt), toSqlDate(message.repliedAt), toSqlDate(message.bouncedAt), message.errorMessage || null, message.providerMessageId || null, message.recipientEmail || null, message.messageId || null, now()]
     );
     return this.getCampaignMessage(id);
   }
