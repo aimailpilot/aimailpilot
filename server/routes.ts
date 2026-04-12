@@ -4543,31 +4543,31 @@ Which account should I use and why? If I need to split across accounts, provide 
         try {
           // rawGet/rawAll/rawRun used for advanced SQL path
 
-          const conditions: string[] = ['c.organizationId = ?'];
+          const conditions: string[] = ['c."organizationId" = ?'];
           const params: any[] = [orgId];
 
           if (!isAdmin) {
-            conditions.push('c.assignedTo = ?');
+            conditions.push('c."assignedTo" = ?');
             params.push(req.user.id);
           } else if (assignedTo) {
             if (assignedTo === 'unassigned') {
-              conditions.push("(c.assignedTo IS NULL OR c.assignedTo = '')");
+              conditions.push(`(c."assignedTo" IS NULL OR c."assignedTo" = '')`);
             } else {
-              conditions.push('c.assignedTo = ?');
+              conditions.push('c."assignedTo" = ?');
               params.push(assignedTo);
             }
           }
 
-          if (listId) { conditions.push('c.listId = ?'); params.push(listId); }
+          if (listId) { conditions.push('c."listId" = ?'); params.push(listId); }
           if (status && status !== 'all') { conditions.push('c.status = ?'); params.push(status); }
-          if (pipelineStage && pipelineStage !== 'all') { conditions.push('c.pipelineStage = ?'); params.push(pipelineStage); }
+          if (pipelineStage && pipelineStage !== 'all') { conditions.push('c."pipelineStage" = ?'); params.push(pipelineStage); }
           if (company) { conditions.push('LOWER(c.company) LIKE ?'); params.push(`%${company.toLowerCase()}%`); }
           if (location) {
             conditions.push('(LOWER(c.city) LIKE ? OR LOWER(c.state) LIKE ? OR LOWER(c.country) LIKE ?)');
             const loc = `%${location.toLowerCase()}%`;
             params.push(loc, loc, loc);
           }
-          if (designation) { conditions.push('LOWER(c.jobTitle) LIKE ?'); params.push(`%${designation.toLowerCase()}%`); }
+          if (designation) { conditions.push('LOWER(c."jobTitle") LIKE ?'); params.push(`%${designation.toLowerCase()}%`); }
 
           // Lead intelligence smart filters (requires subquery to lead_opportunities)
           if (leadFilter && leadFilter !== 'all') {
@@ -4599,22 +4599,22 @@ Which account should I use and why? If I need to split across accounts, provide 
 
           if (search) {
             const q = `%${search.toLowerCase()}%`;
-            conditions.push(`(LOWER(c.firstName) LIKE ? OR LOWER(c.lastName) LIKE ? OR LOWER(c.email) LIKE ? OR
-              LOWER(c.company) LIKE ? OR LOWER(c.jobTitle) LIKE ? OR LOWER(c.tags) LIKE ? OR
-              LOWER(c.phone) LIKE ? OR LOWER(c.mobilePhone) LIKE ? OR LOWER(c.linkedinUrl) LIKE ? OR
+            conditions.push(`(LOWER(c."firstName") LIKE ? OR LOWER(c."lastName") LIKE ? OR LOWER(c.email) LIKE ? OR
+              LOWER(c.company) LIKE ? OR LOWER(c."jobTitle") LIKE ? OR LOWER(COALESCE(CAST(c.tags AS TEXT),'')) LIKE ? OR
+              LOWER(c.phone) LIKE ? OR LOWER(c."mobilePhone") LIKE ? OR LOWER(c."linkedinUrl") LIKE ? OR
               LOWER(c.city) LIKE ? OR LOWER(c.country) LIKE ? OR LOWER(c.industry) LIKE ?)`);
             params.push(q, q, q, q, q, q, q, q, q, q, q, q);
           }
 
           const where = conditions.join(' AND ');
           const allowedSorts: Record<string, string> = {
-            createdAt: 'c.createdAt', firstName: 'c.firstName', company: 'c.company',
-            pipelineStage: 'c.pipelineStage', nextActionDate: 'c.nextActionDate',
-            lastActivityDate: 'c.lastActivityDate', email: 'c.email', jobTitle: 'c.jobTitle',
-            phone: 'c.phone', mobilePhone: 'c.mobilePhone', city: 'c.city',
+            createdAt: 'c."createdAt"', firstName: 'c."firstName"', company: 'c.company',
+            pipelineStage: 'c."pipelineStage"', nextActionDate: 'c."nextActionDate"',
+            lastActivityDate: 'c."lastActivityDate"', email: 'c.email', jobTitle: 'c."jobTitle"',
+            phone: 'c.phone', mobilePhone: 'c."mobilePhone"', city: 'c.city',
           };
           const sortCol = allowedSorts[sortByParam] || 'c.createdAt';
-          const textSortCols = new Set(['c.firstName', 'c.company', 'c.jobTitle', 'c.email', 'c.phone', 'c.mobilePhone', 'c.city']);
+          const textSortCols = new Set(['c."firstName"', 'c.company', 'c."jobTitle"', 'c.email', 'c.phone', 'c."mobilePhone"', 'c.city']);
           const collate = '';
 
           const countSql = `SELECT COUNT(*) as cnt FROM contacts c WHERE ${where}`;
