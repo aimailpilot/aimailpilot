@@ -5983,7 +5983,7 @@ Example response:
       );
 
       const executions = await storage.rawAll(
-        'SELECT id, "campaignMessageId", "stepId", "contactId", status, "scheduledAt", "errorMessage" FROM followup_executions WHERE "campaignId" = ? ORDER BY "scheduledAt" DESC LIMIT 20',
+        'SELECT * FROM followup_executions WHERE "campaignId" = ? ORDER BY "scheduledAt" DESC LIMIT 20',
         campaignId
       );
 
