@@ -5946,6 +5946,66 @@ Example response:
 
 
 
+  // ========== THREADING DIAGNOSTIC ==========
+  app.get('/api/campaigns/:id/threading-check', requireAuth, async (req: any, res) => {
+    try {
+      const campaignId = req.params.id;
+      const campaign = await storage.getCampaign(campaignId);
+      if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+
+      let accountInfo: any = null;
+      if (campaign.emailAccountId) {
+        const acct = await storage.getEmailAccount(campaign.emailAccountId);
+        accountInfo = { id: acct?.id, email: acct?.email, provider: (acct as any)?.provider };
+      }
+
+      const step0Messages = await storage.rawAll(
+        'SELECT id, "contactId", subject, "stepNumber", "providerMessageId", "gmailThreadId", "emailAccountId", status, "sentAt" FROM messages WHERE "campaignId" = ? AND ("stepNumber" = 0 OR "stepNumber" IS NULL) ORDER BY "sentAt" DESC LIMIT 20',
+        campaignId
+      );
+
+      const followupMessages = await storage.rawAll(
+        'SELECT id, "contactId", subject, "stepNumber", "providerMessageId", "gmailThreadId", "emailAccountId", status, "sentAt" FROM messages WHERE "campaignId" = ? AND "stepNumber" > 0 ORDER BY "stepNumber", "sentAt" DESC LIMIT 40',
+        campaignId
+      );
+
+      const totalStep0 = await storage.rawGet(
+        'SELECT COUNT(*)::int as cnt FROM messages WHERE "campaignId" = ? AND ("stepNumber" = 0 OR "stepNumber" IS NULL)', campaignId
+      );
+      const step0WithThread = await storage.rawGet(
+        'SELECT COUNT(*)::int as cnt FROM messages WHERE "campaignId" = ? AND ("stepNumber" = 0 OR "stepNumber" IS NULL) AND "gmailThreadId" IS NOT NULL', campaignId
+      );
+      const step0WithProvider = await storage.rawGet(
+        'SELECT COUNT(*)::int as cnt FROM messages WHERE "campaignId" = ? AND ("stepNumber" = 0 OR "stepNumber" IS NULL) AND "providerMessageId" IS NOT NULL', campaignId
+      );
+      const totalFollowups = await storage.rawGet(
+        'SELECT COUNT(*)::int as cnt FROM messages WHERE "campaignId" = ? AND "stepNumber" > 0', campaignId
+      );
+
+      const executions = await storage.rawAll(
+        'SELECT id, "campaignMessageId", "stepId", "contactId", status, "scheduledAt", "sentAt", "errorMessage" FROM followup_executions WHERE "campaignId" = ? ORDER BY "scheduledAt" DESC LIMIT 20',
+        campaignId
+      );
+
+      res.json({
+        campaign: { id: campaign.id, name: campaign.name, subject: campaign.subject, status: campaign.status },
+        emailAccount: accountInfo,
+        threading: {
+          totalStep0: (totalStep0 as any)?.cnt || 0,
+          step0WithGmailThreadId: (step0WithThread as any)?.cnt || 0,
+          step0WithProviderMessageId: (step0WithProvider as any)?.cnt || 0,
+          totalFollowupMessages: (totalFollowups as any)?.cnt || 0,
+          threadingHealthy: ((step0WithThread as any)?.cnt || 0) === ((totalStep0 as any)?.cnt || 0),
+        },
+        step0Messages,
+        followupMessages,
+        recentExecutions: executions,
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // ========== CONTACT SEGMENTS ==========
 
   app.get('/api/segments', async (req: any, res) => {

@@ -42,6 +42,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > - No changes to inbox reply filter logic — "Emails Need Reply" and "Not Replied" must use `replyType IN ('positive', 'negative', 'general')` to exclude OOO/auto_reply/bounce. Do NOT revert to include-based filters (caused 11k false positives).
 > - No changes to scorecard "Not Replied" 3-day lookback — enforced via `notRepliedCutoff` cutoff in `/api/team/scorecard`. Do NOT remove cutoff or revert to all-time counts — gives accurate signal for aged emails.
 > - No changes to campaign enrichment `Promise.all` block in `GET /api/campaigns` — powers "Sent By" and "List" columns in campaign dashboard
+> - No changes to `messages.recipientEmail` backfill in `pg-storage.ts initializeSchema()` — runs after COMMIT using `queryOne`/`execute`. Backfills email from `contacts` table where `contactId` still resolves. Required for rating engine fallback on re-imported contacts.
+> - No changes to `getContactEngagementStats` 3-tier fallback in `pg-storage.ts` — (1) contactId match, (2) recipientEmail match, (3) old contactId via same email. All 3 tiers required. Removing any tier breaks rating for re-imported contacts.
+> - No changes to email rating badge condition in `contacts-manager.tsx` — must use `emailRatingUpdatedAt` (not `emailRating > 0`). Contacts with 0/F rating are valid and must show badge.
+> - No changes to batch rating fire-and-forget pattern in `POST /api/contacts/batch-rating` — must respond immediately then run `batchRecalculateRatings()` via `setImmediate()`. Making it synchronous causes HTTP timeout on large orgs.
 
 > **CRITICAL — DATABASE PROTECTION (read this before writing ANY server code)**
 > The production database has been accidentally deleted **4 times**. The following rules are NON-NEGOTIABLE:
