@@ -755,6 +755,10 @@ async function initializeSchema() {
       'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "forwardedBy" TEXT',
       'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "repliedBy" TEXT',
       'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "replyContent" TEXT',
+      'ALTER TABLE contacts ADD COLUMN IF NOT EXISTS "emailRating" INTEGER DEFAULT 0',
+      'ALTER TABLE contacts ADD COLUMN IF NOT EXISTS "emailRatingGrade" TEXT DEFAULT \'\'',
+      'ALTER TABLE contacts ADD COLUMN IF NOT EXISTS "emailRatingDetails" JSONB DEFAULT \'{}\'',
+      'ALTER TABLE contacts ADD COLUMN IF NOT EXISTS "emailRatingUpdatedAt" TEXT',
     ];
     for (const alt of alterColumns) {
       try { await client.query(alt); } catch (e) { /* column already exists */ }

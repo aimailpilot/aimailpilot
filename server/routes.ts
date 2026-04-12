@@ -5845,8 +5845,9 @@ Example response:
       const { useAI } = req.body || {};
       const result = await batchRecalculateRatings(req.user.organizationId, { useAI });
       res.json({ success: true, ...result });
-    } catch (error) {
-      res.status(500).json({ message: 'Failed to batch recalculate ratings' });
+    } catch (error: any) {
+      console.error('[BatchRating] Error:', error.message, error.stack?.substring(0, 300));
+      res.status(500).json({ message: `Failed to batch recalculate ratings: ${error.message}` });
     }
   });
 
