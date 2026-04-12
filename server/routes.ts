@@ -5846,24 +5846,38 @@ Example response:
     try {
       const orgId = req.user.organizationId;
       const { useAI } = req.body || {};
-      console.log('[BatchRating] Starting background job for org:', orgId, 'useAI:', useAI);
+      console.log('[BatchRating] Starting for org:', orgId, 'useAI:', useAI);
 
       // Get contact count first for the response
-      const contacts = await storage.getContacts(orgId, 10000);
-      const totalContacts = contacts.length;
+      const countRow = await storage.rawGet('SELECT COUNT(*) as cnt FROM contacts WHERE "organizationId" = ?', orgId) as any;
+      const totalContacts = parseInt(countRow?.cnt || '0');
+      console.log('[BatchRating] Total contacts in org:', totalContacts);
 
       // Respond immediately
       res.json({ success: true, message: `Rating ${totalContacts} contacts in background`, total: totalContacts, processed: 0, errors: 0, background: true });
 
-      // Process in background
-      batchRecalculateRatings(orgId, { useAI }).then(result => {
-        console.log('[BatchRating] Background job done:', result);
-      }).catch(err => {
-        console.error('[BatchRating] Background job FAILED:', err.message);
+      // Process in background with error catching
+      setImmediate(() => {
+        batchRecalculateRatings(orgId, { useAI }).then(result => {
+          console.log('[BatchRating] Background DONE:', JSON.stringify(result));
+        }).catch(err => {
+          console.error('[BatchRating] Background FAILED:', err.message, err.stack?.substring(0, 300));
+        });
       });
     } catch (error: any) {
       console.error('[BatchRating] FAILED:', error.message, error.stack?.substring(0, 500));
       res.status(500).json({ message: `Failed to start batch rating: ${error.message}` });
+    }
+  });
+
+  // Check rating status for a contact (diagnostic)
+  app.get('/api/contacts/:id/rating-check', requireAuth, async (req: any, res) => {
+    try {
+      const row = await storage.rawGet('SELECT "emailRating", "emailRatingGrade", "emailRatingUpdatedAt" FROM contacts WHERE id = ?', req.params.id) as any;
+      const stats = await storage.getContactEngagementStats(req.params.id);
+      res.json({ rating: row, stats });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
     }
   });
 

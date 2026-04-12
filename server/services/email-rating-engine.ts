@@ -221,18 +221,23 @@ export async function batchRecalculateRatings(
   let processed = 0;
   let errors = 0;
 
+  console.log(`[EmailRating] Processing ${contacts.length} contacts for org ${organizationId}`);
   for (const contact of contacts) {
     try {
-      await calculateContactRating(contact.id, { 
-        useAI: options?.useAI, 
-        organizationId 
+      await calculateContactRating(contact.id, {
+        useAI: options?.useAI,
+        organizationId
       });
       processed++;
+      if (processed % 500 === 0) {
+        console.log(`[EmailRating] Progress: ${processed}/${contacts.length} (${errors} errors)`);
+      }
     } catch (e) {
       errors++;
-      console.error(`[EmailRating] Failed for ${contact.email}:`, e);
+      console.error(`[EmailRating] Failed for ${contact.email}:`, (e as any)?.message);
     }
   }
+  console.log(`[EmailRating] Complete: ${processed} processed, ${errors} errors`);
 
   return { processed, errors };
 }
