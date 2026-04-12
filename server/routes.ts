@@ -5897,6 +5897,20 @@ Example response:
         const samples = await storage.rawAll('SELECT id, email FROM contacts LIMIT 3') as any[];
         sampleIds = samples?.map((s: any) => ({ id: s.id, email: s.email }));
       }
+      // Show which org's messages exist and sample recipientEmails
+      const orgId = req.user?.organizationId;
+      const orgMsgs = await storage.rawGet('SELECT COUNT(*) as cnt FROM messages m JOIN campaigns c ON m."campaignId" = c.id WHERE c."organizationId" = ?', orgId) as any;
+      const sampleEmails = await storage.rawAll('SELECT DISTINCT "recipientEmail" FROM messages WHERE "recipientEmail" IS NOT NULL LIMIT 10') as any[];
+      // Check which campaigns are in the contact's list
+      let contactListCampaigns = null;
+      if (row?.email) {
+        contactListCampaigns = await storage.rawAll(`
+          SELECT c.id, c.name, c.status, c."totalRecipients", c."sentCount"
+          FROM campaigns c WHERE c."organizationId" = ?
+          AND c."contactIds"::text LIKE '%' || ? || '%'
+          LIMIT 5
+        `, orgId, cid) as any[];
+      }
       res.json({
         queriedId: cid,
         contact: row,
@@ -5904,10 +5918,13 @@ Example response:
         messagesByContactId: parseInt(msgById?.cnt || 0),
         messagesByRecipientEmail: msgsByEmail,
         totalMessagesInDB: parseInt(totalMsgs?.cnt || 0),
+        messagesInOrg: parseInt(orgMsgs?.cnt || 0),
         recipientEmailBackfill: {
           totalMessages: parseInt(backfillStatus?.total || 0),
           withRecipientEmail: parseInt(backfillStatus?.filled || 0),
         },
+        sampleRecipientEmails: sampleEmails?.map((s: any) => s.recipientEmail).slice(0, 10),
+        campaignsWithThisContact: contactListCampaigns,
         sampleContactIds: sampleIds,
       });
     } catch (error: any) {
