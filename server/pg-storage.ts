@@ -1087,7 +1087,8 @@ export class PostgresStorage {
   }
 
   async getContactEngagementStats(contactId: string) {
-    const stats = await queryOne(`
+    // First try by contactId, then fallback to email match if no messages found
+    let stats = await queryOne(`
       SELECT
         COUNT(*) as "totalSent",
         SUM(CASE WHEN "openedAt" IS NOT NULL THEN 1 ELSE 0 END) as "totalOpened",
@@ -1099,6 +1100,42 @@ export class PostgresStorage {
         MAX("repliedAt") as "lastRepliedAt"
       FROM messages WHERE "contactId" = $1
     `, [contactId]);
+
+    // If no messages found by contactId, try matching by contact email (handles re-imported contacts with new IDs)
+    if (!stats || parseInt(stats.totalSent || 0) === 0) {
+      try {
+        const contact = await queryOne('SELECT email FROM contacts WHERE id = $1', [contactId]);
+        if (contact?.email) {
+          // Find all contactIds that share this email (current + historical)
+          const allIds = await queryAll(
+            'SELECT DISTINCT m."contactId" FROM messages m INNER JOIN contacts c ON c.id = m."contactId" WHERE LOWER(c.email) = LOWER($1)',
+            [contact.email]
+          );
+          if (allIds.length > 0) {
+            const ph = allIds.map((_: any, i: number) => `$${i + 1}`).join(',');
+            const ids = allIds.map((r: any) => r.contactId);
+            const emailStats = await queryOne(`
+              SELECT
+                COUNT(*) as "totalSent",
+                SUM(CASE WHEN "openedAt" IS NOT NULL THEN 1 ELSE 0 END) as "totalOpened",
+                SUM(CASE WHEN "clickedAt" IS NOT NULL THEN 1 ELSE 0 END) as "totalClicked",
+                SUM(CASE WHEN "repliedAt" IS NOT NULL THEN 1 ELSE 0 END) as "totalReplied",
+                MAX("sentAt") as "lastSentAt",
+                MAX("openedAt") as "lastOpenedAt",
+                MAX("clickedAt") as "lastClickedAt",
+                MAX("repliedAt") as "lastRepliedAt"
+              FROM messages WHERE "contactId" IN (${ph})
+            `, ids);
+            if (emailStats && parseInt(emailStats.totalSent || 0) > 0) {
+              stats = emailStats;
+            }
+          }
+        }
+      } catch (e) {
+        // Fallback failed — use original stats (0)
+      }
+    }
+
     if (!stats) return { totalSent: 0, totalOpened: 0, totalClicked: 0, totalReplied: 0 };
     return {
       totalSent: parseInt(stats.totalSent || 0),

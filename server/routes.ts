@@ -5873,9 +5873,15 @@ Example response:
   // Check rating status for a contact (diagnostic)
   app.get('/api/contacts/:id/rating-check', requireAuth, async (req: any, res) => {
     try {
-      const row = await storage.rawGet('SELECT "emailRating", "emailRatingGrade", "emailRatingUpdatedAt" FROM contacts WHERE id = ?', req.params.id) as any;
+      const row = await storage.rawGet('SELECT id, email, "emailRating", "emailRatingGrade", "emailRatingUpdatedAt" FROM contacts WHERE id = ?', req.params.id) as any;
       const stats = await storage.getContactEngagementStats(req.params.id);
-      res.json({ rating: row, stats });
+      // Also check messages directly by contactId and by email
+      const msgById = await storage.rawGet('SELECT COUNT(*) as cnt FROM messages WHERE "contactId" = ?', req.params.id) as any;
+      let msgByEmail = null;
+      if (row?.email) {
+        msgByEmail = await storage.rawGet('SELECT COUNT(*) as cnt FROM messages m INNER JOIN contacts c ON c.id = m."contactId" WHERE LOWER(c.email) = LOWER(?)', row.email) as any;
+      }
+      res.json({ contact: row, stats, messagesByContactId: parseInt(msgById?.cnt || 0), messagesByEmail: parseInt(msgByEmail?.cnt || 0) });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
