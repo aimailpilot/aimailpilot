@@ -5900,17 +5900,22 @@ Example response:
       // Show which org's messages exist and sample recipientEmails
       const orgId = req.user?.organizationId;
       const orgMsgs = await storage.rawGet('SELECT COUNT(*) as cnt FROM messages m JOIN campaigns c ON m."campaignId" = c.id WHERE c."organizationId" = ?', orgId) as any;
-      const sampleEmails = await storage.rawAll('SELECT DISTINCT "recipientEmail" FROM messages WHERE "recipientEmail" IS NOT NULL LIMIT 10') as any[];
-      // Check which campaigns are in the contact's list
-      let contactListCampaigns = null;
-      if (row?.email) {
-        contactListCampaigns = await storage.rawAll(`
-          SELECT c.id, c.name, c.status, c."totalRecipients", c."sentCount"
-          FROM campaigns c WHERE c."organizationId" = ?
-          AND c."contactIds"::text LIKE '%' || ? || '%'
-          LIMIT 5
-        `, orgId, cid) as any[];
-      }
+      // Sample recipientEmails from this org's campaigns
+      const sampleEmails = await storage.rawAll(`
+        SELECT DISTINCT m."recipientEmail" FROM messages m
+        JOIN campaigns c ON m."campaignId" = c.id
+        WHERE c."organizationId" = ? AND m."recipientEmail" IS NOT NULL
+        LIMIT 10
+      `, orgId) as any[];
+      // Find contacts in this list that DO have messages
+      const contactsWithMessages = await storage.rawAll(`
+        SELECT DISTINCT m."recipientEmail", COUNT(*) as msgCount
+        FROM messages m
+        JOIN campaigns c ON m."campaignId" = c.id
+        WHERE c."organizationId" = ? AND m."recipientEmail" IS NOT NULL
+        GROUP BY m."recipientEmail"
+        ORDER BY COUNT(*) DESC LIMIT 5
+      `, orgId) as any[];
       res.json({
         queriedId: cid,
         contact: row,
@@ -5919,12 +5924,8 @@ Example response:
         messagesByRecipientEmail: msgsByEmail,
         totalMessagesInDB: parseInt(totalMsgs?.cnt || 0),
         messagesInOrg: parseInt(orgMsgs?.cnt || 0),
-        recipientEmailBackfill: {
-          totalMessages: parseInt(backfillStatus?.total || 0),
-          withRecipientEmail: parseInt(backfillStatus?.filled || 0),
-        },
-        sampleRecipientEmails: sampleEmails?.map((s: any) => s.recipientEmail).slice(0, 10),
-        campaignsWithThisContact: contactListCampaigns,
+        sampleRecipientsInOrg: sampleEmails?.map((s: any) => s.recipientEmail),
+        topContactsWithMessages: contactsWithMessages?.map((s: any) => ({ email: s.recipientEmail, count: parseInt(s.msgCount || 0) })),
         sampleContactIds: sampleIds,
       });
     } catch (error: any) {
