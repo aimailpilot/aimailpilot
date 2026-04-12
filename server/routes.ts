@@ -5841,17 +5841,29 @@ Example response:
     }
   });
 
-  // Batch recalculate ratings for all contacts
+  // Batch recalculate ratings for all contacts (fire-and-forget to avoid timeout)
   app.post('/api/contacts/batch-rating', requireAuth, async (req: any, res) => {
     try {
-      console.log('[BatchRating] Starting for org:', req.user.organizationId, 'useAI:', req.body?.useAI);
+      const orgId = req.user.organizationId;
       const { useAI } = req.body || {};
-      const result = await batchRecalculateRatings(req.user.organizationId, { useAI });
-      console.log('[BatchRating] Done:', result);
-      res.json({ success: true, ...result });
+      console.log('[BatchRating] Starting background job for org:', orgId, 'useAI:', useAI);
+
+      // Get contact count first for the response
+      const contacts = await storage.getContacts(orgId, 10000);
+      const totalContacts = contacts.length;
+
+      // Respond immediately
+      res.json({ success: true, message: `Rating ${totalContacts} contacts in background`, total: totalContacts, processed: 0, errors: 0, background: true });
+
+      // Process in background
+      batchRecalculateRatings(orgId, { useAI }).then(result => {
+        console.log('[BatchRating] Background job done:', result);
+      }).catch(err => {
+        console.error('[BatchRating] Background job FAILED:', err.message);
+      });
     } catch (error: any) {
       console.error('[BatchRating] FAILED:', error.message, error.stack?.substring(0, 500));
-      res.status(500).json({ message: `Failed to batch recalculate ratings: ${error.message}` });
+      res.status(500).json({ message: `Failed to start batch rating: ${error.message}` });
     }
   });
 
