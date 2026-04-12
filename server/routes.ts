@@ -4615,7 +4615,7 @@ Which account should I use and why? If I need to split across accounts, provide 
           };
           const sortCol = allowedSorts[sortByParam] || 'c.createdAt';
           const textSortCols = new Set(['c.firstName', 'c.company', 'c.jobTitle', 'c.email', 'c.phone', 'c.mobilePhone', 'c.city']);
-          const collate = textSortCols.has(sortCol) ? ' COLLATE NOCASE' : '';
+          const collate = '';
 
           const countSql = `SELECT COUNT(*) as cnt FROM contacts c WHERE ${where}`;
           console.log(`[Contacts] Advanced SQL: sort=${sortCol} ${sortOrder}, params=${params.length}, search="${search}"`);
