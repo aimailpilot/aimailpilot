@@ -5810,15 +5810,17 @@ Example response:
   // Calculate rating for a single contact
   app.post('/api/contacts/:id/rating', requireAuth, async (req: any, res) => {
     try {
+      console.log('[Rating] Single rating for contact:', req.params.id, 'useAI:', req.body?.useAI);
       const { useAI } = req.body || {};
       const result = await calculateContactRating(req.params.id, {
         useAI: useAI !== false,
         organizationId: req.user.organizationId,
       });
+      console.log('[Rating] Done:', result.rating, result.grade);
       res.json(result);
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      res.status(500).json({ message: `Failed to calculate rating: ${msg}` });
+    } catch (error: any) {
+      console.error('[Rating] FAILED for', req.params.id, ':', error.message, error.stack?.substring(0, 500));
+      res.status(500).json({ message: `Failed to calculate rating: ${error.message}` });
     }
   });
 
@@ -5842,11 +5844,13 @@ Example response:
   // Batch recalculate ratings for all contacts
   app.post('/api/contacts/batch-rating', requireAuth, async (req: any, res) => {
     try {
+      console.log('[BatchRating] Starting for org:', req.user.organizationId, 'useAI:', req.body?.useAI);
       const { useAI } = req.body || {};
       const result = await batchRecalculateRatings(req.user.organizationId, { useAI });
+      console.log('[BatchRating] Done:', result);
       res.json({ success: true, ...result });
     } catch (error: any) {
-      console.error('[BatchRating] Error:', error.message, error.stack?.substring(0, 300));
+      console.error('[BatchRating] FAILED:', error.message, error.stack?.substring(0, 500));
       res.status(500).json({ message: `Failed to batch recalculate ratings: ${error.message}` });
     }
   });
