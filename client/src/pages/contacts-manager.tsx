@@ -1232,13 +1232,15 @@ export default function ContactsManager() {
       });
       if (res.ok) {
         const data = await res.json();
-        // Update local contact data
         setContacts(prev => prev.map(c => c.id === contactId ? { ...c, emailRating: data.rating, emailRatingGrade: data.grade, emailRatingDetails: data.details } : c));
         if (detailContact?.id === contactId) {
           setDetailContact(prev => prev ? { ...prev, emailRating: data.rating, emailRatingGrade: data.grade, emailRatingDetails: data.details } : prev);
         }
+        toast({ title: "Rating calculated", description: `Score: ${data.rating}/100 (Grade ${data.grade})` });
+      } else {
+        toast({ title: "Rating failed", description: "Could not calculate rating.", variant: "destructive" });
       }
-    } catch (e) { console.error('Rating calculation failed:', e); }
+    } catch (e) { console.error('Rating calculation failed:', e); toast({ title: "Rating failed", description: "Network error.", variant: "destructive" }); }
     setRatingLoading(null);
   };
 
@@ -1341,14 +1343,21 @@ export default function ContactsManager() {
                   if (ratingLoading) return;
                   setRatingLoading('batch');
                   setBatchRatingProgress({ processed: 0, total: contacts.length });
+                  toast({ title: "Calculating ratings...", description: "This may take a moment for large lists." });
                   try {
                     const res = await fetch('/api/contacts/batch-rating', {
                       method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
                       body: JSON.stringify({ useAI: false }),
                     });
-                    if (res.ok) { const data = await res.json(); setBatchRatingProgress({ processed: data.processed, total: data.processed + data.errors }); }
+                    if (res.ok) {
+                      const data = await res.json();
+                      setBatchRatingProgress({ processed: data.processed, total: data.processed + data.errors });
+                      toast({ title: "Ratings calculated", description: `${data.processed} contacts rated${data.errors > 0 ? `, ${data.errors} errors` : ''}.` });
+                    } else {
+                      toast({ title: "Rating failed", description: "Server error. Please try again.", variant: "destructive" });
+                    }
                     fetchContacts();
-                  } catch (e) { console.error('Batch rating failed:', e); }
+                  } catch (e) { console.error('Batch rating failed:', e); toast({ title: "Rating failed", description: "Network error.", variant: "destructive" }); }
                   setTimeout(() => { setRatingLoading(null); setBatchRatingProgress(null); }, 2000);
                 }}>
                   <BarChart3 className="h-4 w-4 mr-2 text-orange-500" /> {ratingLoading === 'batch' ? 'Calculating...' : 'Calculate Ratings'}
@@ -1356,14 +1365,21 @@ export default function ContactsManager() {
                 <DropdownMenuItem onClick={async () => {
                   if (ratingLoading) return;
                   setRatingLoading('batch-ai');
+                  toast({ title: "AI Rating in progress...", description: "Azure OpenAI is scoring reply quality." });
                   try {
                     const res = await fetch('/api/contacts/batch-rating', {
                       method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
                       body: JSON.stringify({ useAI: true }),
                     });
-                    if (res.ok) { const data = await res.json(); setBatchRatingProgress({ processed: data.processed, total: data.processed + data.errors }); }
+                    if (res.ok) {
+                      const data = await res.json();
+                      setBatchRatingProgress({ processed: data.processed, total: data.processed + data.errors });
+                      toast({ title: "AI Ratings complete", description: `${data.processed} contacts scored${data.errors > 0 ? `, ${data.errors} errors` : ''}.` });
+                    } else {
+                      toast({ title: "AI Rating failed", description: "Server error. Please try again.", variant: "destructive" });
+                    }
                     fetchContacts();
-                  } catch (e) { console.error('AI batch rating failed:', e); }
+                  } catch (e) { console.error('AI batch rating failed:', e); toast({ title: "AI Rating failed", description: "Network error.", variant: "destructive" }); }
                   setTimeout(() => { setRatingLoading(null); setBatchRatingProgress(null); }, 2000);
                 }}>
                   <Sparkles className="h-4 w-4 mr-2 text-purple-500" /> {ratingLoading === 'batch-ai' ? 'AI Scoring...' : 'AI Rate (Azure OpenAI)'}
@@ -3885,6 +3901,13 @@ export default function ContactsManager() {
                               contact.emailVerificationStatus === 'disposable' ? 'bg-orange-500' :
                               contact.emailVerificationStatus === 'spamtrap' ? 'bg-red-700' : 'bg-gray-300'
                             }`} />
+                          )}
+                          {contact.emailRating > 0 && (
+                            <span title={`Rating: ${contact.emailRating}/100 (${contact.emailRatingGrade})`} className={`text-[9px] font-bold px-1 py-0 rounded ${
+                              contact.emailRating >= 75 ? 'bg-emerald-100 text-emerald-700' :
+                              contact.emailRating >= 50 ? 'bg-yellow-100 text-yellow-700' :
+                              contact.emailRating >= 25 ? 'bg-orange-100 text-orange-700' : 'bg-red-100 text-red-600'
+                            }`}>{contact.emailRatingGrade}</span>
                           )}
                         </div>
                       ) : (
