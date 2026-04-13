@@ -27,6 +27,7 @@ interface EmailMessage {
 interface EmailResult {
   success: boolean;
   messageId?: string;
+  internetMessageId?: string;
   error?: string;
 }
 
@@ -262,54 +263,69 @@ class EmailService {
           const fromEmail = senderEmail || tokenResult.email || '';
           console.log(`[Followup] Sending follow-up via Microsoft Graph to ${message.to} from ${fromEmail}${message.inReplyTo ? ' (threaded)' : ''}`);
 
-          const graphMessage: any = {
+          // Use draft-then-send so internetMessageHeaders (In-Reply-To/References) are reliably accepted
+          // and the new message's internetMessageId is captured for downstream follow-up steps.
+          // One-shot /me/sendMail rejects custom headers on many personal accounts AND returns no message id.
+          const baseMessage: any = {
             subject: message.subject,
             body: { contentType: 'HTML', content: message.html },
             toRecipients: [{ emailAddress: { address: message.to } }],
           };
 
-          // Add threading headers (In-Reply-To, References) for email thread continuity
           const threadingHeaders: { name: string; value: string }[] = [];
           if (message.inReplyTo) threadingHeaders.push({ name: 'In-Reply-To', value: message.inReplyTo });
           if (message.references) threadingHeaders.push({ name: 'References', value: message.references });
 
-          // Attempt 1: Send with threading headers
-          if (threadingHeaders.length > 0) {
-            graphMessage.internetMessageHeaders = threadingHeaders;
-          }
-
-          const resp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${tokenResult.token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: graphMessage, saveToSentItems: true }),
-          });
-
-          if (resp.ok) {
-            return { success: true, messageId: `graph-followup-${Date.now()}` };
-          }
-
-          const errText = await resp.text();
-
-          // Don't retry on auth errors — those need token refresh
-          if (resp.status === 401 || resp.status === 403) {
-            console.error(`[Followup] Microsoft Graph auth error: ${resp.status} ${errText}`);
-            // Fall through to SMTP fallback below
-          } else if (threadingHeaders.length > 0) {
-            // Attempt 2: Retry without threading headers (some accounts reject internetMessageHeaders)
-            console.log(`[Followup] Graph send failed with threading headers, retrying without for ${message.to}`);
-            delete graphMessage.internetMessageHeaders;
-            const retryResp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+          const createDraft = async (withHeaders: boolean) => {
+            const msg = (withHeaders && threadingHeaders.length > 0)
+              ? { ...baseMessage, internetMessageHeaders: threadingHeaders }
+              : baseMessage;
+            const r = await fetch('https://graph.microsoft.com/v1.0/me/messages', {
               method: 'POST',
               headers: { Authorization: `Bearer ${tokenResult.token}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ message: graphMessage, saveToSentItems: true }),
+              body: JSON.stringify(msg),
             });
-            if (retryResp.ok) {
-              return { success: true, messageId: `graph-followup-${Date.now()}` };
+            if (r.ok) return { ok: true as const, data: await r.json() as any };
+            return { ok: false as const, status: r.status, err: await r.text() };
+          };
+
+          // Attempt 1: draft with threading headers
+          let draft = await createDraft(true);
+          if (!draft.ok) {
+            if (draft.status === 401 || draft.status === 403) {
+              console.error(`[Followup] Microsoft Graph auth error creating draft: ${draft.status} ${draft.err}`);
+              // Fall through to SMTP fallback below
+            } else if (threadingHeaders.length > 0) {
+              // Attempt 2: draft without threading headers (rare — most personal accounts accept headers on drafts)
+              console.log(`[Followup] Graph draft create with threading headers failed (${draft.status}), retrying without for ${message.to}`);
+              draft = await createDraft(false);
             }
-            const retryErr = await retryResp.text();
-            console.error(`[Followup] Microsoft Graph send failed (retry): ${retryResp.status} ${retryErr}`);
-          } else {
-            console.error(`[Followup] Microsoft Graph send failed: ${resp.status} ${errText}`);
+          }
+
+          if (draft.ok) {
+            const draftId: string | undefined = draft.data?.id;
+            const internetMessageId: string | undefined = draft.data?.internetMessageId;
+            if (draftId) {
+              const sendResp = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(draftId)}/send`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${tokenResult.token}` },
+              });
+              if (sendResp.ok) {
+                return { success: true, messageId: draftId, internetMessageId };
+              }
+              const sendErr = await sendResp.text();
+              console.error(`[Followup] Microsoft Graph draft send failed: ${sendResp.status} ${sendErr}`);
+              // Best-effort: delete the orphan draft
+              try {
+                await fetch(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(draftId)}`, {
+                  method: 'DELETE',
+                  headers: { Authorization: `Bearer ${tokenResult.token}` },
+                });
+              } catch { /* ignore */ }
+              // Fall through to SMTP fallback below
+            }
+          } else if (!draft.ok) {
+            console.error(`[Followup] Microsoft Graph draft create failed: ${draft.status} ${draft.err}`);
           }
           // Fall through to SMTP fallback below
         }
@@ -1335,6 +1351,7 @@ export class FollowupEngine {
           stepNumber: step.stepNumber || 1,
           trackingId: trackingId,
           providerMessageId: emailResult.messageId,
+          messageId: emailResult.internetMessageId || null,
           emailAccountId: campaign.emailAccountId,
           recipientEmail: contact.email,
         });

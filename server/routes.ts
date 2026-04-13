@@ -5960,12 +5960,12 @@ Example response:
       }
 
       const step0Messages = await storage.rawAll(
-        'SELECT id, "contactId", subject, "stepNumber", "providerMessageId", "gmailThreadId", "emailAccountId", status, "sentAt" FROM messages WHERE "campaignId" = ? AND ("stepNumber" = 0 OR "stepNumber" IS NULL) ORDER BY "sentAt" DESC LIMIT 20',
+        'SELECT id, "contactId", subject, "stepNumber", "providerMessageId", "gmailThreadId", "messageId", "emailAccountId", status, "sentAt" FROM messages WHERE "campaignId" = ? AND ("stepNumber" = 0 OR "stepNumber" IS NULL) ORDER BY "sentAt" DESC LIMIT 20',
         campaignId
       );
 
       const followupMessages = await storage.rawAll(
-        'SELECT id, "contactId", subject, "stepNumber", "providerMessageId", "gmailThreadId", "emailAccountId", status, "sentAt" FROM messages WHERE "campaignId" = ? AND "stepNumber" > 0 ORDER BY "stepNumber", "sentAt" DESC LIMIT 40',
+        'SELECT id, "contactId", subject, "stepNumber", "providerMessageId", "gmailThreadId", "messageId", "emailAccountId", status, "sentAt" FROM messages WHERE "campaignId" = ? AND "stepNumber" > 0 ORDER BY "stepNumber", "sentAt" DESC LIMIT 40',
         campaignId
       );
 
@@ -5977,6 +5977,9 @@ Example response:
       );
       const step0WithProvider = await storage.rawGet(
         'SELECT COUNT(*)::int as cnt FROM messages WHERE "campaignId" = ? AND ("stepNumber" = 0 OR "stepNumber" IS NULL) AND "providerMessageId" IS NOT NULL', campaignId
+      );
+      const step0WithRfcMessageId = await storage.rawGet(
+        'SELECT COUNT(*)::int as cnt FROM messages WHERE "campaignId" = ? AND ("stepNumber" = 0 OR "stepNumber" IS NULL) AND "messageId" IS NOT NULL', campaignId
       );
       const totalFollowups = await storage.rawGet(
         'SELECT COUNT(*)::int as cnt FROM messages WHERE "campaignId" = ? AND "stepNumber" > 0', campaignId
@@ -5994,8 +5997,10 @@ Example response:
           totalStep0: (totalStep0 as any)?.cnt || 0,
           step0WithGmailThreadId: (step0WithThread as any)?.cnt || 0,
           step0WithProviderMessageId: (step0WithProvider as any)?.cnt || 0,
+          step0WithRfcMessageId: (step0WithRfcMessageId as any)?.cnt || 0,
           totalFollowupMessages: (totalFollowups as any)?.cnt || 0,
-          threadingHealthy: ((step0WithThread as any)?.cnt || 0) === ((totalStep0 as any)?.cnt || 0),
+          // Healthy if every step-0 has either a Gmail threadId (Gmail) or an RFC messageId (Outlook)
+          threadingHealthy: (((step0WithThread as any)?.cnt || 0) + ((step0WithRfcMessageId as any)?.cnt || 0)) >= ((totalStep0 as any)?.cnt || 0),
         },
         step0Messages,
         followupMessages,
