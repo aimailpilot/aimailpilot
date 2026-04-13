@@ -1242,7 +1242,7 @@ export class FollowupEngine {
             }
           } else if (isOutlookAccount) {
             // Outlook: fetch internetMessageId from Graph API for threading
-            const tokenResult = await this.getOutlookAccessToken(campaign.organizationId, senderEmail);
+            const tokenResult = await this.emailService.getOutlookAccessToken(campaign.organizationId, senderEmail);
             if (tokenResult) {
               // The providerMessageId for Outlook messages is stored as "graph-{timestamp}"
               // which is NOT a real Graph message ID. Instead, search for the original message
