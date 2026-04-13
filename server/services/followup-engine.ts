@@ -22,6 +22,7 @@ interface EmailMessage {
   threadId?: string;       // Gmail thread ID to reply in
   inReplyTo?: string;      // Message-ID of the original email
   references?: string;     // References header for threading
+  outlookParentMessageId?: string; // Graph message ID of the original message — used for createReply (true Outlook conversation threading)
 }
 
 interface EmailResult {
@@ -261,11 +262,67 @@ class EmailService {
         const tokenResult = await this.getOutlookAccessToken(orgId, senderEmail);
         if (tokenResult) {
           const fromEmail = senderEmail || tokenResult.email || '';
-          console.log(`[Followup] Sending follow-up via Microsoft Graph to ${message.to} from ${fromEmail}${message.inReplyTo ? ' (threaded)' : ''}`);
+          console.log(`[Followup] Sending follow-up via Microsoft Graph to ${message.to} from ${fromEmail}${message.inReplyTo ? ' (threaded)' : ''}${message.outlookParentMessageId ? ' [createReply]' : ''}`);
 
-          // Use draft-then-send so internetMessageHeaders (In-Reply-To/References) are reliably accepted
-          // and the new message's internetMessageId is captured for downstream follow-up steps.
-          // One-shot /me/sendMail rejects custom headers on many personal accounts AND returns no message id.
+          // PREFERRED PATH: createReply on the original message.
+          // Outlook UI groups conversations by Microsoft `conversationId`, not RFC In-Reply-To headers.
+          // createReply returns a draft already attached to the original conversation, so the follow-up
+          // appears in the same Outlook thread visually.
+          if (message.outlookParentMessageId) {
+            try {
+              const replyResp = await fetch(
+                `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(message.outlookParentMessageId)}/createReply`,
+                { method: 'POST', headers: { Authorization: `Bearer ${tokenResult.token}` } }
+              );
+              if (replyResp.ok) {
+                const draft = await replyResp.json() as any;
+                const draftId: string | undefined = draft?.id;
+                if (draftId) {
+                  // Patch the draft with our subject + body (createReply pre-fills with quoted original)
+                  const patchResp = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(draftId)}`, {
+                    method: 'PATCH',
+                    headers: { Authorization: `Bearer ${tokenResult.token}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      subject: message.subject,
+                      body: { contentType: 'HTML', content: message.html },
+                    }),
+                  });
+                  if (patchResp.ok) {
+                    const sendResp = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(draftId)}/send`, {
+                      method: 'POST',
+                      headers: { Authorization: `Bearer ${tokenResult.token}` },
+                    });
+                    if (sendResp.ok) {
+                      // Re-fetch the patched draft to pick up the updated internetMessageId (Graph regenerates it on PATCH)
+                      const finalInternetMessageId: string | undefined = (await patchResp.json() as any)?.internetMessageId || draft?.internetMessageId;
+                      return { success: true, messageId: draftId, internetMessageId: finalInternetMessageId };
+                    }
+                    const sendErr = await sendResp.text();
+                    console.error(`[Followup] createReply send failed: ${sendResp.status} ${sendErr}`);
+                    // Best-effort cleanup
+                    try {
+                      await fetch(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(draftId)}`, {
+                        method: 'DELETE',
+                        headers: { Authorization: `Bearer ${tokenResult.token}` },
+                      });
+                    } catch { /* ignore */ }
+                  } else {
+                    const patchErr = await patchResp.text();
+                    console.error(`[Followup] createReply patch failed: ${patchResp.status} ${patchErr}`);
+                  }
+                }
+              } else {
+                const replyErr = await replyResp.text();
+                console.warn(`[Followup] createReply failed (${replyResp.status}), falling back to draft-then-send: ${replyErr}`);
+              }
+              // Falls through to draft-then-send below if any step failed
+            } catch (e) {
+              console.error(`[Followup] createReply exception, falling back to draft-then-send:`, e);
+            }
+          }
+
+          // FALLBACK PATH: draft-then-send with RFC threading headers.
+          // Used when no parent Graph ID is available (e.g., legacy messages with synthetic providerMessageId).
           const baseMessage: any = {
             subject: message.subject,
             body: { contentType: 'HTML', content: message.html },
@@ -1322,6 +1379,12 @@ export class FollowupEngine {
         return;
       }
 
+      // For Outlook: pass the original message's Graph ID so sendEmail can use createReply
+      // (Outlook UI groups by Microsoft conversationId, not RFC headers — createReply inherits the conversation).
+      const outlookParentMessageId = (!isGmailAccount && originalMessage.providerMessageId && !originalMessage.providerMessageId.startsWith('graph-'))
+        ? originalMessage.providerMessageId
+        : undefined;
+
       const emailResult = await this.emailService.sendEmail(campaign.emailAccountId, {
         to: contact.email,
         subject: personalizedSubject,
@@ -1331,6 +1394,7 @@ export class FollowupEngine {
         threadId: gmailThreadId,
         inReplyTo: originalMessageId || undefined,
         references: originalMessageId || undefined,
+        outlookParentMessageId,
       }, campaign.organizationId);
 
       if (emailResult.success) {
