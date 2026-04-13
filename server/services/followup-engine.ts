@@ -278,13 +278,18 @@ class EmailService {
                 const draft = await replyResp.json() as any;
                 const draftId: string | undefined = draft?.id;
                 if (draftId) {
-                  // Patch the draft with our subject + body (createReply pre-fills with quoted original)
+                  // Patch the draft with our subject + body AND override toRecipients.
+                  // createReply on a Sent-folder message pre-populates toRecipients with the ORIGINAL SENDER
+                  // (i.e. ourselves), so we must override it back to the actual contact. The conversationId
+                  // was already inherited from the parent when the draft was created, so overriding
+                  // toRecipients doesn't break threading.
                   const patchResp = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(draftId)}`, {
                     method: 'PATCH',
                     headers: { Authorization: `Bearer ${tokenResult.token}`, 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                       subject: message.subject,
                       body: { contentType: 'HTML', content: message.html },
+                      toRecipients: [{ emailAddress: { address: message.to } }],
                     }),
                   });
                   if (patchResp.ok) {
