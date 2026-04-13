@@ -9069,7 +9069,13 @@ Generate an appropriate reply to the LATEST email above, considering the full co
 
   app.delete('/api/suppression-list/:email', requireAuth, async (req: any, res) => {
     try {
-      await storage.removeFromSuppressionList(req.user.organizationId, decodeURIComponent(req.params.email));
+      const email = decodeURIComponent(req.params.email);
+      await storage.removeFromSuppressionList(req.user.organizationId, email);
+      // Also restore the contact status so bounce-sync doesn't re-add them on next cycle
+      await storage.rawRun(
+        `UPDATE contacts SET status='active', "bouncedAt"=NULL, "bounceType"=NULL, "updatedAt"=$1 WHERE lower(email)=lower($2) AND "organizationId"=$3 AND status='bounced'`,
+        [new Date().toISOString(), email, req.user.organizationId]
+      );
       res.json({ success: true });
     } catch (error) {
       res.status(500).json({ message: 'Failed to remove from suppression list' });
