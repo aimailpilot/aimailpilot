@@ -93,7 +93,14 @@ async function sendViaMicrosoftGraph(
         : baseMessage;
       const r = await fetch('https://graph.microsoft.com/v1.0/me/messages', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          // Request immutable IDs so the message ID survives the Drafts→Sent folder move.
+          // Without this, the default (non-immutable) ID becomes invalid after /send, and
+          // follow-up createReply calls 404 out, breaking Outlook conversation threading.
+          'Prefer': 'IdType="ImmutableId"',
+        },
         body: JSON.stringify(message),
       });
       if (r.ok) {
@@ -130,7 +137,10 @@ async function sendViaMicrosoftGraph(
     // Send the draft
     const sendResp = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(draftId)}/send`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${accessToken}` },
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Prefer': 'IdType="ImmutableId"',
+      },
     });
 
     if (!sendResp.ok) {

@@ -272,7 +272,7 @@ class EmailService {
             try {
               const replyResp = await fetch(
                 `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(message.outlookParentMessageId)}/createReply`,
-                { method: 'POST', headers: { Authorization: `Bearer ${tokenResult.token}` } }
+                { method: 'POST', headers: { Authorization: `Bearer ${tokenResult.token}`, 'Prefer': 'IdType="ImmutableId"' } }
               );
               if (replyResp.ok) {
                 const draft = await replyResp.json() as any;
@@ -285,7 +285,7 @@ class EmailService {
                   // toRecipients doesn't break threading.
                   const patchResp = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(draftId)}`, {
                     method: 'PATCH',
-                    headers: { Authorization: `Bearer ${tokenResult.token}`, 'Content-Type': 'application/json' },
+                    headers: { Authorization: `Bearer ${tokenResult.token}`, 'Content-Type': 'application/json', 'Prefer': 'IdType="ImmutableId"' },
                     body: JSON.stringify({
                       subject: message.subject,
                       body: { contentType: 'HTML', content: message.html },
@@ -295,7 +295,7 @@ class EmailService {
                   if (patchResp.ok) {
                     const sendResp = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(draftId)}/send`, {
                       method: 'POST',
-                      headers: { Authorization: `Bearer ${tokenResult.token}` },
+                      headers: { Authorization: `Bearer ${tokenResult.token}`, 'Prefer': 'IdType="ImmutableId"' },
                     });
                     if (sendResp.ok) {
                       // Re-fetch the patched draft to pick up the updated internetMessageId (Graph regenerates it on PATCH)
@@ -344,7 +344,7 @@ class EmailService {
               : baseMessage;
             const r = await fetch('https://graph.microsoft.com/v1.0/me/messages', {
               method: 'POST',
-              headers: { Authorization: `Bearer ${tokenResult.token}`, 'Content-Type': 'application/json' },
+              headers: { Authorization: `Bearer ${tokenResult.token}`, 'Content-Type': 'application/json', 'Prefer': 'IdType="ImmutableId"' },
               body: JSON.stringify(msg),
             });
             if (r.ok) return { ok: true as const, data: await r.json() as any };
@@ -370,7 +370,7 @@ class EmailService {
             if (draftId) {
               const sendResp = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(draftId)}/send`, {
                 method: 'POST',
-                headers: { Authorization: `Bearer ${tokenResult.token}` },
+                headers: { Authorization: `Bearer ${tokenResult.token}`, 'Prefer': 'IdType="ImmutableId"' },
               });
               if (sendResp.ok) {
                 return { success: true, messageId: draftId, internetMessageId };
