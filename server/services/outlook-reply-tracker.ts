@@ -408,18 +408,58 @@ export class OutlookReplyTracker {
                 },
               });
             } else {
-              // No matching contact — auto-add bounced emails to suppression/blocklist
-              for (const email of foundEmails) {
-                const emailLower = email.toLowerCase();
-                if (emailLower.includes('mailer-daemon') || emailLower.includes('postmaster') || emailLower.includes('noreply')) continue;
+              // No matching contact — narrow bounce extraction.
+              // Only add emails found in explicit NDR recipient markers, and exclude
+              // sender accounts + Exchange internal routing IDs to prevent the blocklist
+              // from being poisoned by quoted From: headers and message envelope IDs.
+              const orgAccounts = await storage.getEmailAccounts(orgId);
+              const orgSenderEmails = new Set(
+                (orgAccounts || []).map((a: any) => (a.email || '').toLowerCase()).filter(Boolean)
+              );
+
+              const ndrPatterns: RegExp[] = [
+                /Final-Recipient:\s*rfc822;\s*([^\s>]+@[^\s>]+)/gi,
+                /Original-Recipient:\s*rfc822;\s*([^\s>]+@[^\s>]+)/gi,
+                /Diagnostic-Code:[^\n]*<([^>]+@[^>]+)>/gi,
+                /<([^>\s]+@[^>\s]+)>:\s*(?:host |[45]\d\d |Recipient )/gi,
+                /Your message (?:to|couldn't be delivered to|wasn't delivered to)\s*[<\s]*([^\s>,]+@[^\s>,]+)/gi,
+                /5\.[01]\.[12]\s*<?([^\s>]+@[^\s>]+)>?/gi,
+              ];
+
+              const candidates = new Set<string>();
+              for (const re of ndrPatterns) {
+                let m;
+                while ((m = re.exec(bodyText)) !== null) {
+                  if (m[1]) candidates.add(m[1].toLowerCase().replace(/[<>]/g, ''));
+                }
+              }
+
+              const isSuppressionCandidate = (email: string): boolean => {
+                if (!email || !email.includes('@')) return false;
+                if (email.includes('mailer-daemon') || email.includes('postmaster') || email.includes('noreply')) return false;
+                if (orgSenderEmails.has(email)) return false;
+                // Exchange/Outlook internal message routing IDs are not real mailboxes
+                if (/@[a-z0-9]*mb\d+\.[a-z0-9]+\.prod\.outlook\.com$/i.test(email)) return false;
+                if (/@.*\.prod\.outlook\.com$/i.test(email)) return false;
+                return true;
+              };
+
+              let added = 0;
+              const candidateList = Array.from(candidates);
+              for (const email of candidateList) {
+                if (!isSuppressionCandidate(email)) continue;
                 try {
-                  await storage.addToSuppressionList(orgId, emailLower, 'bounce', {
+                  await storage.addToSuppressionList(orgId, email, 'bounce', {
                     bounceType: 'hard',
                     source: 'auto-detected',
                     notes: `Auto-blocked: bounce notification received (${(msg.subject || '').slice(0, 100)})`,
                   });
-                  console.log(`[OutlookReplyTracker] Bounce: Auto-added ${emailLower} to suppression/blocklist`);
+                  console.log(`[OutlookReplyTracker] Bounce: Auto-added ${email} to suppression/blocklist`);
+                  added++;
                 } catch (e) { /* ignore duplicate */ }
+              }
+              if (added === 0) {
+                console.log(`[OutlookReplyTracker] Bounce: no valid recipient found in NDR body (subject: ${(msg.subject || '').slice(0, 80)})`);
               }
             }
           } catch (e) {
