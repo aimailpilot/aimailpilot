@@ -27,7 +27,7 @@
 | 18 | Send Email from Contacts (Write/Template/AI) | Send dialog, `handleAiGenerate`, `applyTemplate` in `contacts-manager.tsx` |
 | 19 | Database Safety | See Golden Rules below |
 | 20 | Campaign Engine (step delays, scheduling, jitter) | `evaluateFollowupTrigger`, `getNextValidSendTime`, `checkSendingWindow`, `getUserLocalTime` |
-| 21 | Follow-up Threading — Gmail (CONFIRMED WORKING 2026-04-13) | `sendViaGmailAPI` return value, `gmailThreadId` save/lookup, 401 retry in `followup-engine.ts`. Gmail: threadId stored at step-0, `threadLinked=true` confirmed in logs, all follow-ups land in same thread. **Outlook threading still broken** — `sendViaMicrosoftGraph` returns synthetic `-noheaders` messageId; fix tracked in `docs/RECOMMENDED-TASKS.md` Task 4. |
+| 21 | Follow-up Threading — Gmail + Outlook (CONFIRMED WORKING 2026-04-13) | Gmail: threadId stored at step-0, `threadLinked=true` confirmed in logs. Outlook: `Prefer: IdType="ImmutableId"` on all Graph calls ensures providerMessageId survives Drafts→Sent move; `createReply` path in `followup-engine.ts` uses stored ID to inherit conversationId; `toRecipients` PATCH override fixes self-reply bug. Both confirmed: all steps appear in one conversation thread. |
 | 22 | Follow-up Personalization (22+ variables) | `personalData` + `personalizeText()` in `followup-engine.ts` |
 | 23 | Follow-up Sender Display Name | `senderDisplayName` in `sendEmail()` in `followup-engine.ts` |
 | 24 | Email Subject Encoding (RFC 2047) | `mimeEncodeSubject()` in `campaign-engine.ts` and `followup-engine.ts` |

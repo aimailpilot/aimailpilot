@@ -100,39 +100,16 @@ Initial thought was to merge `contact.status='bounced'` and `suppression_list` e
 
 ---
 
-## 4. Outlook follow-up threading fix
+## 4. Outlook follow-up threading fix — COMPLETED 2026-04-13
 
-**Priority:** HIGH
-**Risk:** MEDIUM (touches `sendViaMicrosoftGraph` which is on the CLAUDE.md protected list — requires explicit approval)
-**Effort:** ~80 LoC
+**Status:** CONFIRMED WORKING — all steps appear in one Outlook conversation thread.
 
-**Problem:**
-Gmail follow-up threading works (fixed 2026-04-13 for campaign `7e0538f5`). Outlook follow-ups do NOT thread — recipients see each follow-up as a separate standalone email in their inbox.
+**What was fixed:**
+- `sendViaMicrosoftGraph` in `campaign-engine.ts`: switched from one-shot `sendMail` to draft-then-send pattern, added `Prefer: IdType="ImmutableId"` header so providerMessageId survives the Drafts→Sent folder move.
+- `sendEmail` Outlook path in `followup-engine.ts`: uses `createReply` on the stored immutable providerMessageId to inherit `conversationId`; PATCH overrides `toRecipients` to fix self-reply bug (createReply on Sent Items pre-populates toRecipients with sender).
+- All 7 Microsoft Graph fetch calls in both files now carry `Prefer: IdType="ImmutableId"`.
 
-**Verified 2026-04-13:** Campaign `6aaeff05-167c-449f-98e1-8efcbcf5bdd4` (test AGBA 2026, Outlook sender `tw@bellaward.com`) sent 9 step-0 + 7 follow-ups. Recipient in Outlook inbox sees 3 separate emails. Same recipient in Gmail sees all emails in one thread.
-
-**Root cause:**
-`sendViaMicrosoftGraph` doesn't capture the real `internetMessageId` from the Graph API response after send. Instead it generates synthetic fallback IDs like `graph-1776052921612-noheaders` (note the `-noheaders` suffix — the tell). Without the real RFC Message-ID, follow-ups can't set proper `In-Reply-To`/`References` headers, so Outlook/Exchange treats each follow-up as a new standalone email.
-
-**Why Gmail works but Outlook doesn't:**
-- Gmail has TWO threading mechanisms: `threadId` (API param) + RFC headers. We store the Gmail threadId at step-0 send time.
-- Outlook has ONLY RFC header threading — there's no equivalent of `threadId`. Without capturing the real `internetMessageId`, threading is impossible.
-
-**Fix:**
-1. After Graph `sendMail` succeeds, fetch the sent message via `GET /me/mailFolders/SentItems/messages?$filter=...` to retrieve the real `internetMessageId`
-2. Store it in the `messageId` column (same column added for Gmail fix) AND `providerMessageId`
-3. Follow-up engine `executeFollowup` already falls back to stored `messageId` — no changes needed there
-4. Remove the `-noheaders` synthetic fallback (or log it as a warning so we can detect when Graph fetch fails)
-
-**Files:**
-- [server/services/campaign-engine.ts](../server/services/campaign-engine.ts) — `sendViaMicrosoftGraph` (PROTECTED, needs approval)
-- [server/services/followup-engine.ts](../server/services/followup-engine.ts) — `sendEmail` Outlook path may need similar fetch-after-send for follow-up's own messageId
-- No changes to `executeFollowup` threading block (fallback chain already handles it)
-
-**Risk notes:**
-- `sendViaMicrosoftGraph` is on the CLAUDE.md protected list. Do NOT start without user approval.
-- Graph API `SentItems` fetch is async — there can be a short delay before the sent message appears. May need retry logic.
-- Test thoroughly: send a real campaign, verify follow-ups thread in recipient's Outlook inbox.
+**Confirmed:** Campaign `647689f6-775b-45ce-88b2-ba9ecf5e34d7`, Outlook sender `tw@bellaward.com` — recipient saw all 3 follow-up steps in one Outlook conversation (2026-04-13).
 
 ---
 
