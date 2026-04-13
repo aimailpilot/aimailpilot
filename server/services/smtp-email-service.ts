@@ -61,6 +61,7 @@ export interface SendResult {
   success: boolean;
   messageId?: string;
   threadId?: string;
+  internetMessageId?: string;
   error?: string;
   timestamp?: string;
 }

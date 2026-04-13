@@ -72,61 +72,85 @@ async function sendViaMicrosoftGraph(
   accessToken: string,
   opts: { from: string; to: string; subject: string; html: string; headers?: Record<string, string> }
 ): Promise<SendResult> {
+  // Use draft-then-send so we can capture the real `internetMessageId` for follow-up threading.
+  // Graph's one-shot /me/sendMail endpoint returns 202 with no body, so the message ID is lost.
+  // POST /me/messages creates a draft and returns the full Message resource (id + internetMessageId),
+  // then POST /me/messages/{id}/send dispatches it.
   try {
-    // Build message — start simple (no from, no custom headers) for maximum compatibility
-    // Microsoft personal accounts reject explicit 'from' and custom internetMessageHeaders
-    const message: any = {
+    const baseMessage: any = {
       subject: opts.subject,
       body: { contentType: 'HTML', content: opts.html },
       toRecipients: [{ emailAddress: { address: opts.to } }],
     };
 
-    // Try sending with custom headers first (needed for tracking), then fall back progressively
     const headersArr = (opts.headers && Object.keys(opts.headers).length > 0)
       ? Object.entries(opts.headers).map(([name, value]) => ({ name, value }))
       : null;
 
-    // Attempt 1: With custom headers (for tracking) — no explicit 'from'
-    // (Graph API uses the authenticated user's email automatically)
-    if (headersArr) {
-      message.internetMessageHeaders = headersArr;
-    }
-
-    const resp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, saveToSentItems: true }),
-    });
-
-    if (resp.ok) {
-      return { success: true, messageId: `graph-${Date.now()}` };
-    }
-
-    const errText = await resp.text();
-    console.error(`[MicrosoftGraph] Send failed to ${opts.to}: status=${resp.status}, error=${errText}`);
-
-    // Don't retry on auth errors — those need token refresh at a higher level
-    if (resp.status === 401 || resp.status === 403) {
-      return { success: false, error: `Graph API error (${resp.status}): ${errText}` };
-    }
-
-    // Attempt 2: Without custom headers (some accounts reject internetMessageHeaders)
-    if (headersArr) {
-      console.log(`[MicrosoftGraph] Retrying without custom headers for ${opts.to}`);
-      delete message.internetMessageHeaders;
-      const retry2 = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+    const createDraft = async (withHeaders: boolean) => {
+      const message = (withHeaders && headersArr)
+        ? { ...baseMessage, internetMessageHeaders: headersArr }
+        : baseMessage;
+      const r = await fetch('https://graph.microsoft.com/v1.0/me/messages', {
         method: 'POST',
         headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, saveToSentItems: true }),
+        body: JSON.stringify(message),
       });
-      if (retry2.ok) {
-        return { success: true, messageId: `graph-${Date.now()}-noheaders` };
+      if (r.ok) {
+        return { ok: true as const, data: await r.json() as any };
       }
-      const retry2Err = await retry2.text();
-      console.error(`[MicrosoftGraph] Retry without headers failed: ${retry2.status} ${retry2Err}`);
+      return { ok: false as const, status: r.status, err: await r.text() };
+    };
+
+    // Attempt 1: draft with custom headers (needed for tracking)
+    let draft = await createDraft(true);
+
+    if (!draft.ok) {
+      // Auth errors need a higher-level token refresh — don't retry here
+      if (draft.status === 401 || draft.status === 403) {
+        return { success: false, error: `Graph API error (${draft.status}): ${draft.err}` };
+      }
+      // Some Microsoft personal accounts reject custom internetMessageHeaders — retry plain
+      if (headersArr) {
+        console.log(`[MicrosoftGraph] Draft create with headers failed (${draft.status}) for ${opts.to}, retrying without headers`);
+        draft = await createDraft(false);
+      }
+      if (!draft.ok) {
+        console.error(`[MicrosoftGraph] Draft create failed for ${opts.to}: ${draft.status} ${draft.err}`);
+        return { success: false, error: `Graph API error (${draft.status}): ${draft.err}` };
+      }
     }
 
-    return { success: false, error: `Graph API error (${resp.status}): ${errText}` };
+    const draftId: string | undefined = draft.data?.id;
+    const internetMessageId: string | undefined = draft.data?.internetMessageId;
+    if (!draftId) {
+      return { success: false, error: 'Graph API: draft created but no id returned' };
+    }
+
+    // Send the draft
+    const sendResp = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(draftId)}/send`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
+    if (!sendResp.ok) {
+      const sendErr = await sendResp.text();
+      console.error(`[MicrosoftGraph] Draft send failed for ${opts.to}: ${sendResp.status} ${sendErr}`);
+      // Best-effort cleanup so we don't leave orphan drafts in the user's Drafts folder
+      try {
+        await fetch(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(draftId)}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+      } catch { /* ignore */ }
+      return { success: false, error: `Graph API send error (${sendResp.status}): ${sendErr}` };
+    }
+
+    return {
+      success: true,
+      messageId: draftId,
+      internetMessageId,
+    };
   } catch (err) {
     console.error(`[MicrosoftGraph] Exception sending to ${opts.to}:`, err);
     return { success: false, error: err instanceof Error ? err.message : String(err) };
@@ -1087,6 +1111,16 @@ export class CampaignEngine {
           // Save Gmail threadId for follow-up threading (avoids extra API call later)
           if (result.threadId) msgUpdate.gmailThreadId = result.threadId;
           await storage.updateCampaignMessage(messageRecord.id, msgUpdate);
+
+          // Save real RFC internetMessageId for Outlook follow-up threading.
+          // followup-engine.ts uses originalMessage.messageId as fallback for In-Reply-To/References.
+          if (result.internetMessageId) {
+            try {
+              await storage.rawRun('UPDATE messages SET "messageId" = ? WHERE id = ?', result.internetMessageId, messageRecord.id);
+            } catch (e) {
+              console.warn(`[CampaignEngine] Failed to save internetMessageId for ${messageRecord.id}:`, e);
+            }
+          }
 
           localSentCount++;
           autopilotDailySent++;
