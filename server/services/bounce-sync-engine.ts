@@ -385,6 +385,7 @@ async function scanOutlookHistorical(orgId: string, lookbackDays: number = 30, c
           const text = msg.bodyPreview || '';
           const emails = extractEmailsFromText(text);
           for (const email of emails) {
+            if (!isSafeToSuppress(email, connectedEmails)) continue;
             try {
               await storage.addToSuppressionList(orgId, email, 'bounce', {
                 bounceType: 'hard',

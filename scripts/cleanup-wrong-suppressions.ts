@@ -15,14 +15,16 @@
  *      email matches an email_accounts row.
  *   2. suppression_list — DELETES rows where:
  *      (a) email matches an email_accounts row (sender accounts), OR
- *      (b) email matches an Exchange internal routing ID pattern,
- *      AND source = 'auto-detected' (only undoing what the buggy auto-path created)
+ *      (b) email matches an Exchange internal routing ID pattern.
+ *      Safety rail is the match itself: your own sender account should NEVER
+ *      be on the blocklist, and *.prod.outlook.com routing IDs are never
+ *      real mailboxes — so source doesn't matter, any such row is wrong.
  *
  * What this script does NOT touch:
  *   - Contacts are never deleted. Only their status is changed.
  *   - No campaigns, messages, tracking events, or other tables touched.
  *   - No contact fields touched except 'status'.
- *   - suppression_list rows with source != 'auto-detected' are left alone.
+ *   - suppression_list rows that don't match (a) or (b) above are left alone.
  *
  * Usage:
  *   export DATABASE_URL="postgresql://..."
@@ -71,11 +73,10 @@ async function main() {
       `SELECT sl.id, sl."organizationId", sl.email, sl.reason, sl.source, sl."createdAt"
        FROM suppression_list sl
        INNER JOIN email_accounts ea ON lower(ea.email) = lower(sl.email)
-       WHERE sl.source = 'auto-detected'
        ORDER BY sl.email, sl."organizationId"`,
     );
 
-    console.log(`━━ 1. Sender accounts in suppression_list (source=auto-detected) ━━`);
+    console.log(`━━ 1. Sender accounts in suppression_list (any source) ━━`);
     if (senderSuppressions.rows.length === 0) {
       console.log('  (none found)');
     } else {
@@ -96,12 +97,11 @@ async function main() {
       `SELECT id, "organizationId", email, source
        FROM suppression_list
        WHERE email LIKE $1
-         AND source = 'auto-detected'
        ORDER BY email`,
       [EXCHANGE_INTERNAL_REGEX],
     );
 
-    console.log(`━━ 2. Exchange internal routing IDs in suppression_list (source=auto-detected) ━━`);
+    console.log(`━━ 2. Exchange internal routing IDs in suppression_list (any source) ━━`);
     if (exchangeSuppressions.rows.length === 0) {
       console.log('  (none found)');
     } else {
