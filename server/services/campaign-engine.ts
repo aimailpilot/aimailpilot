@@ -687,7 +687,7 @@ export class CampaignEngine {
         .catch(async (err) => {
           console.error(`[CampaignEngine] FATAL: sendBatched crashed for campaign ${campaignId}:`, err);
           try {
-            await storage.updateCampaign(campaignId, { status: 'paused' });
+            await storage.updateCampaign(campaignId, { status: 'paused', autoPaused: true });
             this.activeCampaigns.delete(campaignId);
           } catch { }
         });
@@ -801,7 +801,7 @@ export class CampaignEngine {
         }
 
         // Auto-pause the campaign and wait until next window
-        await storage.updateCampaign(campaignId, { status: 'paused' });
+        await storage.updateCampaign(campaignId, { status: 'paused', autoPaused: true });
         if (tracker) tracker.paused = true;
 
         // Sleep until the next sending window opens (check every 60s in case of manual resume)
@@ -822,7 +822,7 @@ export class CampaignEngine {
 
         // Resume the campaign
         if (tracker) tracker.paused = false;
-        await storage.updateCampaign(campaignId, { status: 'active' });
+        await storage.updateCampaign(campaignId, { status: 'active', autoPaused: false });
         console.log(`[CampaignEngine] Campaign ${campaignId} sending window opened, resuming.`);
         
         // Reset daily counters when a new day starts
@@ -851,7 +851,7 @@ export class CampaignEngine {
         }
 
         // Pause until next day's window
-        await storage.updateCampaign(campaignId, { status: 'paused' });
+        await storage.updateCampaign(campaignId, { status: 'paused', autoPaused: true });
         if (tracker) tracker.paused = true;
         
         const sleepMs = this.msUntilNextSendWindow(sendingConfig?.autopilot!, sendingConfig?.timezoneOffset || 0, sendingConfig?.timezone);
@@ -863,7 +863,7 @@ export class CampaignEngine {
 
         if (!this.activeCampaigns.has(campaignId)) return;
         if (tracker) tracker.paused = false;
-        await storage.updateCampaign(campaignId, { status: 'active' });
+        await storage.updateCampaign(campaignId, { status: 'active', autoPaused: false });
         autopilotDailySent = 0;
         console.log(`[CampaignEngine] Campaign ${campaignId} daily limit reset, resuming.`);
       }
@@ -890,9 +890,9 @@ export class CampaignEngine {
           
           // Sleep until next day (check every 5 minutes for daily reset)
           // Instead of permanently stopping, pause and wait for daily counter reset
-          await storage.updateCampaign(campaignId, { status: 'paused' });
+          await storage.updateCampaign(campaignId, { status: 'paused', autoPaused: true });
           if (tracker) tracker.paused = true;
-          
+
           console.log(`[CampaignEngine] Campaign ${campaignId} sleeping until daily limit resets...`);
           
           // Wait up to 24 hours, checking every 5 minutes if daily limit has been reset
@@ -915,7 +915,7 @@ export class CampaignEngine {
           
           if (!this.activeCampaigns.has(campaignId)) return;
           if (tracker) tracker.paused = false;
-          await storage.updateCampaign(campaignId, { status: 'active' });
+          await storage.updateCampaign(campaignId, { status: 'active', autoPaused: false });
         }
         // ===== REPLY RE-CHECK ON RESUME =====
         // Skip contacts who replied during pause (checked via pre-loaded set)
@@ -1320,7 +1320,7 @@ export class CampaignEngine {
     const tracker = this.activeCampaigns.get(campaignId);
     if (tracker) {
       tracker.paused = true;
-      storage.updateCampaign(campaignId, { status: 'paused' });
+      storage.updateCampaign(campaignId, { status: 'paused', autoPaused: false });
       return true;
     }
     return false;
@@ -1346,7 +1346,7 @@ export class CampaignEngine {
     const tracker = this.activeCampaigns.get(campaignId);
     if (tracker) {
       this.activeCampaigns.delete(campaignId);
-      storage.updateCampaign(campaignId, { status: 'paused' });
+      storage.updateCampaign(campaignId, { status: 'paused', autoPaused: false });
       return true;
     }
     return false;
@@ -1393,39 +1393,58 @@ export class CampaignEngine {
    */
   async resumeActiveCampaigns(): Promise<void> {
     try {
-      const allOrgs = await storage.getAllOrganizationIds();
-      let resumedCount = 0;
-      
-      for (const orgId of allOrgs) {
-        const campaigns = await storage.getCampaigns(orgId) as any[];
-        for (const campaign of campaigns) {
-          if (campaign.status === 'active' && !this.activeCampaigns.has(campaign.id)) {
-            console.log(`[CampaignEngine] Auto-resuming active campaign "${campaign.name}" (${campaign.id}) for org ${orgId}`);
-            try {
-              const result = await this.startCampaign({
-                campaignId: campaign.id,
-                sendingConfig: campaign.sendingConfig || undefined,
-              });
-              if (result.success) {
-                resumedCount++;
-                console.log(`[CampaignEngine] Successfully resumed campaign ${campaign.id}`);
-              } else {
-                console.warn(`[CampaignEngine] Failed to resume campaign ${campaign.id}: ${result.error}`);
-              }
-            } catch (e) {
-              console.error(`[CampaignEngine] Error resuming campaign ${campaign.id}:`, e);
-            }
-          }
+      let resumedActive = 0;
+      let resumedAutoPaused = 0;
+
+      // 1) Resume campaigns left in 'active' status (standard path — covers normal restart)
+      const activeRows = await storage.rawAll(
+        `SELECT id, name, "organizationId", "sendingConfig" FROM campaigns WHERE status = 'active'`
+      );
+      for (const row of activeRows as any[]) {
+        if (this.activeCampaigns.has(row.id)) continue;
+        const sendingConfig = typeof row.sendingConfig === 'string'
+          ? (() => { try { return JSON.parse(row.sendingConfig); } catch { return null; } })()
+          : row.sendingConfig;
+        console.log(`[CampaignEngine] Auto-resuming active campaign "${row.name}" (${row.id})`);
+        try {
+          const result = await this.startCampaign({ campaignId: row.id, sendingConfig: sendingConfig || undefined });
+          if (result.success) { resumedActive++; }
+          else { console.warn(`[CampaignEngine] Failed to resume active campaign ${row.id}: ${result.error}`); }
+        } catch (e) {
+          console.error(`[CampaignEngine] Error resuming active campaign ${row.id}:`, e);
         }
       }
-      
-      if (resumedCount > 0) {
-        console.log(`[CampaignEngine] Auto-resumed ${resumedCount} active campaign(s) after server restart`);
-      } else {
-        console.log(`[CampaignEngine] No active campaigns to resume`);
+
+      // 2) Resume auto-paused campaigns (window-wait / daily-limit strandings after restart).
+      //    SQL filter pushes all guards to the DB so we never load user-paused rows.
+      //    Excludes completed/archived (safety rail). Autopilot must be enabled (JSONB->>'enabled' = 'true').
+      //    Window-open check is NOT applied here — startCampaign's own sleep loop handles closed windows correctly.
+      const autoPausedRows = await storage.rawAll(
+        `SELECT id, name, "organizationId", "sendingConfig"
+         FROM campaigns
+         WHERE status = 'paused'
+           AND "autoPaused" = true
+           AND "sendingConfig" IS NOT NULL
+           AND "sendingConfig"->'autopilot'->>'enabled' = 'true'`
+      );
+      for (const row of autoPausedRows as any[]) {
+        if (this.activeCampaigns.has(row.id)) continue;
+        const sendingConfig = typeof row.sendingConfig === 'string'
+          ? (() => { try { return JSON.parse(row.sendingConfig); } catch { return null; } })()
+          : row.sendingConfig;
+        console.log(`[CampaignEngine] Auto-resuming stranded (auto-paused) campaign "${row.name}" (${row.id})`);
+        try {
+          const result = await this.startCampaign({ campaignId: row.id, sendingConfig: sendingConfig || undefined });
+          if (result.success) { resumedAutoPaused++; }
+          else { console.warn(`[CampaignEngine] Failed to resume auto-paused campaign ${row.id}: ${result.error}`); }
+        } catch (e) {
+          console.error(`[CampaignEngine] Error resuming auto-paused campaign ${row.id}:`, e);
+        }
       }
+
+      console.log(`[CampaignEngine] Boot resume: ${resumedActive} active + ${resumedAutoPaused} auto-paused campaign(s) adopted`);
     } catch (error) {
-      console.error('[CampaignEngine] Error resuming active campaigns:', error);
+      console.error('[CampaignEngine] Error resuming campaigns on boot:', error);
     }
   }
 }

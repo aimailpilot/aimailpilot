@@ -3354,7 +3354,7 @@ Which account should I use and why? If I need to split across accounts, provide 
   app.post('/api/campaigns/:id/pause', async (req: any, res) => {
     const success = campaignEngine.pauseCampaign(req.params.id);
     if (!success) {
-      await storage.updateCampaign(req.params.id, { status: 'paused' });
+      await storage.updateCampaign(req.params.id, { status: 'paused', autoPaused: false });
     }
     res.json({ success: true });
   });
@@ -3410,7 +3410,7 @@ Which account should I use and why? If I need to split across accounts, provide 
 
   app.post('/api/campaigns/:id/stop', async (req: any, res) => {
     campaignEngine.stopCampaign(req.params.id);
-    await storage.updateCampaign(req.params.id, { status: 'paused' });
+    await storage.updateCampaign(req.params.id, { status: 'paused', autoPaused: false });
     res.json({ success: true });
   });
 
