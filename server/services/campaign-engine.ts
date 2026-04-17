@@ -1413,6 +1413,7 @@ export class CampaignEngine {
         } catch (e) {
           console.error(`[CampaignEngine] Error resuming active campaign ${row.id}:`, e);
         }
+        await new Promise(r => setTimeout(r, 2000));
       }
 
       // 2) Resume auto-paused campaigns (window-wait / daily-limit strandings after restart).
@@ -1440,6 +1441,7 @@ export class CampaignEngine {
         } catch (e) {
           console.error(`[CampaignEngine] Error resuming auto-paused campaign ${row.id}:`, e);
         }
+        await new Promise(r => setTimeout(r, 2000));
       }
 
       console.log(`[CampaignEngine] Boot resume: ${resumedActive} active + ${resumedAutoPaused} auto-paused campaign(s) adopted`);

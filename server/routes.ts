@@ -3181,23 +3181,21 @@ Which account should I use and why? If I need to split across accounts, provide 
         }
       }
 
-      // Enrich campaigns with creator name — single batch query instead of N getUser() calls
+      // Enrich campaigns with creator name — batch load unique creators
       try {
         const creatorIds = [...new Set((campaigns as any[]).map(c => c.createdBy).filter(Boolean))];
-        if (creatorIds.length > 0) {
-          const placeholders = creatorIds.map((_, i) => `$${i + 1}`).join(', ');
-          const userRows = await storage.rawAll(
-            `SELECT id, "firstName", "lastName", email FROM users WHERE id IN (${placeholders})`,
-            ...creatorIds
-          ) as any[];
-          const creators: Record<string, any> = {};
-          for (const u of userRows) creators[u.id] = u;
-          for (const c of campaigns as any[]) {
-            const creator = c.createdBy ? creators[c.createdBy] : null;
-            if (creator) {
-              c.creatorName = `${creator.firstName || ''} ${creator.lastName || ''}`.trim() || creator.email;
-              c.creatorEmail = creator.email;
-            }
+        const creators: Record<string, any> = {};
+        for (const uid of creatorIds) {
+          try {
+            const u = await storage.getUser(uid);
+            if (u) creators[uid] = u;
+          } catch (e) { /* skip */ }
+        }
+        for (const c of campaigns as any[]) {
+          const creator = c.createdBy ? creators[c.createdBy] : null;
+          if (creator) {
+            c.creatorName = `${(creator as any).firstName || ''} ${(creator as any).lastName || ''}`.trim() || (creator as any).email;
+            c.creatorEmail = (creator as any).email;
           }
         }
       } catch (e) { /* enrichment failure is non-fatal */ }
