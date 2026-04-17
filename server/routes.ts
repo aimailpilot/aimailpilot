@@ -4887,8 +4887,11 @@ Which account should I use and why? If I need to split across accounts, provide 
       const contacts = await storage.rawAll(`SELECT c.*,
         (SELECT ca.notes FROM contact_activities ca WHERE ca."contactId" = c.id ORDER BY ca."createdAt" DESC LIMIT 1) as lastRemark,
         (SELECT ca.type FROM contact_activities ca WHERE ca."contactId" = c.id ORDER BY ca."createdAt" DESC LIMIT 1) as lastActivityType,
-        (SELECT ca."createdAt" FROM contact_activities ca WHERE ca."contactId" = c.id ORDER BY ca."createdAt" DESC LIMIT 1) as lastActivityDate
-        FROM contacts c WHERE c."organizationId" = ? AND c."nextActionDate" IS NOT NULL AND c."nextActionDate" <= ?
+        (SELECT ca."createdAt" FROM contact_activities ca WHERE ca."contactId" = c.id ORDER BY ca."createdAt" DESC LIMIT 1) as lastActivityDate,
+        COALESCE(NULLIF(TRIM(CONCAT(u."firstName", ' ', u."lastName")), ''), u.email) as "assignedToName"
+        FROM contacts c
+        LEFT JOIN users u ON u.id = c."assignedTo"
+        WHERE c."organizationId" = ? AND c."nextActionDate" IS NOT NULL AND c."nextActionDate" <= ?
         AND c."pipelineStage" NOT IN ('won', 'lost') AND c.status NOT IN ('bounced', 'unsubscribed')
         ORDER BY c."nextActionDate" ASC LIMIT 200`, orgId, today + 'T23:59:59');
       res.json(contacts);

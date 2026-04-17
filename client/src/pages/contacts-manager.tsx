@@ -775,6 +775,8 @@ export default function ContactsManager() {
         // Refresh contact to get updated pipeline stage
         const cRes = await fetch(`/api/contacts/${detailContact.id}`, { credentials: 'include' });
         if (cRes.ok) { const c = await cRes.json(); setDetailContact(c); }
+        // Refresh follow-ups list so completed/rescheduled items update immediately
+        fetchFollowUps();
       } else {
         const err = await res.json().catch(() => ({}));
         toast({ title: "Failed to save activity", description: err.message || "Please try again.", variant: "destructive" });
@@ -1848,6 +1850,7 @@ export default function ContactsManager() {
                         </div>
                         <div className="text-[10px] text-gray-400 capitalize">{c.nextActionType || 'follow-up'}</div>
                         {c.nextActionDate && <div className="text-[10px] text-gray-300">{new Date(c.nextActionDate).toLocaleDateString()}</div>}
+                        {c.assignedToName && <div className="text-[10px] text-indigo-500 font-medium mt-0.5">{c.assignedToName}</div>}
                       </div>
                     </div>
                   );
