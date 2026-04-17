@@ -1772,6 +1772,7 @@ export class PostgresStorage {
   }
 
   async getAllRecentCampaignMessages(orgId: string) {
+    const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
     return queryAll(`
       SELECT m.*, ct.email as "contactEmail", c.name as "campaignName" FROM messages m
       INNER JOIN campaigns c ON m."campaignId" = c.id
@@ -1779,9 +1780,10 @@ export class PostgresStorage {
       WHERE c."organizationId" = $1
       AND m.status IN ('sent', 'failed', 'sending', 'bounced')
       AND m."providerMessageId" IS NOT NULL
+      AND m."sentAt" >= $2
       ORDER BY m."sentAt" DESC
       LIMIT 50000
-    `, [orgId]);
+    `, [orgId, cutoff]);
   }
 
   // ========== Unsubscribes ==========
