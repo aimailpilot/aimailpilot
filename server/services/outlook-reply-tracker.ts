@@ -297,8 +297,23 @@ export class OutlookReplyTracker {
     result.checked = listData.value.length;
     console.log(`[OutlookReplyTracker] Found ${listData.value.length} inbox messages for ${accountEmail}`);
 
+    // Build set of org's own sender emails (email_accounts + warmup_accounts) to skip warmup/internal mail
+    const ownEmailsSet = new Set<string>();
+    try {
+      const orgAccounts = await storage.getEmailAccounts(orgId);
+      for (const a of orgAccounts) if (a.email) ownEmailsSet.add(a.email.toLowerCase());
+      const warmupRows = await storage.rawAll(
+        'SELECT email FROM warmup_accounts WHERE "organizationId" = ?', orgId
+      ) as any[];
+      for (const r of warmupRows) if (r.email) ownEmailsSet.add(r.email.toLowerCase());
+    } catch (e) { /* non-fatal — if this fails, process all messages as before */ }
+
     for (const msg of listData.value) {
       try {
+        // Skip messages sent from our own org accounts (warmup/internal mail noise)
+        const senderEmail = (msg.from?.emailAddress?.address || '').toLowerCase();
+        if (senderEmail && ownEmailsSet.has(senderEmail)) continue;
+
         // Skip if already in inbox AND already matched to a campaign
         // Re-check messages that were stored without campaign matching (from older broken code)
         const existing = await storage.getInboxMessageByOutlookId(msg.id);
