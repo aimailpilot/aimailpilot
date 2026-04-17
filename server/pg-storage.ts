@@ -779,6 +779,29 @@ async function initializeSchema() {
     client.release();
   }
 
+  // Backfill allocatedTo/allocatedToName on contact_lists from existing contact assignedTo data
+  try {
+    await execute(`
+      UPDATE contact_lists cl
+      SET
+        "allocatedTo"     = sub."assignedTo",
+        "allocatedToName" = COALESCE(NULLIF(TRIM(CONCAT(u."firstName", ' ', u."lastName")), ''), u.email)
+      FROM (
+        SELECT "listId", "assignedTo"
+        FROM contacts
+        WHERE "assignedTo" IS NOT NULL AND "listId" IS NOT NULL
+        GROUP BY "listId", "assignedTo"
+        HAVING COUNT(*) = (SELECT COUNT(*) FROM contacts c2 WHERE c2."listId" = contacts."listId")
+      ) sub
+      JOIN users u ON u.id = sub."assignedTo"
+      WHERE cl.id = sub."listId"
+        AND cl."allocatedTo" IS NULL
+    `);
+    console.log('[PG] Backfilled allocatedTo/allocatedToName on contact_lists');
+  } catch (e) {
+    console.error('[PG] allocatedTo backfill error (non-fatal):', e);
+  }
+
   // Backfill recipientEmail on messages where contactId still resolves to a contact
   try {
     const needsBackfill = await queryOne(`SELECT COUNT(*) as cnt FROM messages WHERE "recipientEmail" IS NULL AND "contactId" IS NOT NULL`);
