@@ -4757,7 +4757,7 @@ Which account should I use and why? If I need to split across accounts, provide 
       const search = (req.query.search as string || '').trim();
       const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
 
-      const conditions: string[] = ['lo.organizationId = ?'];
+      const conditions: string[] = ['lo."organizationId" = ?'];
       const params: any[] = [orgId];
 
       if (bucket && bucket !== 'all') {
@@ -4770,7 +4770,7 @@ Which account should I use and why? If I need to split across accounts, provide 
 
       if (search) {
         const q = `%${search.toLowerCase()}%`;
-        conditions.push(`(LOWER(lo.contactEmail) LIKE ? OR LOWER(lo.contactName) LIKE ? OR LOWER(lo.company) LIKE ?)`);
+        conditions.push(`(LOWER(lo."contactEmail") LIKE ? OR LOWER(lo."contactName") LIKE ? OR LOWER(lo.company) LIKE ?)`);
         params.push(q, q, q);
       }
 
@@ -4779,7 +4779,7 @@ Which account should I use and why? If I need to split across accounts, provide 
         const memberAccounts = await storage.rawAll(`SELECT email FROM email_accounts WHERE "organizationId" = ? AND "userId" = ?`, orgId, req.user.id) as any[];
         if (memberAccounts.length > 0) {
           const ph = memberAccounts.map(() => '?').join(',');
-          conditions.push(`lo.accountEmail IN (${ph})`);
+          conditions.push(`lo."accountEmail" IN (${ph})`);
           params.push(...memberAccounts.map((a: any) => a.email));
         } else {
           return res.json({ leads: [], total: 0, bucketCounts: {} });
@@ -4795,14 +4795,14 @@ Which account should I use and why? If I need to split across accounts, provide 
       // Get leads with contact data joined
       const leads = await storage.rawAll(`
         SELECT lo.*,
-               c.id as contactId, c.firstName, c.lastName, c.company as contactCompany, c.jobTitle,
-               c.phone, c.city, c.country, c.status as contactStatus, c.pipelineStage,
-               c.totalOpened, c.totalClicked, c.totalReplied, c.totalSent as contactTotalSent, c.totalBounced,
-               c.lastOpenedAt, c.lastClickedAt, c.lastRepliedAt, c.assignedTo
+               c.id as "contactId", c."firstName", c."lastName", c.company as "contactCompany", c."jobTitle",
+               c.phone, c.city, c.country, c.status as "contactStatus", c."pipelineStage",
+               c."totalOpened", c."totalClicked", c."totalReplied", c."totalSent" as "contactTotalSent", c."totalBounced",
+               c."lastOpenedAt", c."lastClickedAt", c."lastRepliedAt", c."assignedTo"
         FROM lead_opportunities lo
-        LEFT JOIN contacts c ON LOWER(c.email) = LOWER(lo.contactEmail) AND c.organizationId = lo.organizationId
+        LEFT JOIN contacts c ON LOWER(c.email) = LOWER(lo."contactEmail") AND c."organizationId" = lo."organizationId"
         WHERE ${where}
-        ORDER BY lo.confidence DESC, lo.lastEmailDate DESC
+        ORDER BY lo.confidence DESC, lo."lastEmailDate" DESC
         LIMIT ? OFFSET ?
       `, ...params, limit, offset);
 
@@ -4816,7 +4816,7 @@ Which account should I use and why? If I need to split across accounts, provide 
       const bucketCounts = await storage.rawAll(`
         SELECT bucket, COUNT(*) as cnt
         FROM lead_opportunities
-        WHERE organizationId = ?
+        WHERE "organizationId" = ?
         GROUP BY bucket
         ORDER BY cnt DESC
       `, orgId) as any[];
