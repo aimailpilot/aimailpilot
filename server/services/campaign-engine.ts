@@ -547,10 +547,10 @@ export class CampaignEngine {
       } else if (campaign.contactIds && campaign.contactIds.length > 0) {
         // Bulk load all contacts in one query instead of one-by-one
         contacts = await storage.getContactsByIds(campaign.contactIds);
-        // If contactIds were invalid (e.g. 'paste-0' placeholders), fall back to all org contacts
+        // If contactIds were explicitly set but resolve to nothing, abort — do NOT fall back to all org contacts (causes OOM on large orgs)
         if (contacts.length === 0) {
-          console.warn(`[CampaignEngine] contactIds ${JSON.stringify(campaign.contactIds.slice(0, 5))} resolved to 0 contacts, falling back to all org contacts`);
-          contacts = await storage.getContacts(campaign.organizationId, 10000, 0);
+          console.error(`[CampaignEngine] contactIds ${JSON.stringify(campaign.contactIds.slice(0, 5))} resolved to 0 contacts — aborting campaign ${campaign.id} to prevent OOM fallback`);
+          return { success: false, error: 'Campaign contactIds resolve to 0 contacts — please re-import or reassign contacts' };
         }
       } else {
         contacts = await storage.getContacts(campaign.organizationId, 10000, 0);
