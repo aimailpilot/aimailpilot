@@ -762,6 +762,8 @@ async function initializeSchema() {
       'ALTER TABLE messages ADD COLUMN IF NOT EXISTS "recipientEmail" TEXT',
       'ALTER TABLE messages ADD COLUMN IF NOT EXISTS "messageId" TEXT',
       'ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS "autoPaused" BOOLEAN DEFAULT FALSE',
+      'ALTER TABLE contact_lists ADD COLUMN IF NOT EXISTS "allocatedTo" TEXT',
+      'ALTER TABLE contact_lists ADD COLUMN IF NOT EXISTS "allocatedToName" TEXT',
     ];
     for (const alt of alterColumns) {
       try { await client.query(alt); } catch (e) { /* column already exists */ }
@@ -1338,8 +1340,9 @@ export class PostgresStorage {
     return contactIds.length;
   }
 
-  async assignContactsByList(listId: string, userId: string, organizationId: string) {
+  async assignContactsByList(listId: string, userId: string, organizationId: string, memberName?: string) {
     const result = await execute('UPDATE contacts SET "assignedTo" = $1, "updatedAt" = $2 WHERE "listId" = $3 AND "organizationId" = $4', [userId, now(), listId, organizationId]);
+    await execute('UPDATE contact_lists SET "allocatedTo" = $1, "allocatedToName" = $2, "updatedAt" = $3 WHERE id = $4', [userId, memberName || null, now(), listId]);
     return result.rowCount;
   }
 

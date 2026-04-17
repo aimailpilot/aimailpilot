@@ -108,6 +108,7 @@
 |----------|------------------------|
 | Login / session lost | `server/routes.ts` (`requireAuth` ~line 130), `server/auth/google-oauth.ts` |
 | Campaign not sending | `server/services/campaign-engine.ts`, `server/routes.ts` (`campaigns/send`) |
+| Campaign stranded after restart | `campaign-engine.ts` `resumeActiveCampaigns()` — check `autoPaused` flag in DB; run `scripts/diag-active-campaigns.ts` |
 | Follow-up threading | `server/services/followup-engine.ts` (`executeFollowup`, `sendEmail`) |
 | Inbox not syncing | `gmail-reply-tracker.ts`, `outlook-reply-tracker.ts` |
 | False bounces / replies | `reply-classifier.ts` (strengthened patterns), `server/routes.ts` (auto-classify + `POST /api/inbox/reclassify`), `pg-storage.ts` |
@@ -117,3 +118,16 @@
 | Email account tokens 401 | `server/routes.ts` (`getGmailAccessToken`, `getOutlookAccessToken`) |
 | Raw SQL 0 rows in PG | Double-quote camelCase: `"organizationId"`, `"contactId"`, etc. |
 | Import crash | Never import `server/db.ts`. Use `storage.rawGet/rawAll/rawRun` |
+
+---
+
+## Diagnostic Scripts
+
+| Script | What it does |
+|--------|-------------|
+| `scripts/diag-active-campaigns.ts` | Lists all active campaigns with ✅ SENDING / ⚠️ SLOW / ❌ STRANDED flags based on last 10/60 min activity |
+| `scripts/diag-followup.ts` | Inspects follow-up executions for a campaign by name — step/status breakdown, pending overdue, sample rows |
+| `scripts/unstick-stranded-campaigns.ts` | One-time script: marks stranded campaigns `autoPaused=true` so boot recovery adopts them. `--apply` flag required to write. |
+| `scripts/fix-bellaward-bounced.ts` | Restores bounced contacts whose email matches any email_account row (removes false-positive bounces) |
+
+All scripts require `$env:DATABASE_URL` set in PowerShell before running.

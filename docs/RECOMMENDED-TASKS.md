@@ -127,6 +127,59 @@ User already has a Blocklist tab in Contacts. Building a separate admin page is 
 
 ---
 
+## 6. Fix Gmail reply tracker 400/404 errors — QUEUED 2026-04-14
+
+**Priority:** MEDIUM
+**Risk:** LOW (read path only, no send logic)
+**Effort:** ~50 LoC
+
+**Problem:**
+`gmail-reply-tracker.ts` emits continuous errors in production logs:
+- `Gmail API error (400): Invalid id value` — empty or malformed `providerMessageId` passed to `messages.get()`
+- `Gmail API error (404): Requested entity was not found` — stale ID for a deleted/purged Gmail message
+
+Both errors retry twice (2s + 4s backoff) before giving up, wasting ~6s per bad ID per poll cycle. Over 80 accounts polling every 5 minutes, this adds up. More importantly, 404s mean reply detection silently fails for those messages.
+
+**Fix direction:**
+1. Guard against empty/null/non-hex IDs before calling the Gmail API — skip immediately with a warning log
+2. Catch 404 responses and mark the local DB row as `provider_not_found` (or similar) so it's not retried every cycle
+3. Log the offending ID at WARN level so we can trace the source
+
+**Protected code constraints:**
+- Do NOT touch `checkingOrgs` lock logic
+- Do NOT touch 15-min lookback window in `runCheck()`
+- Do NOT touch NDR extraction guard
+
+**Files:**
+- [server/services/gmail-reply-tracker.ts](../server/services/gmail-reply-tracker.ts) — PROTECTED, add guards around `messages.get()` calls only
+
+---
+
+## 7. Fix Gmail/Outlook token refresh timeouts — QUEUED 2026-04-14
+
+**Priority:** MEDIUM
+**Risk:** MEDIUM (touches token refresh path used by campaign sends)
+**Effort:** ~100 LoC
+
+**Problem:**
+Logs show recurring `TIMEOUT (30000ms) on: refreshGmailToken/refreshMicrosoftToken` for multiple accounts (bharatai@, ujwala@, bharatai3@, bharatai5@, etc.). The 30s timeout blocks the send loop for that account while waiting. Doesn't block other accounts but wastes 30s per stalled account per send cycle.
+
+**Fix direction:**
+1. Investigate why token refresh HTTP calls hang — likely network timeout to Google/Microsoft from Azure
+2. Reduce the per-request timeout from 30s to ~10s with retry
+3. Cache last-known-good token aggressively — if refresh times out, use cached token if not yet expired
+
+**Protected code constraints:**
+- Do NOT change `parseInt(tokenExpiry || '0')` null handling in `getGmailAccessToken`
+- Do NOT remove 401 retry + force-refresh logic in `sendEmail()` Gmail path
+- Do NOT change `sendViaGmailAPI` return value
+
+**Files:**
+- [server/services/followup-engine.ts](../server/services/followup-engine.ts) — token refresh helpers
+- [server/services/campaign-engine.ts](../server/services/campaign-engine.ts) — PROTECTED, token refresh path only
+
+---
+
 ## Incident log — 2026-04-13
 
 **Context for future Claude sessions:**

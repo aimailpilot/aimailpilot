@@ -95,6 +95,8 @@ interface ContactList {
   contactCount: number;
   uploadedBy?: string;
   uploadedByName?: string;
+  allocatedTo?: string;
+  allocatedToName?: string;
   createdAt: string;
 }
 
@@ -479,6 +481,7 @@ export default function ContactsManager() {
         setAssignListId('');
         setAssignListTargetUserId('');
         await fetchContacts();
+        await fetchContactLists();
         await fetchTeamMembers();
       }
     } catch (e) { console.error('Failed to assign list:', e); }
@@ -1495,10 +1498,11 @@ export default function ContactsManager() {
             ) : (
               <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden">
                 {/* List table header */}
-                <div className="grid grid-cols-[1fr_100px_100px_100px_100px_48px] gap-4 px-5 py-3 border-b border-gray-100 bg-gray-50/60">
+                <div className="grid grid-cols-[1fr_100px_100px_120px_100px_100px_48px] gap-4 px-5 py-3 border-b border-gray-100 bg-gray-50/60">
                   <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">List Name</div>
                   <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Source</div>
                   <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Uploaded By</div>
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Allocated To</div>
                   <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 text-center">Contacts</div>
                   <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Created</div>
                   <div></div>
@@ -1508,7 +1512,7 @@ export default function ContactsManager() {
                   .map(list => (
                   <div
                     key={list.id}
-                    className="grid grid-cols-[1fr_100px_100px_100px_100px_48px] gap-4 px-5 py-3.5 border-b border-gray-50 items-center hover:bg-blue-50/30 cursor-pointer transition-all group"
+                    className="grid grid-cols-[1fr_100px_100px_120px_100px_100px_48px] gap-4 px-5 py-3.5 border-b border-gray-50 items-center hover:bg-blue-50/30 cursor-pointer transition-all group"
                     onClick={() => { setActiveListId(list.id); setCurrentPage(1); }}
                   >
                     <div className="flex items-center gap-3 min-w-0">
@@ -1535,6 +1539,11 @@ export default function ContactsManager() {
                     </div>
                     <div className="text-xs text-gray-500 truncate">
                       {list.uploadedByName || <span className="text-gray-300">-</span>}
+                    </div>
+                    <div className="text-xs truncate">
+                      {list.allocatedToName
+                        ? <span className="text-indigo-600 font-medium">{list.allocatedToName}</span>
+                        : <span className="text-gray-300">-</span>}
                     </div>
                     <div className="text-center">
                       <span className="text-sm font-bold text-gray-900">{list.contactCount}</span>

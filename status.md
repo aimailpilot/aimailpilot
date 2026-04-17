@@ -1,4 +1,4 @@
-# STATUS.md — DO NOT BREAK (61 features confirmed working)
+# STATUS.md — DO NOT BREAK (63 features confirmed working)
 
 > Do NOT modify code for these features unless explicitly asked to fix a bug in that specific feature.
 > When in doubt — **ask before changing**.
@@ -75,6 +75,7 @@
 | 65 | AI Refine Button — Two-Phase Reclassification | Team Scorecard + My Dashboard get purple "AI Refine" button. Phase 1: rules-based reclassification (5000 msgs). Phase 2: Azure OpenAI batch (200 msgs). Progress message shown; auto-refreshes dashboard after 15s. |
 | 66 | Email Rating Engine (Contact Scoring) | `email-rating-engine.ts` — 0–100 score + A+/A/B+…F grade per contact. Batch runs fire-and-forget via `POST /api/contacts/batch-rating`. AI rating uses Azure OpenAI reply-quality scoring. Ratings shown as badges in contacts table and detail card (condition: `emailRatingUpdatedAt` not `emailRating > 0`). Contacts with 0 sent emails correctly score 0/F. |
 | 67 | Email Rating — recipientEmail Fallback | `pg-storage.ts getContactEngagementStats` — 3-tier fallback: (1) match by `contactId`, (2) match by `recipientEmail` column (backfilled on startup from contacts), (3) match via old contactIds sharing same email. `messages.recipientEmail` added as `ALTER TABLE` + backfilled via `UPDATE messages SET "recipientEmail" = c.email FROM contacts c WHERE messages."contactId" = c.id`. New messages get `recipientEmail` from `campaign-engine.ts` and `followup-engine.ts`. |
+| 69 | Campaign Auto-Pause Recovery (autoPaused flag) — CONFIRMED WORKING 2026-04-14 | `campaign-engine.ts` + `pg-storage.ts` + `routes.ts` — `autoPaused` BOOLEAN column on campaigns distinguishes system pauses (window closed, daily limit, crash → `autoPaused=true`) from user pauses (UI pause/stop → `autoPaused=false`). `resumeActiveCampaigns()` does two-pass boot recovery: (1) `status='active'` rows, (2) `status='paused' AND autoPaused=true AND autopilot.enabled=true`. SQL-filtered, not in-memory. Verified live: 36/36 campaigns ✅ SENDING after deploy + unstick script (2026-04-14). |
 
 ## Golden Rules (NEVER violate)
 
@@ -101,3 +102,5 @@
 - **Email rating badge condition** in `contacts-manager.tsx` — use `contact.emailRatingUpdatedAt` (not `emailRating > 0`) to detect rated contacts. A 0/F rating is valid and must show a badge.
 - **`messages.recipientEmail` backfill** in `pg-storage.ts initializeSchema()` — runs after schema COMMIT using `queryOne`/`execute` (not `client`). Backfills from `contacts` table where `contactId` still resolves. Do NOT remove — required for rating fallback on re-imported contacts.
 - **Batch rating is fire-and-forget** — `POST /api/contacts/batch-rating` responds immediately with `background: true`, then runs `batchRecalculateRatings()` via `setImmediate()`. Do NOT make it synchronous (causes HTTP timeout on large orgs).
+- **autoPaused flag** — `campaigns.autoPaused` MUST be set to `true` on ALL system-initiated pauses (window closed, daily limit, sendBatched crash) and `false` on ALL user-initiated pauses (UI pause/stop). Boot recovery SQL filter depends on this being correct. Do NOT change `autoPaused` logic in `campaign-engine.ts` or `routes.ts` pause/stop endpoints.
+- **resumeActiveCampaigns two-pass** — Pass 1 (`status='active'`) and Pass 2 (`status='paused' AND autoPaused=true AND autopilot.enabled=true`) are both required. Do NOT collapse into one query or remove either pass. Pass 2 recovers stranded campaigns after server restart.

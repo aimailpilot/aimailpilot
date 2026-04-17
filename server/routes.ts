@@ -5719,8 +5719,12 @@ Example response:
       // Verify the target user is a member of this org
       const membership = await storage.getOrgMember(req.user.organizationId, userId);
       if (!membership) return res.status(400).json({ message: 'Target user is not a member of this organization' });
-      
-      const count = await storage.assignContactsByList(req.params.id, userId, req.user.organizationId);
+
+      const targetUser = await storage.getUser(userId);
+      const memberName = targetUser
+        ? (`${(targetUser as any).firstName || ''} ${(targetUser as any).lastName || ''}`.trim() || (targetUser as any).email || '')
+        : '';
+      const count = await storage.assignContactsByList(req.params.id, userId, req.user.organizationId, memberName);
       res.json({ success: true, assigned: count });
     } catch (error) {
       res.status(500).json({ message: 'Failed to assign list contacts' });
