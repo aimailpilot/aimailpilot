@@ -540,22 +540,6 @@ export class CampaignEngine {
       if (!emailAccount) return { success: false, error: 'Email account not found' };
       if (!emailAccount.smtpConfig) return { success: false, error: 'Email account SMTP not configured' };
 
-      // Early sending window check — if window is closed, sleep without loading contacts (prevents OOM on boot)
-      const earlyConfig: SendingConfig = optSendingConfig || campaign.sendingConfig || { delayBetweenEmails };
-      const earlyWindowCheck = this.checkSendingWindow(earlyConfig);
-      if (!earlyWindowCheck.canSend && earlyWindowCheck.pauseUntilMs) {
-        const pauseMs = earlyWindowCheck.pauseUntilMs - Date.now();
-        const pauseMin = Math.round(pauseMs / 60000);
-        console.log(`[CampaignEngine] Campaign ${campaignId} outside sending window: ${earlyWindowCheck.reason}. Pausing for ${pauseMin} minutes.`);
-        await storage.updateCampaign(campaignId, { status: 'paused', autoPaused: true });
-        this.activeCampaigns.set(campaignId, { timer: null, paused: true, progress: 0, total: 0 });
-        setTimeout(async () => {
-          this.activeCampaigns.delete(campaignId);
-          await this.startCampaign(options);
-        }, pauseMs);
-        return { success: true };
-      }
-
       // Get contacts for this campaign (batch-loaded to avoid N+1 queries)
       let contacts: any[];
       if (campaign.segmentId) {
