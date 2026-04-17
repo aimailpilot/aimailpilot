@@ -525,10 +525,10 @@ async function buildContactSummaries(orgId: string, emailAccountIds?: string[]):
   try {
     // Build account filter clause
     const hasAccountFilter = emailAccountIds && emailAccountIds.length > 0;
-    const accountFilterSQL = hasAccountFilter ? ` AND emailAccountId IN (${emailAccountIds!.map(() => '?').join(',')})` : '';
+    const accountFilterSQL = hasAccountFilter ? ` AND "emailAccountId" IN (${emailAccountIds!.map(() => '?').join(',')})` : '';
     const accountFilterParams = hasAccountFilter ? emailAccountIds! : [];
 
-    const countCheck = await storage.rawGet(`SELECT COUNT(*) as cnt FROM email_history WHERE organizationId = ?${accountFilterSQL}`, orgId, ...accountFilterParams) as any;
+    const countCheck = await storage.rawGet(`SELECT COUNT(*) as cnt FROM email_history WHERE "organizationId" = ?${accountFilterSQL}`, orgId, ...accountFilterParams) as any;
     console.log(`[LeadIntel] email_history has ${countCheck?.cnt || 0} rows for org ${orgId}${hasAccountFilter ? ` (filtered to ${emailAccountIds!.length} accounts)` : ''}`);
 
     if ((countCheck?.cnt || 0) === 0) {
@@ -538,15 +538,15 @@ async function buildContactSummaries(orgId: string, emailAccountIds?: string[]):
       // Sent-only contacts are just outreach recipients — not leads
       const contactRows = await storage.rawAll(`
         SELECT
-          LOWER(fromEmail) as contactEmail,
-          MAX(fromName) as contactName,
-          MAX(accountEmail) as accountEmail,
-          MAX(emailAccountId) as emailAccountId,
+          LOWER("fromEmail") as contactEmail,
+          MAX("fromName") as contactName,
+          MAX("accountEmail") as accountEmail,
+          MAX("emailAccountId") as emailAccountId,
           COUNT(*) as totalReceived,
-          MAX(receivedAt) as lastEmailDate
+          MAX("receivedAt") as lastEmailDate
         FROM email_history
-        WHERE organizationId = ? AND direction = 'received'
-          AND fromEmail IS NOT NULL AND fromEmail != ''
+        WHERE "organizationId" = ? AND direction = 'received'
+          AND "fromEmail" IS NOT NULL AND "fromEmail" != ''
           ${accountFilterSQL}
         GROUP BY contactEmail
         ORDER BY lastEmailDate DESC
@@ -559,10 +559,10 @@ async function buildContactSummaries(orgId: string, emailAccountIds?: string[]):
       const sentCounts: Record<string, number> = {};
       try {
         const sentRows = await storage.rawAll(`
-          SELECT LOWER(toEmail) as contactEmail, COUNT(*) as cnt
+          SELECT LOWER("toEmail") as contactEmail, COUNT(*) as cnt
           FROM email_history
-          WHERE organizationId = ? AND direction = 'sent'
-            AND toEmail IS NOT NULL AND toEmail != ''
+          WHERE "organizationId" = ? AND direction = 'sent'
+            AND "toEmail" IS NOT NULL AND "toEmail" != ''
             ${accountFilterSQL}
           GROUP BY contactEmail
         `, orgId, ...accountFilterParams) as any[];
@@ -583,8 +583,8 @@ async function buildContactSummaries(orgId: string, emailAccountIds?: string[]):
         try {
           const samples = await storage.rawAll(`
             SELECT subject, snippet FROM email_history
-            WHERE organizationId = ? AND (LOWER(fromEmail) = ? OR LOWER(toEmail) = ?)
-            ORDER BY receivedAt DESC LIMIT 5
+            WHERE "organizationId" = ? AND (LOWER("fromEmail") = ? OR LOWER("toEmail") = ?)
+            ORDER BY "receivedAt" DESC LIMIT 5
           `, orgId, email, email) as any[];
           subjects = samples.map((s: any) => s.subject).filter(Boolean);
           snippets = samples.map((s: any) => (s.snippet || '').substring(0, 200)).filter(Boolean);
@@ -616,11 +616,11 @@ async function buildContactSummaries(orgId: string, emailAccountIds?: string[]):
   // Uses JS-side aggregation instead of GROUP_CONCAT for cross-DB compatibility
   try {
     const inboxRows = await storage.rawAll(`
-      SELECT fromEmail as contactEmail, fromName as contactName,
-        subject, snippet, receivedAt
+      SELECT "fromEmail" as contactEmail, "fromName" as contactName,
+        subject, snippet, "receivedAt"
       FROM unified_inbox
-      WHERE organizationId = ? AND status != 'sent'
-      ORDER BY receivedAt DESC
+      WHERE "organizationId" = ? AND status != 'sent'
+      ORDER BY "receivedAt" DESC
       LIMIT 2000
     `, orgId) as any[];
 
@@ -669,12 +669,12 @@ async function buildContactSummaries(orgId: string, emailAccountIds?: string[]):
   // Only enriches — does NOT add sent-only contacts (those are outreach noise, not leads)
   try {
     const contactRows = await storage.rawAll(`
-      SELECT email, firstName, lastName, company,
-        totalSent, totalOpened, totalClicked, totalReplied,
-        lastOpenedAt, lastClickedAt, lastRepliedAt, leadStatus, status
+      SELECT email, "firstName", "lastName", company,
+        "totalSent", "totalOpened", "totalClicked", "totalReplied",
+        "lastOpenedAt", "lastClickedAt", "lastRepliedAt", "leadStatus", status
       FROM contacts
-      WHERE organizationId = ? AND totalSent > 0
-      ORDER BY totalSent DESC
+      WHERE "organizationId" = ? AND "totalSent" > 0
+      ORDER BY "totalSent" DESC
       LIMIT 500
     `, orgId) as any[];
 
@@ -885,7 +885,7 @@ export async function analyzeOrgLeads(orgId: string, emailAccountIds?: string[])
 
     // Quick DB check before building summaries
     try {
-      const cnt = await storage.rawGet(`SELECT COUNT(*) as cnt FROM email_history WHERE organizationId = ?`, orgId) as any;
+      const cnt = await storage.rawGet(`SELECT COUNT(*) as cnt FROM email_history WHERE "organizationId" = ?`, orgId) as any;
       result.debug.emailHistoryCount = cnt?.cnt || 0;
       result.debug.dbOk = true;
     } catch (dbErr) {
@@ -918,7 +918,7 @@ export async function analyzeOrgLeads(orgId: string, emailAccountIds?: string[])
       // Look up existing contact for company info
       let company = '';
       try {
-        const contact = await storage.rawGet('SELECT company FROM contacts WHERE organizationId = ? AND LOWER(email) = ? LIMIT 1', orgId, cls.contactEmail.toLowerCase()) as any;
+        const contact = await storage.rawGet('SELECT company FROM contacts WHERE "organizationId" = ? AND LOWER(email) = ? LIMIT 1', orgId, cls.contactEmail.toLowerCase()) as any;
         if (contact?.company) company = contact.company;
       } catch (e) { /* ignore */ }
 
