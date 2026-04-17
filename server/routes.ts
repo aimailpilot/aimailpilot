@@ -4448,6 +4448,40 @@ Which account should I use and why? If I need to split across accounts, provide 
     }
   });
 
+  // Campaigns that used contacts from this list
+  app.get('/api/contact-lists/:id/campaigns', async (req: any, res) => {
+    try {
+      const list = await storage.getContactList(req.params.id);
+      if (!list) return res.status(404).json({ message: 'Not found' });
+
+      // Find campaigns that included contacts from this list — join entirely in DB
+      const campaigns = await storage.rawAll(
+        `SELECT DISTINCT c.id, c.name, c.status, c."sentCount", c."totalRecipients", c."createdAt", c."createdBy",
+                COALESCE(NULLIF(TRIM(CONCAT(u."firstName", ' ', u."lastName")), ''), u.email) as "createdByName"
+         FROM campaigns c
+         LEFT JOIN users u ON u.id = c."createdBy"
+         WHERE c."organizationId" = $1
+           AND EXISTS (
+             SELECT 1
+             FROM jsonb_array_elements_text(
+               CASE WHEN jsonb_typeof(c."contactIds") = 'array' THEN c."contactIds" ELSE '[]'::jsonb END
+             ) AS cid
+             JOIN contacts ct ON ct.id = cid
+             WHERE ct."listId" = $2
+           )
+         ORDER BY c."createdAt" DESC
+         LIMIT 50`,
+        req.user.organizationId,
+        req.params.id
+      ) as any[];
+
+      res.json(campaigns);
+    } catch (error) {
+      console.error('List campaigns fetch error:', error);
+      res.status(500).json({ message: 'Failed to fetch campaigns for list' });
+    }
+  });
+
   // Create a new (empty) contact list
   app.post('/api/contact-lists', async (req: any, res) => {
     try {

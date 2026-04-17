@@ -134,6 +134,9 @@ export default function ContactsManager() {
   // Contact lists
   const [contactLists, setContactLists] = useState<ContactList[]>([]);
   const [activeListId, setActiveListId] = useState<string | null>(null);
+  const [listCampaigns, setListCampaigns] = useState<any[]>([]);
+  const [listCampaignsLoading, setListCampaignsLoading] = useState(false);
+  const [showListCampaigns, setShowListCampaigns] = useState(false);
 
   // Form state
   const [formEmail, setFormEmail] = useState('');
@@ -276,6 +279,17 @@ export default function ContactsManager() {
 
   useEffect(() => { fetchContacts(); }, [debouncedSearch, statusFilter, activeListId, activeTab, assignFilterUserId, currentPage, sortBy, sortOrder, pipelineFilter, companyFilter, locationFilter, designationFilter, leadFilterValue]);
   useEffect(() => { fetchContactLists(); fetchTeamMembers(); fetchFollowUps(); fetchFilterOptions(); fetchHotLeadsCounts(); }, []);
+  useEffect(() => {
+    if (activeListId) {
+      setListCampaigns([]);
+      setShowListCampaigns(false);
+      setListCampaignsLoading(true);
+      fetch(`/api/contact-lists/${activeListId}/campaigns`, { credentials: 'include' })
+        .then(r => r.json()).then(data => { setListCampaigns(Array.isArray(data) ? data : []); })
+        .catch(() => setListCampaigns([]))
+        .finally(() => setListCampaignsLoading(false));
+    }
+  }, [activeListId]);
 
   const fetchContacts = async () => {
     setLoading(true);
@@ -1631,6 +1645,44 @@ export default function ContactsManager() {
               <Button variant="ghost" size="sm" className="h-7 text-violet-400 hover:text-red-500" onClick={() => setActiveListId(null)}>
                 <X className="h-4 w-4" />
               </Button>
+            </div>
+
+            {/* Campaigns collapsible panel */}
+            <div className="border border-gray-200 rounded-xl overflow-hidden">
+              <button
+                className="w-full flex items-center justify-between px-4 py-2.5 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
+                onClick={() => setShowListCampaigns(v => !v)}
+              >
+                <span className="text-xs font-semibold text-gray-600 flex items-center gap-2">
+                  <span>Campaigns using this list</span>
+                  {listCampaignsLoading
+                    ? <span className="text-gray-400">Loading...</span>
+                    : <span className="bg-indigo-100 text-indigo-600 text-[10px] font-bold px-1.5 py-0.5 rounded-full">{listCampaigns.length}</span>
+                  }
+                </span>
+                <ChevronDown className={`h-3.5 w-3.5 text-gray-400 transition-transform ${showListCampaigns ? 'rotate-180' : ''}`} />
+              </button>
+              {showListCampaigns && (
+                <div className="divide-y divide-gray-50">
+                  {listCampaigns.length === 0 ? (
+                    <div className="px-4 py-3 text-xs text-gray-400">No campaigns found for this list.</div>
+                  ) : listCampaigns.map((camp: any) => (
+                    <div key={camp.id} className="grid grid-cols-[1fr_90px_110px_80px] gap-3 px-4 py-2.5 items-center hover:bg-gray-50">
+                      <div className="text-xs font-medium text-gray-800 truncate">{camp.name}</div>
+                      <div>
+                        <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full capitalize ${
+                          camp.status === 'active' ? 'bg-green-100 text-green-700'
+                          : camp.status === 'completed' ? 'bg-blue-100 text-blue-700'
+                          : camp.status === 'paused' ? 'bg-amber-100 text-amber-700'
+                          : 'bg-gray-100 text-gray-500'
+                        }`}>{camp.status}</span>
+                      </div>
+                      <div className="text-xs text-gray-500 truncate">{camp.createdByName || '-'}</div>
+                      <div className="text-xs text-gray-400 text-right">{camp.sentCount ?? 0} sent</div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {renderContactsTable()}
