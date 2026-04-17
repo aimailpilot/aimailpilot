@@ -244,6 +244,11 @@ export class GmailReplyTracker {
           throw new Error(`Gmail API auth error (401): Token may have expired`);
         }
 
+        if (response.status === 404) {
+          // Message was deleted/moved between list and get — benign race condition, skip silently
+          return null;
+        }
+
         if (!response.ok) {
           const errorText = await response.text();
           throw new Error(`Gmail API error (${response.status}): ${errorText}`);
@@ -389,6 +394,8 @@ export class GmailReplyTracker {
             `messages/${msgRef.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=In-Reply-To&metadataHeaders=References&metadataHeaders=Date&metadataHeaders=To`
           );
 
+          if (!msg) continue; // message deleted between list and get
+
           const headers = msg.payload?.headers || [];
           const getHeader = (name: string) => headers.find(h => h.name.toLowerCase() === name.toLowerCase())?.value || '';
 
@@ -451,6 +458,7 @@ export class GmailReplyTracker {
               let bounceBody = msg.snippet || '';
               try {
                 const fullMsg = await this.gmailFetch(accessToken, `messages/${msgRef.id}?format=full`);
+                if (!fullMsg) throw new Error('message deleted');
                 const bodyData = fullMsg.payload?.body?.data || '';
                 const parts = fullMsg.payload?.parts || [];
                 if (bodyData) {
