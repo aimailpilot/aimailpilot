@@ -297,7 +297,7 @@ export default function LeadOpportunities() {
           </div>
           <div className="flex items-center gap-2">
             <div className="flex items-center gap-1">
-              <Input type="number" min="1" max="24" value={monthsBack} onChange={e => setMonthsBack(e.target.value)}
+              <Input type="number" min="1" max="36" value={monthsBack} onChange={e => setMonthsBack(e.target.value)}
                 className="h-8 w-16 text-xs" title="Months to scan back" />
               <span className="text-xs text-gray-400">months</span>
             </div>
