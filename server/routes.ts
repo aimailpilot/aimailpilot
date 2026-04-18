@@ -9602,6 +9602,10 @@ Generate an appropriate reply to the LATEST email above, considering the full co
             SELECT COUNT(DISTINCT LOWER(COALESCE(c.email, ui."fromEmail"))) as cnt FROM unified_inbox ui
             INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
             LEFT JOIN contacts c ON c.id = ui."contactId"
+            INNER JOIN lead_opportunities lo
+              ON LOWER(lo."contactEmail") = LOWER(COALESCE(c.email, ui."fromEmail"))
+              AND lo."organizationId" = ui."organizationId"
+              AND lo.bucket IN ('hot_lead', 'warm_lead', 'past_customer')
             WHERE ui."organizationId" = ? AND ea."userId" = ?
             AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
             AND ui."replyType" = 'positive'
@@ -9764,7 +9768,10 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           FROM unified_inbox ui
           INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
           LEFT JOIN contacts c ON c.id = ui."contactId"
-          LEFT JOIN lead_opportunities lo ON LOWER(lo."contactEmail") = LOWER(ui."fromEmail") AND lo."organizationId" = ?
+          INNER JOIN lead_opportunities lo
+            ON LOWER(lo."contactEmail") = LOWER(COALESCE(c.email, ui."fromEmail"))
+            AND lo."organizationId" = ?
+            AND lo.bucket IN ('hot_lead', 'warm_lead', 'past_customer')
           WHERE ui."organizationId" = ? AND ea."userId" = ?
           AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
           AND ui."replyType" = 'positive'
