@@ -9580,6 +9580,11 @@ Generate an appropriate reply to the LATEST email above, considering the full co
               SELECT 1 FROM messages m2 WHERE m2."contactId" = m."contactId"
               AND m2."campaignId" = m."campaignId" AND m2.status = 'replied'
             )
+            AND NOT EXISTS (
+              SELECT 1 FROM unified_inbox ui WHERE ui."contactId" = m."contactId"
+              AND ui."campaignId" = m."campaignId"
+              AND ui."replyType" IN ('positive', 'negative', 'general', 'unsubscribe')
+            )
           `, orgId, userId, notRepliedCutoff) as any)?.cnt || 0);
         } catch { /* messages table schema mismatch — skip */ }
 
@@ -9704,6 +9709,11 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           AND NOT EXISTS (
             SELECT 1 FROM messages m2 WHERE m2."contactId" = m."contactId"
             AND m2."campaignId" = m."campaignId" AND m2.status = 'replied'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM unified_inbox ui WHERE ui."contactId" = m."contactId"
+            AND ui."campaignId" = m."campaignId"
+            AND ui."replyType" IN ('positive', 'negative', 'general', 'unsubscribe')
           )
           ORDER BY m."contactId", m."sentAt" ASC
         `, orgId, userId, notRepliedCutoff) as any[];

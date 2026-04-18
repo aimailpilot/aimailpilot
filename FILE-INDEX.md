@@ -18,10 +18,10 @@
 | `server/auth/microsoft-oauth.ts` | Microsoft OAuth (MSAL) — token exchange, refresh |
 | `server/routes/oauth-routes.ts` | Gmail/Outlook connect, Google Sheets/Excel/CSV import routes |
 | `server/services/campaign-engine.ts` | Email sending, scheduling, throttling, per-account limits |
-| `server/services/followup-engine.ts` | Auto follow-ups, Gmail/Outlook threading, bounce skip |
+| `server/services/followup-engine.ts` | Auto follow-ups, Gmail/Outlook threading, bounce skip. Has `addTrackingPixel()`, `addClickTracking()`, `getBaseUrl()` helpers for Steps 2/3/4 open+click tracking |
 | `server/services/warmup-engine.ts` | Self-warmup between org accounts, engagement actions |
-| `server/services/gmail-reply-tracker.ts` | Gmail inbox sync — reply/bounce/open detection |
-| `server/services/outlook-reply-tracker.ts` | Outlook Graph inbox sync — reply/bounce/open detection |
+| `server/services/gmail-reply-tracker.ts` | Gmail inbox sync — reply/bounce/open detection. Has warmup filter (`ownEmailsSet` from email_accounts+warmup_accounts), 404 silent skip (returns null), 90-day message cutoff via `getAllRecentCampaignMessages` |
+| `server/services/outlook-reply-tracker.ts` | Outlook Graph inbox sync — reply/bounce/open detection. Has warmup filter (`ownEmailsSet`) |
 | `server/services/bounce-sync-engine.ts` | 5-source bounce scanner + suppression list sync |
 | `server/services/reply-classifier.ts` | Auto-classify replies: positive/negative/bounce/OOO/auto_reply/unsub — 30+ rule patterns + Azure OpenAI for borderline cases |
 | `server/services/smtp-email-service.ts` | SMTP provider abstraction (SendGrid, Elastic, generic) |
@@ -108,7 +108,8 @@
 |----------|------------------------|
 | Login / session lost | `server/routes.ts` (`requireAuth` ~line 130), `server/auth/google-oauth.ts` |
 | Campaign not sending | `server/services/campaign-engine.ts`, `server/routes.ts` (`campaigns/send`) |
-| Campaign stranded after restart | `campaign-engine.ts` `resumeActiveCampaigns()` — check `autoPaused` flag in DB; run `scripts/diag-active-campaigns.ts` |
+| Campaign stranded after restart | `campaign-engine.ts` `resumeActiveCampaigns()` — check `autoPaused` flag in DB; run `scripts/diag-active-campaigns.ts`. Boot has 2s stagger between campaigns to prevent OOM. |
+| Server OOM crash on boot | `campaign-engine.ts` — check if a campaign has orphaned contactIds (0 contacts). Abort path added. Also check Azure `NODE_OPTIONS=--max-old-space-size=4096` is set. |
 | Follow-up threading | `server/services/followup-engine.ts` (`executeFollowup`, `sendEmail`) |
 | Inbox not syncing | `gmail-reply-tracker.ts`, `outlook-reply-tracker.ts` |
 | False bounces / replies | `reply-classifier.ts` (strengthened patterns), `server/routes.ts` (auto-classify + `POST /api/inbox/reclassify`), `pg-storage.ts` |
