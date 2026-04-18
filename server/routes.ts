@@ -8357,6 +8357,66 @@ Respond with ONLY a JSON object in this format:
     }
   });
 
+  // Confirm AI-suggested Won — flips contact pipelineStage to 'won' and dismisses nudge
+  app.post('/api/inbox/:id/confirm-won', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const { dealValue, dealNotes } = req.body || {};
+      const msg = await storage.getInboxMessage(req.params.id);
+      if (!msg || (msg as any).organizationId !== orgId) return res.status(404).json({ message: 'Not found' });
+      const contactId = (msg as any).contactId;
+      if (contactId) {
+        await storage.rawRun(
+          `UPDATE contacts SET "pipelineStage" = 'won', "dealValue" = COALESCE(?, "dealValue"), "dealNotes" = COALESCE(?, "dealNotes"), "dealClosedAt" = ? WHERE id = ? AND "organizationId" = ?`,
+          dealValue ?? null, dealNotes ?? null, new Date().toISOString(), contactId, orgId
+        );
+      }
+      await storage.rawRun(`UPDATE unified_inbox SET "aiSuggestedWon" = FALSE WHERE id = ?`, req.params.id);
+      res.json({ success: true });
+    } catch (e: any) {
+      console.error('[confirm-won]', e);
+      res.status(500).json({ message: 'Failed to confirm Won' });
+    }
+  });
+
+  // Confirm AI-suggested Meeting — logs a contact_activities row of type='meeting' and dismisses nudge
+  app.post('/api/inbox/:id/confirm-meeting', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const userId = req.user.id;
+      const msg = await storage.getInboxMessage(req.params.id);
+      if (!msg || (msg as any).organizationId !== orgId) return res.status(404).json({ message: 'Not found' });
+      const contactId = (msg as any).contactId;
+      if (contactId) {
+        try {
+          await (storage as any).createContactActivity({
+            contactId,
+            organizationId: orgId,
+            userId,
+            type: 'meeting',
+            outcome: 'scheduled',
+            notes: `Confirmed from inbox nudge: ${(msg as any).subject || ''}`,
+          });
+        } catch { /* fallback: direct insert */ }
+      }
+      await storage.rawRun(`UPDATE unified_inbox SET "aiSuggestedMeeting" = FALSE WHERE id = ?`, req.params.id);
+      res.json({ success: true });
+    } catch (e: any) {
+      console.error('[confirm-meeting]', e);
+      res.status(500).json({ message: 'Failed to confirm meeting' });
+    }
+  });
+
+  // Dismiss a nudge without acting on it
+  app.post('/api/inbox/:id/dismiss-nudge', requireAuth, async (req: any, res) => {
+    try {
+      await storage.rawRun(`UPDATE unified_inbox SET "aiSuggestedWon" = FALSE, "aiSuggestedMeeting" = FALSE WHERE id = ?`, req.params.id);
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ message: 'Failed to dismiss' });
+    }
+  });
+
   // Archive message
   app.post('/api/inbox/:id/archive', requireAuth, async (req: any, res) => {
     try {
@@ -9529,6 +9589,22 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           proposalsSent = activityMap['proposal'] || 0;
         } catch { /* contact_activities may not exist */ }
 
+        // Meetings detected in inbox (regex-detected Zoom/Meet/Teams/ICS invites sent to this user's accounts).
+        // Counted as DISTINCT contact so multiple invite emails for the same contact = 1 meeting.
+        try {
+          const inboxMeetings = parseInt((await storage.rawGet(`
+            SELECT COUNT(DISTINCT LOWER(COALESCE(c.email, ui."fromEmail"))) as cnt FROM unified_inbox ui
+            INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
+            LEFT JOIN contacts c ON c.id = ui."contactId"
+            WHERE ui."organizationId" = ? AND ea."userId" = ?
+            AND ui."meetingDetected" = TRUE
+            AND ui."receivedAt" >= ? AND ui."receivedAt" < ?
+            ${ownEmailsFilter}
+            AND LOWER(TRIM(COALESCE(c.email, ''))) NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
+          `, orgId, userId, startDate, endDate) as any)?.cnt || 0);
+          meetingsDone += inboxMeetings;
+        } catch { /* meetingDetected column may not exist yet */ }
+
         // Pipeline stats (contacts assigned to this user)
         // dealValue column may not exist yet on older deployments — use try/catch
         let pipelineStats: any[] = [];
@@ -9782,7 +9858,29 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         return res.json({ contacts: contacts || [] });
       }
 
-      res.status(400).json({ message: 'Invalid type. Use not_replied or hot_leads' });
+      if (type === 'meetings') {
+        const contacts = await storage.rawAll(`
+          SELECT DISTINCT ON (LOWER(COALESCE(c.email, ui."fromEmail")))
+            COALESCE(c.id, ui.id) AS id,
+            COALESCE(c."firstName", SPLIT_PART(ui."fromName", ' ', 1), '') AS "firstName",
+            COALESCE(c."lastName", '') AS "lastName",
+            COALESCE(c.email, ui."fromEmail") AS email,
+            c.company, c."pipelineStage", c."dealValue", c."nextActionDate",
+            ui."receivedAt" AS "sentAt", ui.subject,
+            ui."meetingPlatform", ui."meetingUrl", ui."meetingAt"
+          FROM unified_inbox ui
+          INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
+          LEFT JOIN contacts c ON c.id = ui."contactId"
+          WHERE ui."organizationId" = ? AND ea."userId" = ?
+          AND ui."meetingDetected" = TRUE
+          ${ownEmailsFilter}
+          AND LOWER(TRIM(COALESCE(c.email, ''))) NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
+          ORDER BY LOWER(COALESCE(c.email, ui."fromEmail")), ui."receivedAt" DESC
+        `, orgId, userId) as any[];
+        return res.json({ contacts: contacts || [] });
+      }
+
+      res.status(400).json({ message: 'Invalid type. Use not_replied, hot_leads, or meetings' });
     } catch (error: any) {
       console.error('[Scorecard Drilldown] Error:', error.message);
       res.status(500).json({ message: 'Failed to fetch drill-down data' });
@@ -9901,6 +9999,20 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         callsMade = activityMap['call'] || 0;
         meetingsDone = activityMap['meeting'] || 0;
         proposalsSent = activityMap['proposal'] || 0;
+      } catch { }
+
+      try {
+        const inboxMeetings = parseInt((await storage.rawGet(`
+          SELECT COUNT(DISTINCT LOWER(COALESCE(c.email, ui."fromEmail"))) as cnt FROM unified_inbox ui
+          INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
+          LEFT JOIN contacts c ON c.id = ui."contactId"
+          WHERE ui."organizationId" = ? AND ea."userId" = ?
+          AND ui."meetingDetected" = TRUE
+          AND ui."receivedAt" >= ? AND ui."receivedAt" < ?
+          AND LOWER(TRIM(ui."fromEmail")) NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
+          AND LOWER(TRIM(COALESCE(c.email, ''))) NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
+        `, orgId, userId, startDate, endDate) as any)?.cnt || 0);
+        meetingsDone += inboxMeetings;
       } catch { }
 
       let dealsWon = { cnt: 0, totalValue: 0 };

@@ -4010,9 +4010,9 @@ export default function ContactsManager() {
                     <div className="text-xs text-gray-500 truncate min-w-0">{contact.jobTitle || <span className="text-gray-300">--</span>}</div>
                   )}
 
-                  {/* Pipeline Stage (inline clickable) */}
+                  {/* Pipeline Stage (inline clickable) + quick Won/Lost actions */}
                   {!isSpecialTab && (
-                    <div className="flex items-center" onClick={e => e.stopPropagation()}>
+                    <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <button className={`text-[10px] px-2 py-1 rounded-full font-medium ${stage?.color || 'bg-gray-100 text-gray-500'} hover:opacity-80 transition`}>
@@ -4027,6 +4027,24 @@ export default function ContactsManager() {
                           ))}
                         </DropdownMenuContent>
                       </DropdownMenu>
+                      {contact.pipelineStage !== 'won' && (
+                        <button
+                          title="Mark as Won"
+                          onClick={() => updatePipeline(contact.id, 'won')}
+                          className="p-1 rounded hover:bg-emerald-50 text-emerald-600 transition"
+                        >
+                          <Trophy className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                      {contact.pipelineStage !== 'lost' && (
+                        <button
+                          title="Mark as Lost"
+                          onClick={() => updatePipeline(contact.id, 'lost')}
+                          className="p-1 rounded hover:bg-red-50 text-red-500 transition"
+                        >
+                          <XOctagon className="h-3.5 w-3.5" />
+                        </button>
+                      )}
                     </div>
                   )}
 

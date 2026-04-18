@@ -4,6 +4,8 @@ import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { startFollowupEngine } from "./services/followup-engine";
 import { startWarmupEngine } from "./services/warmup-engine";
+import { startHotLeadsRefiner } from "./services/hot-leads-refiner";
+import { startInboxNudgeEngine } from "./services/inbox-nudge-engine";
 import { campaignEngine } from "./services/campaign-engine";
 import { classifyReply, classifyReplyWithAI } from "./services/reply-classifier";
 import { storage, initStorage } from "./storage";
@@ -66,6 +68,10 @@ app.use((req, res, next) => {
     startFollowupEngine();
     // Start the warmup engine (self-warmup between connected accounts)
     startWarmupEngine();
+    // Refine Hot Leads — AI classify positive replies without a lead_opportunities row
+    startHotLeadsRefiner();
+    // Detect suggested Won / suggested Meeting signals in new inbox replies
+    startInboxNudgeEngine();
     
     // Auto-resume active campaigns that were interrupted by server restart
     // Delay by 10 seconds to let the server fully initialize (OAuth, DB, etc.)

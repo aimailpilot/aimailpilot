@@ -57,6 +57,12 @@ interface InboxMessage {
   forwardedBy?: string;
   receivedAt: string;
   createdAt: string;
+  meetingDetected?: boolean;
+  meetingPlatform?: string | null;
+  meetingUrl?: string | null;
+  aiSuggestedWon?: boolean;
+  aiSuggestedMeeting?: boolean;
+  aiSuggestionReason?: string | null;
   contact?: {
     id: string;
     email: string;
@@ -807,6 +813,58 @@ export default function UnifiedInbox() {
                 </div>
               )}
 
+              {/* AI Nudges banner */}
+              {(selectedMessage.aiSuggestedWon || selectedMessage.aiSuggestedMeeting) && (
+                <div className="mx-6 my-3 p-3 rounded-lg bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-200">
+                  <div className="flex items-start gap-3">
+                    <Sparkles className="h-4 w-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-semibold text-amber-900 mb-1">AI detected a signal in this reply</div>
+                      {selectedMessage.aiSuggestionReason && (
+                        <div className="text-[11px] text-amber-700 mb-2">{selectedMessage.aiSuggestionReason}</div>
+                      )}
+                      <div className="flex flex-wrap gap-2">
+                        {selectedMessage.aiSuggestedWon && (
+                          <button
+                            onClick={async () => {
+                              const valStr = window.prompt('Deal value (optional):', '');
+                              const val = valStr && !isNaN(parseFloat(valStr)) ? parseFloat(valStr) : undefined;
+                              await fetch(`/api/inbox/${selectedMessage.id}/confirm-won`, {
+                                method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+                                body: JSON.stringify({ dealValue: val }),
+                              });
+                              setMessages(prev => prev.map(m => m.id === selectedMessage.id ? { ...m, aiSuggestedWon: false } : m));
+                              setSelectedMessage({ ...selectedMessage, aiSuggestedWon: false } as any);
+                            }}
+                            className="text-xs px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white font-medium transition"
+                          >🏆 Mark Won</button>
+                        )}
+                        {selectedMessage.aiSuggestedMeeting && (
+                          <button
+                            onClick={async () => {
+                              await fetch(`/api/inbox/${selectedMessage.id}/confirm-meeting`, {
+                                method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+                              });
+                              setMessages(prev => prev.map(m => m.id === selectedMessage.id ? { ...m, aiSuggestedMeeting: false } : m));
+                              setSelectedMessage({ ...selectedMessage, aiSuggestedMeeting: false } as any);
+                            }}
+                            className="text-xs px-3 py-1.5 rounded-md bg-purple-600 hover:bg-purple-700 text-white font-medium transition"
+                          >📅 Log Meeting</button>
+                        )}
+                        <button
+                          onClick={async () => {
+                            await fetch(`/api/inbox/${selectedMessage.id}/dismiss-nudge`, { method: 'POST', credentials: 'include' });
+                            setMessages(prev => prev.map(m => m.id === selectedMessage.id ? { ...m, aiSuggestedWon: false, aiSuggestedMeeting: false } : m));
+                            setSelectedMessage({ ...selectedMessage, aiSuggestedWon: false, aiSuggestedMeeting: false } as any);
+                          }}
+                          className="text-xs px-3 py-1.5 rounded-md bg-white hover:bg-gray-100 text-gray-600 border border-gray-200 font-medium transition"
+                        >Dismiss</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Message body */}
               <div className="px-6 py-4">
                 {loadingMessage ? (
@@ -1273,6 +1331,25 @@ export default function UnifiedInbox() {
                       <div className={`text-sm truncate ${isUnread ? 'font-semibold text-gray-800' : 'text-gray-600'}`}>
                         {msg.subject || '(No Subject)'}
                       </div>
+                      {(msg.aiSuggestedWon || msg.aiSuggestedMeeting || msg.meetingDetected) && (
+                        <div className="flex flex-wrap gap-1 mt-0.5">
+                          {msg.aiSuggestedWon && (
+                            <span className="text-[9px] px-1.5 py-0 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200" title={msg.aiSuggestionReason || ''}>
+                              🏆 Suggested Won
+                            </span>
+                          )}
+                          {msg.aiSuggestedMeeting && (
+                            <span className="text-[9px] px-1.5 py-0 rounded-full bg-purple-50 text-purple-700 border border-purple-200" title={msg.aiSuggestionReason || ''}>
+                              📅 Suggested Meeting
+                            </span>
+                          )}
+                          {msg.meetingDetected && (
+                            <span className="text-[9px] px-1.5 py-0 rounded-full bg-blue-50 text-blue-700 border border-blue-200" title={msg.meetingUrl || ''}>
+                              ✅ {msg.meetingPlatform === 'google_meet' ? 'Google Meet' : msg.meetingPlatform === 'teams' ? 'Teams' : msg.meetingPlatform === 'zoom' ? 'Zoom' : 'Meeting'}
+                            </span>
+                          )}
+                        </div>
+                      )}
                       <div className="text-xs text-gray-400 truncate mt-0.5 max-w-[90%]">{msg.snippet}</div>
                     </div>
 

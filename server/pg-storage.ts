@@ -764,6 +764,16 @@ async function initializeSchema() {
       'ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS "autoPaused" BOOLEAN DEFAULT FALSE',
       'ALTER TABLE contact_lists ADD COLUMN IF NOT EXISTS "allocatedTo" TEXT',
       'ALTER TABLE contact_lists ADD COLUMN IF NOT EXISTS "allocatedToName" TEXT',
+      'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "meetingDetected" BOOLEAN DEFAULT FALSE',
+      'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "meetingPlatform" TEXT',
+      'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "meetingUrl" TEXT',
+      'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "meetingAt" TEXT',
+      'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "aiSuggestedWon" BOOLEAN DEFAULT FALSE',
+      'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "aiSuggestedMeeting" BOOLEAN DEFAULT FALSE',
+      'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "aiSuggestionReason" TEXT',
+      'CREATE INDEX IF NOT EXISTS idx_inbox_meeting ON unified_inbox("organizationId", "meetingDetected")',
+      'CREATE INDEX IF NOT EXISTS idx_inbox_ai_won ON unified_inbox("organizationId", "aiSuggestedWon")',
+      'CREATE INDEX IF NOT EXISTS idx_inbox_ai_meeting ON unified_inbox("organizationId", "aiSuggestedMeeting")',
     ];
     for (const alt of alterColumns) {
       try { await client.query(alt); } catch (e) { /* column already exists */ }
@@ -819,6 +829,48 @@ async function initializeSchema() {
   } catch (e) {
     console.error('[PG] recipientEmail backfill error (non-fatal):', e);
   }
+
+  // Backfill meetingDetected on unified_inbox for existing rows (one-time per row)
+  // Runs in background — does not block server startup
+  setTimeout(async () => {
+    try {
+      const { detectMeeting } = await import('./services/meeting-detector');
+      const needs = await queryOne(`SELECT COUNT(*) as cnt FROM unified_inbox WHERE "meetingDetected" IS NULL OR ("meetingDetected" = FALSE AND "meetingPlatform" IS NULL)`);
+      const total = parseInt((needs as any)?.cnt || '0');
+      if (total === 0) return;
+      console.log(`[PG] Meeting detection backfill: scanning ${total} inbox rows in background...`);
+      let scanned = 0, hits = 0, offset = 0;
+      const BATCH = 500;
+      while (true) {
+        const rows = await queryAll(
+          `SELECT id, subject, body, "bodyHtml" FROM unified_inbox
+           WHERE ("meetingDetected" IS NULL OR ("meetingDetected" = FALSE AND "meetingPlatform" IS NULL))
+           ORDER BY "receivedAt" DESC LIMIT $1 OFFSET $2`,
+          [BATCH, offset]
+        );
+        if (!rows.length) break;
+        for (const r of rows) {
+          const det = detectMeeting(r.subject, r.body, r.bodyHtml);
+          if (det.detected) {
+            await execute(
+              'UPDATE unified_inbox SET "meetingDetected"=TRUE, "meetingPlatform"=$1, "meetingUrl"=$2, "meetingAt"=$3 WHERE id=$4',
+              [det.platform, det.url, det.meetingAt, r.id]
+            );
+            hits++;
+          } else {
+            await execute('UPDATE unified_inbox SET "meetingDetected"=FALSE WHERE id=$1 AND "meetingDetected" IS NULL', [r.id]);
+          }
+          scanned++;
+        }
+        offset += rows.length;
+        if (rows.length < BATCH) break;
+        await new Promise(r => setTimeout(r, 100));
+      }
+      console.log(`[PG] Meeting backfill done: scanned=${scanned} hits=${hits}`);
+    } catch (e) {
+      console.error('[PG] Meeting backfill error (non-fatal):', e);
+    }
+  }, 30000);
 }
 
 // ========== PostgresStorage Class ==========
@@ -2179,6 +2231,16 @@ export class PostgresStorage {
       msg.status || 'unread', msg.provider || '', msg.aiDraft || null, msg.repliedAt || null, msg.receivedAt || ts, ts,
       msg.replyType || '', msg.bounceType || '', msg.threadId || null, msg.inReplyTo || null, msg.assignedTo || null, msg.leadStatus || '', msg.sentByUs || 0]
     );
+    try {
+      const { detectMeeting } = await import('./services/meeting-detector');
+      const det = detectMeeting(msg.subject, msg.body, msg.bodyHtml);
+      if (det.detected) {
+        await execute(
+          'UPDATE unified_inbox SET "meetingDetected"=TRUE, "meetingPlatform"=$1, "meetingUrl"=$2, "meetingAt"=$3 WHERE id=$4',
+          [det.platform, det.url, det.meetingAt, id]
+        );
+      }
+    } catch (e) { /* meeting columns may not exist yet */ }
     return this.getInboxMessage(id);
   }
 
