@@ -249,7 +249,14 @@ export class OutlookReplyTracker {
 
       console.log(`[OutlookReplyTracker] Checking ${outlookAccounts.length} Outlook account(s) for org ${orgId.substring(0, 8)}`);
 
-      for (const account of outlookAccounts) {
+      // 1-5s jitter between accounts to prevent thundering herd on PG pool and
+      // Microsoft Graph API rate limits (token refresh timeouts were the symptom)
+      for (let idx = 0; idx < outlookAccounts.length; idx++) {
+        const account = outlookAccounts[idx];
+        if (idx > 0) {
+          const jitterMs = 1000 + Math.floor(Math.random() * 4000);
+          await new Promise(r => setTimeout(r, jitterMs));
+        }
         try {
           const accountResult = await this.checkAccountForReplies(orgId, account.email, account.accessToken, lookbackMinutes);
           result.checked += accountResult.checked;

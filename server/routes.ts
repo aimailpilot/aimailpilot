@@ -11238,15 +11238,19 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   // for orgs where tokens are stored per-sender (e.g., after OAuth connect flow)
   try {
     const allOrgIds = await storage.getAllOrganizationIds();
-    for (const orgId of allOrgIds) {
+    // Stagger org startup to prevent thundering herd: all orgs firing runCheck()
+    // simultaneously saturates the PG pool and Google/MS API rate limits.
+    for (let i = 0; i < allOrgIds.length; i++) {
+      const orgId = allOrgIds[i];
       const orgSettings = await storage.getApiSettings(orgId);
+      const stagger = i * 3000; // 3s per org
       if (orgHasGmailTokens(orgSettings)) {
-        console.log(`[ReplyTracker] Gmail tokens found for org ${orgId}, starting auto-check...`);
-        gmailReplyTracker.startAutoCheck(orgId, 5);
+        console.log(`[ReplyTracker] Gmail tokens found for org ${orgId}, starting auto-check in ${stagger}ms...`);
+        setTimeout(() => gmailReplyTracker.startAutoCheck(orgId, 5), stagger);
       }
       if (orgHasOutlookTokens(orgSettings)) {
-        console.log(`[ReplyTracker] Outlook tokens found for org ${orgId}, starting auto-check...`);
-        outlookReplyTracker.startAutoCheck(orgId, 5);
+        console.log(`[ReplyTracker] Outlook tokens found for org ${orgId}, starting auto-check in ${stagger}ms...`);
+        setTimeout(() => outlookReplyTracker.startAutoCheck(orgId, 5), stagger);
       }
     }
   } catch (e) {

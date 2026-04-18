@@ -46,7 +46,7 @@ export function startWarmupInboxPurge() {
   const run = async () => {
     try {
       const { deleted } = await purgeOldWarmupInboxOnce();
-      if (deleted > 0) console.log(`[WarmupPurge] deleted=${deleted} warmup rows older than ${RETENTION_DAYS} days`);
+      console.log(`[WarmupPurge] run complete: deleted=${deleted} warmup rows older than ${RETENTION_DAYS} days`);
     } catch (e) {
       console.error('[WarmupPurge] Error:', e);
     }

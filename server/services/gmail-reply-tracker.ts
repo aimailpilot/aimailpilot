@@ -249,6 +249,11 @@ export class GmailReplyTracker {
           return null;
         }
 
+        if (response.status === 400) {
+          // Invalid message/thread ID (deleted, expired, or malformed) — skip silently, no retry
+          return null;
+        }
+
         if (!response.ok) {
           const errorText = await response.text();
           throw new Error(`Gmail API error (${response.status}): ${errorText}`);
@@ -332,8 +337,14 @@ export class GmailReplyTracker {
       // Track already-seen Gmail message IDs to avoid duplicate processing across accounts
       const processedGmailIds = new Set<string>();
 
-      // Check EACH Gmail account
-      for (const { email: accountEmail, accessToken } of allTokens) {
+      // Check EACH Gmail account — with 1-5s jitter between accounts to prevent
+      // thundering herd on PG pool and Gmail API rate limits
+      for (let idx = 0; idx < allTokens.length; idx++) {
+        const { email: accountEmail, accessToken } = allTokens[idx];
+        if (idx > 0) {
+          const jitterMs = 1000 + Math.floor(Math.random() * 4000);
+          await new Promise(r => setTimeout(r, jitterMs));
+        }
         try {
           await this.checkAccountForReplies(
             orgId, accountEmail, accessToken, lookbackMinutes,

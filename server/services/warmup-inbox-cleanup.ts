@@ -127,7 +127,7 @@ export function startWarmupInboxCleanup() {
   const run = async () => {
     try {
       const { accounts, cleaned } = await cleanupWarmupInboxOnce();
-      if (cleaned > 0) console.log(`[WarmupCleanup] scanned ${accounts} accounts, cleaned ${cleaned} inbox entries`);
+      console.log(`[WarmupCleanup] run complete: scanned ${accounts} accounts, cleaned ${cleaned} inbox entries`);
     } catch (e) {
       console.error('[WarmupCleanup] Error:', e);
     }
