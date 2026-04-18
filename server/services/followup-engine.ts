@@ -512,6 +512,34 @@ export class FollowupEngine {
     this.emailService = new EmailService();
   }
 
+  private getBaseUrl(): string {
+    const url = process.env.BASE_URL || process.env.PUBLIC_URL || `http://localhost:${process.env.PORT || 3000}`;
+    if (!url.includes('localhost') && !url.includes('127.0.0.1')) {
+      return url.replace(/^http:\/\//, 'https://');
+    }
+    return url;
+  }
+
+  private addTrackingPixel(html: string, trackingId: string, baseUrl: string): string {
+    const cacheBuster = Date.now();
+    const pixel = `<img src="${baseUrl}/api/track/open/${trackingId}?cb=${cacheBuster}" width="1" height="1" style="display:none;width:1px;height:1px;border:0;" alt="" />`;
+    if (html.includes('</body>')) {
+      return html.replace('</body>', `${pixel}</body>`);
+    }
+    return html + pixel;
+  }
+
+  private addClickTracking(html: string, trackingId: string, baseUrl: string): string {
+    return html.replace(
+      /href="(https?:\/\/[^"]+)"/g,
+      (match, url) => {
+        if (url.includes('/api/track/')) return match;
+        const encodedUrl = encodeURIComponent(url);
+        return `href="${baseUrl}/api/track/click/${trackingId}?url=${encodedUrl}"`;
+      }
+    );
+  }
+
   /**
    * Process all pending follow-up triggers
    */
@@ -1390,10 +1418,16 @@ export class FollowupEngine {
         ? originalMessage.providerMessageId
         : undefined;
 
+      // Inject open + click tracking (same as Step 1 in campaign-engine)
+      const followupTrackingId = `${campaign.id}_${contact.id}_${Date.now()}`;
+      const baseUrl = this.getBaseUrl();
+      const trackedContent = this.addTrackingPixel(personalizedContent, followupTrackingId, baseUrl);
+      const clickTrackedContent = this.addClickTracking(trackedContent, followupTrackingId, baseUrl);
+
       const emailResult = await this.emailService.sendEmail(campaign.emailAccountId, {
         to: contact.email,
         subject: personalizedSubject,
-        html: personalizedContent,
+        html: clickTrackedContent,
         text: personalizedContent.replace(/<[^>]*>/g, ""),
         // Threading info — places follow-up in same Gmail thread as original email
         threadId: gmailThreadId,
@@ -1409,16 +1443,15 @@ export class FollowupEngine {
         });
         
         // Create a new campaign message record for tracking with correct stepNumber
-        const trackingId = `${campaign.id}_${contact.id}_${Date.now()}`;
         await storage.createCampaignMessage({
           campaignId: campaign.id,
           contactId: contact.id,
           subject: personalizedSubject,
-          content: personalizedContent,
+          content: clickTrackedContent,
           status: "sent",
           sentAt: new Date().toISOString(),
           stepNumber: step.stepNumber || 1,
-          trackingId: trackingId,
+          trackingId: followupTrackingId,
           providerMessageId: emailResult.messageId,
           messageId: emailResult.internetMessageId || null,
           emailAccountId: campaign.emailAccountId,
@@ -1434,9 +1467,9 @@ export class FollowupEngine {
         await storage.createTrackingEvent({
           type: 'sent',
           campaignId: campaign.id,
-          messageId: trackingId,
+          messageId: followupTrackingId,
           contactId: contact.id,
-          trackingId: trackingId,
+          trackingId: followupTrackingId,
         });
         
         console.log(`[Followup] Follow-up step ${step.stepNumber} sent successfully to ${contact.email} for campaign ${campaign.name}`);
