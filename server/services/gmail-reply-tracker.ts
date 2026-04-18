@@ -420,8 +420,8 @@ export class GmailReplyTracker {
           const subjectLower = subject.toLowerCase();
 
           // ===== SKIP OWN ORG ACCOUNTS (warmup/internal mail) =====
-          const senderEmail = fromLower.match(/[\w.+-]+@[\w.-]+\.\w+/)?.[0] || '';
-          if (senderEmail && ownEmailsSet.has(senderEmail)) continue;
+          const fromEmail = fromLower.match(/[\w.+-]+@[\w.-]+\.\w+/)?.[0] || '';
+          if (fromEmail && ownEmailsSet.has(fromEmail)) continue;
 
           // ===== SKIP DMARC / Automated Reports =====
           // These are NOT bounces or replies — they are aggregate reports from email providers
