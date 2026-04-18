@@ -9481,20 +9481,39 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       // Get all org members
       const members = await storage.getOrgMembers(orgId);
 
+      // Build own-emails list to exclude warmup/internal senders from inbox metrics
+      const ownEmails: string[] = [];
+      try {
+        const eaRows = await storage.rawAll(`SELECT LOWER(email) as email FROM email_accounts WHERE "organizationId" = ?`, orgId) as any[];
+        for (const r of eaRows) if (r.email) ownEmails.push(r.email);
+        const waRows = await storage.rawAll(`SELECT LOWER(email) as email FROM warmup_accounts WHERE "organizationId" = ?`, orgId) as any[];
+        for (const r of waRows) if (r.email) ownEmails.push(r.email);
+      } catch { /* warmup_accounts may not exist */ }
+      const ownEmailsUniq = Array.from(new Set(ownEmails));
+      // Build SQL IN clause — fall back to a sentinel that matches nothing if empty
+      const ownEmailsPlaceholders = ownEmailsUniq.length > 0 ? ownEmailsUniq.map(() => '?').join(',') : `''`;
+      const ownEmailsFilter = ownEmailsUniq.length > 0
+        ? `AND LOWER(ui."fromEmail") NOT IN (${ownEmailsPlaceholders})`
+        : '';
+
       const scorecard = [];
       for (const member of members) {
        try {
         const userId = (member as any).userId;
         const userName = `${(member as any).firstName || ''} ${(member as any).lastName || ''}`.trim() || (member as any).email || 'Unknown';
 
-        // Emails sent — count messages for contacts assigned to this user
+        // Emails sent — count messages for contacts assigned to this user (exclude own-org / warmup recipients)
         let emailsSent = 0;
         try {
+          const excludeRecipientFilter = ownEmailsUniq.length > 0
+            ? `AND LOWER(COALESCE(m."recipientEmail", c.email, '')) NOT IN (${ownEmailsUniq.map(() => '?').join(',')})`
+            : '';
           emailsSent = parseInt((await storage.rawGet(`
             SELECT COUNT(*) as cnt FROM messages m
             JOIN contacts c ON c.id = m."contactId"
             WHERE c."organizationId" = ? AND c."assignedTo" = ? AND m.status = 'sent' AND m."sentAt" >= ? AND m."sentAt" < ?
-          `, orgId, userId, startDate, endDate) as any)?.cnt || 0);
+            ${excludeRecipientFilter}
+          `, orgId, userId, startDate, endDate, ...ownEmailsUniq) as any)?.cnt || 0);
         } catch { /* messages table schema mismatch — skip */ }
 
         // Activities by type
@@ -9561,6 +9580,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
 
         // Not Replied — inbox messages the team member hasn't replied back to
         // Counts human replies (positive/negative/general) waiting in their inbox
+        // Excludes warmup/internal senders (own-org email accounts)
         let notReplied = 0;
         try {
           notReplied = parseInt((await storage.rawGet(`
@@ -9570,10 +9590,12 @@ Generate an appropriate reply to the LATEST email above, considering the full co
             AND ui."repliedAt" IS NULL
             AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
             AND ui."replyType" IN ('positive', 'negative', 'general')
-          `, orgId, userId) as any)?.cnt || 0);
+            ${ownEmailsFilter}
+          `, orgId, userId, ...ownEmailsUniq) as any)?.cnt || 0);
         } catch { /* inbox schema mismatch — skip */ }
 
         // Hot Leads — recipients who replied with positive intent (distinct contacts)
+        // Excludes warmup/internal senders
         let hotLeads = 0;
         try {
           hotLeads = parseInt((await storage.rawGet(`
@@ -9582,7 +9604,8 @@ Generate an appropriate reply to the LATEST email above, considering the full co
             WHERE ui."organizationId" = ? AND ea."userId" = ?
             AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
             AND ui."replyType" = 'positive'
-          `, orgId, userId) as any)?.cnt || 0);
+            ${ownEmailsFilter}
+          `, orgId, userId, ...ownEmailsUniq) as any)?.cnt || 0);
         } catch { /* inbox schema mismatch — skip */ }
 
         const revenue = dealsWon.totalValue || 0;
@@ -9687,8 +9710,21 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         endDate = nextMonth.toISOString().split('T')[0];
       }
 
+      // Build own-emails list to exclude warmup/internal senders
+      const ownEmails: string[] = [];
+      try {
+        const eaRows = await storage.rawAll(`SELECT LOWER(email) as email FROM email_accounts WHERE "organizationId" = ?`, orgId) as any[];
+        for (const r of eaRows) if (r.email) ownEmails.push(r.email);
+        const waRows = await storage.rawAll(`SELECT LOWER(email) as email FROM warmup_accounts WHERE "organizationId" = ?`, orgId) as any[];
+        for (const r of waRows) if (r.email) ownEmails.push(r.email);
+      } catch { /* warmup_accounts may not exist */ }
+      const ownEmailsUniq = Array.from(new Set(ownEmails));
+      const ownEmailsFilter = ownEmailsUniq.length > 0
+        ? `AND LOWER(ui."fromEmail") NOT IN (${ownEmailsUniq.map(() => '?').join(',')})`
+        : '';
+
       if (type === 'not_replied') {
-        // Inbox messages the team member hasn't replied to yet
+        // Inbox messages the team member hasn't replied to yet (excluding warmup/internal)
         const contacts = await storage.rawAll(`
           SELECT
             COALESCE(c.id, ui.id) AS id,
@@ -9705,13 +9741,14 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           AND ui."repliedAt" IS NULL
           AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
           AND ui."replyType" IN ('positive', 'negative', 'general')
+          ${ownEmailsFilter}
           ORDER BY ui."receivedAt" DESC
-        `, orgId, userId) as any[];
+        `, orgId, userId, ...ownEmailsUniq) as any[];
         return res.json({ contacts: contacts || [] });
       }
 
       if (type === 'hot_leads') {
-        // Recipients who replied positively (showed interest)
+        // Recipients who replied positively (excluding warmup/internal senders)
         const contacts = await storage.rawAll(`
           SELECT DISTINCT ON (LOWER(ui."fromEmail"))
             COALESCE(c.id, ui.id) AS id,
@@ -9729,8 +9766,9 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           WHERE ui."organizationId" = ? AND ea."userId" = ?
           AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
           AND ui."replyType" = 'positive'
+          ${ownEmailsFilter}
           ORDER BY LOWER(ui."fromEmail"), ui."receivedAt" DESC
-        `, orgId, orgId, userId) as any[];
+        `, orgId, orgId, userId, ...ownEmailsUniq) as any[];
         return res.json({ contacts: contacts || [] });
       }
 
