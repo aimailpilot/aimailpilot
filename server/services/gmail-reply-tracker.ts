@@ -316,6 +316,17 @@ export class GmailReplyTracker {
       
       console.log(`[GmailReplyTracker] Maps built: ${providerIdToMessage.size} by providerId, ${contactEmailToMessages.size} by email, ${contactCampaignToMessages.size} by contact+campaign`);
 
+      // Build set of org's own sender emails (email_accounts + warmup_accounts) to skip warmup/internal mail
+      const ownEmailsSet = new Set<string>();
+      try {
+        const orgAccounts = await storage.getEmailAccounts(orgId);
+        for (const a of orgAccounts) if (a.email) ownEmailsSet.add(a.email.toLowerCase());
+        const warmupRows = await storage.rawAll(
+          'SELECT email FROM warmup_accounts WHERE "organizationId" = ?', orgId
+        ) as any[];
+        for (const r of warmupRows) if (r.email) ownEmailsSet.add(r.email.toLowerCase());
+      } catch (e) { /* non-fatal — if this fails, process all messages as before */ }
+
       // Track already-seen Gmail message IDs to avoid duplicate processing across accounts
       const processedGmailIds = new Set<string>();
 
@@ -325,7 +336,7 @@ export class GmailReplyTracker {
           await this.checkAccountForReplies(
             orgId, accountEmail, accessToken, lookbackMinutes,
             providerIdToMessage, contactEmailToMessages, contactCampaignToMessages,
-            processedGmailIds, result
+            processedGmailIds, ownEmailsSet, result
           );
         } catch (acctError) {
           const msg = acctError instanceof Error ? acctError.message : String(acctError);
@@ -355,6 +366,7 @@ export class GmailReplyTracker {
     contactEmailToMessages: Map<string, any[]>,
     contactCampaignToMessages: Map<string, any[]>,
     processedGmailIds: Set<string>,
+    ownEmailsSet: Set<string>,
     result: ReplyCheckResult
   ): Promise<void> {
 
@@ -406,6 +418,10 @@ export class GmailReplyTracker {
           const date = getHeader('Date');
           const fromLower = from.toLowerCase();
           const subjectLower = subject.toLowerCase();
+
+          // ===== SKIP OWN ORG ACCOUNTS (warmup/internal mail) =====
+          const senderEmail = fromLower.match(/[\w.+-]+@[\w.-]+\.\w+/)?.[0] || '';
+          if (senderEmail && ownEmailsSet.has(senderEmail)) continue;
 
           // ===== SKIP DMARC / Automated Reports =====
           // These are NOT bounces or replies — they are aggregate reports from email providers
