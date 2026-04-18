@@ -9559,37 +9559,31 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           `, orgId, userId) as any)?.cnt || 0);
         }
 
-        // Hot leads (interested + meeting_scheduled + meeting_done)
-        const hotLeads = (pipeMap['interested']?.count || 0) + (pipeMap['meeting_scheduled']?.count || 0) + (pipeMap['meeting_done']?.count || 0);
-
-        // Not replied — contacts emailed 3-30 days ago who haven't replied
-        // Window: 3 days (give time) to 30 days (beyond 30 days is no longer actionable)
-        // Not period-bound: always shows current backlog regardless of selected period
+        // Not Replied — inbox messages the team member hasn't replied back to
+        // Counts human replies (positive/negative/general) waiting in their inbox
         let notReplied = 0;
         try {
-          const threeDaysAgo = new Date(now);
-          threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
-          const notRepliedCutoff = threeDaysAgo.toISOString().split('T')[0];
-          const thirtyDaysAgo = new Date(now);
-          thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-          const notRepliedStart = thirtyDaysAgo.toISOString().split('T')[0];
           notReplied = parseInt((await storage.rawGet(`
-            SELECT COUNT(DISTINCT m."contactId") as cnt FROM messages m
-            JOIN contacts c ON c.id = m."contactId"
-            WHERE c."organizationId" = ? AND c."assignedTo" = ? AND m.status = 'sent'
-            AND m."sentAt" >= ? AND m."sentAt" < ?
-            AND m."repliedAt" IS NULL
-            AND NOT EXISTS (
-              SELECT 1 FROM messages m2 WHERE m2."contactId" = m."contactId"
-              AND m2."campaignId" = m."campaignId" AND m2.status = 'replied'
-            )
-            AND NOT EXISTS (
-              SELECT 1 FROM unified_inbox ui WHERE ui."contactId" = m."contactId"
-              AND ui."campaignId" = m."campaignId"
-              AND ui."replyType" IN ('positive', 'negative', 'general', 'unsubscribe')
-            )
-          `, orgId, userId, notRepliedStart, notRepliedCutoff) as any)?.cnt || 0);
-        } catch { /* messages table schema mismatch — skip */ }
+            SELECT COUNT(*) as cnt FROM unified_inbox ui
+            INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
+            WHERE ui."organizationId" = ? AND ea."userId" = ?
+            AND ui."repliedAt" IS NULL
+            AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
+            AND ui."replyType" IN ('positive', 'negative', 'general')
+          `, orgId, userId) as any)?.cnt || 0);
+        } catch { /* inbox schema mismatch — skip */ }
+
+        // Hot Leads — recipients who replied with positive intent (distinct contacts)
+        let hotLeads = 0;
+        try {
+          hotLeads = parseInt((await storage.rawGet(`
+            SELECT COUNT(DISTINCT ui."fromEmail") as cnt FROM unified_inbox ui
+            INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
+            WHERE ui."organizationId" = ? AND ea."userId" = ?
+            AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
+            AND ui."replyType" = 'positive'
+          `, orgId, userId) as any)?.cnt || 0);
+        } catch { /* inbox schema mismatch — skip */ }
 
         const revenue = dealsWon.totalValue || 0;
         const wonCount = dealsWon.cnt || 0;
@@ -9694,48 +9688,48 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       }
 
       if (type === 'not_replied') {
-        // Contacts emailed 3-30 days ago who haven't replied
-        const threeDaysAgo = new Date(now);
-        threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
-        const notRepliedCutoff = threeDaysAgo.toISOString().split('T')[0];
-        const thirtyDaysAgo = new Date(now);
-        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-        const notRepliedStart = thirtyDaysAgo.toISOString().split('T')[0];
+        // Inbox messages the team member hasn't replied to yet
         const contacts = await storage.rawAll(`
-          SELECT DISTINCT ON (m."contactId")
-            c.id, c."firstName", c."lastName", c.email, c.company, c."pipelineStage",
-            m."sentAt", m.subject,
-            EXTRACT(DAY FROM (NOW() - m."sentAt"::timestamptz))::int AS "daysSinceSent"
-          FROM messages m
-          JOIN contacts c ON c.id = m."contactId"
-          WHERE c."organizationId" = ? AND c."assignedTo" = ? AND m.status = 'sent'
-          AND m."sentAt" >= ? AND m."sentAt" < ?
-          AND m."repliedAt" IS NULL
-          AND NOT EXISTS (
-            SELECT 1 FROM messages m2 WHERE m2."contactId" = m."contactId"
-            AND m2."campaignId" = m."campaignId" AND m2.status = 'replied'
-          )
-          AND NOT EXISTS (
-            SELECT 1 FROM unified_inbox ui WHERE ui."contactId" = m."contactId"
-            AND ui."campaignId" = m."campaignId"
-            AND ui."replyType" IN ('positive', 'negative', 'general', 'unsubscribe')
-          )
-          ORDER BY m."contactId", m."sentAt" ASC
-        `, orgId, userId, notRepliedStart, notRepliedCutoff) as any[];
+          SELECT
+            COALESCE(c.id, ui.id) AS id,
+            COALESCE(c."firstName", SPLIT_PART(ui."fromName", ' ', 1), '') AS "firstName",
+            COALESCE(c."lastName", '') AS "lastName",
+            COALESCE(c.email, ui."fromEmail") AS email,
+            c.company, c."pipelineStage",
+            ui."receivedAt" AS "sentAt", ui.subject,
+            EXTRACT(DAY FROM (NOW() - ui."receivedAt"::timestamptz))::int AS "daysSinceSent"
+          FROM unified_inbox ui
+          INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
+          LEFT JOIN contacts c ON c.id = ui."contactId"
+          WHERE ui."organizationId" = ? AND ea."userId" = ?
+          AND ui."repliedAt" IS NULL
+          AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
+          AND ui."replyType" IN ('positive', 'negative', 'general')
+          ORDER BY ui."receivedAt" DESC
+        `, orgId, userId) as any[];
         return res.json({ contacts: contacts || [] });
       }
 
       if (type === 'hot_leads') {
-        // Contacts in hot lead pipeline stages assigned to this user
+        // Recipients who replied positively (showed interest)
         const contacts = await storage.rawAll(`
-          SELECT c.id, c."firstName", c."lastName", c.email, c.company, c."pipelineStage",
+          SELECT DISTINCT ON (LOWER(ui."fromEmail"))
+            COALESCE(c.id, ui.id) AS id,
+            COALESCE(c."firstName", SPLIT_PART(ui."fromName", ' ', 1), '') AS "firstName",
+            COALESCE(c."lastName", '') AS "lastName",
+            COALESCE(c.email, ui."fromEmail") AS email,
+            c.company, c."pipelineStage",
             c."dealValue", c."nextActionDate",
+            ui."receivedAt" AS "sentAt", ui.subject,
             lo.bucket AS "leadBucket", lo.confidence AS "leadConfidence", lo."suggestedAction"
-          FROM contacts c
-          LEFT JOIN lead_opportunities lo ON LOWER(lo."contactEmail") = LOWER(c.email) AND lo."organizationId" = ?
-          WHERE c."organizationId" = ? AND c."assignedTo" = ?
-          AND c."pipelineStage" IN ('interested', 'meeting_scheduled', 'meeting_done')
-          ORDER BY c."pipelineStage", c."firstName"
+          FROM unified_inbox ui
+          INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
+          LEFT JOIN contacts c ON c.id = ui."contactId"
+          LEFT JOIN lead_opportunities lo ON LOWER(lo."contactEmail") = LOWER(ui."fromEmail") AND lo."organizationId" = ?
+          WHERE ui."organizationId" = ? AND ea."userId" = ?
+          AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
+          AND ui."replyType" = 'positive'
+          ORDER BY LOWER(ui."fromEmail"), ui."receivedAt" DESC
         `, orgId, orgId, userId) as any[];
         return res.json({ contacts: contacts || [] });
       }
