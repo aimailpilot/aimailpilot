@@ -262,6 +262,11 @@ export class GmailReplyTracker {
         return response.json();
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
+        // Don't retry on 401 — token won't un-expire in 2s. Bubble up immediately so
+        // caller skips this account's cycle (saves ~6s of wasted retries per bad token).
+        if (lastError.message.includes('401')) {
+          throw lastError;
+        }
         if (attempt < retries) {
           const delay = (attempt + 1) * 2000; // 2s, 4s backoff
           console.warn(`[GmailReplyTracker] Gmail API call failed (attempt ${attempt + 1}), retrying in ${delay}ms:`, lastError.message);
