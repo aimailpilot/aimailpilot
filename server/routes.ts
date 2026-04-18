@@ -9481,14 +9481,16 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       // Get all org members
       const members = await storage.getOrgMembers(orgId);
 
-      // Build own-emails list to exclude warmup/internal senders from inbox metrics
+      // Build own-emails list to exclude warmup/internal senders from inbox metrics.
+      // Exclude ALL email_accounts system-wide (warmup happens across orgs — any connected
+      // sender account is internal, never a real external lead).
       const ownEmails: string[] = [];
       try {
-        const eaRows = await storage.rawAll(`SELECT LOWER(email) as email FROM email_accounts WHERE "organizationId" = ?`, orgId) as any[];
+        const eaRows = await storage.rawAll(`SELECT LOWER(email) as email FROM email_accounts`) as any[];
         for (const r of eaRows) if (r.email) ownEmails.push(r.email);
-        const waRows = await storage.rawAll(`SELECT LOWER(email) as email FROM warmup_accounts WHERE "organizationId" = ?`, orgId) as any[];
+        const waRows = await storage.rawAll(`SELECT LOWER(ea.email) as email FROM warmup_accounts wa JOIN email_accounts ea ON ea.id = wa."emailAccountId"`) as any[];
         for (const r of waRows) if (r.email) ownEmails.push(r.email);
-      } catch { /* warmup_accounts may not exist */ }
+      } catch { /* tables may not exist */ }
       const ownEmailsUniq = Array.from(new Set(ownEmails));
       // Build SQL IN clause — fall back to a sentinel that matches nothing if empty
       const ownEmailsPlaceholders = ownEmailsUniq.length > 0 ? ownEmailsUniq.map(() => '?').join(',') : `''`;
@@ -9710,14 +9712,16 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         endDate = nextMonth.toISOString().split('T')[0];
       }
 
-      // Build own-emails list to exclude warmup/internal senders
+      // Build own-emails list to exclude warmup/internal senders.
+      // Exclude ALL email_accounts system-wide — warmup happens across orgs,
+      // any connected sender account is internal, never a real external lead.
       const ownEmails: string[] = [];
       try {
-        const eaRows = await storage.rawAll(`SELECT LOWER(email) as email FROM email_accounts WHERE "organizationId" = ?`, orgId) as any[];
+        const eaRows = await storage.rawAll(`SELECT LOWER(email) as email FROM email_accounts`) as any[];
         for (const r of eaRows) if (r.email) ownEmails.push(r.email);
-        const waRows = await storage.rawAll(`SELECT LOWER(email) as email FROM warmup_accounts WHERE "organizationId" = ?`, orgId) as any[];
+        const waRows = await storage.rawAll(`SELECT LOWER(ea.email) as email FROM warmup_accounts wa JOIN email_accounts ea ON ea.id = wa."emailAccountId"`) as any[];
         for (const r of waRows) if (r.email) ownEmails.push(r.email);
-      } catch { /* warmup_accounts may not exist */ }
+      } catch { /* tables may not exist */ }
       const ownEmailsUniq = Array.from(new Set(ownEmails));
       const ownEmailsFilter = ownEmailsUniq.length > 0
         ? `AND LOWER(ui."fromEmail") NOT IN (${ownEmailsUniq.map(() => '?').join(',')})`
