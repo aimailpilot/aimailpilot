@@ -3088,12 +3088,18 @@ export class PostgresStorage {
     const params: any[] = [organizationId];
     let idx = 2;
 
-    // Warmup detection: both fromEmail AND toEmail are org email accounts
-    // fromEmail may store "Name <email>" format — extract just the email part
+    // Warmup detection: fromEmail is any org-connected account (email_accounts ∪ warmup_accounts).
+    // Exclude traffic where the sender is one of our own mailboxes (warmup chatter), regardless of recipient.
     const extractFrom = `LOWER(CASE WHEN "fromEmail" LIKE '%<%>%' THEN substring("fromEmail" from '<([^>]+)>') ELSE "fromEmail" END)`;
     const extractTo = `LOWER(CASE WHEN "toEmail" LIKE '%<%>%' THEN substring("toEmail" from '<([^>]+)>') ELSE COALESCE("toEmail",'') END)`;
-    const orgEmails = `(SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
-    const warmupExclude = ` AND NOT (${extractFrom} IN ${orgEmails} AND ${extractTo} IN ${orgEmails})`;
+    const orgEmails = `(
+      SELECT LOWER(TRIM(email)) FROM email_accounts WHERE "organizationId" = $1 AND email IS NOT NULL
+      UNION
+      SELECT LOWER(TRIM(ea.email)) FROM warmup_accounts wa
+        JOIN email_accounts ea ON ea.id = wa."emailAccountId"
+        WHERE wa."organizationId" = $1 AND ea.email IS NOT NULL
+    )`;
+    const warmupExclude = ` AND ${extractFrom} NOT IN ${orgEmails}`;
     const warmupOnly = ` AND ${extractFrom} IN ${orgEmails} AND ${extractTo} IN ${orgEmails}`;
 
     if (filters?.status === 'warmup') {
@@ -3103,8 +3109,8 @@ export class PostgresStorage {
     } else if (filters?.status === 'unsubscribed') {
       sql += ` AND "replyType" = 'unsubscribe'`;
     } else if (filters?.status === 'replied') {
-      // Include both messages we replied to (status='replied') AND incoming replies tracked via repliedAt
-      sql += ` AND (status = 'replied' OR "repliedAt" IS NOT NULL)` + warmupExclude;
+      // All incoming replies from real contacts across every account, warmup excluded via sender
+      sql += ` AND "replyType" IN ('positive','negative','general')` + warmupExclude;
     } else if (filters?.status && filters.status !== 'all') {
       sql += ` AND status = $${idx++}` + warmupExclude; params.push(filters.status);
     } else {
@@ -3147,8 +3153,14 @@ export class PostgresStorage {
 
     const extractFromC = `LOWER(CASE WHEN "fromEmail" LIKE '%<%>%' THEN substring("fromEmail" from '<([^>]+)>') ELSE "fromEmail" END)`;
     const extractToC = `LOWER(CASE WHEN "toEmail" LIKE '%<%>%' THEN substring("toEmail" from '<([^>]+)>') ELSE COALESCE("toEmail",'') END)`;
-    const orgEmailsC = `(SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
-    const warmupExcludeCount = ` AND NOT (${extractFromC} IN ${orgEmailsC} AND ${extractToC} IN ${orgEmailsC})`;
+    const orgEmailsC = `(
+      SELECT LOWER(TRIM(email)) FROM email_accounts WHERE "organizationId" = $1 AND email IS NOT NULL
+      UNION
+      SELECT LOWER(TRIM(ea.email)) FROM warmup_accounts wa
+        JOIN email_accounts ea ON ea.id = wa."emailAccountId"
+        WHERE wa."organizationId" = $1 AND ea.email IS NOT NULL
+    )`;
+    const warmupExcludeCount = ` AND ${extractFromC} NOT IN ${orgEmailsC}`;
     const warmupOnlyCount = ` AND ${extractFromC} IN ${orgEmailsC} AND ${extractToC} IN ${orgEmailsC}`;
 
     if (filters?.status === 'warmup') {
@@ -3158,7 +3170,7 @@ export class PostgresStorage {
     } else if (filters?.status === 'unsubscribed') {
       sql += ` AND "replyType" = 'unsubscribe'`;
     } else if (filters?.status === 'replied') {
-      sql += ` AND (status = 'replied' OR "repliedAt" IS NOT NULL)` + warmupExcludeCount;
+      sql += ` AND "replyType" IN ('positive','negative','general')` + warmupExcludeCount;
     } else if (filters?.status && filters.status !== 'all') {
       sql += ` AND status = $${idx++}` + warmupExcludeCount; params.push(filters.status);
     } else {
@@ -3188,13 +3200,19 @@ export class PostgresStorage {
     // Warmup detection: both fromEmail AND toEmail are org email accounts
     const exF = `LOWER(CASE WHEN "fromEmail" LIKE '%<%>%' THEN substring("fromEmail" from '<([^>]+)>') ELSE "fromEmail" END)`;
     const exT = `LOWER(CASE WHEN "toEmail" LIKE '%<%>%' THEN substring("toEmail" from '<([^>]+)>') ELSE COALESCE("toEmail",'') END)`;
-    const oE = `(SELECT LOWER(email) FROM email_accounts WHERE "organizationId" = $1)`;
-    const warmupExcludeSql = `AND NOT (${exF} IN ${oE} AND ${exT} IN ${oE})`;
+    const oE = `(
+      SELECT LOWER(TRIM(email)) FROM email_accounts WHERE "organizationId" = $1 AND email IS NOT NULL
+      UNION
+      SELECT LOWER(TRIM(ea.email)) FROM warmup_accounts wa
+        JOIN email_accounts ea ON ea.id = wa."emailAccountId"
+        WHERE wa."organizationId" = $1 AND ea.email IS NOT NULL
+    )`;
+    const warmupExcludeSql = `AND ${exF} NOT IN ${oE}`;
     const warmupOnlySql = `AND ${exF} IN ${oE} AND ${exT} IN ${oE}`;
 
     const total = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 ${warmupExcludeSql}`, [organizationId])).c);
     const unread = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'unread' ${warmupExcludeSql}`, [organizationId])).c);
-    const replied = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND (status = 'replied' OR "repliedAt" IS NOT NULL) ${warmupExcludeSql}`, [organizationId])).c);
+    const replied = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" IN ('positive','negative','general') ${warmupExcludeSql}`, [organizationId])).c);
     const archived = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'archived'`, [organizationId])).c);
     const positive = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'positive'`, [organizationId])).c);
     const negative = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'negative'`, [organizationId])).c);
