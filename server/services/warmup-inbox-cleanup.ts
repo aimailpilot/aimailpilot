@@ -7,27 +7,27 @@ import { storage } from '../storage';
 
 const WARMUP_LABEL_NAME = 'AImailPilot-Warmup';
 
-async function getAccessTokenForGmailAccount(acctId: string): Promise<string | null> {
-  const row: any = await storage.rawGet(
-    `SELECT "accessToken", "refreshToken", "tokenExpiry" FROM email_accounts WHERE id = ?`,
-    acctId
-  );
-  if (!row?.accessToken) return null;
-  const exp = parseInt(row.tokenExpiry || '0');
-  if (exp && exp > Date.now() + 60_000) return row.accessToken;
-  // Token expired — skip this cycle. Live sends will refresh via their own path.
-  return null;
+async function getAccessTokenForGmailAccount(orgId: string, email: string): Promise<string | null> {
+  const settings = await storage.getApiSettings(orgId);
+  const prefix = `gmail_sender_${email}_`;
+  const accessToken = settings[`${prefix}access_token`] || settings.gmail_access_token || null;
+  const tokenExpiry = settings[`${prefix}token_expiry`] || settings.gmail_token_expiry || null;
+  if (!accessToken) return null;
+  const exp = parseInt(tokenExpiry || '0');
+  // Skip if token is expired — live sends will refresh via their own path
+  if (exp && exp < Date.now() + 60_000) return null;
+  return accessToken;
 }
 
-async function getAccessTokenForOutlookAccount(acctId: string): Promise<string | null> {
-  const row: any = await storage.rawGet(
-    `SELECT "accessToken", "tokenExpiry" FROM email_accounts WHERE id = ?`,
-    acctId
-  );
-  if (!row?.accessToken) return null;
-  const exp = parseInt(row.tokenExpiry || '0');
-  if (exp && exp > Date.now() + 60_000) return row.accessToken;
-  return null;
+async function getAccessTokenForOutlookAccount(orgId: string, email: string): Promise<string | null> {
+  const settings = await storage.getApiSettings(orgId);
+  const prefix = `outlook_sender_${email}_`;
+  const accessToken = settings[`${prefix}access_token`] || settings.microsoft_access_token || null;
+  const tokenExpiry = settings[`${prefix}token_expiry`] || settings.microsoft_token_expiry || null;
+  if (!accessToken) return null;
+  const exp = parseInt(tokenExpiry || '0');
+  if (exp && exp < Date.now() + 60_000) return null;
+  return accessToken;
 }
 
 async function gmailFindWarmupLabelId(token: string): Promise<string | null> {
@@ -92,17 +92,16 @@ async function outlookCleanupAccount(token: string): Promise<number> {
 export async function cleanupWarmupInboxOnce(): Promise<{ accounts: number; cleaned: number }> {
   // All connected email accounts that also have a warmup_accounts row
   const accounts: any[] = await storage.rawAll(`
-    SELECT ea.id, ea.email, ea.provider
+    SELECT ea.id, ea.email, ea.provider, ea."organizationId"
     FROM email_accounts ea
     JOIN warmup_accounts wa ON wa."emailAccountId" = ea.id
-    WHERE ea."accessToken" IS NOT NULL
   `) as any[];
 
   let totalCleaned = 0;
   for (const acct of accounts) {
     try {
       if (acct.provider === 'gmail') {
-        const token = await getAccessTokenForGmailAccount(acct.id);
+        const token = await getAccessTokenForGmailAccount(acct.organizationId, acct.email);
         if (!token) continue;
         const n = await gmailCleanupAccount(token);
         if (n > 0) {
@@ -110,7 +109,7 @@ export async function cleanupWarmupInboxOnce(): Promise<{ accounts: number; clea
           console.log(`[WarmupCleanup] gmail ${acct.email}: removed INBOX from ${n} warmup messages`);
         }
       } else if (acct.provider === 'outlook' || acct.provider === 'microsoft') {
-        const token = await getAccessTokenForOutlookAccount(acct.id);
+        const token = await getAccessTokenForOutlookAccount(acct.organizationId, acct.email);
         if (!token) continue;
         const n = await outlookCleanupAccount(token);
         totalCleaned += n;
