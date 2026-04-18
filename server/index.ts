@@ -6,6 +6,7 @@ import { startFollowupEngine } from "./services/followup-engine";
 import { startWarmupEngine } from "./services/warmup-engine";
 import { startHotLeadsRefiner } from "./services/hot-leads-refiner";
 import { startInboxNudgeEngine } from "./services/inbox-nudge-engine";
+import { startWarmupInboxPurge } from "./services/warmup-inbox-purge";
 import { campaignEngine } from "./services/campaign-engine";
 import { classifyReply, classifyReplyWithAI } from "./services/reply-classifier";
 import { storage, initStorage } from "./storage";
@@ -72,6 +73,8 @@ app.use((req, res, next) => {
     startHotLeadsRefiner();
     // Detect suggested Won / suggested Meeting signals in new inbox replies
     startInboxNudgeEngine();
+    // Purge warmup-only emails from unified_inbox older than 5 days
+    startWarmupInboxPurge();
     
     // Auto-resume active campaigns that were interrupted by server restart
     // Delay by 10 seconds to let the server fully initialize (OAuth, DB, etc.)
