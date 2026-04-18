@@ -301,8 +301,8 @@ async function gmailEngage(token: string, fromEmail: string): Promise<{ opened: 
   try {
     const warmupLabelId = await getOrCreateGmailLabel(token);
 
-    // 1. Search INBOX for warmup emails from this sender
-    const inboxQ = encodeURIComponent(`from:${fromEmail} is:unread newer_than:1d in:inbox`);
+    // 1. Search INBOX for warmup emails from this sender (read or unread — engagement marks as read)
+    const inboxQ = encodeURIComponent(`from:${fromEmail} newer_than:3d in:inbox`);
     const inboxResp = await fetch(
       `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${inboxQ}&maxResults=20`,
       { headers: { Authorization: `Bearer ${token}` } }

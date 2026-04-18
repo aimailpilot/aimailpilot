@@ -13,6 +13,7 @@ export async function purgeOldWarmupInboxOnce(): Promise<{ deleted: number }> {
       SELECT ui.id
       FROM unified_inbox ui
       WHERE ui."receivedAt" < (NOW() - INTERVAL '${RETENTION_DAYS} days')::text
+        AND (ui."replyType" IS NULL OR ui."replyType" NOT IN ('positive','negative','general'))
         AND LOWER(CASE WHEN ui."fromEmail" LIKE '%<%>%'
                        THEN substring(ui."fromEmail" from '<([^>]+)>')
                        ELSE ui."fromEmail" END) IN (
