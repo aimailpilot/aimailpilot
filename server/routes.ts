@@ -9584,11 +9584,13 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           notReplied = parseInt((await storage.rawGet(`
             SELECT COUNT(*) as cnt FROM unified_inbox ui
             INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
+            LEFT JOIN contacts c ON c.id = ui."contactId"
             WHERE ui."organizationId" = ? AND ea."userId" = ?
             AND ui."repliedAt" IS NULL
             AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
             AND ui."replyType" IN ('positive', 'negative', 'general')
             ${ownEmailsFilter}
+            AND LOWER(TRIM(COALESCE(c.email, ''))) NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
           `, orgId, userId) as any)?.cnt || 0);
         } catch { /* inbox schema mismatch — skip */ }
 
@@ -9597,12 +9599,14 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         let hotLeads = 0;
         try {
           hotLeads = parseInt((await storage.rawGet(`
-            SELECT COUNT(DISTINCT ui."fromEmail") as cnt FROM unified_inbox ui
+            SELECT COUNT(DISTINCT LOWER(COALESCE(c.email, ui."fromEmail"))) as cnt FROM unified_inbox ui
             INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
+            LEFT JOIN contacts c ON c.id = ui."contactId"
             WHERE ui."organizationId" = ? AND ea."userId" = ?
             AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
             AND ui."replyType" = 'positive'
             ${ownEmailsFilter}
+            AND LOWER(TRIM(COALESCE(c.email, ''))) NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
           `, orgId, userId) as any)?.cnt || 0);
         } catch { /* inbox schema mismatch — skip */ }
 
@@ -9737,15 +9741,18 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
           AND ui."replyType" IN ('positive', 'negative', 'general')
           ${ownEmailsFilter}
+          AND LOWER(TRIM(COALESCE(c.email, ''))) NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
           ORDER BY ui."receivedAt" DESC
         `, orgId, userId) as any[];
         return res.json({ contacts: contacts || [] });
       }
 
       if (type === 'hot_leads') {
-        // Recipients who replied positively (excluding warmup/internal senders)
+        // Recipients who replied positively (excluding warmup/internal senders).
+        // Also exclude by joined contacts.email — inbox rows can have contactId
+        // pointing to an internal bellaward/aegis contact even when fromEmail differs.
         const contacts = await storage.rawAll(`
-          SELECT DISTINCT ON (LOWER(ui."fromEmail"))
+          SELECT DISTINCT ON (LOWER(COALESCE(c.email, ui."fromEmail")))
             COALESCE(c.id, ui.id) AS id,
             COALESCE(c."firstName", SPLIT_PART(ui."fromName", ' ', 1), '') AS "firstName",
             COALESCE(c."lastName", '') AS "lastName",
@@ -9762,7 +9769,8 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
           AND ui."replyType" = 'positive'
           ${ownEmailsFilter}
-          ORDER BY LOWER(ui."fromEmail"), ui."receivedAt" DESC
+          AND LOWER(TRIM(COALESCE(c.email, ''))) NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
+          ORDER BY LOWER(COALESCE(c.email, ui."fromEmail")), ui."receivedAt" DESC
         `, orgId, orgId, userId) as any[];
         return res.json({ contacts: contacts || [] });
       }
