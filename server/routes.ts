@@ -9780,7 +9780,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       const orgId = req.user.organizationId;
       const sample = (req.query.sample as string || '').toLowerCase().trim();
 
-      const emailAccounts = await storage.rawAll(`SELECT id, LOWER(TRIM(email)) as email, "organizationId", provider, status FROM email_accounts ORDER BY email`) as any[];
+      const emailAccounts = await storage.rawAll(`SELECT id, LOWER(TRIM(email)) as email, "organizationId", provider FROM email_accounts ORDER BY email`) as any[];
       const warmupJoin = await storage.rawAll(`
         SELECT wa.id as warmup_id, LOWER(TRIM(ea.email)) as email, ea."organizationId", wa.status
         FROM warmup_accounts wa JOIN email_accounts ea ON ea.id = wa."emailAccountId"
@@ -9809,7 +9809,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       // Optional: look up a specific sample email
       let sampleInfo: any = null;
       if (sample) {
-        const inEa = await storage.rawAll(`SELECT id, LOWER(TRIM(email)) as email, "organizationId", provider, status FROM email_accounts WHERE LOWER(TRIM(email)) = ?`, sample) as any[];
+        const inEa = await storage.rawAll(`SELECT id, LOWER(TRIM(email)) as email, "organizationId", provider FROM email_accounts WHERE LOWER(TRIM(email)) = ?`, sample) as any[];
         const inWa = await storage.rawAll(`
           SELECT wa.id, LOWER(TRIM(ea.email)) as email, ea."organizationId"
           FROM warmup_accounts wa JOIN email_accounts ea ON ea.id = wa."emailAccountId"
