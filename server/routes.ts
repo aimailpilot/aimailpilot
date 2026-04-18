@@ -9481,22 +9481,17 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       // Get all org members
       const members = await storage.getOrgMembers(orgId);
 
-      // Build own-emails list to exclude warmup/internal senders from inbox metrics.
-      // Exclude ALL email_accounts system-wide (warmup happens across orgs — any connected
-      // sender account is internal, never a real external lead).
-      const ownEmails: string[] = [];
-      try {
-        const eaRows = await storage.rawAll(`SELECT LOWER(email) as email FROM email_accounts`) as any[];
-        for (const r of eaRows) if (r.email) ownEmails.push(r.email);
-        const waRows = await storage.rawAll(`SELECT LOWER(ea.email) as email FROM warmup_accounts wa JOIN email_accounts ea ON ea.id = wa."emailAccountId"`) as any[];
-        for (const r of waRows) if (r.email) ownEmails.push(r.email);
-      } catch { /* tables may not exist */ }
-      const ownEmailsUniq = Array.from(new Set(ownEmails));
-      // Build SQL IN clause — fall back to a sentinel that matches nothing if empty
-      const ownEmailsPlaceholders = ownEmailsUniq.length > 0 ? ownEmailsUniq.map(() => '?').join(',') : `''`;
-      const ownEmailsFilter = ownEmailsUniq.length > 0
-        ? `AND LOWER(ui."fromEmail") NOT IN (${ownEmailsPlaceholders})`
-        : '';
+      // Exclude ALL connected sender / warmup account emails. Uses SQL subqueries
+      // against email_accounts + warmup_accounts (via join) to guarantee a match
+      // regardless of case/whitespace — these are the same emails shown on the
+      // warmup-monitoring page.
+      const ownEmailsFilter = `
+        AND LOWER(TRIM(ui."fromEmail")) NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
+        AND LOWER(TRIM(ui."fromEmail")) NOT IN (
+          SELECT LOWER(TRIM(ea.email)) FROM warmup_accounts wa
+          JOIN email_accounts ea ON ea.id = wa."emailAccountId" WHERE ea.email IS NOT NULL
+        )
+      `;
 
       const scorecard = [];
       for (const member of members) {
@@ -9507,15 +9502,16 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         // Emails sent — count messages for contacts assigned to this user (exclude own-org / warmup recipients)
         let emailsSent = 0;
         try {
-          const excludeRecipientFilter = ownEmailsUniq.length > 0
-            ? `AND LOWER(COALESCE(m."recipientEmail", c.email, '')) NOT IN (${ownEmailsUniq.map(() => '?').join(',')})`
-            : '';
           emailsSent = parseInt((await storage.rawGet(`
             SELECT COUNT(*) as cnt FROM messages m
             JOIN contacts c ON c.id = m."contactId"
             WHERE c."organizationId" = ? AND c."assignedTo" = ? AND m.status = 'sent' AND m."sentAt" >= ? AND m."sentAt" < ?
-            ${excludeRecipientFilter}
-          `, orgId, userId, startDate, endDate, ...ownEmailsUniq) as any)?.cnt || 0);
+            AND LOWER(TRIM(COALESCE(m."recipientEmail", c.email, ''))) NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
+            AND LOWER(TRIM(COALESCE(m."recipientEmail", c.email, ''))) NOT IN (
+              SELECT LOWER(TRIM(ea.email)) FROM warmup_accounts wa
+              JOIN email_accounts ea ON ea.id = wa."emailAccountId" WHERE ea.email IS NOT NULL
+            )
+          `, orgId, userId, startDate, endDate) as any)?.cnt || 0);
         } catch { /* messages table schema mismatch — skip */ }
 
         // Activities by type
@@ -9593,7 +9589,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
             AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
             AND ui."replyType" IN ('positive', 'negative', 'general')
             ${ownEmailsFilter}
-          `, orgId, userId, ...ownEmailsUniq) as any)?.cnt || 0);
+          `, orgId, userId) as any)?.cnt || 0);
         } catch { /* inbox schema mismatch — skip */ }
 
         // Hot Leads — recipients who replied with positive intent (distinct contacts)
@@ -9607,7 +9603,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
             AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
             AND ui."replyType" = 'positive'
             ${ownEmailsFilter}
-          `, orgId, userId, ...ownEmailsUniq) as any)?.cnt || 0);
+          `, orgId, userId) as any)?.cnt || 0);
         } catch { /* inbox schema mismatch — skip */ }
 
         const revenue = dealsWon.totalValue || 0;
@@ -9712,20 +9708,15 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         endDate = nextMonth.toISOString().split('T')[0];
       }
 
-      // Build own-emails list to exclude warmup/internal senders.
-      // Exclude ALL email_accounts system-wide — warmup happens across orgs,
-      // any connected sender account is internal, never a real external lead.
-      const ownEmails: string[] = [];
-      try {
-        const eaRows = await storage.rawAll(`SELECT LOWER(email) as email FROM email_accounts`) as any[];
-        for (const r of eaRows) if (r.email) ownEmails.push(r.email);
-        const waRows = await storage.rawAll(`SELECT LOWER(ea.email) as email FROM warmup_accounts wa JOIN email_accounts ea ON ea.id = wa."emailAccountId"`) as any[];
-        for (const r of waRows) if (r.email) ownEmails.push(r.email);
-      } catch { /* tables may not exist */ }
-      const ownEmailsUniq = Array.from(new Set(ownEmails));
-      const ownEmailsFilter = ownEmailsUniq.length > 0
-        ? `AND LOWER(ui."fromEmail") NOT IN (${ownEmailsUniq.map(() => '?').join(',')})`
-        : '';
+      // Exclude all connected sender / warmup account emails via SQL subquery
+      // (same emails shown on warmup-monitoring page).
+      const ownEmailsFilter = `
+        AND LOWER(TRIM(ui."fromEmail")) NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
+        AND LOWER(TRIM(ui."fromEmail")) NOT IN (
+          SELECT LOWER(TRIM(ea.email)) FROM warmup_accounts wa
+          JOIN email_accounts ea ON ea.id = wa."emailAccountId" WHERE ea.email IS NOT NULL
+        )
+      `;
 
       if (type === 'not_replied') {
         // Inbox messages the team member hasn't replied to yet (excluding warmup/internal)
@@ -9747,7 +9738,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           AND ui."replyType" IN ('positive', 'negative', 'general')
           ${ownEmailsFilter}
           ORDER BY ui."receivedAt" DESC
-        `, orgId, userId, ...ownEmailsUniq) as any[];
+        `, orgId, userId) as any[];
         return res.json({ contacts: contacts || [] });
       }
 
@@ -9772,7 +9763,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           AND ui."replyType" = 'positive'
           ${ownEmailsFilter}
           ORDER BY LOWER(ui."fromEmail"), ui."receivedAt" DESC
-        `, orgId, orgId, userId, ...ownEmailsUniq) as any[];
+        `, orgId, orgId, userId) as any[];
         return res.json({ contacts: contacts || [] });
       }
 
@@ -9780,6 +9771,69 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     } catch (error: any) {
       console.error('[Scorecard Drilldown] Error:', error.message);
       res.status(500).json({ message: 'Failed to fetch drill-down data' });
+    }
+  });
+
+  // Debug — shows the exclusion set + any inbox senders that look internal but aren't excluded
+  app.get('/api/team/scorecard/debug', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const sample = (req.query.sample as string || '').toLowerCase().trim();
+
+      const emailAccounts = await storage.rawAll(`SELECT id, LOWER(TRIM(email)) as email, "organizationId", provider, status FROM email_accounts ORDER BY email`) as any[];
+      const warmupJoin = await storage.rawAll(`
+        SELECT wa.id as warmup_id, LOWER(TRIM(ea.email)) as email, ea."organizationId", wa.status
+        FROM warmup_accounts wa JOIN email_accounts ea ON ea.id = wa."emailAccountId"
+        ORDER BY ea.email
+      `) as any[];
+
+      // Find inbox senders for this org that look like they SHOULD be excluded but aren't in either table
+      const leakedSenders = await storage.rawAll(`
+        SELECT LOWER(TRIM(ui."fromEmail")) as "fromEmail", COUNT(*)::int as cnt
+        FROM unified_inbox ui
+        WHERE ui."organizationId" = ?
+        AND LOWER(TRIM(ui."fromEmail")) NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
+        AND LOWER(TRIM(ui."fromEmail")) NOT IN (
+          SELECT LOWER(TRIM(ea.email)) FROM warmup_accounts wa
+          JOIN email_accounts ea ON ea.id = wa."emailAccountId" WHERE ea.email IS NOT NULL
+        )
+        AND (
+          LOWER(TRIM(ui."fromEmail")) LIKE '%@bellaward.com'
+          OR LOWER(TRIM(ui."fromEmail")) LIKE '%@aegis.edu.in'
+        )
+        GROUP BY LOWER(TRIM(ui."fromEmail"))
+        ORDER BY cnt DESC
+        LIMIT 50
+      `, orgId) as any[];
+
+      // Optional: look up a specific sample email
+      let sampleInfo: any = null;
+      if (sample) {
+        const inEa = await storage.rawAll(`SELECT id, LOWER(TRIM(email)) as email, "organizationId", provider, status FROM email_accounts WHERE LOWER(TRIM(email)) = ?`, sample) as any[];
+        const inWa = await storage.rawAll(`
+          SELECT wa.id, LOWER(TRIM(ea.email)) as email, ea."organizationId"
+          FROM warmup_accounts wa JOIN email_accounts ea ON ea.id = wa."emailAccountId"
+          WHERE LOWER(TRIM(ea.email)) = ?
+        `, sample) as any[];
+        const inInbox = await storage.rawAll(`
+          SELECT ui.id, LOWER(TRIM(ui."fromEmail")) as "fromEmail", ui."emailAccountId", ui."replyType", ui."sentByUs"
+          FROM unified_inbox ui WHERE LOWER(TRIM(ui."fromEmail")) = ? LIMIT 5
+        `, sample) as any[];
+        sampleInfo = { sample, inEmailAccounts: inEa, inWarmupAccounts: inWa, inboxRows: inInbox };
+      }
+
+      res.json({
+        orgId,
+        emailAccountsCount: emailAccounts.length,
+        warmupLinkedCount: warmupJoin.length,
+        emailAccounts: emailAccounts.slice(0, 100),
+        warmupAccounts: warmupJoin,
+        leakedSenders,
+        sampleInfo,
+      });
+    } catch (error: any) {
+      console.error('[Scorecard Debug] Error:', error.message);
+      res.status(500).json({ message: error.message });
     }
   });
 
