@@ -303,7 +303,9 @@ export class OutlookReplyTracker {
       const orgAccounts = await storage.getEmailAccounts(orgId);
       for (const a of orgAccounts) if (a.email) ownEmailsSet.add(a.email.toLowerCase());
       const warmupRows = await storage.rawAll(
-        'SELECT email FROM warmup_accounts WHERE "organizationId" = ?', orgId
+        `SELECT ea.email FROM warmup_accounts wa
+         JOIN email_accounts ea ON ea.id = wa."emailAccountId"
+         WHERE wa."organizationId" = ? AND ea.email IS NOT NULL`, orgId
       ) as any[];
       for (const r of warmupRows) if (r.email) ownEmailsSet.add(r.email.toLowerCase());
     } catch (e) { /* non-fatal — if this fails, process all messages as before */ }
