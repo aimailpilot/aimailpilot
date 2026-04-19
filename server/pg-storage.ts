@@ -19,6 +19,15 @@ pool.on('error', (err) => {
   console.error('[PG] Unexpected pool error:', err);
 });
 
+// Raise work_mem per connection so large sorts (reply-matching 50k-row queries)
+// stay in RAM instead of spilling to disk. Server default is 4MB; 32MB covers
+// the ~10MB sort with headroom. Per-connection × pool max 10 = 320MB ceiling.
+pool.on('connect', (client) => {
+  client.query("SET work_mem = '32MB'").catch((e) => {
+    console.error('[PG] Failed to set work_mem:', e instanceof Error ? e.message : e);
+  });
+});
+
 // ========== Helpers ==========
 function genId(): string { return crypto.randomUUID(); }
 function now(): string { return new Date().toISOString(); }
