@@ -8334,6 +8334,23 @@ Respond with ONLY a JSON object in this format:
     }
   });
 
+  // Score unscored human-reply inbox messages with Azure OpenAI (fire-and-forget)
+  app.post('/api/inbox/score-replies', requireAuth, async (req: any, res) => {
+    try {
+      const { batchScoreOrgReplies } = await import('./services/reply-quality-engine');
+      const limit = parseInt(req.body?.limit) || 100;
+      res.json({ status: 'started', limit });
+      // Fire-and-forget after responding
+      setImmediate(() => {
+        batchScoreOrgReplies(req.user.organizationId, limit).catch((e: any) =>
+          console.error('[ReplyQuality] batch error:', e instanceof Error ? e.message : e)
+        );
+      });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to start reply scoring' });
+    }
+  });
+
   // Get single inbox message
   app.get('/api/inbox/:id', requireAuth, async (req: any, res) => {
     try {

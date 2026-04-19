@@ -63,6 +63,8 @@ interface InboxMessage {
   aiSuggestedWon?: boolean;
   aiSuggestedMeeting?: boolean;
   aiSuggestionReason?: string | null;
+  replyQualityScore?: number | null;
+  replyQualityLabel?: string | null;
   contact?: {
     id: string;
     email: string;
@@ -163,6 +165,9 @@ export default function UnifiedInbox() {
   const [showContactInfo, setShowContactInfo] = useState(false);
   const [showLeadPanel, setShowLeadPanel] = useState(false);
 
+  // Reply quality scoring
+  const [scoringReplies, setScoringReplies] = useState(false);
+
   const isAdmin = userRole === 'owner' || userRole === 'admin';
 
   // Fetch user role, team, accounts, campaigns on mount
@@ -262,6 +267,22 @@ export default function UnifiedInbox() {
       console.error('Sync error:', err);
     } finally {
       if (manual) setSyncing(false);
+    }
+  };
+
+  const scoreReplies = async () => {
+    setScoringReplies(true);
+    try {
+      await fetch('/api/inbox/score-replies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ limit: 100 }),
+      });
+      // Refresh after a short delay to show updated scores
+      setTimeout(() => { fetchMessages(); setScoringReplies(false); }, 3000);
+    } catch (e) {
+      setScoringReplies(false);
     }
   };
 
@@ -600,6 +621,14 @@ export default function UnifiedInbox() {
       not_interested: { label: 'Not Interested', className: 'bg-gray-100 text-gray-600', icon: <XSquare className="h-3 w-3" /> },
     };
     return map[leadStatus] || null;
+  };
+
+  const getQualityBadge = (score: number | null | undefined, label: string | null | undefined) => {
+    if (score == null) return null;
+    if (score >= 8) return { label: label || 'Hot', className: 'bg-red-50 text-red-600 border-red-200', icon: '🔥' };
+    if (score >= 6) return { label: label || 'Warm', className: 'bg-amber-50 text-amber-600 border-amber-200', icon: '⚡' };
+    if (score >= 4) return { label: label || 'Neutral', className: 'bg-gray-50 text-gray-500 border-gray-200', icon: '—' };
+    return { label: label || 'Declined', className: 'bg-slate-50 text-slate-400 border-slate-200', icon: '↓' };
   };
 
   const getProviderIcon = (provider: string) => {
@@ -1169,6 +1198,15 @@ export default function UnifiedInbox() {
             ))}
           </div>
 
+          {/* Score replies button — only on Need Reply tab */}
+          {statusFilter === 'not_replied' && (
+            <button onClick={scoreReplies} disabled={scoringReplies}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-violet-100 text-violet-700 hover:bg-violet-200 disabled:opacity-50 transition-all">
+              <Sparkles className="h-3 w-3" />
+              {scoringReplies ? 'Scoring…' : 'Score with AI'}
+            </button>
+          )}
+
           {/* Reply type filter */}
           <Select value={replyTypeFilter} onValueChange={v => { setReplyTypeFilter(v === 'all_types' ? '' : v); setPage(0); }}>
             <SelectTrigger className="w-[130px] h-8 text-xs">
@@ -1283,6 +1321,7 @@ export default function UnifiedInbox() {
                 const isStarred = starredIds.has(msg.id);
                 const replyBadge = getReplyTypeBadge(msg.replyType);
                 const leadBadge = getLeadStatusBadge(msg.leadStatus);
+                const qualityBadge = getQualityBadge(msg.replyQualityScore, msg.replyQualityLabel);
 
                 return (
                   <div key={msg.id}
@@ -1324,6 +1363,11 @@ export default function UnifiedInbox() {
                         {leadBadge && (
                           <Badge variant="outline" className={`${leadBadge.className} text-[9px] px-1.5 py-0 gap-0.5`}>
                             {leadBadge.icon}{leadBadge.label}
+                          </Badge>
+                        )}
+                        {qualityBadge && statusFilter === 'not_replied' && (
+                          <Badge variant="outline" className={`${qualityBadge.className} text-[9px] px-1.5 py-0`} title={`Reply quality score: ${msg.replyQualityScore}/10`}>
+                            {qualityBadge.icon} {qualityBadge.label}
                           </Badge>
                         )}
                         {msg.campaignId && (

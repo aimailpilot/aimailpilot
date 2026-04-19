@@ -771,9 +771,12 @@ async function initializeSchema() {
       'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "aiSuggestedWon" BOOLEAN DEFAULT FALSE',
       'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "aiSuggestedMeeting" BOOLEAN DEFAULT FALSE',
       'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "aiSuggestionReason" TEXT',
+      'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "replyQualityScore" INTEGER DEFAULT NULL',
+      'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "replyQualityLabel" TEXT DEFAULT NULL',
       'CREATE INDEX IF NOT EXISTS idx_inbox_meeting ON unified_inbox("organizationId", "meetingDetected")',
       'CREATE INDEX IF NOT EXISTS idx_inbox_ai_won ON unified_inbox("organizationId", "aiSuggestedWon")',
       'CREATE INDEX IF NOT EXISTS idx_inbox_ai_meeting ON unified_inbox("organizationId", "aiSuggestedMeeting")',
+      'CREATE INDEX IF NOT EXISTS idx_inbox_reply_quality ON unified_inbox("organizationId", "replyQualityScore")',
     ];
     for (const alt of alterColumns) {
       try { await client.query(alt); } catch (e) { /* column already exists */ }
