@@ -3206,7 +3206,7 @@ export class PostgresStorage {
     return parseInt((await queryOne(sql, params)).c);
   }
 
-  async getInboxStats(organizationId: string) {
+  async getInboxStats(organizationId: string, accountIds?: string[]) {
     // Warmup detection: both fromEmail AND toEmail are org email accounts
     const exF = `LOWER(CASE WHEN "fromEmail" LIKE '%<%>%' THEN substring("fromEmail" from '<([^>]+)>') ELSE "fromEmail" END)`;
     const exT = `LOWER(CASE WHEN "toEmail" LIKE '%<%>%' THEN substring("toEmail" from '<([^>]+)>') ELSE COALESCE("toEmail",'') END)`;
@@ -3220,18 +3220,27 @@ export class PostgresStorage {
     const warmupExcludeSql = `AND ${exF} NOT IN ${oE}`;
     const warmupOnlySql = `AND ${exF} IN ${oE} AND ${exT} IN ${oE}`;
 
-    const total = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 ${warmupExcludeSql}`, [organizationId])).c);
-    const unread = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'unread' ${warmupExcludeSql}`, [organizationId])).c);
-    const replied = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" IN ('positive','negative','general') ${warmupExcludeSql}`, [organizationId])).c);
-    const archived = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'archived'`, [organizationId])).c);
-    const positive = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'positive'`, [organizationId])).c);
-    const negative = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'negative'`, [organizationId])).c);
-    const ooo = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'ooo'`, [organizationId])).c);
-    const autoReply = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'auto_reply'`, [organizationId])).c);
-    const bounced = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND ("bounceType" != '' AND "bounceType" IS NOT NULL) ${warmupExcludeSql}`, [organizationId])).c);
-    const starred = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "isStarred" = 1`, [organizationId])).c);
-    const warmup = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 ${warmupOnlySql}`, [organizationId])).c);
-    const notReplied = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" IN ('positive','negative','general') AND (status != 'replied' AND "repliedAt" IS NULL) ${warmupExcludeSql}`, [organizationId])).c);
+    // Scope to specific email accounts when provided (non-admin members)
+    const params: any[] = [organizationId];
+    let acctScope = '';
+    if (accountIds && accountIds.length > 0) {
+      const placeholders = accountIds.map((_, i) => `$${i + 2}`).join(',');
+      acctScope = ` AND "emailAccountId" IN (${placeholders})`;
+      params.push(...accountIds);
+    }
+
+    const total = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 ${warmupExcludeSql}${acctScope}`, params)).c);
+    const unread = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'unread' ${warmupExcludeSql}${acctScope}`, params)).c);
+    const replied = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" IN ('positive','negative','general') ${warmupExcludeSql}${acctScope}`, params)).c);
+    const archived = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'archived'${acctScope}`, params)).c);
+    const positive = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'positive'${acctScope}`, params)).c);
+    const negative = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'negative'${acctScope}`, params)).c);
+    const ooo = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'ooo'${acctScope}`, params)).c);
+    const autoReply = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'auto_reply'${acctScope}`, params)).c);
+    const bounced = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND ("bounceType" != '' AND "bounceType" IS NOT NULL) ${warmupExcludeSql}${acctScope}`, params)).c);
+    const starred = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "isStarred" = 1${acctScope}`, params)).c);
+    const warmup = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 ${warmupOnlySql}${acctScope}`, params)).c);
+    const notReplied = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" IN ('positive','negative','general') AND (status != 'replied' AND "repliedAt" IS NULL) ${warmupExcludeSql}${acctScope}`, params)).c);
     return { total, unread, replied, archived, positive, negative, ooo, autoReply, bounced, starred, warmup, notReplied };
   }
 

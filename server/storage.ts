@@ -3391,7 +3391,7 @@ export class DatabaseStorage {
   }
 
   // Get inbox stats breakdown for dashboard
-  async getInboxStats(organizationId: string) {
+  async getInboxStats(organizationId: string, _accountIds?: string[]) {
     const exFS = "LOWER(CASE WHEN fromEmail LIKE '%<%>%' THEN SUBSTR(fromEmail, INSTR(fromEmail,'<')+1, INSTR(fromEmail,'>')-INSTR(fromEmail,'<')-1) ELSE fromEmail END)";
     const exTS = "LOWER(CASE WHEN toEmail LIKE '%<%>%' THEN SUBSTR(toEmail, INSTR(toEmail,'<')+1, INSTR(toEmail,'>')-INSTR(toEmail,'<')-1) ELSE COALESCE(toEmail,'') END)";
     const oES = "(SELECT LOWER(email) FROM email_accounts WHERE organizationId = ?)";

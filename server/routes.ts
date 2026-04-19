@@ -8286,7 +8286,11 @@ Respond with ONLY a JSON object in this format:
 
       const messages = await storage.getInboxMessagesEnhanced(req.user.organizationId, filters, parsedLimit, parsedOffset);
       const total = await storage.getInboxMessageCountEnhanced(req.user.organizationId, filters);
-      const stats = await storage.getInboxStats(req.user.organizationId);
+      // Scope stats to member's own accounts (admins see org-wide)
+      const statsAccountIds = !isAdmin && filters.emailAccountId
+        ? String(filters.emailAccountId).split(',').filter(Boolean)
+        : undefined;
+      const stats = await storage.getInboxStats(req.user.organizationId, statsAccountIds);
       const unread = stats.unread;
 
       // Enrich messages (individual try/catch to prevent one bad message from crashing the whole endpoint)
@@ -8327,7 +8331,15 @@ Respond with ONLY a JSON object in this format:
   // Get inbox stats
   app.get('/api/inbox/stats', requireAuth, async (req: any, res) => {
     try {
-      const stats = await storage.getInboxStats(req.user.organizationId);
+      const role = req.user.role;
+      const isAdmin = role === 'owner' || role === 'admin';
+      let accountIds: string[] | undefined;
+      if (!isAdmin) {
+        const userAccounts = await storage.getEmailAccountsForUser(req.user.organizationId, req.user.id);
+        accountIds = userAccounts.map((a: any) => a.id);
+        if (accountIds.length === 0) return res.json({ total: 0, unread: 0, replied: 0, archived: 0, positive: 0, negative: 0, ooo: 0, autoReply: 0, bounced: 0, starred: 0, warmup: 0, notReplied: 0 });
+      }
+      const stats = await storage.getInboxStats(req.user.organizationId, accountIds);
       res.json(stats);
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch inbox stats' });
