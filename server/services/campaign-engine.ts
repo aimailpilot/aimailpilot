@@ -171,6 +171,13 @@ async function sendViaMicrosoftGraph(
 const _gmailTokenCache = new Map<string, { token: string; expiry: number }>();
 // Per-account refresh lock: prevents concurrent refreshes for the same account
 const _gmailRefreshLock = new Map<string, Promise<string | null>>();
+// Negative cache: back off for 60s after a failed refresh so we don't hot-loop a bad account
+const _gmailRefreshBackoff = new Map<string, number>();
+// Same pattern for Microsoft tokens
+const _msTokenCache = new Map<string, { token: string; expiry: number }>();
+const _msRefreshLock = new Map<string, Promise<string | null>>();
+const _msRefreshBackoff = new Map<string, number>();
+const REFRESH_BACKOFF_MS = 60_000;
 
 /**
  * Refresh a Gmail access token if expired.
@@ -183,6 +190,14 @@ async function refreshGmailToken(orgId: string, senderEmail?: string): Promise<s
   const cached = _gmailTokenCache.get(cacheKey);
   if (cached && Date.now() < cached.expiry - 300_000) {
     return cached.token;
+  }
+
+  // Negative cache: if this account recently failed to refresh, short-circuit
+  // and return whatever cached token we have (may be expired — caller's 401
+  // retry path handles that) so we don't hot-loop 10s timeouts every cycle.
+  const backoffUntil = _gmailRefreshBackoff.get(cacheKey) || 0;
+  if (Date.now() < backoffUntil) {
+    return cached?.token || null;
   }
 
   // If a refresh is already in-flight for this account, wait for it instead of firing another
@@ -242,29 +257,56 @@ async function _doRefreshGmailToken(orgId: string, senderEmail: string | undefin
   if (!clientSecret) clientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
   if (!clientId || !clientSecret) return accessToken || null;
 
+  // Direct fetch to Google's token endpoint with AbortController timeout.
+  // We previously used google-auth-library's refreshAccessToken() but observed
+  // 30s hangs (keep-alive socket reuse against half-open TCP). Each call here
+  // creates a fresh connection bound to this request's abort signal, so a stuck
+  // socket can't block future refresh attempts.
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 10_000);
   try {
-    const { OAuth2Client } = await import('google-auth-library');
-    const oauth2 = new OAuth2Client(clientId, clientSecret);
-    oauth2.setCredentials({ refresh_token: refreshToken });
-    const { credentials } = await oauth2.refreshAccessToken();
-    if (credentials.access_token) {
-      // Store refreshed tokens for the specific sender if applicable
-      if (senderEmail) {
-        await storage.setApiSetting(orgId, `${senderPrefix}access_token`, credentials.access_token);
-        if (credentials.expiry_date) await storage.setApiSetting(orgId, `${senderPrefix}token_expiry`, String(credentials.expiry_date));
-      } else {
-        // Only update org-level tokens when NOT refreshing a per-sender token
-        // CRITICAL: Don't overwrite org-level tokens with a secondary account's tokens!
-        await storage.setApiSetting(orgId, 'gmail_access_token', credentials.access_token);
-        if (credentials.expiry_date) await storage.setApiSetting(orgId, 'gmail_token_expiry', String(credentials.expiry_date));
+    const body = new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+      grant_type: 'refresh_token',
+    });
+    const resp = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+      signal: ac.signal,
+    });
+    if (resp.ok) {
+      const tokens = await resp.json() as any;
+      if (tokens.access_token) {
+        const expiryMs = Date.now() + ((tokens.expires_in || 3600) * 1000);
+        if (senderEmail) {
+          await storage.setApiSetting(orgId, `${senderPrefix}access_token`, tokens.access_token);
+          await storage.setApiSetting(orgId, `${senderPrefix}token_expiry`, String(expiryMs));
+        } else {
+          await storage.setApiSetting(orgId, 'gmail_access_token', tokens.access_token);
+          await storage.setApiSetting(orgId, 'gmail_token_expiry', String(expiryMs));
+        }
+        _gmailTokenCache.set(cacheKey, { token: tokens.access_token, expiry: expiryMs });
+        _gmailRefreshBackoff.delete(cacheKey); // clear any prior backoff on success
+        return tokens.access_token;
       }
-      // Cache the new token in memory
-      const expiry = credentials.expiry_date || (Date.now() + 3600_000);
-      _gmailTokenCache.set(cacheKey, { token: credentials.access_token, expiry });
-      return credentials.access_token;
+    } else {
+      // Non-2xx: log status + body so invalid_grant etc. is visible. Set backoff.
+      let errText = '';
+      try { errText = await resp.text(); } catch { /* ignore */ }
+      console.error(`[CampaignEngine] Gmail token refresh HTTP ${resp.status} for ${senderEmail || orgId}: ${errText.slice(0, 200)}`);
+      _gmailRefreshBackoff.set(cacheKey, Date.now() + REFRESH_BACKOFF_MS);
     }
-  } catch (e) { console.error('[CampaignEngine] Gmail token refresh failed:', e); }
-  // Cache existing token if still valid
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[CampaignEngine] Gmail token refresh failed for ${senderEmail || orgId}: ${msg}`);
+    _gmailRefreshBackoff.set(cacheKey, Date.now() + REFRESH_BACKOFF_MS);
+  } finally {
+    clearTimeout(timer);
+  }
+  // Cache existing token if still valid so subsequent calls skip the DB read
   if (accessToken) {
     const exp = parseInt(String(tokenExpiry || '0'));
     if (exp > Date.now()) _gmailTokenCache.set(cacheKey, { token: accessToken, expiry: exp });
@@ -276,15 +318,28 @@ async function _doRefreshGmailToken(orgId: string, senderEmail: string | undefin
  * Refresh a Microsoft access token if expired.
  */
 async function refreshMicrosoftToken(orgId: string, senderEmail?: string): Promise<string | null> {
+  const cacheKey = `${orgId}:${senderEmail || '__org__'}`;
+  const cached = _msTokenCache.get(cacheKey);
+  if (cached && Date.now() < cached.expiry - 300_000) return cached.token;
+  const backoffUntil = _msRefreshBackoff.get(cacheKey) || 0;
+  if (Date.now() < backoffUntil) return cached?.token || null;
+  const inflight = _msRefreshLock.get(cacheKey);
+  if (inflight) return inflight;
+  const p = _doRefreshMicrosoftToken(orgId, senderEmail, cacheKey);
+  _msRefreshLock.set(cacheKey, p);
+  try { return await p; } finally { _msRefreshLock.delete(cacheKey); }
+}
+
+async function _doRefreshMicrosoftToken(orgId: string, senderEmail: string | undefined, cacheKey: string): Promise<string | null> {
   const settings = await storage.getApiSettings(orgId);
-  
+
   // Try per-sender tokens first (for multi-account support)
   const senderPrefix = senderEmail ? `outlook_sender_${senderEmail}_` : '';
   let accessToken = senderEmail ? settings[`${senderPrefix}access_token`] : null;
   let refreshToken = senderEmail ? settings[`${senderPrefix}refresh_token`] : null;
   let tokenExpiry = senderEmail ? settings[`${senderPrefix}token_expiry`] : null;
   let isPerSender = !!(accessToken || refreshToken);
-  
+
   // Fall back to org-level tokens ONLY if no per-sender tokens exist at all
   // CRITICAL: Don't mix refresh tokens from different accounts!
   if (!accessToken && !refreshToken) {
@@ -293,9 +348,10 @@ async function refreshMicrosoftToken(orgId: string, senderEmail?: string): Promi
     tokenExpiry = settings.microsoft_token_expiry;
     isPerSender = false;
   }
-  
+
   const expiry = parseInt(tokenExpiry || '0');
   if (accessToken && Date.now() < expiry - 300000) {
+    _msTokenCache.set(cacheKey, { token: accessToken, expiry });
     return accessToken;
   }
   if (!refreshToken) return accessToken || null;
@@ -326,9 +382,17 @@ async function refreshMicrosoftToken(orgId: string, senderEmail?: string): Promi
       grant_type: 'refresh_token',
       scope: 'openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/SMTP.Send',
     });
-    const resp = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
-      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString(),
-    });
+    const ac = new AbortController();
+    const msTimer = setTimeout(() => ac.abort(), 10000);
+    let resp: Response;
+    try {
+      resp = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString(), signal: ac.signal,
+      });
+    } finally {
+      clearTimeout(msTimer);
+    }
     if (resp.ok) {
       const tokens = await resp.json() as any;
       if (tokens.access_token) {
@@ -338,6 +402,7 @@ async function refreshMicrosoftToken(orgId: string, senderEmail?: string): Promi
           if (tokens.refresh_token) await storage.setApiSetting(orgId, `${senderPrefix}refresh_token`, tokens.refresh_token);
           const exp = Date.now() + (tokens.expires_in || 3600) * 1000;
           await storage.setApiSetting(orgId, `${senderPrefix}token_expiry`, String(exp));
+          _msTokenCache.set(cacheKey, { token: tokens.access_token, expiry: exp });
         } else {
           // Only update org-level tokens when NOT refreshing a per-sender token
           // CRITICAL: Don't overwrite org-level tokens with a secondary account's tokens!
@@ -345,11 +410,26 @@ async function refreshMicrosoftToken(orgId: string, senderEmail?: string): Promi
           if (tokens.refresh_token) await storage.setApiSetting(orgId, 'microsoft_refresh_token', tokens.refresh_token);
           const exp = Date.now() + (tokens.expires_in || 3600) * 1000;
           await storage.setApiSetting(orgId, 'microsoft_token_expiry', String(exp));
+          _msTokenCache.set(cacheKey, { token: tokens.access_token, expiry: exp });
         }
+        _msRefreshBackoff.delete(cacheKey);
         return tokens.access_token;
       }
+    } else {
+      let errText = '';
+      try { errText = await resp.text(); } catch { /* ignore */ }
+      console.error(`[CampaignEngine] Microsoft token refresh HTTP ${resp.status} for ${senderEmail || orgId}: ${errText.slice(0, 200)}`);
+      _msRefreshBackoff.set(cacheKey, Date.now() + REFRESH_BACKOFF_MS);
     }
-  } catch (e) { console.error('[CampaignEngine] Microsoft token refresh failed:', e); }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[CampaignEngine] Microsoft token refresh failed for ${senderEmail || orgId}: ${msg}`);
+    _msRefreshBackoff.set(cacheKey, Date.now() + REFRESH_BACKOFF_MS);
+  }
+  if (accessToken) {
+    const exp = parseInt(String(tokenExpiry || '0'));
+    if (exp > Date.now()) _msTokenCache.set(cacheKey, { token: accessToken, expiry: exp });
+  }
   return accessToken || null;
 }
 
