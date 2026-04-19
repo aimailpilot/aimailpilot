@@ -138,6 +138,34 @@ app.use((req, res, next) => {
       }
     }, 30000);
 
+    // Auto-score new human-reply inbox messages with Azure OpenAI
+    // Runs every 15 minutes; skips messages that already have a score
+    setTimeout(() => {
+      const runScorer = async () => {
+        try {
+          const { batchScoreOrgReplies } = await import('./services/reply-quality-engine');
+          const orgs = await storage.rawAll(`
+            SELECT DISTINCT "organizationId" FROM unified_inbox
+            WHERE "replyType" IN ('positive','negative','general')
+              AND "replyQualityScore" IS NULL
+            LIMIT 50
+          `) as any[];
+          for (const org of orgs) {
+            try {
+              await batchScoreOrgReplies(org.organizationId, 50);
+            } catch (e) {
+              console.error(`[ReplyQualityAuto] Org ${org.organizationId} failed:`, e instanceof Error ? e.message : e);
+            }
+          }
+        } catch (e) {
+          console.error('[ReplyQualityAuto] sweep error:', e instanceof Error ? e.message : e);
+        }
+      };
+      runScorer();
+      setInterval(runScorer, 15 * 60 * 1000);
+      log('[ReplyQualityAuto] Scheduled: first run now, then every 15 minutes');
+    }, 90 * 1000);
+
     // Daily reset of email account send counters (check every hour, reset at midnight UTC)
     let lastResetDay = new Date().getUTCDate();
     setInterval(async () => {

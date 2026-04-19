@@ -19,6 +19,8 @@ interface ScorecardMember {
   proposalsSent: number;
   hotLeads: number;
   notReplied: number;
+  notRepliedHot?: number;
+  notRepliedWarm?: number;
   dealsWon: number;
   dealsLost: number;
   revenue: number;
@@ -35,6 +37,8 @@ interface ScorecardData {
     proposalsSent: number;
     hotLeads: number;
     notReplied: number;
+    notRepliedHot?: number;
+    notRepliedWarm?: number;
     dealsWon: number;
     dealsLost: number;
     revenue: number;
@@ -286,7 +290,17 @@ export default function TeamScorecard({ onBack }: TeamScorecardProps) {
 
       <div className="grid grid-cols-4 gap-3">
         <SummaryCard icon={<Flame className="h-5 w-5 text-orange-600" />} label="Hot Leads" value={teamTotals.hotLeads} bg="bg-orange-50" />
-        <SummaryCard icon={<MailX className="h-5 w-5 text-rose-600" />} label="Not Replied" value={teamTotals.notReplied || 0} bg="bg-rose-50" />
+        <SummaryCard
+          icon={<MailX className="h-5 w-5 text-rose-600" />}
+          label="Not Replied"
+          value={teamTotals.notReplied || 0}
+          bg="bg-rose-50"
+          subtitle={
+            (teamTotals.notRepliedHot || 0) + (teamTotals.notRepliedWarm || 0) > 0
+              ? `🔥 ${teamTotals.notRepliedHot || 0} Hot · ⚡ ${teamTotals.notRepliedWarm || 0} Warm`
+              : undefined
+          }
+        />
         <SummaryCard icon={<CheckCircle2 className="h-5 w-5 text-green-600" />} label="Deals Won" value={teamTotals.dealsWon} bg="bg-green-50" />
         <SummaryCard icon={<XCircle className="h-5 w-5 text-red-500" />} label="Deals Lost" value={teamTotals.dealsLost} bg="bg-red-50" />
       </div>
@@ -344,13 +358,21 @@ export default function TeamScorecard({ onBack }: TeamScorecardProps) {
                   </td>
                   <td className="px-4 py-3 text-center">
                     {(member.notReplied || 0) > 0 ? (
-                      <button
-                        onClick={() => openDrilldown(member, 'not_replied')}
-                        className="font-semibold text-rose-600 underline underline-offset-2 hover:text-rose-800 transition"
-                        title="Click to see who hasn't replied"
-                      >
-                        {member.notReplied}
-                      </button>
+                      <div className="flex flex-col items-center gap-0.5">
+                        <button
+                          onClick={() => openDrilldown(member, 'not_replied')}
+                          className="font-semibold text-rose-600 underline underline-offset-2 hover:text-rose-800 transition"
+                          title="Click to see who hasn't replied"
+                        >
+                          {member.notReplied}
+                        </button>
+                        {((member.notRepliedHot || 0) + (member.notRepliedWarm || 0) > 0) && (
+                          <div className="text-[10px] text-gray-500 flex gap-1">
+                            {(member.notRepliedHot || 0) > 0 && <span title="Hot replies">🔥{member.notRepliedHot}</span>}
+                            {(member.notRepliedWarm || 0) > 0 && <span title="Warm replies">⚡{member.notRepliedWarm}</span>}
+                          </div>
+                        )}
+                      </div>
                     ) : (
                       <span className="text-gray-300">0</span>
                     )}
@@ -507,7 +529,7 @@ export default function TeamScorecard({ onBack }: TeamScorecardProps) {
   );
 }
 
-function SummaryCard({ icon, label, value, bg, isString }: { icon: React.ReactNode; label: string; value: number | string; bg: string; isString?: boolean }) {
+function SummaryCard({ icon, label, value, bg, isString, subtitle }: { icon: React.ReactNode; label: string; value: number | string; bg: string; isString?: boolean; subtitle?: string }) {
   return (
     <div className={`${bg} rounded-xl p-4 border border-gray-100`}>
       <div className="flex items-center gap-2 mb-2">
@@ -515,6 +537,7 @@ function SummaryCard({ icon, label, value, bg, isString }: { icon: React.ReactNo
         <span className="text-[11px] text-gray-500 font-medium uppercase tracking-wide">{label}</span>
       </div>
       <div className="text-2xl font-bold text-gray-900">{isString ? value : (value as number).toLocaleString()}</div>
+      {subtitle && <div className="text-[11px] text-gray-600 mt-1">{subtitle}</div>}
     </div>
   );
 }

@@ -9697,9 +9697,15 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         // Counts human replies (positive/negative/general) waiting in their inbox
         // Excludes warmup/internal senders (own-org email accounts)
         let notReplied = 0;
+        let notRepliedHot = 0;
+        let notRepliedWarm = 0;
         try {
-          notReplied = parseInt((await storage.rawGet(`
-            SELECT COUNT(*) as cnt FROM unified_inbox ui
+          const row = (await storage.rawGet(`
+            SELECT
+              COUNT(*) as cnt,
+              COUNT(*) FILTER (WHERE ui."replyQualityLabel" = 'Hot') as hot,
+              COUNT(*) FILTER (WHERE ui."replyQualityLabel" = 'Warm') as warm
+            FROM unified_inbox ui
             INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
             LEFT JOIN contacts c ON c.id = ui."contactId"
             WHERE ui."organizationId" = ? AND ea."userId" = ?
@@ -9708,7 +9714,10 @@ Generate an appropriate reply to the LATEST email above, considering the full co
             AND ui."replyType" IN ('positive', 'negative', 'general')
             ${ownEmailsFilter}
             AND LOWER(TRIM(COALESCE(c.email, ''))) NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
-          `, orgId, userId) as any)?.cnt || 0);
+          `, orgId, userId) as any) || {};
+          notReplied = parseInt(row.cnt || 0);
+          notRepliedHot = parseInt(row.hot || 0);
+          notRepliedWarm = parseInt(row.warm || 0);
         } catch { /* inbox schema mismatch — skip */ }
 
         // Hot Leads — recipients who replied with positive intent (distinct contacts)
@@ -9746,6 +9755,8 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           proposalsSent,
           hotLeads,
           notReplied,
+          notRepliedHot,
+          notRepliedWarm,
           dealsWon: wonCount,
           dealsLost,
           revenue,
@@ -9769,6 +9780,8 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         proposalsSent: scorecard.reduce((s, m) => s + m.proposalsSent, 0),
         hotLeads: scorecard.reduce((s, m) => s + m.hotLeads, 0),
         notReplied: scorecard.reduce((s, m) => s + (m.notReplied || 0), 0),
+        notRepliedHot: scorecard.reduce((s, m) => s + ((m as any).notRepliedHot || 0), 0),
+        notRepliedWarm: scorecard.reduce((s, m) => s + ((m as any).notRepliedWarm || 0), 0),
         dealsWon: scorecard.reduce((s, m) => s + m.dealsWon, 0),
         dealsLost: scorecard.reduce((s, m) => s + m.dealsLost, 0),
         revenue: scorecard.reduce((s, m) => s + m.revenue, 0),
@@ -10130,17 +10143,37 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       // 2. Emails needing reply — only CLASSIFIED human replies (positive, negative, general)
       // Excludes: OOO, auto_reply, bounce, and unclassified (NULL/empty) messages
       let emailsNeedingReply = 0;
+      let hotReplies = 0;
+      let warmReplies = 0;
       try {
-        emailsNeedingReply = parseInt((await storage.rawGet(`
-          SELECT COUNT(*) as cnt FROM unified_inbox ui
+        const needReplyBreakdown = (await storage.rawGet(`
+          SELECT
+            COUNT(*) as cnt,
+            COUNT(*) FILTER (WHERE ui."replyQualityLabel" = 'Hot') as hot,
+            COUNT(*) FILTER (WHERE ui."replyQualityLabel" = 'Warm') as warm
+          FROM unified_inbox ui
           INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
           WHERE ui."organizationId" = ? AND ea."userId" = ?
           AND ui.status IN ('unread', 'read') AND ui."repliedAt" IS NULL
           AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
           AND ui."replyType" IN ('positive', 'negative', 'general')
-        `, orgId, userId) as any)?.cnt || 0);
-        if (emailsNeedingReply > 0) nudges.push({ type: 'needs_reply', priority: 'high', title: `${emailsNeedingReply} Emails Need Reply`, message: 'Real human replies that haven\'t been responded to yet', count: emailsNeedingReply, actionType: 'emails' });
+        `, orgId, userId) as any) || {};
+        emailsNeedingReply = parseInt(needReplyBreakdown.cnt || 0);
+        hotReplies = parseInt(needReplyBreakdown.hot || 0);
+        warmReplies = parseInt(needReplyBreakdown.warm || 0);
+        if (emailsNeedingReply > 0) {
+          const qualityBits: string[] = [];
+          if (hotReplies > 0) qualityBits.push(`🔥 ${hotReplies} Hot`);
+          if (warmReplies > 0) qualityBits.push(`⚡ ${warmReplies} Warm`);
+          const msg = qualityBits.length
+            ? `${qualityBits.join(' · ')} — prioritize these first`
+            : 'Real human replies that haven\'t been responded to yet';
+          nudges.push({ type: 'needs_reply', priority: 'high', title: `${emailsNeedingReply} Emails Need Reply`, message: msg, count: emailsNeedingReply, actionType: 'emails' });
+        }
       } catch { }
+      (stats as any).hotReplies = hotReplies;
+      (stats as any).warmReplies = warmReplies;
+      (stats as any).emailsNeedingReply = emailsNeedingReply;
 
       // 3. Unactioned replies (contacts replied to campaign but no activity logged after)
       try {
@@ -10233,6 +10266,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       const emails = await storage.rawAll(`
         SELECT ui.id, ui."fromEmail", ui."fromName", ui."toEmail", ui.subject, ui.snippet, ui.body, ui."bodyHtml",
                ui."receivedAt", ui.status, ui."campaignId", ui."contactId", ui."replyType",
+               ui."replyQualityScore", ui."replyQualityLabel",
                c."firstName" as contactFirstName, c."lastName" as contactLastName, c.company as contactCompany,
                camp.name as campaignName
         FROM unified_inbox ui
@@ -10243,7 +10277,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         AND ui.status IN ('unread', 'read') AND ui."repliedAt" IS NULL
         AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
         AND ui."replyType" IN ('positive', 'negative', 'general')
-        ORDER BY ui."receivedAt" DESC
+        ORDER BY COALESCE(ui."replyQualityScore", -1) DESC, ui."receivedAt" DESC
         LIMIT ? OFFSET ?
       `, orgId, userId, limit, offset) as any[];
 

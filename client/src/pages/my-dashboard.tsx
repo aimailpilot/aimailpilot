@@ -58,6 +58,8 @@ interface EmailNeedingReply {
   campaignId: string;
   contactId: string;
   replyType: string;
+  replyQualityScore?: number | null;
+  replyQualityLabel?: string | null;
   contactFirstName: string;
   contactLastName: string;
   contactCompany: string;
@@ -355,6 +357,17 @@ export default function MyDashboard() {
                                           email.replyType === 'ooo' ? 'bg-purple-100 text-purple-600' :
                                           'bg-gray-100 text-gray-600'
                                         }`}>{email.replyType}</Badge>
+                                      )}
+                                      {email.replyQualityLabel && (
+                                        <Badge className={`text-[10px] px-1.5 py-0 h-4 ${
+                                          email.replyQualityLabel === 'Hot' ? 'bg-orange-100 text-orange-700' :
+                                          email.replyQualityLabel === 'Warm' ? 'bg-amber-100 text-amber-700' :
+                                          email.replyQualityLabel === 'Negative' ? 'bg-red-50 text-red-500' :
+                                          email.replyQualityLabel === 'Declined' ? 'bg-gray-100 text-gray-500' :
+                                          'bg-slate-100 text-slate-600'
+                                        }`} title={`AI quality score: ${email.replyQualityScore ?? '-'}`}>
+                                          {email.replyQualityLabel === 'Hot' ? '🔥' : email.replyQualityLabel === 'Warm' ? '⚡' : ''} {email.replyQualityLabel}
+                                        </Badge>
                                       )}
                                     </div>
 
