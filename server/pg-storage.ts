@@ -1813,6 +1813,7 @@ export class PostgresStorage {
   }
 
   async getUnrepliedCampaignMessages(orgId: string) {
+    const cutoff = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000).toISOString();
     return queryAll(`
       SELECT m.*, ct.email as "contactEmail", c.name as "campaignName" FROM messages m
       INNER JOIN campaigns c ON m."campaignId" = c.id
@@ -1821,9 +1822,10 @@ export class PostgresStorage {
       AND m.status = 'sent'
       AND m."repliedAt" IS NULL
       AND m."providerMessageId" IS NOT NULL
+      AND m."sentAt" >= $2
       ORDER BY m."sentAt" DESC
       LIMIT 5000
-    `, [orgId]);
+    `, [orgId, cutoff]);
   }
 
   async getAllRecentCampaignMessages(orgId: string) {
