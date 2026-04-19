@@ -56,6 +56,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > - No changes to 404 handling in `gmailFetch()` in `gmail-reply-tracker.ts` — must return `null` on 404 (not throw). Callers must check `if (!msg) continue`. Reverting causes retry loop noise for deleted messages.
 > - No changes to follow-up tracking injection in `executeFollowup()` in `followup-engine.ts` — `followupTrackingId` generated before send, `addTrackingPixel()` + `addClickTracking()` applied to content before passing to `sendEmail()`. Same ID stored in message record and tracking event. Removing breaks Steps 2/3/4 open+click tracking (2026-04-18 fix).
 > - No changes to `getAllRecentCampaignMessages()` 90-day cutoff in `pg-storage.ts` — `AND m."sentAt" >= $2` with 90-day window is required for index usage. Removing reverts to full table scan (11s+ query).
+> - No changes to `getUnrepliedCampaignMessages()` 45-day cutoff in `pg-storage.ts` — `AND m."sentAt" >= $2` with 45-day window is required. Removing causes 8s+ full table scan ([PG-SLOW] 7908ms observed 2026-04-19).
+> - No changes to `getInboxStats(orgId, accountIds?)` scoping in `pg-storage.ts` — `accountIds` param adds `AND "emailAccountId" IN (...)` to ALL count queries. Routes must pass member account IDs for non-admin users. Removing causes members to see org-wide counts (data leak).
+> - No changes to Reply Quality auto-scorer in `server/index.ts` — 15-min `batchScoreOrgReplies` sweep (90s boot delay) populates `replyQualityScore`/`replyQualityLabel`. Removing causes dashboard hot/warm breakdowns to show zeros permanently.
+> - No changes to `not_replied` filter in `pg-storage.ts` (`getInboxMessagesEnhanced`, `getInboxMessageCountEnhanced`, `getInboxStats`) — must be `"replyType" IN ('positive','negative','general') AND (status != 'replied' AND "repliedAt" IS NULL)`. Both conditions are required.
 
 > **CRITICAL — DATABASE PROTECTION (read this before writing ANY server code)**
 > The production database has been accidentally deleted **4 times**. The following rules are NON-NEGOTIABLE:

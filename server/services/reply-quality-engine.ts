@@ -125,8 +125,8 @@ export async function scoreInboxMessage(
     const result = await scoreWithAzure(msg.subject || '', msg.snippet || '', msg.body || '', azure);
 
     await storage.rawRun(
-      `UPDATE unified_inbox SET "replyQualityScore"=$1, "replyQualityLabel"=$2 WHERE id=$3`,
-      [result.score, result.label, messageId]
+      `UPDATE unified_inbox SET "replyQualityScore"=?, "replyQualityLabel"=? WHERE id=?`,
+      result.score, result.label, messageId
     );
     return result;
   } catch (e) {
@@ -142,12 +142,12 @@ export async function batchScoreOrgReplies(
 ): Promise<{ scored: number; errors: number }> {
   const rows = await storage.rawAll(
     `SELECT id FROM unified_inbox
-     WHERE "organizationId" = $1
+     WHERE "organizationId" = ?
        AND "replyType" IN ('positive','negative','general')
        AND "replyQualityScore" IS NULL
      ORDER BY "receivedAt" DESC
-     LIMIT $2`,
-    [organizationId, limit]
+     LIMIT ?`,
+    organizationId, limit
   ) as any[];
 
   let scored = 0;
@@ -160,8 +160,8 @@ export async function batchScoreOrgReplies(
       if (!msg) { errors++; continue; }
       const result = await scoreWithAzure(msg.subject || '', msg.snippet || '', msg.body || '', azure);
       await storage.rawRun(
-        `UPDATE unified_inbox SET "replyQualityScore"=$1, "replyQualityLabel"=$2 WHERE id=$3`,
-        [result.score, result.label, row.id]
+        `UPDATE unified_inbox SET "replyQualityScore"=?, "replyQualityLabel"=? WHERE id=?`,
+        result.score, result.label, row.id
       );
       scored++;
     } catch (e) {
