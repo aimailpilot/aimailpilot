@@ -454,7 +454,7 @@ export class OutlookReplyTracker {
               for (const re of ndrPatterns) {
                 let m;
                 while ((m = re.exec(bodyText)) !== null) {
-                  if (m[1]) candidates.add(m[1].toLowerCase().replace(/[<>]/g, ''));
+                  if (m[1]) candidates.add(m[1].toLowerCase().replace(/[<>]/g, '').replace(/[.,;:]+$/, ''));
                 }
               }
 
