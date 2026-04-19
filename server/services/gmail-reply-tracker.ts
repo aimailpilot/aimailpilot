@@ -324,7 +324,8 @@ export class GmailReplyTracker {
         contactCampaignToMessages.set(key, existing);
       }
       
-      console.log(`[GmailReplyTracker] Maps built: ${providerIdToMessage.size} by providerId, ${contactEmailToMessages.size} by email, ${contactCampaignToMessages.size} by contact+campaign`);
+      const heapMB = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+      console.log(`[GmailReplyTracker] Maps built: ${providerIdToMessage.size} by providerId, ${contactEmailToMessages.size} by email, ${contactCampaignToMessages.size} by contact+campaign, heap=${heapMB}MB`);
 
       // Build set of org's own sender emails (email_accounts + warmup_accounts) to skip warmup/internal mail
       const ownEmailsSet = new Set<string>();

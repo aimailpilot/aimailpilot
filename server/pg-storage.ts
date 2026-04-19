@@ -1817,7 +1817,12 @@ export class PostgresStorage {
   async getUnrepliedCampaignMessages(orgId: string) {
     const cutoff = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000).toISOString();
     return queryAll(`
-      SELECT m.*, ct.email as "contactEmail", c.name as "campaignName" FROM messages m
+      SELECT
+        m.id, m."campaignId", m."contactId", m."providerMessageId", m."gmailThreadId",
+        m."trackingId", m."stepNumber", m.status, m."sentAt", m."repliedAt",
+        m."recipientEmail", m."bouncedAt",
+        ct.email as "contactEmail", c.name as "campaignName"
+      FROM messages m
       INNER JOIN campaigns c ON m."campaignId" = c.id
       LEFT JOIN contacts ct ON m."contactId" = ct.id
       WHERE c."organizationId" = $1
@@ -1833,7 +1838,12 @@ export class PostgresStorage {
   async getAllRecentCampaignMessages(orgId: string) {
     const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
     return queryAll(`
-      SELECT m.*, ct.email as "contactEmail", c.name as "campaignName" FROM messages m
+      SELECT
+        m.id, m."campaignId", m."contactId", m."providerMessageId", m."gmailThreadId",
+        m."trackingId", m."stepNumber", m.status, m."sentAt", m."repliedAt",
+        m."recipientEmail", m."bouncedAt",
+        ct.email as "contactEmail", c.name as "campaignName"
+      FROM messages m
       INNER JOIN campaigns c ON m."campaignId" = c.id
       LEFT JOIN contacts ct ON m."contactId" = ct.id
       WHERE c."organizationId" = $1
