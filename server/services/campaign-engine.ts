@@ -167,10 +167,38 @@ async function sendViaMicrosoftGraph(
   }
 }
 
+// In-memory token cache: key = `${orgId}:${email}`, value = { token, expiry }
+const _gmailTokenCache = new Map<string, { token: string; expiry: number }>();
+// Per-account refresh lock: prevents concurrent refreshes for the same account
+const _gmailRefreshLock = new Map<string, Promise<string | null>>();
+
 /**
  * Refresh a Gmail access token if expired.
+ * Uses in-memory cache to avoid redundant DB reads and concurrent Google API calls.
  */
 async function refreshGmailToken(orgId: string, senderEmail?: string): Promise<string | null> {
+  const cacheKey = `${orgId}:${senderEmail || '__org__'}`;
+
+  // Serve from cache if token is valid for >5 more minutes
+  const cached = _gmailTokenCache.get(cacheKey);
+  if (cached && Date.now() < cached.expiry - 300_000) {
+    return cached.token;
+  }
+
+  // If a refresh is already in-flight for this account, wait for it instead of firing another
+  const inflight = _gmailRefreshLock.get(cacheKey);
+  if (inflight) return inflight;
+
+  const refreshPromise = _doRefreshGmailToken(orgId, senderEmail, cacheKey);
+  _gmailRefreshLock.set(cacheKey, refreshPromise);
+  try {
+    return await refreshPromise;
+  } finally {
+    _gmailRefreshLock.delete(cacheKey);
+  }
+}
+
+async function _doRefreshGmailToken(orgId: string, senderEmail: string | undefined, cacheKey: string): Promise<string | null> {
   const settings = await storage.getApiSettings(orgId);
   
   // Try per-sender tokens first (for multi-account support)
@@ -189,6 +217,8 @@ async function refreshGmailToken(orgId: string, senderEmail?: string): Promise<s
   
   const expiry = parseInt(tokenExpiry || '0');
   if (accessToken && Date.now() < expiry - 300000) {
+    // Warm the in-memory cache so future calls skip the DB read entirely
+    _gmailTokenCache.set(cacheKey, { token: accessToken, expiry });
     return accessToken;
   }
   if (!refreshToken) return accessToken || null;
@@ -228,9 +258,17 @@ async function refreshGmailToken(orgId: string, senderEmail?: string): Promise<s
         await storage.setApiSetting(orgId, 'gmail_access_token', credentials.access_token);
         if (credentials.expiry_date) await storage.setApiSetting(orgId, 'gmail_token_expiry', String(credentials.expiry_date));
       }
+      // Cache the new token in memory
+      const expiry = credentials.expiry_date || (Date.now() + 3600_000);
+      _gmailTokenCache.set(cacheKey, { token: credentials.access_token, expiry });
       return credentials.access_token;
     }
   } catch (e) { console.error('[CampaignEngine] Gmail token refresh failed:', e); }
+  // Cache existing token if still valid
+  if (accessToken) {
+    const exp = parseInt(String(tokenExpiry || '0'));
+    if (exp > Date.now()) _gmailTokenCache.set(cacheKey, { token: accessToken, expiry: exp });
+  }
   return accessToken || null;
 }
 
