@@ -3111,6 +3111,9 @@ export class PostgresStorage {
     } else if (filters?.status === 'replied') {
       // All incoming replies from real contacts across every account, warmup excluded via sender
       sql += ` AND "replyType" IN ('positive','negative','general')` + warmupExclude;
+    } else if (filters?.status === 'not_replied') {
+      // Human replies that haven't been responded to yet
+      sql += ` AND "replyType" IN ('positive','negative','general') AND (status != 'replied' AND "repliedAt" IS NULL)` + warmupExclude;
     } else if (filters?.status && filters.status !== 'all') {
       sql += ` AND status = $${idx++}` + warmupExclude; params.push(filters.status);
     } else {
@@ -3171,6 +3174,8 @@ export class PostgresStorage {
       sql += ` AND "replyType" = 'unsubscribe'`;
     } else if (filters?.status === 'replied') {
       sql += ` AND "replyType" IN ('positive','negative','general')` + warmupExcludeCount;
+    } else if (filters?.status === 'not_replied') {
+      sql += ` AND "replyType" IN ('positive','negative','general') AND (status != 'replied' AND "repliedAt" IS NULL)` + warmupExcludeCount;
     } else if (filters?.status && filters.status !== 'all') {
       sql += ` AND status = $${idx++}` + warmupExcludeCount; params.push(filters.status);
     } else {
@@ -3221,7 +3226,8 @@ export class PostgresStorage {
     const bounced = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND ("bounceType" != '' AND "bounceType" IS NOT NULL) ${warmupExcludeSql}`, [organizationId])).c);
     const starred = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "isStarred" = 1`, [organizationId])).c);
     const warmup = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 ${warmupOnlySql}`, [organizationId])).c);
-    return { total, unread, replied, archived, positive, negative, ooo, autoReply, bounced, starred, warmup };
+    const notReplied = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" IN ('positive','negative','general') AND (status != 'replied' AND "repliedAt" IS NULL) ${warmupExcludeSql}`, [organizationId])).c);
+    return { total, unread, replied, archived, positive, negative, ooo, autoReply, bounced, starred, warmup, notReplied };
   }
 
   // ========== DATABASE EXPORT/IMPORT ==========

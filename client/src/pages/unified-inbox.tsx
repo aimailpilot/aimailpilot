@@ -98,6 +98,7 @@ interface InboxStats {
   bounced: number;
   starred: number;
   warmup: number;
+  notReplied: number;
 }
 
 export default function UnifiedInbox() {
@@ -1153,6 +1154,7 @@ export default function UnifiedInbox() {
             {[
               { value: 'all', label: 'All', count: stats?.total },
               { value: 'unread', label: 'Unread', count: stats?.unread },
+              { value: 'not_replied', label: 'Need Reply', count: stats?.notReplied },
               { value: 'read', label: 'Read' },
               { value: 'replied', label: 'Replied', count: stats?.replied },
               { value: 'bounced', label: 'Bounced', count: stats?.bounced },

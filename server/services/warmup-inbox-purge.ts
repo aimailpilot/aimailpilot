@@ -4,7 +4,7 @@
 
 import { storage } from '../storage';
 
-const RETENTION_DAYS = 5;
+const RETENTION_DAYS = 2;
 
 export async function purgeOldWarmupInboxOnce(): Promise<{ deleted: number }> {
   const sql = `
