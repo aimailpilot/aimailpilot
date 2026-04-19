@@ -507,13 +507,22 @@ export interface FollowupTriggerData {
 export class FollowupEngine {
   private emailService: EmailService;
   private _checkCount: number = 0;
+  private _publicBaseUrl: string | null = null;
 
   constructor() {
     this.emailService = new EmailService();
   }
 
+  setPublicBaseUrl(url: string): void {
+    let cleanUrl = url.replace(/\/$/, '');
+    if (!cleanUrl.includes('localhost') && !cleanUrl.includes('127.0.0.1')) {
+      cleanUrl = cleanUrl.replace(/^http:\/\//, 'https://');
+    }
+    this._publicBaseUrl = cleanUrl;
+  }
+
   private getBaseUrl(): string {
-    const url = process.env.BASE_URL || process.env.PUBLIC_URL || `http://localhost:${process.env.PORT || 3000}`;
+    const url = this._publicBaseUrl || process.env.BASE_URL || process.env.PUBLIC_URL || `http://localhost:${process.env.PORT || 3000}`;
     if (!url.includes('localhost') && !url.includes('127.0.0.1')) {
       return url.replace(/^http:\/\//, 'https://');
     }

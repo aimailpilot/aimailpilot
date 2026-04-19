@@ -6,6 +6,7 @@ import cookieParser from "cookie-parser";
 import MemoryStore from "memorystore";
 import { smtpEmailService, SMTP_PRESETS, type SmtpConfig, getProviderDailyLimit } from "./services/smtp-email-service";
 import { campaignEngine } from "./services/campaign-engine";
+import { followupEngine } from "./services/followup-engine";
 import { gmailReplyTracker } from "./services/gmail-reply-tracker";
 import { outlookReplyTracker } from "./services/outlook-reply-tracker";
 import { calculateContactRating, batchRecalculateRatings } from "./services/email-rating-engine";
@@ -172,7 +173,9 @@ const requireAuth = async (req: any, res: any, next: any) => {
     const host = req.headers['x-forwarded-host'] || req.headers['host'];
     if (host && !host.includes('localhost')) {
       const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
-      campaignEngine.setPublicBaseUrl(`${proto}://${host}`);
+      const url = `${proto}://${host}`;
+      campaignEngine.setPublicBaseUrl(url);
+      followupEngine.setPublicBaseUrl(url);
     }
     return next();
   }
@@ -251,7 +254,9 @@ const requireAuth = async (req: any, res: any, next: any) => {
   const host = req.headers['x-forwarded-host'] || req.headers['host'];
   if (host && !host.includes('localhost')) {
     const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
-    campaignEngine.setPublicBaseUrl(`${proto}://${host}`);
+    const url = `${proto}://${host}`;
+    campaignEngine.setPublicBaseUrl(url);
+    followupEngine.setPublicBaseUrl(url);
   }
   next();
 };
@@ -275,6 +280,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const orgSettings = await storage.getApiSettings(orgId);
       if (orgSettings.tracking_base_url) {
         campaignEngine.setPublicBaseUrl(orgSettings.tracking_base_url);
+        followupEngine.setPublicBaseUrl(orgSettings.tracking_base_url);
         console.log('[Tracking] Loaded base URL from settings:', orgSettings.tracking_base_url);
         break; // Use first found
       }
@@ -290,6 +296,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const detectedUrl = `${proto}://${host}`;
       // Always update to latest detected URL (ensures HTTPS via setPublicBaseUrl)
       campaignEngine.setPublicBaseUrl(detectedUrl);
+      followupEngine.setPublicBaseUrl(detectedUrl);
     }
     next();
   });
@@ -3318,7 +3325,9 @@ Which account should I use and why? If I need to split across accounts, provide 
       const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
       const host = req.headers['x-forwarded-host'] || req.headers['host'];
       if (host && !host.includes('localhost')) {
-        campaignEngine.setPublicBaseUrl(`${proto}://${host}`);
+        const url = `${proto}://${host}`;
+        campaignEngine.setPublicBaseUrl(url);
+        followupEngine.setPublicBaseUrl(url);
       }
 
       const delayBetweenEmails = req.body.delayBetweenEmails || 2000;
@@ -3364,7 +3373,9 @@ Which account should I use and why? If I need to split across accounts, provide 
     const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
     const host = req.headers['x-forwarded-host'] || req.headers['host'];
     if (host && !host.includes('localhost')) {
-      campaignEngine.setPublicBaseUrl(`${proto}://${host}`);
+      const url = `${proto}://${host}`;
+      campaignEngine.setPublicBaseUrl(url);
+      followupEngine.setPublicBaseUrl(url);
     }
 
     const success = campaignEngine.resumeCampaign(req.params.id);
@@ -7067,6 +7078,7 @@ Respond with ONLY a JSON object in this format:
       const { trackingBaseUrl } = req.body;
       if (trackingBaseUrl) {
         campaignEngine.setPublicBaseUrl(trackingBaseUrl);
+        followupEngine.setPublicBaseUrl(trackingBaseUrl);
         await storage.setApiSettings(req.user.organizationId, { tracking_base_url: trackingBaseUrl });
         res.json({ success: true, trackingBaseUrl: campaignEngine.getBaseUrl() });
       } else {
