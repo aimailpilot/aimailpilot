@@ -450,10 +450,16 @@ export class OutlookReplyTracker {
                 /5\.[01]\.[12]\s*<?([^\s>]+@[^\s>]+)>?/gi,
               ];
 
+              const decodeHtml = (s: string) => s
+                .replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
+                .replace(/&amp;/gi, '&').replace(/&quot;/gi, '"')
+                .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
+              const decodedBody = decodeHtml(bodyText);
+
               const candidates = new Set<string>();
               for (const re of ndrPatterns) {
                 let m;
-                while ((m = re.exec(bodyText)) !== null) {
+                while ((m = re.exec(decodedBody)) !== null) {
                   if (m[1]) candidates.add(m[1].toLowerCase().replace(/[<>]/g, '').replace(/[.,;:]+$/, ''));
                 }
               }
