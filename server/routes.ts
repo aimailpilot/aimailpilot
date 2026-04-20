@@ -10284,9 +10284,16 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         AND ui.status IN ('unread', 'read') AND ui."repliedAt" IS NULL
         AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
         AND ui."replyType" IN ('positive', 'negative', 'general')
+        AND LOWER(CASE WHEN ui."fromEmail" LIKE '%<%>%' THEN substring(ui."fromEmail" from '<([^>]+)>') ELSE ui."fromEmail" END) NOT IN (
+          SELECT LOWER(TRIM(email)) FROM email_accounts WHERE "organizationId" = ? AND email IS NOT NULL
+          UNION
+          SELECT LOWER(TRIM(ea2.email)) FROM warmup_accounts wa
+            JOIN email_accounts ea2 ON ea2.id = wa."emailAccountId"
+            WHERE wa."organizationId" = ? AND ea2.email IS NOT NULL
+        )
         ORDER BY COALESCE(ui."replyQualityScore", -1) DESC, ui."receivedAt" DESC
         LIMIT ? OFFSET ?
-      `, orgId, userId, limit, offset) as any[];
+      `, orgId, userId, orgId, orgId, limit, offset) as any[];
 
       const total = (await storage.rawGet(`
         SELECT COUNT(*) as cnt FROM unified_inbox ui
@@ -10295,7 +10302,14 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         AND ui.status IN ('unread', 'read') AND ui."repliedAt" IS NULL
         AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
         AND ui."replyType" IN ('positive', 'negative', 'general')
-      `, orgId, userId) as any)?.cnt || 0;
+        AND LOWER(CASE WHEN ui."fromEmail" LIKE '%<%>%' THEN substring(ui."fromEmail" from '<([^>]+)>') ELSE ui."fromEmail" END) NOT IN (
+          SELECT LOWER(TRIM(email)) FROM email_accounts WHERE "organizationId" = ? AND email IS NOT NULL
+          UNION
+          SELECT LOWER(TRIM(ea2.email)) FROM warmup_accounts wa
+            JOIN email_accounts ea2 ON ea2.id = wa."emailAccountId"
+            WHERE wa."organizationId" = ? AND ea2.email IS NOT NULL
+        )
+      `, orgId, userId, orgId, orgId) as any)?.cnt || 0;
 
       res.json({ emails, total });
     } catch (error: any) {
