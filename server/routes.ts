@@ -3462,65 +3462,245 @@ Which account should I use and why? If I need to split across accounts, provide 
     }
   });
 
-  // Reset campaign: clear failed messages and bounce counts (for campaigns with false bounces)
+  // Classify a campaign message error as infrastructure/policy-block (false bounce) vs real bounce.
+  // Matches both OAuth/token failures AND provider policy-block bounces (Outlook 550 5.7.1, spam heuristics, throttling)
+  // which are recoverable once the sender is unblocked.
+  const isFalseBounceError = (errorMessage: string | null | undefined): boolean => {
+    const e = (errorMessage || '').toLowerCase();
+    if (!e) return false;
+    // Infrastructure / auth (email never left)
+    if (e.includes('oauth') || e.includes('token') || e.includes('re-authenticate') ||
+        e.includes('401') || e.includes('403') || e.includes('api error') ||
+        e.includes('connection refused') || e.includes('getaddrinfo') ||
+        e.includes('invalidauthenticationtoken') || e.includes('credentials') ||
+        (e.includes('smtp') && e.includes('auth'))) return true;
+    // Provider policy blocks (recoverable — unblock sender + reset)
+    if (e.includes('5.7.1') || e.includes('5.7.0') || e.includes('5.7.26') ||
+        e.includes('policy') || e.includes('blocked') || e.includes('denied') ||
+        e.includes('message rejected') || e.includes('rejected by') ||
+        e.includes('spam') || e.includes('throttle') || e.includes('quota exceeded') ||
+        e.includes('access denied') || e.includes('messagerejected') ||
+        e.includes('relay access denied') || e.includes('temporarily rate')) return true;
+    return false;
+  };
+
+  // Preview which messages would be reset (dry run) — lets UI show a breakdown before committing
+  app.get('/api/campaigns/:id/reset-bounces-preview', async (req: any, res) => {
+    try {
+      const campaign = await storage.getCampaign(req.params.id);
+      if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+      const messages = await storage.getCampaignMessages(req.params.id, 100000, 0) as any[];
+      const matches: any[] = [];
+      for (const msg of messages) {
+        if ((msg.status === 'failed' || msg.status === 'bounced') && isFalseBounceError(msg.errorMessage)) {
+          matches.push({ id: msg.id, email: msg.recipientEmail, error: (msg.errorMessage || '').slice(0, 200), status: msg.status });
+        }
+      }
+      const byPattern: Record<string, number> = {};
+      for (const m of matches) {
+        const e = m.error.toLowerCase();
+        let tag = 'other';
+        if (e.includes('5.7.1') || e.includes('policy') || e.includes('blocked') || e.includes('denied')) tag = 'policy_block';
+        else if (e.includes('spam')) tag = 'spam_filter';
+        else if (e.includes('throttle') || e.includes('quota') || e.includes('rate')) tag = 'throttle';
+        else if (e.includes('oauth') || e.includes('token') || e.includes('auth')) tag = 'auth_error';
+        byPattern[tag] = (byPattern[tag] || 0) + 1;
+      }
+      res.json({ total: matches.length, byPattern, sample: matches.slice(0, 10) });
+    } catch (error) {
+      console.error('[Campaign] Reset bounces preview error:', error);
+      res.status(500).json({ error: 'Failed to preview reset' });
+    }
+  });
+
+  // Reset campaign: clear false-bounce messages (auth + Outlook/SMTP policy blocks) and restore affected contacts.
+  // Also clears the matching 'bounce' tracking_events and removes affected emails from the org suppression list.
   app.post('/api/campaigns/:id/reset-bounces', async (req: any, res) => {
     try {
       const campaign = await storage.getCampaign(req.params.id);
       if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
 
-      // Get all messages for this campaign
       const messages = await storage.getCampaignMessages(req.params.id, 100000, 0) as any[];
-      
-      // Delete failed messages (these were never actually sent)
       let deletedCount = 0;
       let restoredContacts = 0;
+      let unsuppressedCount = 0;
+      let clearedTrackingEvents = 0;
+
       for (const msg of messages) {
-        if (msg.status === 'failed') {
-          // Check if the failure was an infrastructure error (not a real bounce)
-          const errorStr = (msg.errorMessage || '').toLowerCase();
-          const isInfraError = errorStr.includes('oauth') || errorStr.includes('token') ||
-            errorStr.includes('re-authenticate') || errorStr.includes('401') || errorStr.includes('403') ||
-            errorStr.includes('api error') || errorStr.includes('connection refused');
-          
-          if (isInfraError) {
-            // Delete the failed message record
-            try { await storage.deleteCampaignMessage(msg.id); } catch (e) {}
-            deletedCount++;
-            
-            // Restore contact status from 'bounced' to 'active' if it was falsely bounced
-            if (msg.contactId) {
-              try {
-                const contact = await storage.getContact(msg.contactId);
-                if (contact && (contact as any).status === 'bounced') {
-                  await storage.updateContact(msg.contactId, { status: 'active' });
-                  restoredContacts++;
-                }
-              } catch (e) {}
-            }
+        if ((msg.status !== 'failed' && msg.status !== 'bounced')) continue;
+        if (!isFalseBounceError(msg.errorMessage)) continue;
+
+        // Delete 'bounce' tracking events tied to this message
+        try {
+          const existing = await storage.rawAll(
+            `SELECT id FROM tracking_events WHERE "messageId" = ? AND type = 'bounce'`,
+            msg.id
+          ) as any[];
+          if (existing && existing.length) {
+            await storage.rawRun(`DELETE FROM tracking_events WHERE "messageId" = ? AND type = 'bounce'`, msg.id);
+            clearedTrackingEvents += existing.length;
           }
+        } catch (e) { /* ignore */ }
+
+        // Delete the failed message record
+        try { await storage.deleteCampaignMessage(msg.id); } catch (e) {}
+        deletedCount++;
+
+        // Restore contact + drop from suppression list
+        if (msg.contactId) {
+          try {
+            const contact = await storage.getContact(msg.contactId);
+            if (contact && (contact as any).status === 'bounced') {
+              await storage.updateContact(msg.contactId, { status: 'active' });
+              restoredContacts++;
+            }
+            const email = (contact as any)?.email || msg.recipientEmail;
+            if (email) {
+              try {
+                await storage.removeFromSuppressionList(campaign.organizationId, email);
+                unsuppressedCount++;
+              } catch (e) { /* ignore */ }
+            }
+          } catch (e) {}
+        } else if (msg.recipientEmail) {
+          try {
+            await storage.removeFromSuppressionList(campaign.organizationId, msg.recipientEmail);
+            unsuppressedCount++;
+          } catch (e) { /* ignore */ }
         }
       }
-      
-      // Recalculate bounce count from remaining failed messages
+
+      // Recalculate campaign counters from what's actually left
       const remainingMessages = await storage.getCampaignMessages(req.params.id, 100000, 0) as any[];
-      const actualBounces = remainingMessages.filter((m: any) => m.status === 'failed').length;
+      const actualBounces = remainingMessages.filter((m: any) => m.status === 'failed' || m.status === 'bounced').length;
       const actualSent = remainingMessages.filter((m: any) => m.status === 'sent').length;
-      
+
       await storage.updateCampaign(req.params.id, {
         bouncedCount: actualBounces,
         sentCount: actualSent,
       });
-      
+
       res.json({
         success: true,
         deletedMessages: deletedCount,
         restoredContacts,
+        unsuppressedCount,
+        clearedTrackingEvents,
         actualBounces,
         actualSent,
       });
     } catch (error) {
       console.error('[Campaign] Reset bounces error:', error);
       res.status(500).json({ error: 'Failed to reset bounces' });
+    }
+  });
+
+  // One-click "Retry after unblock" — reset false bounces, then resume the campaign so it re-sends to restored contacts.
+  app.post('/api/campaigns/:id/retry-after-unblock', async (req: any, res) => {
+    try {
+      const campaign = await storage.getCampaign(req.params.id);
+      if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+
+      // --- Inline reset (same logic as /reset-bounces) ---
+      const messages = await storage.getCampaignMessages(req.params.id, 100000, 0) as any[];
+      let deletedCount = 0;
+      let restoredContacts = 0;
+      let unsuppressedCount = 0;
+
+      for (const msg of messages) {
+        if ((msg.status !== 'failed' && msg.status !== 'bounced')) continue;
+        if (!isFalseBounceError(msg.errorMessage)) continue;
+        try {
+          await storage.rawRun(`DELETE FROM tracking_events WHERE "messageId" = ? AND type = 'bounce'`, msg.id);
+        } catch (e) {}
+        try { await storage.deleteCampaignMessage(msg.id); } catch (e) {}
+        deletedCount++;
+        if (msg.contactId) {
+          try {
+            const contact = await storage.getContact(msg.contactId);
+            if (contact && (contact as any).status === 'bounced') {
+              await storage.updateContact(msg.contactId, { status: 'active' });
+              restoredContacts++;
+            }
+            const email = (contact as any)?.email || msg.recipientEmail;
+            if (email) {
+              try { await storage.removeFromSuppressionList(campaign.organizationId, email); unsuppressedCount++; } catch (e) {}
+            }
+          } catch (e) {}
+        } else if (msg.recipientEmail) {
+          try { await storage.removeFromSuppressionList(campaign.organizationId, msg.recipientEmail); unsuppressedCount++; } catch (e) {}
+        }
+      }
+
+      const remainingMessages = await storage.getCampaignMessages(req.params.id, 100000, 0) as any[];
+      const actualBounces = remainingMessages.filter((m: any) => m.status === 'failed' || m.status === 'bounced').length;
+      const actualSent = remainingMessages.filter((m: any) => m.status === 'sent').length;
+      await storage.updateCampaign(req.params.id, { bouncedCount: actualBounces, sentCount: actualSent });
+
+      // --- Resume the campaign (mirrors /resume logic) ---
+      let resumed = false;
+      try {
+        const fresh = await storage.getCampaign(req.params.id);
+        if (fresh && (fresh.status === 'paused' || fresh.status === 'draft' || fresh.status === 'completed')) {
+          // Set public base URL for tracking links
+          const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+          const host = req.headers['x-forwarded-host'] || req.headers['host'];
+          if (host && !host.includes('localhost')) {
+            const url = `${proto}://${host}`;
+            campaignEngine.setPublicBaseUrl(url);
+            followupEngine.setPublicBaseUrl(url);
+          }
+
+          await storage.updateCampaign(req.params.id, { status: 'active', autoPaused: false });
+          const savedConfig: any = fresh.sendingConfig || {};
+          const delayBetweenEmails = savedConfig?.delayBetweenEmails || 2000;
+          try {
+            const result = await campaignEngine.startCampaign({
+              campaignId: req.params.id,
+              delayBetweenEmails,
+              batchSize: savedConfig?.batchSize || 10,
+              sendingConfig: savedConfig || undefined,
+            });
+            resumed = !!result?.success;
+          } catch (e) {
+            console.error('[Campaign] Retry-after-unblock: start failed:', e);
+          }
+        }
+      } catch (e) { console.error('[Campaign] Retry-after-unblock: resume error:', e); }
+
+      res.json({
+        success: true,
+        deletedMessages: deletedCount,
+        restoredContacts,
+        unsuppressedCount,
+        actualBounces,
+        actualSent,
+        resumed,
+      });
+    } catch (error) {
+      console.error('[Campaign] Retry-after-unblock error:', error);
+      res.status(500).json({ error: 'Failed to retry after unblock' });
+    }
+  });
+
+  // Latest bounce-surge alert for a campaign — powers the UI banner.
+  app.get('/api/campaigns/:id/bounce-surge', async (req: any, res) => {
+    try {
+      const campaign = await storage.getCampaign(req.params.id);
+      if (!campaign) return res.status(404).json({ alert: null });
+      const row = await storage.rawGet(
+        `SELECT id, "createdAt", metadata FROM tracking_events
+         WHERE "campaignId" = ? AND type = 'bounce_surge'
+         ORDER BY "createdAt" DESC LIMIT 1`,
+        req.params.id
+      ) as any;
+      if (!row) return res.json({ alert: null });
+      let metadata: any = row.metadata;
+      if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = {}; } }
+      res.json({ alert: { id: row.id, createdAt: row.createdAt, ...metadata } });
+    } catch (e) {
+      console.error('[Campaign] bounce-surge fetch error:', e);
+      res.json({ alert: null });
     }
   });
 

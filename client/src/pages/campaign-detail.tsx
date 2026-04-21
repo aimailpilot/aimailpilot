@@ -30,6 +30,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
   const [detail, setDetail] = useState<CampaignDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [surgeAlert, setSurgeAlert] = useState<any>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [showActions, setShowActions] = useState(false);
@@ -126,7 +127,17 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
     } catch (e) {}
   };
 
-  useEffect(() => { fetchDetail(); fetchReplyStatus(); }, [campaignId]);
+  const fetchSurgeAlert = async () => {
+    try {
+      const res = await fetch(`/api/campaigns/${campaignId}/bounce-surge`, { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        setSurgeAlert(data.alert || null);
+      }
+    } catch (e) {}
+  };
+
+  useEffect(() => { fetchDetail(); fetchReplyStatus(); fetchSurgeAlert(); }, [campaignId]);
 
   // Silent background refresh every 60s for active campaigns (no UI flicker)
   useEffect(() => {
@@ -374,15 +385,38 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
 
   const handleResetBounces = async () => {
     setShowActions(false);
-    if (!confirm('This will remove false bounces caused by sending errors (OAuth/authentication issues) and restore affected contacts. Continue?')) return;
     try {
+      const previewRes = await fetch(`/api/campaigns/${campaignId}/reset-bounces-preview`, { credentials: 'include' });
+      let previewLine = '';
+      if (previewRes.ok) {
+        const p = await previewRes.json();
+        const parts = Object.entries(p.byPattern || {}).map(([k, v]) => `${k}: ${v}`).join(', ');
+        previewLine = `\n\nFound ${p.total} recoverable bounce(s)${parts ? ` (${parts})` : ''}.`;
+      }
+      if (!confirm(`This removes false bounces (OAuth/auth errors AND Outlook/SMTP policy blocks — 5.7.1, blocked, rate-limited, etc.), restores contacts, clears bounce tracking events, and removes those addresses from the org suppression list.${previewLine}\n\nContinue?`)) return;
       const res = await fetch(`/api/campaigns/${campaignId}/reset-bounces`, { method: 'POST', credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
-        alert(`Reset complete: ${data.deletedMessages} false bounces removed, ${data.restoredContacts} contacts restored. Actual sent: ${data.actualSent}, actual bounces: ${data.actualBounces}`);
+        alert(`Reset complete:\n  • ${data.deletedMessages} false bounces removed\n  • ${data.restoredContacts} contacts restored\n  • ${data.unsuppressedCount} removed from suppression list\n  • ${data.clearedTrackingEvents} bounce events cleared\n\nActual sent: ${data.actualSent}, actual bounces: ${data.actualBounces}`);
         fetchDetail();
       }
     } catch (e) { /* ignore */ }
+  };
+
+  const handleRetryAfterUnblock = async () => {
+    setShowActions(false);
+    if (!confirm('Make sure the sender account has been UNBLOCKED at the provider (Outlook/Gmail/SMTP) before continuing.\n\nThis will:\n  1. Reset all recoverable bounces (auth + policy blocks)\n  2. Restore bounced contacts to active\n  3. Remove affected emails from the suppression list\n  4. Resume the campaign so it re-sends to restored contacts\n\nContinue?')) return;
+    try {
+      const res = await fetch(`/api/campaigns/${campaignId}/retry-after-unblock`, { method: 'POST', credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        alert(`Retry complete:\n  • ${data.deletedMessages} bounces reset\n  • ${data.restoredContacts} contacts restored\n  • ${data.unsuppressedCount} removed from suppression\n  • Campaign resumed: ${data.resumed ? 'yes' : 'no (check status)'}`);
+        fetchDetail();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(`Retry failed: ${err.error || res.statusText}`);
+      }
+    } catch (e) { alert('Retry failed — see console for details'); }
   };
 
   const handleStop = async () => {
@@ -666,6 +700,9 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
                 {(campaign.bouncedCount > 0) && (
                   <ActionItem icon={<RefreshCw className="h-3.5 w-3.5" />} label="Reset false bounces" onClick={handleResetBounces} />
                 )}
+                {(campaign.bouncedCount > 0) && (
+                  <ActionItem icon={<RefreshCw className="h-3.5 w-3.5" />} label="Retry after unblock" onClick={handleRetryAfterUnblock} />
+                )}
                 <div className="border-t border-gray-100 my-1" />
                 {(isActive || isPaused) ? (
                   <ActionItem icon={<Ban className="h-3.5 w-3.5" />} label="Cancel" onClick={handleStop} destructive />
@@ -695,6 +732,27 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
       </div>
 
       <div className="border-t border-gray-100" />
+
+      {/* ===================== BOUNCE SURGE ALERT ===================== */}
+      {surgeAlert && (
+        <div className="mx-6 mt-4 rounded-lg border border-red-200 bg-red-50 p-4">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 h-5 w-5 rounded-full bg-red-100 text-red-600 flex items-center justify-center font-bold text-xs flex-shrink-0">!</div>
+            <div className="flex-1 min-w-0">
+              <div className="font-semibold text-red-900 text-sm">Sender likely blocked by provider</div>
+              <div className="text-xs text-red-800 mt-1">
+                {surgeAlert.reason || 'High bounce rate detected — campaign auto-paused.'}
+              </div>
+              {surgeAlert.lastError && (
+                <div className="text-[11px] text-red-700 mt-1 font-mono break-all">Last error: {String(surgeAlert.lastError).slice(0, 200)}</div>
+              )}
+              <div className="text-xs text-red-800 mt-2">
+                <strong>Next steps:</strong> Unblock the sender <code className="bg-red-100 px-1 rounded">{surgeAlert.senderEmail || ''}</code> at the provider (Outlook/Gmail/SMTP admin), then click <strong>Retry after unblock</strong> in the Actions menu.
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ===================== OVERVIEW ===================== */}
       <div className="px-6 py-6">

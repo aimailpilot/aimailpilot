@@ -844,6 +844,17 @@ export class CampaignEngine {
     let localFailedCount = 0; // Infrastructure failures (auth errors, etc.) — NOT real bounces
     // Batch size for DB count updates (flush every N emails)
     const FLUSH_INTERVAL = 25;
+
+    // Bounce-surge detection: rolling window of last N send outcomes for this sender account.
+    // If bounce rate within the window exceeds threshold, auto-pause and alert — the provider
+    // has likely blocked this sender (Outlook 550 5.7.1 policy block, mass rejection, etc.).
+    const SURGE_WINDOW = 50;
+    const SURGE_BOUNCE_THRESHOLD = 0.2; // 20% bounce rate
+    const SURGE_MIN_BOUNCES = 10; // need at least 10 bounces before tripping
+    const SURGE_CONSECUTIVE = 10; // OR 10 consecutive bounces = immediate pause
+    const sendWindow: ('sent' | 'bounced')[] = [];
+    let consecutiveBounces = 0;
+    let surgeTriggered = false;
     
     // Track daily limit locally (refresh from DB on flush)
     // Use the account's stored dailyLimit, falling back to provider-based limit
@@ -1252,6 +1263,9 @@ export class CampaignEngine {
 
           localSentCount++;
           autopilotDailySent++;
+          sendWindow.push('sent');
+          if (sendWindow.length > SURGE_WINDOW) sendWindow.shift();
+          consecutiveBounces = 0;
 
           // Create 'sent' tracking event
           await storage.createTrackingEvent({
@@ -1303,6 +1317,9 @@ export class CampaignEngine {
           } else {
             // Real bounce (invalid email, mailbox full, etc.) — count as bounce
             localBouncedCount++;
+            sendWindow.push('bounced');
+            if (sendWindow.length > SURGE_WINDOW) sendWindow.shift();
+            consecutiveBounces++;
 
             // Create 'bounce' tracking event
             await storage.createTrackingEvent({
@@ -1321,6 +1338,59 @@ export class CampaignEngine {
               console.log(`[CampaignEngine] Contact ${contact.email} (${contact.id}) marked as bounced`);
             } catch (e) {
               console.error(`[CampaignEngine] Failed to mark contact ${contact.email} (${contact.id}) as bounced:`, e);
+            }
+
+            // BOUNCE-SURGE DETECTION: if provider is mass-rejecting, pause and alert
+            if (!surgeTriggered) {
+              const windowBounces = sendWindow.filter(x => x === 'bounced').length;
+              const windowRate = sendWindow.length > 0 ? windowBounces / sendWindow.length : 0;
+              const tripByRate = sendWindow.length >= SURGE_WINDOW && windowBounces >= SURGE_MIN_BOUNCES && windowRate >= SURGE_BOUNCE_THRESHOLD;
+              const tripByStreak = consecutiveBounces >= SURGE_CONSECUTIVE;
+              if (tripByRate || tripByStreak) {
+                surgeTriggered = true;
+                const reason = tripByStreak
+                  ? `${consecutiveBounces} consecutive bounces on sender ${emailAccount.email}`
+                  : `${windowBounces}/${sendWindow.length} bounces (${Math.round(windowRate * 100)}%) on sender ${emailAccount.email}`;
+                console.error(`[CampaignEngine] *** BOUNCE SURGE *** Campaign ${campaignId}: ${reason}. Auto-pausing. Last error: ${result.error?.slice(0, 200)}`);
+                try {
+                  // Flush current counts first
+                  const flushCampaign = await storage.getCampaign(campaignId);
+                  if (flushCampaign) {
+                    await storage.updateCampaign(campaignId, {
+                      status: 'paused',
+                      autoPaused: true,
+                      sentCount: (flushCampaign.sentCount || 0) + localSentCount,
+                      bouncedCount: (flushCampaign.bouncedCount || 0) + localBouncedCount,
+                    });
+                  }
+                  // Record surge as a tracking event for UI surfacing
+                  try {
+                    await storage.createTrackingEvent({
+                      type: 'bounce_surge' as any,
+                      campaignId,
+                      messageId: messageRecord.id,
+                      contactId: contact.id,
+                      trackingId,
+                      stepNumber,
+                      metadata: {
+                        reason,
+                        senderEmail: emailAccount.email,
+                        consecutiveBounces,
+                        windowBounces,
+                        windowSize: sendWindow.length,
+                        lastError: (result.error || '').slice(0, 500),
+                      },
+                    });
+                  } catch (e) { /* non-fatal */ }
+                  if (localSentCount > 0) {
+                    await storage.incrementDailySent(emailAccount.id, localSentCount);
+                  }
+                } catch (e) {
+                  console.error('[CampaignEngine] Failed to record bounce surge:', e);
+                }
+                this.activeCampaigns.delete(campaignId);
+                return; // Stop sending this batch
+              }
             }
           }
         }
