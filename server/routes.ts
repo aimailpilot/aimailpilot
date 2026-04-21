@@ -9923,7 +9923,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
             INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
             LEFT JOIN contacts c ON c.id = ui."contactId"
             WHERE ui."organizationId" = ? AND ea."userId" = ?
-            AND ui."repliedAt" IS NULL
+            AND ui.status != 'replied' AND ui."repliedAt" IS NULL AND ui."repliedBy" IS NULL
             AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
             AND ui."replyType" IN ('positive', 'negative', 'general')
             ${ownEmailsFilter}
@@ -9934,24 +9934,23 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           notRepliedWarm = parseInt(row.warm || 0);
         } catch { /* inbox schema mismatch — skip */ }
 
-        // Hot Leads — recipients who replied with positive intent (distinct contacts)
-        // Excludes warmup/internal senders
+        // Hot Leads — contacts classified as hot_lead/warm_lead/past_customer by lead intelligence,
+        // who are assigned to this user OR received email on this user's accounts
         let hotLeads = 0;
         try {
           hotLeads = parseInt((await storage.rawGet(`
-            SELECT COUNT(DISTINCT LOWER(COALESCE(c.email, ui."fromEmail"))) as cnt FROM unified_inbox ui
-            INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
-            LEFT JOIN contacts c ON c.id = ui."contactId"
-            INNER JOIN lead_opportunities lo
-              ON LOWER(lo."contactEmail") = LOWER(COALESCE(c.email, ui."fromEmail"))
-              AND lo."organizationId" = ui."organizationId"
-              AND lo.bucket IN ('hot_lead', 'warm_lead', 'past_customer')
-            WHERE ui."organizationId" = ? AND ea."userId" = ?
-            AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
-            AND ui."replyType" = 'positive'
-            ${ownEmailsFilter}
-            AND LOWER(TRIM(COALESCE(c.email, ''))) NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
-          `, orgId, userId) as any)?.cnt || 0);
+            SELECT COUNT(DISTINCT LOWER(lo."contactEmail")) as cnt
+            FROM lead_opportunities lo
+            WHERE lo."organizationId" = ?
+            AND lo.bucket IN ('hot_lead', 'warm_lead', 'past_customer')
+            AND (
+              lo."accountEmail" IN (SELECT email FROM email_accounts WHERE "userId" = ? AND email IS NOT NULL)
+              OR LOWER(lo."contactEmail") IN (
+                SELECT LOWER(COALESCE(c.email, '')) FROM contacts c WHERE c."organizationId" = ? AND c."assignedTo" = ? AND c.email IS NOT NULL
+              )
+            )
+            AND LOWER(lo."contactEmail") NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
+          `, orgId, userId, orgId, userId) as any)?.cnt || 0);
         } catch { /* inbox schema mismatch — skip */ }
 
         const revenue = dealsWon.totalValue || 0;
@@ -10085,7 +10084,7 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
           LEFT JOIN contacts c ON c.id = ui."contactId"
           WHERE ui."organizationId" = ? AND ea."userId" = ?
-          AND ui."repliedAt" IS NULL
+          AND ui.status != 'replied' AND ui."repliedAt" IS NULL AND ui."repliedBy" IS NULL
           AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
           AND ui."replyType" IN ('positive', 'negative', 'general')
           ${ownEmailsFilter}
@@ -10096,33 +10095,31 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       }
 
       if (type === 'hot_leads') {
-        // Recipients who replied positively (excluding warmup/internal senders).
-        // Also exclude by joined contacts.email — inbox rows can have contactId
-        // pointing to an internal bellaward/aegis contact even when fromEmail differs.
+        // Contacts classified as hot/warm/past_customer by lead intelligence engine,
+        // assigned to this user or received on this user's accounts.
         const contacts = await storage.rawAll(`
-          SELECT DISTINCT ON (LOWER(COALESCE(c.email, ui."fromEmail")))
-            COALESCE(c.id, ui.id) AS id,
-            COALESCE(c."firstName", SPLIT_PART(ui."fromName", ' ', 1), '') AS "firstName",
+          SELECT DISTINCT ON (LOWER(lo."contactEmail"))
+            COALESCE(c.id::text, lo.id::text) AS id,
+            COALESCE(c."firstName", SPLIT_PART(lo."contactName", ' ', 1), '') AS "firstName",
             COALESCE(c."lastName", '') AS "lastName",
-            COALESCE(c.email, ui."fromEmail") AS email,
+            lo."contactEmail" AS email,
             c.company, c."pipelineStage",
             c."dealValue", c."nextActionDate",
-            ui."receivedAt" AS "sentAt", ui.subject,
-            lo.bucket AS "leadBucket", lo.confidence AS "leadConfidence", lo."suggestedAction"
-          FROM unified_inbox ui
-          INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
-          LEFT JOIN contacts c ON c.id = ui."contactId"
-          INNER JOIN lead_opportunities lo
-            ON LOWER(lo."contactEmail") = LOWER(COALESCE(c.email, ui."fromEmail"))
-            AND lo."organizationId" = ?
-            AND lo.bucket IN ('hot_lead', 'warm_lead', 'past_customer')
-          WHERE ui."organizationId" = ? AND ea."userId" = ?
-          AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
-          AND ui."replyType" = 'positive'
-          ${ownEmailsFilter}
-          AND LOWER(TRIM(COALESCE(c.email, ''))) NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
-          ORDER BY LOWER(COALESCE(c.email, ui."fromEmail")), ui."receivedAt" DESC
-        `, orgId, orgId, userId) as any[];
+            lo.bucket AS "leadBucket", lo.confidence AS "leadConfidence",
+            lo."suggestedAction", lo."aiReasoning"
+          FROM lead_opportunities lo
+          LEFT JOIN contacts c ON LOWER(c.email) = LOWER(lo."contactEmail") AND c."organizationId" = lo."organizationId"
+          WHERE lo."organizationId" = ?
+          AND lo.bucket IN ('hot_lead', 'warm_lead', 'past_customer')
+          AND (
+            lo."accountEmail" IN (SELECT email FROM email_accounts WHERE "userId" = ? AND email IS NOT NULL)
+            OR LOWER(lo."contactEmail") IN (
+              SELECT LOWER(COALESCE(c2.email, '')) FROM contacts c2 WHERE c2."organizationId" = ? AND c2."assignedTo" = ? AND c2.email IS NOT NULL
+            )
+          )
+          AND LOWER(lo."contactEmail") NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
+          ORDER BY LOWER(lo."contactEmail"), lo."lastEmailDate" DESC
+        `, orgId, userId, orgId, userId) as any[];
         return res.json({ contacts: contacts || [] });
       }
 

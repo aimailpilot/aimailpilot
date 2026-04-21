@@ -62,13 +62,18 @@ interface DrilldownContact {
   dealValue?: number;
   nextActionDate?: string;
   leadBucket?: string;
+  leadConfidence?: number;
   suggestedAction?: string;
+  aiReasoning?: string;
+  meetingPlatform?: string;
+  meetingUrl?: string;
+  meetingAt?: string;
 }
 
 interface DrilldownModal {
   userId: string;
   userName: string;
-  type: 'not_replied' | 'hot_leads';
+  type: 'not_replied' | 'hot_leads' | 'meetings';
 }
 
 interface TeamScorecardProps {
@@ -381,7 +386,17 @@ export default function TeamScorecard({ onBack }: TeamScorecardProps) {
                     <span className={`font-semibold ${member.callsMade > 0 ? "text-green-700" : "text-gray-300"}`}>{member.callsMade}</span>
                   </td>
                   <td className="px-4 py-3 text-center">
-                    <span className={`font-semibold ${member.meetingsDone > 0 ? "text-purple-700" : "text-gray-300"}`}>{member.meetingsDone}</span>
+                    {member.meetingsDone > 0 ? (
+                      <button
+                        onClick={() => openDrilldown(member, 'meetings')}
+                        className="font-semibold text-purple-700 underline underline-offset-2 hover:text-purple-900 transition"
+                        title="Click to see meetings"
+                      >
+                        {member.meetingsDone}
+                      </button>
+                    ) : (
+                      <span className="text-gray-300">0</span>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-center">
                     {(member.hotLeads || 0) > 0 ? (
@@ -433,6 +448,8 @@ export default function TeamScorecard({ onBack }: TeamScorecardProps) {
                 <h3 className="text-base font-bold text-gray-900">
                   {drilldown.type === 'not_replied' ? (
                     <span className="flex items-center gap-2"><MailX className="h-4 w-4 text-rose-600" /> Not Replied — {drilldown.userName}</span>
+                  ) : drilldown.type === 'meetings' ? (
+                    <span className="flex items-center gap-2"><Users className="h-4 w-4 text-purple-600" /> Meetings — {drilldown.userName}</span>
                   ) : (
                     <span className="flex items-center gap-2"><Flame className="h-4 w-4 text-orange-600" /> Hot Leads — {drilldown.userName}</span>
                   )}
@@ -440,7 +457,9 @@ export default function TeamScorecard({ onBack }: TeamScorecardProps) {
                 <p className="text-xs text-gray-400 mt-0.5">
                   {drilldown.type === 'not_replied'
                     ? 'Contacts who received emails but haven\'t replied'
-                    : 'Contacts in active pipeline stages'}
+                    : drilldown.type === 'meetings'
+                    ? 'Meeting invites detected in inbox'
+                    : 'AI-classified hot/warm leads and past customers'}
                 </p>
               </div>
               <button onClick={() => setDrilldown(null)} className="p-1.5 rounded-lg hover:bg-gray-100 transition">
@@ -489,14 +508,14 @@ export default function TeamScorecard({ onBack }: TeamScorecardProps) {
                     ))}
                   </tbody>
                 </table>
-              ) : (
+              ) : drilldown.type === 'meetings' ? (
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="bg-gray-50 text-left">
                       <th className="px-4 py-2.5 text-[11px] font-semibold text-gray-500 uppercase">Contact</th>
-                      <th className="px-4 py-2.5 text-[11px] font-semibold text-gray-500 uppercase">Stage</th>
-                      <th className="px-4 py-2.5 text-[11px] font-semibold text-gray-500 uppercase">Next Action</th>
-                      <th className="px-4 py-2.5 text-[11px] font-semibold text-gray-500 uppercase text-right">Deal Value</th>
+                      <th className="px-4 py-2.5 text-[11px] font-semibold text-gray-500 uppercase">Subject</th>
+                      <th className="px-4 py-2.5 text-[11px] font-semibold text-gray-500 uppercase">Platform</th>
+                      <th className="px-4 py-2.5 text-[11px] font-semibold text-gray-500 uppercase">Meeting At</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -507,10 +526,48 @@ export default function TeamScorecard({ onBack }: TeamScorecardProps) {
                           <div className="text-[11px] text-gray-400">{c.email}</div>
                           {c.company && <div className="text-[11px] text-gray-400">{c.company}</div>}
                         </td>
-                        <td className="px-4 py-3">{getStageBadge(c.pipelineStage)}</td>
+                        <td className="px-4 py-3 text-gray-600 text-xs max-w-[180px] truncate">{c.subject || '—'}</td>
+                        <td className="px-4 py-3 text-xs text-gray-500 capitalize">{c.meetingPlatform || '—'}</td>
                         <td className="px-4 py-3 text-xs text-gray-500">
-                          {c.nextActionDate ? new Date(c.nextActionDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }) : '—'}
+                          {c.meetingAt ? new Date(c.meetingAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'}
+                          {c.meetingUrl && <a href={c.meetingUrl} target="_blank" rel="noreferrer" className="ml-2 text-blue-500 underline text-[10px]">Join</a>}
                         </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-gray-50 text-left">
+                      <th className="px-4 py-2.5 text-[11px] font-semibold text-gray-500 uppercase">Contact</th>
+                      <th className="px-4 py-2.5 text-[11px] font-semibold text-gray-500 uppercase">AI Bucket</th>
+                      <th className="px-4 py-2.5 text-[11px] font-semibold text-gray-500 uppercase">Stage</th>
+                      <th className="px-4 py-2.5 text-[11px] font-semibold text-gray-500 uppercase text-right">Deal Value</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {drilldownContacts.map((c) => (
+                      <tr key={c.id} className="border-t border-gray-50 hover:bg-gray-50/50">
+                        <td className="px-4 py-3">
+                          <div className="font-medium text-gray-900">{[c.firstName, c.lastName].filter(Boolean).join(' ') || c.email}</div>
+                          <div className="text-[11px] text-gray-400">{c.email}</div>
+                          {c.company && <div className="text-[11px] text-gray-400">{c.company}</div>}
+                          {c.suggestedAction && <div className="text-[10px] text-blue-600 mt-0.5 italic">{c.suggestedAction}</div>}
+                        </td>
+                        <td className="px-4 py-3">
+                          {c.leadBucket && (
+                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
+                              c.leadBucket === 'hot_lead' ? 'bg-red-100 text-red-700' :
+                              c.leadBucket === 'warm_lead' ? 'bg-amber-100 text-amber-700' :
+                              'bg-blue-100 text-blue-700'
+                            }`}>
+                              {c.leadBucket.replace('_', ' ')}
+                            </span>
+                          )}
+                          {c.aiReasoning && <div className="text-[10px] text-gray-400 mt-1 max-w-[150px] line-clamp-2">{c.aiReasoning}</div>}
+                        </td>
+                        <td className="px-4 py-3">{getStageBadge(c.pipelineStage)}</td>
                         <td className="px-4 py-3 text-right">
                           {c.dealValue ? (
                             <span className="text-xs font-semibold text-emerald-700">{formatCurrency(c.dealValue)}</span>
