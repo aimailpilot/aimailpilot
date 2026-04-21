@@ -9814,20 +9814,32 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         const userId = (member as any).userId;
         const userName = `${(member as any).firstName || ''} ${(member as any).lastName || ''}`.trim() || (member as any).email || 'Unknown';
 
-        // Emails sent — count messages for contacts assigned to this user (exclude own-org / warmup recipients)
+        // Emails sent — count campaign messages sent FROM this user's email accounts.
+        // Warmup sends never write to the messages table so they are already excluded.
+        // Also exclude recipients that are own-org accounts (internal sends).
         let emailsSent = 0;
         try {
           emailsSent = parseInt((await storage.rawGet(`
             SELECT COUNT(*) as cnt FROM messages m
-            JOIN contacts c ON c.id = m."contactId"
-            WHERE c."organizationId" = ? AND c."assignedTo" = ? AND m.status = 'sent' AND m."sentAt" >= ? AND m."sentAt" < ?
-            AND LOWER(TRIM(COALESCE(m."recipientEmail", c.email, ''))) NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
-            AND LOWER(TRIM(COALESCE(m."recipientEmail", c.email, ''))) NOT IN (
-              SELECT LOWER(TRIM(ea.email)) FROM warmup_accounts wa
-              JOIN email_accounts ea ON ea.id = wa."emailAccountId" WHERE ea.email IS NOT NULL
+            JOIN email_accounts ea ON ea.id = m."emailAccountId"
+            WHERE ea."organizationId" = ? AND ea."userId" = ? AND m.status = 'sent' AND m."sentAt" >= ? AND m."sentAt" < ?
+            AND LOWER(TRIM(COALESCE(m."recipientEmail", ''))) NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
+            AND LOWER(TRIM(COALESCE(m."recipientEmail", ''))) NOT IN (
+              SELECT LOWER(TRIM(ea2.email)) FROM warmup_accounts wa
+              JOIN email_accounts ea2 ON ea2.id = wa."emailAccountId" WHERE ea2.email IS NOT NULL
             )
           `, orgId, userId, startDate, endDate) as any)?.cnt || 0);
-        } catch { /* messages table schema mismatch — skip */ }
+        } catch {
+          // Fallback: count by contacts assigned to this user if emailAccountId column missing
+          try {
+            emailsSent = parseInt((await storage.rawGet(`
+              SELECT COUNT(*) as cnt FROM messages m
+              JOIN contacts c ON c.id = m."contactId"
+              WHERE c."organizationId" = ? AND c."assignedTo" = ? AND m.status = 'sent' AND m."sentAt" >= ? AND m."sentAt" < ?
+              AND LOWER(TRIM(COALESCE(m."recipientEmail", c.email, ''))) NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
+            `, orgId, userId, startDate, endDate) as any)?.cnt || 0);
+          } catch { /* skip */ }
+        }
 
         // Activities by type
         let callsMade = 0, meetingsDone = 0, proposalsSent = 0;
@@ -9935,7 +9947,8 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         } catch { /* inbox schema mismatch — skip */ }
 
         // Hot Leads — contacts classified as hot_lead/warm_lead/past_customer by lead intelligence,
-        // who are assigned to this user OR received email on this user's accounts
+        // who are linked to this user's accounts (via emailAccountId or accountEmail) OR assigned to this user.
+        // accountEmail may be empty string on older records so we also match via emailAccountId.
         let hotLeads = 0;
         try {
           hotLeads = parseInt((await storage.rawGet(`
@@ -9944,13 +9957,14 @@ Generate an appropriate reply to the LATEST email above, considering the full co
             WHERE lo."organizationId" = ?
             AND lo.bucket IN ('hot_lead', 'warm_lead', 'past_customer')
             AND (
-              lo."accountEmail" IN (SELECT email FROM email_accounts WHERE "userId" = ? AND email IS NOT NULL)
+              lo."emailAccountId" IN (SELECT id FROM email_accounts WHERE "userId" = ? AND id IS NOT NULL)
+              OR (lo."accountEmail" != '' AND lo."accountEmail" IN (SELECT email FROM email_accounts WHERE "userId" = ? AND email IS NOT NULL))
               OR LOWER(lo."contactEmail") IN (
                 SELECT LOWER(COALESCE(c.email, '')) FROM contacts c WHERE c."organizationId" = ? AND c."assignedTo" = ? AND c.email IS NOT NULL
               )
             )
             AND LOWER(lo."contactEmail") NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
-          `, orgId, userId, orgId, userId) as any)?.cnt || 0);
+          `, orgId, userId, userId, orgId, userId) as any)?.cnt || 0);
         } catch { /* inbox schema mismatch — skip */ }
 
         const revenue = dealsWon.totalValue || 0;
@@ -10112,14 +10126,15 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           WHERE lo."organizationId" = ?
           AND lo.bucket IN ('hot_lead', 'warm_lead', 'past_customer')
           AND (
-            lo."accountEmail" IN (SELECT email FROM email_accounts WHERE "userId" = ? AND email IS NOT NULL)
+            lo."emailAccountId" IN (SELECT id FROM email_accounts WHERE "userId" = ? AND id IS NOT NULL)
+            OR (lo."accountEmail" != '' AND lo."accountEmail" IN (SELECT email FROM email_accounts WHERE "userId" = ? AND email IS NOT NULL))
             OR LOWER(lo."contactEmail") IN (
               SELECT LOWER(COALESCE(c2.email, '')) FROM contacts c2 WHERE c2."organizationId" = ? AND c2."assignedTo" = ? AND c2.email IS NOT NULL
             )
           )
           AND LOWER(lo."contactEmail") NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
           ORDER BY LOWER(lo."contactEmail"), lo."lastEmailDate" DESC
-        `, orgId, userId, orgId, userId) as any[];
+        `, orgId, userId, userId, orgId, userId) as any[];
         return res.json({ contacts: contacts || [] });
       }
 
