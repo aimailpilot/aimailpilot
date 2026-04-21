@@ -3292,7 +3292,7 @@ export default function ContactsManager() {
 
       {/* ====== PR2: ADD-TO-LIST DIALOG ====== */}
       <Dialog open={showAddToListDialog} onOpenChange={setShowAddToListDialog}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-md bg-white">
           <DialogHeader>
             <DialogTitle>Add {selectAllMatching ? total : selectedIds.length} contact{(selectAllMatching ? total : selectedIds.length) === 1 ? '' : 's'} to a list</DialogTitle>
             <DialogDescription>
@@ -3331,12 +3331,12 @@ export default function ContactsManager() {
               <div className="space-y-2">
                 <Label className="text-xs">Pick a list</Label>
                 <Input placeholder="Search your lists..." value={addToListSearch} onChange={e => setAddToListSearch(e.target.value)} className="h-8 text-xs" />
-                <div className="max-h-60 overflow-y-auto border rounded-lg divide-y">
+                <div className="max-h-60 overflow-y-auto border rounded-lg divide-y bg-white">
                   {contactLists
                     .filter(l => !addToListSearch || l.name.toLowerCase().includes(addToListSearch.toLowerCase()))
                     .map(l => (
                       <button key={l.id} onClick={() => setAddToListExistingId(l.id)}
-                        className={`w-full flex items-center justify-between px-3 py-2 text-left text-xs hover:bg-gray-50 ${addToListExistingId === l.id ? 'bg-purple-50' : ''}`}>
+                        className={`w-full flex items-center justify-between px-3 py-2 text-left text-xs ${addToListExistingId === l.id ? 'bg-purple-50' : 'bg-white hover:bg-gray-50'}`}>
                         <div className="truncate">
                           <div className="font-medium text-gray-900 truncate">{l.name}</div>
                           <div className="text-[10px] text-gray-400">{l.contactCount || 0} contacts</div>
@@ -3345,7 +3345,7 @@ export default function ContactsManager() {
                       </button>
                     ))}
                   {contactLists.filter(l => !addToListSearch || l.name.toLowerCase().includes(addToListSearch.toLowerCase())).length === 0 && (
-                    <div className="px-3 py-6 text-center text-xs text-gray-400">No lists found</div>
+                    <div className="px-3 py-6 text-center text-xs text-gray-400 bg-white">No lists found</div>
                   )}
                 </div>
               </div>
