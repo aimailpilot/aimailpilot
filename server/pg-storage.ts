@@ -3136,11 +3136,35 @@ export class PostgresStorage {
     } else if (filters?.status === 'unsubscribed') {
       sql += ` AND "replyType" = 'unsubscribe'`;
     } else if (filters?.status === 'replied') {
-      // Emails where a team member has sent a reply back to the contact
-      sql += ` AND ("repliedBy" IS NOT NULL OR (status = 'replied' AND "repliedAt" IS NOT NULL))` + warmupExclude;
+      // Emails where a team member has sent a reply back to the contact.
+      // Detects both in-app replies (repliedBy/status='replied') AND native-client
+      // replies (subsequent message in same thread from an org-connected account).
+      sql += ` AND (
+        "repliedBy" IS NOT NULL
+        OR (status = 'replied' AND "repliedAt" IS NOT NULL)
+        OR ("threadId" IS NOT NULL AND EXISTS (
+          SELECT 1 FROM unified_inbox ui2
+          WHERE ui2."threadId" = unified_inbox."threadId"
+            AND ui2."organizationId" = unified_inbox."organizationId"
+            AND ui2."receivedAt" > unified_inbox."receivedAt"
+            AND LOWER(CASE WHEN ui2."fromEmail" LIKE '%<%>%' THEN substring(ui2."fromEmail" from '<([^>]+)>') ELSE ui2."fromEmail" END) IN ${orgEmails}
+        ))
+      )` + warmupExclude;
     } else if (filters?.status === 'not_replied') {
-      // Human replies that haven't been responded to yet
-      sql += ` AND "replyType" IN ('positive','negative','general') AND (status != 'replied' AND "repliedAt" IS NULL)` + warmupExclude;
+      // Human replies that haven't been responded to yet — exclude threads where
+      // a team member has replied via native client (subsequent inbox row from org account).
+      sql += ` AND "replyType" IN ('positive','negative','general')
+        AND (status != 'replied' AND "repliedAt" IS NULL)
+        AND "repliedBy" IS NULL
+        AND NOT (
+          "threadId" IS NOT NULL AND EXISTS (
+            SELECT 1 FROM unified_inbox ui2
+            WHERE ui2."threadId" = unified_inbox."threadId"
+              AND ui2."organizationId" = unified_inbox."organizationId"
+              AND ui2."receivedAt" > unified_inbox."receivedAt"
+              AND LOWER(CASE WHEN ui2."fromEmail" LIKE '%<%>%' THEN substring(ui2."fromEmail" from '<([^>]+)>') ELSE ui2."fromEmail" END) IN ${orgEmails}
+          )
+        )` + warmupExclude;
     } else if (filters?.status && filters.status !== 'all') {
       sql += ` AND status = $${idx++}` + warmupExclude; params.push(filters.status);
     } else {
@@ -3200,9 +3224,30 @@ export class PostgresStorage {
     } else if (filters?.status === 'unsubscribed') {
       sql += ` AND "replyType" = 'unsubscribe'`;
     } else if (filters?.status === 'replied') {
-      sql += ` AND ("repliedBy" IS NOT NULL OR (status = 'replied' AND "repliedAt" IS NOT NULL))` + warmupExcludeCount;
+      sql += ` AND (
+        "repliedBy" IS NOT NULL
+        OR (status = 'replied' AND "repliedAt" IS NOT NULL)
+        OR ("threadId" IS NOT NULL AND EXISTS (
+          SELECT 1 FROM unified_inbox ui2
+          WHERE ui2."threadId" = unified_inbox."threadId"
+            AND ui2."organizationId" = unified_inbox."organizationId"
+            AND ui2."receivedAt" > unified_inbox."receivedAt"
+            AND LOWER(CASE WHEN ui2."fromEmail" LIKE '%<%>%' THEN substring(ui2."fromEmail" from '<([^>]+)>') ELSE ui2."fromEmail" END) IN ${orgEmailsC}
+        ))
+      )` + warmupExcludeCount;
     } else if (filters?.status === 'not_replied') {
-      sql += ` AND "replyType" IN ('positive','negative','general') AND (status != 'replied' AND "repliedAt" IS NULL)` + warmupExcludeCount;
+      sql += ` AND "replyType" IN ('positive','negative','general')
+        AND (status != 'replied' AND "repliedAt" IS NULL)
+        AND "repliedBy" IS NULL
+        AND NOT (
+          "threadId" IS NOT NULL AND EXISTS (
+            SELECT 1 FROM unified_inbox ui2
+            WHERE ui2."threadId" = unified_inbox."threadId"
+              AND ui2."organizationId" = unified_inbox."organizationId"
+              AND ui2."receivedAt" > unified_inbox."receivedAt"
+              AND LOWER(CASE WHEN ui2."fromEmail" LIKE '%<%>%' THEN substring(ui2."fromEmail" from '<([^>]+)>') ELSE ui2."fromEmail" END) IN ${orgEmailsC}
+          )
+        )` + warmupExcludeCount;
     } else if (filters?.status && filters.status !== 'all') {
       sql += ` AND status = $${idx++}` + warmupExcludeCount; params.push(filters.status);
     } else {
@@ -3253,7 +3298,15 @@ export class PostgresStorage {
 
     const total = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 ${warmupExcludeSql}${acctScope}`, params)).c);
     const unread = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'unread' ${warmupExcludeSql}${acctScope}`, params)).c);
-    const replied = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND ("repliedBy" IS NOT NULL OR (status = 'replied' AND "repliedAt" IS NOT NULL)) ${warmupExcludeSql}${acctScope}`, params)).c);
+    const teamRepliedInThread = `("threadId" IS NOT NULL AND EXISTS (
+      SELECT 1 FROM unified_inbox ui2
+      WHERE ui2."threadId" = unified_inbox."threadId"
+        AND ui2."organizationId" = unified_inbox."organizationId"
+        AND ui2."receivedAt" > unified_inbox."receivedAt"
+        AND LOWER(CASE WHEN ui2."fromEmail" LIKE '%<%>%' THEN substring(ui2."fromEmail" from '<([^>]+)>') ELSE ui2."fromEmail" END) IN ${oE}
+    ))`;
+    const repliedFilter = `AND ("repliedBy" IS NOT NULL OR (status = 'replied' AND "repliedAt" IS NOT NULL) OR ${teamRepliedInThread})`;
+    const replied = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 ${repliedFilter} ${warmupExcludeSql}${acctScope}`, params)).c);
     const archived = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'archived'${acctScope}`, params)).c);
     const positive = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'positive'${acctScope}`, params)).c);
     const negative = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'negative'${acctScope}`, params)).c);
@@ -3262,7 +3315,7 @@ export class PostgresStorage {
     const bounced = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND ("bounceType" != '' AND "bounceType" IS NOT NULL) ${warmupExcludeSql}${acctScope}`, params)).c);
     const starred = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "isStarred" = 1${acctScope}`, params)).c);
     const warmup = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 ${warmupOnlySql}${acctScope}`, params)).c);
-    const notReplied = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" IN ('positive','negative','general') AND (status != 'replied' AND "repliedAt" IS NULL) ${warmupExcludeSql}${acctScope}`, params)).c);
+    const notReplied = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" IN ('positive','negative','general') AND (status != 'replied' AND "repliedAt" IS NULL) AND "repliedBy" IS NULL AND NOT ${teamRepliedInThread} ${warmupExcludeSql}${acctScope}`, params)).c);
     return { total, unread, replied, archived, positive, negative, ooo, autoReply, bounced, starred, warmup, notReplied };
   }
 
