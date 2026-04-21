@@ -114,7 +114,7 @@ export default function TeamScorecard({ onBack }: TeamScorecardProps) {
 
   useEffect(() => { fetchScorecard(); }, [period]);
 
-  const openDrilldown = async (member: ScorecardMember, type: 'not_replied' | 'hot_leads') => {
+  const openDrilldown = async (member: ScorecardMember, type: 'not_replied' | 'hot_leads' | 'meetings') => {
     setDrilldown({ userId: member.userId, userName: member.userName, type });
     setDrilldownContacts([]);
     setDrilldownLoading(true);
