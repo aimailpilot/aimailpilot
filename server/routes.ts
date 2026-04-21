@@ -10504,6 +10504,166 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     }
   });
 
+  // ── Daily Task Queue — structured action list for sales reps ──
+  app.get('/api/my/task-queue', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const userId = req.user.id;
+      const todayStr = new Date().toISOString().split('T')[0];
+      const threeDaysAgo = new Date(); threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+      const threeDaysAgoStr = threeDaysAgo.toISOString().split('T')[0];
+
+      const ownEmailsSubquery = `
+        SELECT LOWER(TRIM(email)) FROM email_accounts WHERE "organizationId" = ? AND email IS NOT NULL
+        UNION
+        SELECT LOWER(TRIM(ea2.email)) FROM warmup_accounts wa
+          JOIN email_accounts ea2 ON ea2.id = wa."emailAccountId"
+          WHERE wa."organizationId" = ? AND ea2.email IS NOT NULL
+      `;
+
+      // 1. Hot replies — positive/general inbox messages not yet replied to (limit 10)
+      let hotReplies: any[] = [];
+      try {
+        hotReplies = await storage.rawAll(`
+          SELECT ui.id, ui."fromName", ui."fromEmail", ui.subject, ui.snippet,
+                 ui."receivedAt", ui."replyType", ui."replyQualityLabel", ui."replyQualityScore",
+                 c."firstName", c."lastName", c.company, c.id as "contactId"
+          FROM unified_inbox ui
+          INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
+          LEFT JOIN contacts c ON c.id = ui."contactId"
+          WHERE ui."organizationId" = ? AND ea."userId" = ?
+          AND ui.status != 'replied' AND ui."repliedAt" IS NULL AND ui."repliedBy" IS NULL
+          AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
+          AND ui."replyType" IN ('positive', 'negative', 'general')
+          AND LOWER(TRIM(ui."fromEmail")) NOT IN (${ownEmailsSubquery})
+          ORDER BY
+            CASE ui."replyQualityLabel" WHEN 'Hot' THEN 0 WHEN 'Warm' THEN 1 ELSE 2 END,
+            ui."receivedAt" DESC
+          LIMIT 10
+        `, orgId, userId, orgId, orgId) as any[];
+      } catch { }
+
+      // 2. Overdue follow-ups — contacts with nextActionDate in the past (limit 10)
+      let overdueFollowups: any[] = [];
+      try {
+        overdueFollowups = await storage.rawAll(`
+          SELECT c.id, c."firstName", c."lastName", c.email, c.company, c."pipelineStage",
+                 c."nextActionDate",
+                 EXTRACT(DAY FROM (NOW() - c."nextActionDate"::timestamptz))::int AS "daysOverdue"
+          FROM contacts c
+          WHERE c."organizationId" = ? AND c."assignedTo" = ?
+          AND c."nextActionDate" < ? AND c."nextActionDate" IS NOT NULL
+          AND c."pipelineStage" NOT IN ('won', 'lost')
+          ORDER BY c."nextActionDate" ASC
+          LIMIT 10
+        `, orgId, userId, todayStr) as any[];
+      } catch { }
+
+      // 3. Stale hot leads — interested/meeting stage contacts with no activity in 3+ days (limit 10)
+      let staleLeads: any[] = [];
+      try {
+        staleLeads = await storage.rawAll(`
+          SELECT c.id, c."firstName", c."lastName", c.email, c.company, c."pipelineStage",
+                 c."nextActionDate",
+                 (SELECT MAX(ca."createdAt") FROM contact_activities ca WHERE ca."contactId" = c.id) AS "lastActivityAt"
+          FROM contacts c
+          WHERE c."organizationId" = ? AND c."assignedTo" = ?
+          AND c."pipelineStage" IN ('interested', 'meeting_scheduled', 'meeting_done', 'proposal_sent')
+          AND NOT EXISTS (
+            SELECT 1 FROM contact_activities ca WHERE ca."contactId" = c.id AND ca."createdAt" >= ?
+          )
+          ORDER BY c."nextActionDate" ASC NULLS LAST
+          LIMIT 10
+        `, orgId, userId, threeDaysAgoStr) as any[];
+      } catch { }
+
+      // 4. Today's activity counts (auto-tracked)
+      const todayStart = todayStr;
+      const todayEnd = new Date(); todayEnd.setDate(todayEnd.getDate() + 1);
+      const todayEndStr = todayEnd.toISOString().split('T')[0];
+
+      let todayEmailsSent = 0;
+      let todayCallsMade = 0;
+      let todayMeetings = 0;
+      let todayWhatsApp = 0;
+      try {
+        const acts = await storage.rawAll(`
+          SELECT type, COUNT(*) as cnt FROM contact_activities
+          WHERE "organizationId" = ? AND "userId" = ? AND "createdAt" >= ? AND "createdAt" < ?
+          GROUP BY type
+        `, orgId, userId, todayStart, todayEndStr) as any[];
+        const actMap: Record<string, number> = {};
+        for (const a of acts) actMap[a.type] = parseInt(a.cnt || 0);
+        todayCallsMade = actMap['call'] || 0;
+        todayMeetings = actMap['meeting'] || 0;
+        todayWhatsApp = actMap['whatsapp'] || 0;
+      } catch { }
+      try {
+        todayEmailsSent = parseInt((await storage.rawGet(`
+          SELECT COUNT(*) as cnt FROM messages m
+          JOIN email_accounts ea ON ea.id = m."emailAccountId"
+          WHERE ea."organizationId" = ? AND ea."userId" = ? AND m.status = 'sent' AND m."sentAt" >= ? AND m."sentAt" < ?
+          AND LOWER(TRIM(COALESCE(m."recipientEmail", ''))) NOT IN (SELECT LOWER(TRIM(email)) FROM email_accounts WHERE email IS NOT NULL)
+        `, orgId, userId, todayStart, todayEndStr) as any)?.cnt || 0);
+      } catch { }
+
+      // 5. Load daily targets from api_settings (admin-configurable)
+      let targets = { emails: 50, calls: 10, meetings: 1, whatsapp: 15 };
+      try {
+        const targetsRow = await storage.rawGet(
+          `SELECT value FROM api_settings WHERE "organizationId" = ? AND key = 'daily_activity_targets'`,
+          orgId
+        ) as any;
+        if (targetsRow?.value) {
+          const parsed = JSON.parse(targetsRow.value);
+          targets = { ...targets, ...parsed };
+        }
+      } catch { }
+
+      res.json({
+        hotReplies,
+        overdueFollowups,
+        staleLeads,
+        todayProgress: {
+          emailsSent: todayEmailsSent,
+          callsMade: todayCallsMade,
+          meetingsDone: todayMeetings,
+          whatsappSent: todayWhatsApp,
+        },
+        targets,
+        summary: {
+          hotRepliesCount: hotReplies.length,
+          overdueCount: overdueFollowups.length,
+          staleCount: staleLeads.length,
+        }
+      });
+    } catch (error: any) {
+      console.error('[TaskQueue] Error:', error.message);
+      res.status(500).json({ message: 'Failed to fetch task queue' });
+    }
+  });
+
+  // ── Log a manual activity from task queue (call/whatsapp/meeting) ──
+  app.post('/api/my/log-activity', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const userId = req.user.id;
+      const { contactId, type, outcome, notes } = req.body;
+      if (!type) return res.status(400).json({ message: 'type required' });
+
+      const id = `act_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      await storage.rawRun(`
+        INSERT INTO contact_activities (id, "organizationId", "contactId", "userId", type, outcome, notes, "createdAt", "updatedAt")
+        VALUES (?, ?, ?, ?, ?, ?, ?, NOW()::text, NOW()::text)
+      `, id, orgId, contactId || null, userId, type, outcome || null, notes || null);
+
+      res.json({ success: true, id });
+    } catch (error: any) {
+      console.error('[LogActivity] Error:', error.message);
+      res.status(500).json({ message: 'Failed to log activity' });
+    }
+  });
+
   // ── Emails needing reply (detail list for nudge click) ──
   app.get('/api/my/emails-needing-reply', requireAuth, async (req: any, res) => {
     try {

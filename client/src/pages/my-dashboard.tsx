@@ -8,6 +8,7 @@ import {
   ArrowRight, PartyPopper, Bell, Eye, ChevronDown, ChevronUp,
   ExternalLink, User, Building2, Reply
 } from "lucide-react";
+import DailyTaskQueue from "@/components/daily-task-queue";
 
 interface DashboardStats {
   emailsSent: number;
@@ -269,11 +270,15 @@ export default function MyDashboard() {
         </div>
       </div>
 
-      {/* Nudges / Action Items */}
-      {nudges.length > 0 && (
+      {/* Daily Task Queue + Nudges side by side */}
+      <div className="grid grid-cols-2 gap-4">
+        {/* Left: Daily Task Queue */}
+        <DailyTaskQueue />
+
+        {/* Right: Nudges / Action Items */}
         <div className="space-y-2">
           <h2 className="text-sm font-semibold text-gray-700 flex items-center gap-1.5">
-            <Zap className="h-4 w-4 text-amber-500" /> Action Items
+            <Zap className="h-4 w-4 text-amber-500" /> Alerts
           </h2>
           <div className="space-y-2">
             {nudges.map((nudge) => {
@@ -402,7 +407,7 @@ export default function MyDashboard() {
             })}
           </div>
         </div>
-      )}
+      </div>
 
       {/* Stats Cards */}
       <div className="grid grid-cols-4 gap-3">
