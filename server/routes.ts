@@ -10368,7 +10368,8 @@ Generate an appropriate reply to the LATEST email above, considering the full co
           FROM unified_inbox ui
           INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
           WHERE ui."organizationId" = ? AND ea."userId" = ?
-          AND ui.status IN ('unread', 'read') AND ui."repliedAt" IS NULL
+          AND ui.status != 'replied' AND ui."repliedAt" IS NULL
+          AND ui."repliedBy" IS NULL
           AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
           AND ui."replyType" IN ('positive', 'negative', 'general')
           AND LOWER(CASE WHEN ui."fromEmail" LIKE '%<%>%' THEN substring(ui."fromEmail" from '<([^>]+)>') ELSE ui."fromEmail" END) NOT IN (
@@ -10378,7 +10379,22 @@ Generate an appropriate reply to the LATEST email above, considering the full co
               JOIN email_accounts ea2 ON ea2.id = wa."emailAccountId"
               WHERE wa."organizationId" = ? AND ea2.email IS NOT NULL
           )
-        `, orgId, userId, orgId, orgId) as any) || {};
+          AND NOT (
+            ui."threadId" IS NOT NULL AND EXISTS (
+              SELECT 1 FROM unified_inbox ui2
+              WHERE ui2."threadId" = ui."threadId"
+                AND ui2."organizationId" = ui."organizationId"
+                AND ui2."receivedAt" > ui."receivedAt"
+                AND LOWER(CASE WHEN ui2."fromEmail" LIKE '%<%>%' THEN substring(ui2."fromEmail" from '<([^>]+)>') ELSE ui2."fromEmail" END) IN (
+                  SELECT LOWER(TRIM(email)) FROM email_accounts WHERE "organizationId" = ? AND email IS NOT NULL
+                  UNION
+                  SELECT LOWER(TRIM(ea3.email)) FROM warmup_accounts wa2
+                    JOIN email_accounts ea3 ON ea3.id = wa2."emailAccountId"
+                    WHERE wa2."organizationId" = ? AND ea3.email IS NOT NULL
+                )
+            )
+          )
+        `, orgId, userId, orgId, orgId, orgId, orgId) as any) || {};
         emailsNeedingReply = parseInt(needReplyBreakdown.cnt || 0);
         hotReplies = parseInt(needReplyBreakdown.hot || 0);
         warmReplies = parseInt(needReplyBreakdown.warm || 0);
@@ -10495,7 +10511,8 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         LEFT JOIN contacts c ON c.id = ui."contactId"
         LEFT JOIN campaigns camp ON camp.id = ui."campaignId"
         WHERE ui."organizationId" = ? AND ea."userId" = ?
-        AND ui.status IN ('unread', 'read') AND ui."repliedAt" IS NULL
+        AND ui.status != 'replied' AND ui."repliedAt" IS NULL
+        AND ui."repliedBy" IS NULL
         AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
         AND ui."replyType" IN ('positive', 'negative', 'general')
         AND LOWER(CASE WHEN ui."fromEmail" LIKE '%<%>%' THEN substring(ui."fromEmail" from '<([^>]+)>') ELSE ui."fromEmail" END) NOT IN (
@@ -10505,15 +10522,31 @@ Generate an appropriate reply to the LATEST email above, considering the full co
             JOIN email_accounts ea2 ON ea2.id = wa."emailAccountId"
             WHERE wa."organizationId" = ? AND ea2.email IS NOT NULL
         )
+        AND NOT (
+          ui."threadId" IS NOT NULL AND EXISTS (
+            SELECT 1 FROM unified_inbox ui2
+            WHERE ui2."threadId" = ui."threadId"
+              AND ui2."organizationId" = ui."organizationId"
+              AND ui2."receivedAt" > ui."receivedAt"
+              AND LOWER(CASE WHEN ui2."fromEmail" LIKE '%<%>%' THEN substring(ui2."fromEmail" from '<([^>]+)>') ELSE ui2."fromEmail" END) IN (
+                SELECT LOWER(TRIM(email)) FROM email_accounts WHERE "organizationId" = ? AND email IS NOT NULL
+                UNION
+                SELECT LOWER(TRIM(ea3.email)) FROM warmup_accounts wa2
+                  JOIN email_accounts ea3 ON ea3.id = wa2."emailAccountId"
+                  WHERE wa2."organizationId" = ? AND ea3.email IS NOT NULL
+              )
+          )
+        )
         ORDER BY COALESCE(ui."replyQualityScore", -1) DESC, ui."receivedAt" DESC
         LIMIT ? OFFSET ?
-      `, orgId, userId, orgId, orgId, limit, offset) as any[];
+      `, orgId, userId, orgId, orgId, orgId, orgId, limit, offset) as any[];
 
       const total = (await storage.rawGet(`
         SELECT COUNT(*) as cnt FROM unified_inbox ui
         INNER JOIN email_accounts ea ON ea.id = ui."emailAccountId"
         WHERE ui."organizationId" = ? AND ea."userId" = ?
-        AND ui.status IN ('unread', 'read') AND ui."repliedAt" IS NULL
+        AND ui.status != 'replied' AND ui."repliedAt" IS NULL
+        AND ui."repliedBy" IS NULL
         AND (ui."sentByUs" IS NULL OR ui."sentByUs" = 0)
         AND ui."replyType" IN ('positive', 'negative', 'general')
         AND LOWER(CASE WHEN ui."fromEmail" LIKE '%<%>%' THEN substring(ui."fromEmail" from '<([^>]+)>') ELSE ui."fromEmail" END) NOT IN (
@@ -10523,7 +10556,22 @@ Generate an appropriate reply to the LATEST email above, considering the full co
             JOIN email_accounts ea2 ON ea2.id = wa."emailAccountId"
             WHERE wa."organizationId" = ? AND ea2.email IS NOT NULL
         )
-      `, orgId, userId, orgId, orgId) as any)?.cnt || 0;
+        AND NOT (
+          ui."threadId" IS NOT NULL AND EXISTS (
+            SELECT 1 FROM unified_inbox ui2
+            WHERE ui2."threadId" = ui."threadId"
+              AND ui2."organizationId" = ui."organizationId"
+              AND ui2."receivedAt" > ui."receivedAt"
+              AND LOWER(CASE WHEN ui2."fromEmail" LIKE '%<%>%' THEN substring(ui2."fromEmail" from '<([^>]+)>') ELSE ui2."fromEmail" END) IN (
+                SELECT LOWER(TRIM(email)) FROM email_accounts WHERE "organizationId" = ? AND email IS NOT NULL
+                UNION
+                SELECT LOWER(TRIM(ea3.email)) FROM warmup_accounts wa2
+                  JOIN email_accounts ea3 ON ea3.id = wa2."emailAccountId"
+                  WHERE wa2."organizationId" = ? AND ea3.email IS NOT NULL
+              )
+          )
+        )
+      `, orgId, userId, orgId, orgId, orgId, orgId) as any)?.cnt || 0;
 
       res.json({ emails, total });
     } catch (error: any) {
