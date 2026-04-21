@@ -198,6 +198,88 @@ export default function ContactsManager() {
   const [filterOptions, setFilterOptions] = useState<{ companies: string[]; designations: string[]; cities: string[]; countries: string[] }>({ companies: [], designations: [], cities: [], countries: [] });
   const [showFilters, setShowFilters] = useState(false);
 
+  // === PR1: Column customization, density, select-all-matching ===
+  type ColId = 'contact' | 'company' | 'designation' | 'pipeline' | 'mobile' | 'phone' | 'linkedin' | 'location' | 'nextAction' | 'lastRemark' | 'assigned' | 'quick';
+  interface ColDef { id: ColId; label: string; width: number; visible: boolean; sortKey?: string; adminOnly?: boolean; }
+  const DEFAULT_COLUMNS: ColDef[] = [
+    { id: 'contact',     label: 'Contact',     width: 220, visible: true,  sortKey: 'firstName' },
+    { id: 'company',     label: 'Company',     width: 150, visible: true,  sortKey: 'company' },
+    { id: 'designation', label: 'Designation', width: 150, visible: true,  sortKey: 'jobTitle' },
+    { id: 'pipeline',    label: 'Pipeline',    width: 120, visible: true,  sortKey: 'pipelineStage' },
+    { id: 'mobile',      label: 'Mobile',      width: 115, visible: true,  sortKey: 'mobilePhone' },
+    { id: 'phone',       label: 'Phone',       width: 115, visible: true,  sortKey: 'phone' },
+    { id: 'linkedin',    label: 'LinkedIn',    width: 50,  visible: true },
+    { id: 'location',    label: 'Location',    width: 130, visible: true,  sortKey: 'city' },
+    { id: 'nextAction',  label: 'Next Action', width: 120, visible: true,  sortKey: 'nextActionDate' },
+    { id: 'lastRemark',  label: 'Last Remark', width: 180, visible: true },
+    { id: 'assigned',    label: 'Assigned',    width: 60,  visible: true,  adminOnly: true },
+    { id: 'quick',       label: 'Quick',       width: 110, visible: true },
+  ];
+  const COL_STORAGE_KEY = 'aim_contacts_columns_v1';
+  const DENSITY_STORAGE_KEY = 'aim_contacts_density_v1';
+  const [columns, setColumns] = useState<ColDef[]>(() => {
+    try {
+      const raw = localStorage.getItem(COL_STORAGE_KEY);
+      if (!raw) return DEFAULT_COLUMNS;
+      const saved = JSON.parse(raw) as ColDef[];
+      // merge: keep default order for unknown ids, apply saved width/visible
+      const map = new Map(saved.map(c => [c.id, c]));
+      const merged = DEFAULT_COLUMNS.map(d => ({ ...d, ...(map.get(d.id) || {}) }));
+      // append any saved columns not in default (future-proofing) — none for now
+      // reorder: saved order first
+      const savedOrder = saved.map(c => c.id).filter(id => merged.find(m => m.id === id));
+      const inOrder = savedOrder.map(id => merged.find(m => m.id === id)!).filter(Boolean);
+      const rest = merged.filter(m => !savedOrder.includes(m.id));
+      return [...inOrder, ...rest];
+    } catch { return DEFAULT_COLUMNS; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(COL_STORAGE_KEY, JSON.stringify(columns)); } catch {}
+  }, [columns]);
+  const [density, setDensity] = useState<'comfortable' | 'compact' | 'condensed'>(() => {
+    try { return (localStorage.getItem(DENSITY_STORAGE_KEY) as any) || 'comfortable'; } catch { return 'comfortable'; }
+  });
+  useEffect(() => { try { localStorage.setItem(DENSITY_STORAGE_KEY, density); } catch {} }, [density]);
+  const [selectAllMatching, setSelectAllMatching] = useState(false); // true = all `total` contacts selected across pages
+  const resizingColRef = useRef<{ id: ColId; startX: number; startW: number } | null>(null);
+
+  const setColWidth = (id: ColId, width: number) => {
+    setColumns(prev => prev.map(c => c.id === id ? { ...c, width: Math.max(40, Math.min(600, width)) } : c));
+  };
+  const toggleColVisible = (id: ColId) => {
+    setColumns(prev => prev.map(c => c.id === id ? { ...c, visible: !c.visible } : c));
+  };
+  const moveCol = (id: ColId, dir: -1 | 1) => {
+    setColumns(prev => {
+      const idx = prev.findIndex(c => c.id === id);
+      const to = idx + dir;
+      if (idx < 0 || to < 0 || to >= prev.length) return prev;
+      const copy = [...prev];
+      [copy[idx], copy[to]] = [copy[to], copy[idx]];
+      return copy;
+    });
+  };
+  const resetColumns = () => setColumns(DEFAULT_COLUMNS);
+
+  const startColResize = (e: React.MouseEvent, id: ColId) => {
+    e.preventDefault(); e.stopPropagation();
+    const col = columns.find(c => c.id === id);
+    if (!col) return;
+    resizingColRef.current = { id, startX: e.clientX, startW: col.width };
+    const onMove = (ev: MouseEvent) => {
+      const r = resizingColRef.current;
+      if (!r) return;
+      setColWidth(r.id, r.startW + (ev.clientX - r.startX));
+    };
+    const onUp = () => {
+      resizingColRef.current = null;
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
   // Create list dialog state
   const [showCreateListDialog, setShowCreateListDialog] = useState(false);
   const [newListName, setNewListName] = useState('');
@@ -1263,8 +1345,52 @@ export default function ContactsManager() {
     setRatingLoading(null);
   };
 
-  const toggleSelect = (id: string) => { setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]); };
-  const toggleSelectAll = () => { setSelectedIds(selectedIds.length === contacts.length ? [] : contacts.map(c => c.id)); };
+  const toggleSelect = (id: string) => { setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]); setSelectAllMatching(false); };
+  const toggleSelectAll = () => { setSelectedIds(selectedIds.length === contacts.length ? [] : contacts.map(c => c.id)); setSelectAllMatching(false); };
+
+  // PR1: CSV export of current filtered view (respects visible columns)
+  const exportVisibleCsv = () => {
+    const visCols = columns.filter(c => c.visible && c.id !== 'quick');
+    const headers = ['Email', ...visCols.map(c => c.label)];
+    const rows = contacts.map(ct => {
+      const cells: string[] = [ct.email || ''];
+      for (const col of visCols) {
+        let v = '';
+        switch (col.id) {
+          case 'contact':    v = `${ct.firstName || ''} ${ct.lastName || ''}`.trim(); break;
+          case 'company':    v = ct.company || ''; break;
+          case 'designation':v = ct.jobTitle || ''; break;
+          case 'pipeline':   v = (ct as any).pipelineStage || 'new'; break;
+          case 'mobile':     v = ct.mobilePhone || ''; break;
+          case 'phone':      v = (ct as any).phone || ''; break;
+          case 'linkedin':   v = (ct as any).linkedinUrl || ''; break;
+          case 'location':   v = [(ct as any).city, (ct as any).country].filter(Boolean).join(', '); break;
+          case 'nextAction': v = (ct as any).nextActionDate ? `${(ct as any).nextActionDate} ${(ct as any).nextActionType || ''}`.trim() : ''; break;
+          case 'lastRemark': v = (ct as any).lastRemark || ''; break;
+          case 'assigned': {
+            const m = (ct as any).assignedTo ? teamMembers.find((tm: any) => tm.userId === (ct as any).assignedTo) : null;
+            v = m ? (m.firstName || m.email?.split('@')[0] || '') : '';
+            break;
+          }
+        }
+        cells.push(v);
+      }
+      return cells;
+    });
+    const csv = [headers, ...rows].map(r =>
+      r.map(c => {
+        const s = String(c ?? '');
+        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      }).join(',')
+    ).join('\r\n');
+    const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `contacts_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const activeList = contactLists.find(l => l.id === activeListId);
 
@@ -3706,12 +3832,15 @@ export default function ContactsManager() {
       </button>
     );
 
-    // Column layout: checkbox | contact | company | designation | pipeline | mobile | phone | linkedin | location | next action | last remark | assigned | actions
-    const gridCols = isSpecialTab
-      ? 'grid-cols-[40px_1fr_160px_48px]'
-      : isAdmin
-        ? 'grid-cols-[40px_minmax(140px,1.1fr)_minmax(110px,0.85fr)_minmax(110px,0.85fr)_90px_105px_105px_30px_105px_90px_minmax(80px,0.7fr)_50px_40px]'
-        : 'grid-cols-[40px_minmax(140px,1.1fr)_minmax(110px,0.85fr)_minmax(110px,0.85fr)_90px_105px_105px_30px_105px_90px_minmax(80px,0.7fr)_40px]';
+    // PR1: Column layout is now driven by `columns` state (widths/visibility/order).
+    // Visible cols (filtering admin-only for non-admins, and in special tabs we keep original simple layout)
+    const visibleCols = columns.filter(c => c.visible && (!c.adminOnly || isAdmin));
+    const gridTemplate = isSpecialTab
+      ? '40px 1fr 160px 48px'
+      : `40px ${visibleCols.map(c => `${c.width}px`).join(' ')} 40px`;
+    const totalTableWidth = isSpecialTab ? 1200 : 40 + visibleCols.reduce((s, c) => s + c.width, 0) + 40 + 32;
+    const rowPadY = density === 'condensed' ? 'py-1' : density === 'compact' ? 'py-1.5' : 'py-2.5';
+    const rowTextSize = density === 'condensed' ? 'text-[11px]' : 'text-xs';
 
     return (
       <div className="space-y-3">
@@ -3903,23 +4032,114 @@ export default function ContactsManager() {
           </div>
         ) : (
           <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-x-auto">
-            {/* Table Header */}
-            <div className={`grid ${gridCols} gap-2 px-4 py-2.5 border-b border-gray-100 bg-gray-50/60 min-w-[1200px]`}>
-              <div className="flex items-center">
-                <input type="checkbox" checked={selectedIds.length === contacts.length && contacts.length > 0} onChange={toggleSelectAll} className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600" />
+            {/* Select-all-matching banner */}
+            {!isSpecialTab && selectedIds.length > 0 && selectedIds.length === contacts.length && total > contacts.length && (
+              <div className="flex items-center justify-center gap-2 px-4 py-2 bg-blue-50 border-b border-blue-100 text-xs text-blue-700">
+                {selectAllMatching ? (
+                  <>
+                    <CheckCircle className="h-3.5 w-3.5" />
+                    <span>All <strong>{total}</strong> contacts matching the current filter are selected.</span>
+                    <button onClick={() => setSelectAllMatching(false)} className="font-semibold underline hover:text-blue-900">Clear selection</button>
+                  </>
+                ) : (
+                  <>
+                    <span>All <strong>{contacts.length}</strong> on this page selected.</span>
+                    <button onClick={() => setSelectAllMatching(true)} className="font-semibold underline hover:text-blue-900">Select all {total} matching</button>
+                  </>
+                )}
               </div>
-              <SortHeader col="firstName" label={isSpecialTab ? 'Email' : 'Contact'} />
-              {!isSpecialTab && <SortHeader col="company" label="Company" icon={Building} />}
-              {!isSpecialTab && <SortHeader col="jobTitle" label="Designation" icon={Briefcase} />}
-              {!isSpecialTab && <SortHeader col="pipelineStage" label="Pipeline" icon={Target} />}
-              {!isSpecialTab && <SortHeader col="mobilePhone" label="Mobile" icon={Smartphone} />}
-              {!isSpecialTab && <SortHeader col="phone" label="Phone" icon={Phone} />}
-              {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1" title="LinkedIn"><Linkedin className="h-2.5 w-2.5" /></div>}
-              {!isSpecialTab && <SortHeader col="city" label="Location" icon={MapPin} />}
-              {!isSpecialTab && <SortHeader col="nextActionDate" label="Next Action" icon={Clock} />}
-              {!isSpecialTab && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1"><MessageSquare className="h-2.5 w-2.5" /> Last Remark</div>}
-              {!isSpecialTab && isAdmin && <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400"><UserCheck className="h-2.5 w-2.5" /></div>}
-              <div></div>
+            )}
+            {/* Table Header (dynamic columns) */}
+            <div
+              className="grid gap-2 px-4 py-2.5 border-b border-gray-100 bg-gray-50/60 sticky top-0 z-10"
+              style={{ gridTemplateColumns: gridTemplate, minWidth: `${totalTableWidth}px` }}
+            >
+              <div className="flex items-center">
+                <input type="checkbox"
+                  checked={selectedIds.length === contacts.length && contacts.length > 0}
+                  onChange={toggleSelectAll}
+                  className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600" />
+              </div>
+              {isSpecialTab ? (
+                <>
+                  <SortHeader col="firstName" label="Email" />
+                  <div />
+                  <div />
+                </>
+              ) : (
+                <>
+                  {visibleCols.map((col, idx) => {
+                    const iconMap: Record<string, any> = { company: Building, designation: Briefcase, pipeline: Target, mobile: Smartphone, phone: Phone, location: MapPin, nextAction: Clock };
+                    const Icon = iconMap[col.id];
+                    return (
+                      <div key={col.id} className="relative flex items-center gap-1 group/col min-w-0">
+                        {col.sortKey ? (
+                          <SortHeader col={col.sortKey} label={col.label} icon={Icon} />
+                        ) : (
+                          <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1">
+                            {Icon && <Icon className="h-2.5 w-2.5" />}
+                            {col.id === 'linkedin' ? <Linkedin className="h-2.5 w-2.5" /> : col.id === 'lastRemark' ? <><MessageSquare className="h-2.5 w-2.5" /> {col.label}</> : col.id === 'assigned' ? <UserCheck className="h-2.5 w-2.5" /> : col.label}
+                          </div>
+                        )}
+                        {/* Column ops menu (reorder / hide) */}
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <button className="opacity-0 group-hover/col:opacity-60 hover:opacity-100 ml-auto p-0.5" title="Column options">
+                              <ChevronDown className="h-3 w-3" />
+                            </button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="start" className="text-xs">
+                            <DropdownMenuItem onClick={() => moveCol(col.id, -1)} disabled={idx === 0}>Move left</DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => moveCol(col.id, 1)} disabled={idx === visibleCols.length - 1}>Move right</DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem onClick={() => toggleColVisible(col.id)}>Hide column</DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => setColWidth(col.id, DEFAULT_COLUMNS.find(d => d.id === col.id)?.width || 120)}>Reset width</DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                        {/* Resize handle (right edge) */}
+                        <div
+                          onMouseDown={(e) => startColResize(e, col.id)}
+                          className="absolute right-0 top-0 bottom-0 w-1.5 -mr-1 cursor-col-resize hover:bg-blue-400/50 active:bg-blue-500/70 z-20"
+                          title="Drag to resize"
+                        />
+                      </div>
+                    );
+                  })}
+                  <div className="flex items-center justify-end">
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button className="text-gray-400 hover:text-gray-600" title="Table options">
+                          <MoreHorizontal className="h-3.5 w-3.5" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-56">
+                        <div className="px-2 py-1.5 text-[10px] font-semibold uppercase text-gray-400">Columns</div>
+                        {columns.filter(c => !c.adminOnly || isAdmin).map(c => (
+                          <DropdownMenuItem key={c.id} onSelect={(e) => { e.preventDefault(); toggleColVisible(c.id); }} className="text-xs flex items-center gap-2">
+                            <input type="checkbox" checked={c.visible} readOnly className="h-3 w-3" />
+                            <span>{c.label}</span>
+                          </DropdownMenuItem>
+                        ))}
+                        <DropdownMenuSeparator />
+                        <div className="px-2 py-1.5 text-[10px] font-semibold uppercase text-gray-400">Density</div>
+                        {(['comfortable','compact','condensed'] as const).map(d => (
+                          <DropdownMenuItem key={d} onSelect={(e) => { e.preventDefault(); setDensity(d); }} className="text-xs flex items-center gap-2">
+                            <input type="radio" checked={density === d} readOnly className="h-3 w-3" />
+                            <span className="capitalize">{d}</span>
+                          </DropdownMenuItem>
+                        ))}
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onClick={exportVisibleCsv} className="text-xs">
+                          <Download className="h-3 w-3 mr-2" /> Export CSV (this page)
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={resetColumns} className="text-xs text-gray-500">
+                          <RefreshCw className="h-3 w-3 mr-2" /> Reset columns
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                </>
+              )}
             </div>
 
             {/* Rows */}
@@ -3931,91 +4151,70 @@ export default function ContactsManager() {
               const stage = PIPELINE_STAGES.find(s => s.value === (contact.pipelineStage || 'new'));
               const isOverdue = contact.nextActionDate && new Date(contact.nextActionDate) < new Date(new Date().toISOString().split('T')[0]);
 
-              return (
-                <div
-                  key={contact.id}
-                  onClick={() => openDetail(contact)}
-                  className={`grid ${gridCols} gap-2 px-4 py-2.5 border-b border-gray-50 items-center transition-all group cursor-pointer min-w-[1200px] ${
-                    isSelected ? 'bg-blue-50/50' : isFlagged ? 'bg-red-50/20' : 'hover:bg-gray-50/80'
-                  }`}
-                >
-                  <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
-                    <input type="checkbox" checked={isSelected} onChange={() => toggleSelect(contact.id)} className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600" />
-                  </div>
-
-                  {/* Contact name (no email — visible on click) */}
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    {!isSpecialTab && (
-                      <Avatar className="h-8 w-8 flex-shrink-0 shadow-sm">
+              // PR1: cell renderers keyed by column id (for dynamic rendering below)
+              const renderCell = (colId: ColId) => {
+                switch (colId) {
+                  case 'contact': return (
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <Avatar className={`${density === 'condensed' ? 'h-6 w-6' : 'h-8 w-8'} flex-shrink-0 shadow-sm`}>
                         <AvatarFallback className={`bg-gradient-to-br ${getAvatarColor(contact.email)} text-white text-[11px] font-semibold`}>
                           {getInitials(contact.firstName, contact.lastName)}
                         </AvatarFallback>
                       </Avatar>
-                    )}
-                    <div className="min-w-0">
-                      {!isSpecialTab && (contact.firstName || contact.lastName) ? (
-                        <div className="text-sm font-semibold text-gray-900 truncate flex items-center gap-1.5">
-                          {contact.firstName} {contact.lastName}
-                          <Badge variant="outline" className={`text-[9px] font-semibold capitalize ${sc.bg} ${sc.text} border-0 shadow-none py-0 px-1.5`}>
-                            <div className={`w-1 h-1 rounded-full ${sc.dot} mr-1`} />{contact.status}
-                          </Badge>
-                          {contact.emailVerificationStatus && contact.emailVerificationStatus !== 'unverified' && (
-                            <span title={`Email: ${contact.emailVerificationStatus}`} className={`inline-block w-2 h-2 rounded-full shrink-0 ${
-                              contact.emailVerificationStatus === 'valid' ? 'bg-green-500' :
-                              contact.emailVerificationStatus === 'invalid' ? 'bg-red-500' :
-                              contact.emailVerificationStatus === 'risky' ? 'bg-amber-500' :
-                              contact.emailVerificationStatus === 'disposable' ? 'bg-orange-500' :
-                              contact.emailVerificationStatus === 'spamtrap' ? 'bg-red-700' : 'bg-gray-300'
-                            }`} />
-                          )}
-                          {contact.emailRatingUpdatedAt && (
-                            <span title={`Rating: ${contact.emailRating ?? 0}/100 (${contact.emailRatingGrade || 'F'})`} className={`text-[9px] font-bold px-1 py-0 rounded ${
-                              (contact.emailRating ?? 0) >= 75 ? 'bg-emerald-100 text-emerald-700' :
-                              (contact.emailRating ?? 0) >= 50 ? 'bg-yellow-100 text-yellow-700' :
-                              (contact.emailRating ?? 0) >= 25 ? 'bg-orange-100 text-orange-700' : 'bg-red-100 text-red-600'
-                            }`}>{contact.emailRatingGrade || 'F'}</span>
-                          )}
-                        </div>
-                      ) : (
-                        <div className="text-sm text-gray-900 truncate">{contact.email}</div>
-                      )}
-                      {/* AI Lead Intelligence badge */}
-                      {contact.leadBucket && contact.leadBucket !== 'unknown' && (() => {
-                        const cfg = LEAD_BUCKET_CONFIG[contact.leadBucket] || LEAD_BUCKET_CONFIG.unknown;
-                        return (
-                          <Tooltip>
-                            <TooltipTrigger>
-                              <span className={`inline-flex items-center gap-0.5 text-[9px] font-medium px-1.5 py-0 rounded-full ${cfg.bg} ${cfg.text}`}>
-                                <span className="text-[8px]">{cfg.icon}</span> {cfg.label}
-                              </span>
-                            </TooltipTrigger>
-                            <TooltipContent side="bottom" className="max-w-xs">
-                              <p className="text-xs font-semibold mb-1">{cfg.icon} {cfg.label} ({contact.leadConfidence}% confidence)</p>
-                              {contact.aiReasoning && <p className="text-xs text-gray-600 mb-1">{contact.aiReasoning}</p>}
-                              {contact.suggestedAction && <p className="text-xs text-blue-600">Suggested: {contact.suggestedAction}</p>}
-                            </TooltipContent>
-                          </Tooltip>
-                        );
-                      })()}
+                      <div className="min-w-0">
+                        {(contact.firstName || contact.lastName) ? (
+                          <div className="text-sm font-semibold text-gray-900 truncate flex items-center gap-1.5">
+                            {contact.firstName} {contact.lastName}
+                            <Badge variant="outline" className={`text-[9px] font-semibold capitalize ${sc.bg} ${sc.text} border-0 shadow-none py-0 px-1.5`}>
+                              <div className={`w-1 h-1 rounded-full ${sc.dot} mr-1`} />{contact.status}
+                            </Badge>
+                            {contact.emailVerificationStatus && contact.emailVerificationStatus !== 'unverified' && (
+                              <span title={`Email: ${contact.emailVerificationStatus}`} className={`inline-block w-2 h-2 rounded-full shrink-0 ${
+                                contact.emailVerificationStatus === 'valid' ? 'bg-green-500' :
+                                contact.emailVerificationStatus === 'invalid' ? 'bg-red-500' :
+                                contact.emailVerificationStatus === 'risky' ? 'bg-amber-500' :
+                                contact.emailVerificationStatus === 'disposable' ? 'bg-orange-500' :
+                                contact.emailVerificationStatus === 'spamtrap' ? 'bg-red-700' : 'bg-gray-300'
+                              }`} />
+                            )}
+                            {contact.emailRatingUpdatedAt && (
+                              <span title={`Rating: ${contact.emailRating ?? 0}/100 (${contact.emailRatingGrade || 'F'})`} className={`text-[9px] font-bold px-1 py-0 rounded ${
+                                (contact.emailRating ?? 0) >= 75 ? 'bg-emerald-100 text-emerald-700' :
+                                (contact.emailRating ?? 0) >= 50 ? 'bg-yellow-100 text-yellow-700' :
+                                (contact.emailRating ?? 0) >= 25 ? 'bg-orange-100 text-orange-700' : 'bg-red-100 text-red-600'
+                              }`}>{contact.emailRatingGrade || 'F'}</span>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="text-sm text-gray-900 truncate">{contact.email}</div>
+                        )}
+                        {contact.leadBucket && contact.leadBucket !== 'unknown' && (() => {
+                          const cfg = LEAD_BUCKET_CONFIG[contact.leadBucket] || LEAD_BUCKET_CONFIG.unknown;
+                          return (
+                            <Tooltip>
+                              <TooltipTrigger>
+                                <span className={`inline-flex items-center gap-0.5 text-[9px] font-medium px-1.5 py-0 rounded-full ${cfg.bg} ${cfg.text}`}>
+                                  <span className="text-[8px]">{cfg.icon}</span> {cfg.label}
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent side="bottom" className="max-w-xs">
+                                <p className="text-xs font-semibold mb-1">{cfg.icon} {cfg.label} ({contact.leadConfidence}% confidence)</p>
+                                {contact.aiReasoning && <p className="text-xs text-gray-600 mb-1">{contact.aiReasoning}</p>}
+                                {contact.suggestedAction && <p className="text-xs text-blue-600">Suggested: {contact.suggestedAction}</p>}
+                              </TooltipContent>
+                            </Tooltip>
+                          );
+                        })()}
+                      </div>
                     </div>
-                  </div>
-
-                  {/* Company */}
-                  {!isSpecialTab && (
-                    <div className="text-sm text-gray-700 truncate min-w-0">{contact.company || <span className="text-xs text-gray-300">--</span>}</div>
-                  )}
-
-                  {/* Designation */}
-                  {!isSpecialTab && (
-                    <div className="text-xs text-gray-500 truncate min-w-0">{contact.jobTitle || <span className="text-gray-300">--</span>}</div>
-                  )}
-
-                  {/* Pipeline Stage (inline clickable) + quick Won/Lost actions */}
-                  {!isSpecialTab && (
-                    <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+                  );
+                  case 'company': return <div className={`text-sm text-gray-700 truncate min-w-0`}>{contact.company || <span className="text-xs text-gray-300">--</span>}</div>;
+                  case 'designation': return <div className={`${rowTextSize} text-gray-500 truncate min-w-0`}>{contact.jobTitle || <span className="text-gray-300">--</span>}</div>;
+                  case 'pipeline': return (
+                    <div className="flex items-center gap-1 min-w-0" onClick={e => e.stopPropagation()}>
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
-                          <button className={`text-[10px] px-2 py-1 rounded-full font-medium ${stage?.color || 'bg-gray-100 text-gray-500'} hover:opacity-80 transition`}>
+                          <button className={`text-[10px] px-2 py-1 rounded-full font-medium ${stage?.color || 'bg-gray-100 text-gray-500'} hover:opacity-80 transition truncate`}>
                             {stage?.label || 'New'}
                           </button>
                         </DropdownMenuTrigger>
@@ -4028,57 +4227,29 @@ export default function ContactsManager() {
                         </DropdownMenuContent>
                       </DropdownMenu>
                       {contact.pipelineStage !== 'won' && (
-                        <button
-                          title="Mark as Won"
-                          onClick={() => updatePipeline(contact.id, 'won')}
-                          className="p-1 rounded hover:bg-emerald-50 text-emerald-600 transition"
-                        >
-                          <Trophy className="h-3.5 w-3.5" />
-                        </button>
+                        <button title="Mark as Won" onClick={() => updatePipeline(contact.id, 'won')} className="p-1 rounded hover:bg-emerald-50 text-emerald-600 transition"><Trophy className="h-3.5 w-3.5" /></button>
                       )}
                       {contact.pipelineStage !== 'lost' && (
-                        <button
-                          title="Mark as Lost"
-                          onClick={() => updatePipeline(contact.id, 'lost')}
-                          className="p-1 rounded hover:bg-red-50 text-red-500 transition"
-                        >
-                          <XOctagon className="h-3.5 w-3.5" />
-                        </button>
+                        <button title="Mark as Lost" onClick={() => updatePipeline(contact.id, 'lost')} className="p-1 rounded hover:bg-red-50 text-red-500 transition"><XOctagon className="h-3.5 w-3.5" /></button>
                       )}
                     </div>
-                  )}
-
-                  {/* Mobile */}
-                  {!isSpecialTab && (
-                    <div className="text-xs text-gray-600 truncate">{contact.mobilePhone || <span className="text-gray-300">--</span>}</div>
-                  )}
-
-                  {/* Phone */}
-                  {!isSpecialTab && (
-                    <div className="text-xs text-gray-600 truncate">{contact.phone || <span className="text-gray-300">--</span>}</div>
-                  )}
-
-                  {/* LinkedIn */}
-                  {!isSpecialTab && (
+                  );
+                  case 'mobile': return <div className={`${rowTextSize} text-gray-600 truncate`}>{contact.mobilePhone || <span className="text-gray-300">--</span>}</div>;
+                  case 'phone': return <div className={`${rowTextSize} text-gray-600 truncate`}>{contact.phone || <span className="text-gray-300">--</span>}</div>;
+                  case 'linkedin': return (
                     <div className="flex items-center justify-center">
                       {contact.linkedinUrl ? (
-                        <a href={contact.linkedinUrl} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="text-blue-600 hover:text-blue-800 transition" title={contact.linkedinUrl}>
-                          <Linkedin className="h-3.5 w-3.5" />
-                        </a>
+                        <a href={contact.linkedinUrl} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} className="text-blue-600 hover:text-blue-800 transition" title={contact.linkedinUrl}><Linkedin className="h-3.5 w-3.5" /></a>
                       ) : <span className="text-gray-300 text-xs">--</span>}
                     </div>
-                  )}
-
-                  {/* Location */}
-                  {!isSpecialTab && (
-                    <div className="text-xs text-gray-600 truncate">
+                  );
+                  case 'location': return (
+                    <div className={`${rowTextSize} text-gray-600 truncate`}>
                       {[contact.city, contact.country].filter(Boolean).join(', ') || <span className="text-gray-300">--</span>}
                     </div>
-                  )}
-
-                  {/* Next Action */}
-                  {!isSpecialTab && (
-                    <div className="text-xs truncate">
+                  );
+                  case 'nextAction': return (
+                    <div className={`${rowTextSize} truncate`}>
                       {contact.nextActionDate ? (
                         <span className={`font-medium ${isOverdue ? 'text-red-600' : 'text-gray-600'}`}>
                           {new Date(contact.nextActionDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
@@ -4086,17 +4257,13 @@ export default function ContactsManager() {
                         </span>
                       ) : <span className="text-gray-300">--</span>}
                     </div>
-                  )}
-
-                  {/* Last Remark */}
-                  {!isSpecialTab && (
-                    <div className="text-xs text-gray-500 truncate italic" title={(contact as any).lastRemark || ''}>
+                  );
+                  case 'lastRemark': return (
+                    <div className={`${rowTextSize} text-gray-500 truncate italic`} title={(contact as any).lastRemark || ''}>
                       {(contact as any).lastRemark || <span className="text-gray-300 not-italic">--</span>}
                     </div>
-                  )}
-
-                  {/* Assigned (admin only) */}
-                  {!isSpecialTab && isAdmin && (
+                  );
+                  case 'assigned': return (
                     <div className="flex items-center">
                       {assignedMember ? (
                         <Tooltip>
@@ -4111,9 +4278,51 @@ export default function ContactsManager() {
                         </Tooltip>
                       ) : <span className="text-[10px] text-gray-300">--</span>}
                     </div>
+                  );
+                  case 'quick': return (
+                    <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity" onClick={e => e.stopPropagation()}>
+                      {contact.mobilePhone && (
+                        <a href={`tel:${contact.mobilePhone}`} className="p-1 rounded hover:bg-green-50 text-green-600" title={`Call ${contact.mobilePhone}`}><PhoneCall className="h-3.5 w-3.5" /></a>
+                      )}
+                      {contact.mobilePhone && (
+                        <a href={`https://wa.me/${(contact.mobilePhone || '').replace(/[^\d]/g, '')}`} target="_blank" rel="noopener noreferrer" className="p-1 rounded hover:bg-emerald-50 text-emerald-600" title="WhatsApp"><MessageSquare className="h-3.5 w-3.5" /></a>
+                      )}
+                      {contact.email && (
+                        <a href={`mailto:${contact.email}`} className="p-1 rounded hover:bg-blue-50 text-blue-600" title={`Email ${contact.email}`}><Mail className="h-3.5 w-3.5" /></a>
+                      )}
+                    </div>
+                  );
+                }
+              };
+
+              return (
+                <div
+                  key={contact.id}
+                  onClick={() => openDetail(contact)}
+                  className={`grid gap-2 px-4 ${rowPadY} border-b border-gray-50 items-center transition-all group cursor-pointer ${
+                    isSelected ? 'bg-blue-50/50' : isFlagged ? 'bg-red-50/20' : 'hover:bg-gray-50/80'
+                  }`}
+                  style={{ gridTemplateColumns: gridTemplate, minWidth: `${totalTableWidth}px` }}
+                >
+                  <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
+                    <input type="checkbox" checked={isSelected} onChange={() => toggleSelect(contact.id)} className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600" />
+                  </div>
+
+                  {isSpecialTab ? (
+                    <>
+                      <div className="text-sm text-gray-900 truncate">{contact.email}</div>
+                      <div />
+                      <div />
+                    </>
+                  ) : (
+                    <>
+                      {visibleCols.map(col => (
+                        <React.Fragment key={col.id}>{renderCell(col.id)}</React.Fragment>
+                      ))}
+                    </>
                   )}
 
-                  {/* Actions */}
+                  {/* Row-actions cell (always last) */}
                   <div className="flex justify-center" onClick={e => e.stopPropagation()}>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
