@@ -538,18 +538,18 @@ async function buildContactSummaries(orgId: string, emailAccountIds?: string[]):
       // Sent-only contacts are just outreach recipients — not leads
       const contactRows = await storage.rawAll(`
         SELECT
-          LOWER("fromEmail") as contactEmail,
-          MAX("fromName") as contactName,
-          MAX("accountEmail") as accountEmail,
-          MAX("emailAccountId") as emailAccountId,
-          COUNT(*) as totalReceived,
-          MAX("receivedAt") as lastEmailDate
+          LOWER("fromEmail") as "contactEmail",
+          MAX("fromName") as "contactName",
+          MAX("accountEmail") as "accountEmail",
+          MAX("emailAccountId") as "emailAccountId",
+          COUNT(*) as "totalReceived",
+          MAX("receivedAt") as "lastEmailDate"
         FROM email_history
         WHERE "organizationId" = ? AND direction = 'received'
           AND "fromEmail" IS NOT NULL AND "fromEmail" != ''
           ${accountFilterSQL}
-        GROUP BY contactEmail
-        ORDER BY lastEmailDate DESC
+        GROUP BY "contactEmail"
+        ORDER BY "lastEmailDate" DESC
         LIMIT 1000
       `, orgId, ...accountFilterParams) as any[];
 
@@ -559,12 +559,12 @@ async function buildContactSummaries(orgId: string, emailAccountIds?: string[]):
       const sentCounts: Record<string, number> = {};
       try {
         const sentRows = await storage.rawAll(`
-          SELECT LOWER("toEmail") as contactEmail, COUNT(*) as cnt
+          SELECT LOWER("toEmail") as "contactEmail", COUNT(*) as cnt
           FROM email_history
           WHERE "organizationId" = ? AND direction = 'sent'
             AND "toEmail" IS NOT NULL AND "toEmail" != ''
             ${accountFilterSQL}
-          GROUP BY contactEmail
+          GROUP BY "contactEmail"
         `, orgId, ...accountFilterParams) as any[];
         for (const r of sentRows) {
           sentCounts[(r.contactEmail || '').toLowerCase()] = r.cnt;
@@ -616,7 +616,7 @@ async function buildContactSummaries(orgId: string, emailAccountIds?: string[]):
   // Uses JS-side aggregation instead of GROUP_CONCAT for cross-DB compatibility
   try {
     const inboxRows = await storage.rawAll(`
-      SELECT "fromEmail" as contactEmail, "fromName" as contactName,
+      SELECT "fromEmail" as "contactEmail", "fromName" as "contactName",
         subject, snippet, "receivedAt"
       FROM unified_inbox
       WHERE "organizationId" = ? AND status != 'sent'
