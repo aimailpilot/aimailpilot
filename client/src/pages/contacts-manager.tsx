@@ -243,6 +243,27 @@ export default function ContactsManager() {
   const [selectAllMatching, setSelectAllMatching] = useState(false); // true = all `total` contacts selected across pages
   const resizingColRef = useRef<{ id: ColId; startX: number; startW: number } | null>(null);
 
+  // PR2: Add-to-List dialog state
+  const [showAddToListDialog, setShowAddToListDialog] = useState(false);
+  const [addToListMode, setAddToListMode] = useState<'new' | 'existing'>('new');
+  const [addToListExistingId, setAddToListExistingId] = useState('');
+  const [addToListNewName, setAddToListNewName] = useState('');
+  const [addToListNewDesc, setAddToListNewDesc] = useState('');
+  const [addToListSearch, setAddToListSearch] = useState('');
+  const [addToListSaving, setAddToListSaving] = useState(false);
+
+  // PR2: Saved views state
+  interface SavedView { id: string; name: string; createdAt: string; data: any; }
+  const [savedViews, setSavedViews] = useState<SavedView[]>([]);
+  const [showSaveViewDialog, setShowSaveViewDialog] = useState(false);
+  const [saveViewName, setSaveViewName] = useState('');
+
+  // PR2: Inline-edit state (one cell at a time)
+  const [inlineEdit, setInlineEdit] = useState<{ contactId: string; field: 'nextAction' } | null>(null);
+
+  // PR2: Keyboard nav — active row index (within current page)
+  const [activeRowIdx, setActiveRowIdx] = useState<number>(-1);
+
   const setColWidth = (id: ColId, width: number) => {
     setColumns(prev => prev.map(c => c.id === id ? { ...c, width: Math.max(40, Math.min(600, width)) } : c));
   };
@@ -361,6 +382,62 @@ export default function ContactsManager() {
 
   useEffect(() => { fetchContacts(); }, [debouncedSearch, statusFilter, activeListId, activeTab, assignFilterUserId, currentPage, sortBy, sortOrder, pipelineFilter, companyFilter, locationFilter, designationFilter, leadFilterValue]);
   useEffect(() => { fetchContactLists(); fetchTeamMembers(); fetchFollowUps(); fetchFilterOptions(); fetchHotLeadsCounts(); }, []);
+
+  // PR2: Keyboard navigation (j/k/arrows/Enter/e/c)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t) {
+        const tag = t.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable) return;
+      }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (!contacts || contacts.length === 0) return;
+      const key = e.key;
+      if (key === 'j' || key === 'ArrowDown') {
+        e.preventDefault();
+        setActiveRowIdx(i => {
+          const next = Math.min(contacts.length - 1, (i < 0 ? 0 : i + 1));
+          requestAnimationFrame(() => {
+            const el = document.querySelector(`[data-row-idx="${next}"]`) as HTMLElement | null;
+            el?.scrollIntoView({ block: 'nearest' });
+          });
+          return next;
+        });
+      } else if (key === 'k' || key === 'ArrowUp') {
+        e.preventDefault();
+        setActiveRowIdx(i => {
+          const next = Math.max(0, (i < 0 ? 0 : i - 1));
+          requestAnimationFrame(() => {
+            const el = document.querySelector(`[data-row-idx="${next}"]`) as HTMLElement | null;
+            el?.scrollIntoView({ block: 'nearest' });
+          });
+          return next;
+        });
+      } else if (key === 'Enter') {
+        if (activeRowIdx >= 0 && activeRowIdx < contacts.length) {
+          e.preventDefault();
+          openDetail(contacts[activeRowIdx]);
+        }
+      } else if (key === 'x' || key === ' ') {
+        if (activeRowIdx >= 0 && activeRowIdx < contacts.length) {
+          e.preventDefault();
+          toggleSelect(contacts[activeRowIdx].id);
+        }
+      } else if (key === 'e') {
+        const c = contacts[activeRowIdx];
+        if (c?.email) { e.preventDefault(); window.location.href = `mailto:${c.email}`; }
+      } else if (key === 'c') {
+        const c = contacts[activeRowIdx] as any;
+        const phone = c?.mobilePhone || c?.phone;
+        if (phone) { e.preventDefault(); window.location.href = `tel:${phone}`; }
+      } else if (key === 'Escape') {
+        setActiveRowIdx(-1);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [contacts, activeRowIdx]);
   useEffect(() => {
     if (activeListId) {
       setListCampaigns([]);
@@ -1347,6 +1424,131 @@ export default function ContactsManager() {
 
   const toggleSelect = (id: string) => { setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]); setSelectAllMatching(false); };
   const toggleSelectAll = () => { setSelectedIds(selectedIds.length === contacts.length ? [] : contacts.map(c => c.id)); setSelectAllMatching(false); };
+
+  // PR2: build current filter payload (used by add-to-list select-all-matching path)
+  const buildFilterPayload = () => ({
+    search: debouncedSearch || undefined,
+    status: statusFilter !== 'all' ? statusFilter : undefined,
+    listId: activeListId || undefined,
+    assignedTo: assignFilterUserId || undefined,
+    pipelineStage: pipelineFilter !== 'all' ? pipelineFilter : undefined,
+    company: companyFilter || undefined,
+    location: locationFilter || undefined,
+    designation: designationFilter || undefined,
+    leadFilter: leadFilterValue || undefined,
+  });
+
+  // PR2: Add selected contacts to a new or existing list
+  const submitAddToList = async () => {
+    if (addToListMode === 'new' && !addToListNewName.trim()) { toast({ title: 'List name required', variant: 'destructive' }); return; }
+    if (addToListMode === 'existing' && !addToListExistingId) { toast({ title: 'Pick a list', variant: 'destructive' }); return; }
+    setAddToListSaving(true);
+    try {
+      const body: any = {};
+      if (addToListMode === 'new') body.newList = { name: addToListNewName.trim(), description: addToListNewDesc.trim() || undefined };
+      else body.listId = addToListExistingId;
+      if (selectAllMatching) body.filter = buildFilterPayload();
+      else body.contactIds = selectedIds;
+
+      const res = await fetch('/api/contact-lists/add-contacts', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.message || 'Failed to add');
+      toast({
+        title: `Added ${data.added} contact${data.added === 1 ? '' : 's'} to "${data.listName}"`,
+        description: data.moved > 0 ? `${data.moved} were moved from another list.` : undefined,
+      });
+      setShowAddToListDialog(false);
+      setAddToListNewName(''); setAddToListNewDesc(''); setAddToListExistingId(''); setAddToListSearch('');
+      setSelectedIds([]); setSelectAllMatching(false);
+      await fetchContacts();
+      await fetchContactLists();
+    } catch (e: any) {
+      toast({ title: 'Failed', description: e.message, variant: 'destructive' });
+    } finally {
+      setAddToListSaving(false);
+    }
+  };
+
+  // PR2: Saved views — load/save/delete
+  const fetchSavedViews = async () => {
+    try {
+      const res = await fetch('/api/my/contact-views', { credentials: 'include' });
+      if (res.ok) setSavedViews(await res.json());
+    } catch {}
+  };
+  useEffect(() => { fetchSavedViews(); }, []);
+
+  const saveCurrentView = async () => {
+    if (!saveViewName.trim()) { toast({ title: 'Name required', variant: 'destructive' }); return; }
+    const data = {
+      filters: {
+        search, statusFilter, pipelineFilter, companyFilter, locationFilter,
+        designationFilter, leadFilterValue, assignFilterUserId, activeListId, activeTab,
+      },
+      sort: { sortBy, sortOrder },
+      columns, density,
+    };
+    try {
+      const res = await fetch('/api/my/contact-views', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: saveViewName.trim(), data }),
+      });
+      if (!res.ok) throw new Error('Save failed');
+      await fetchSavedViews();
+      setShowSaveViewDialog(false);
+      setSaveViewName('');
+      toast({ title: `View "${saveViewName.trim()}" saved` });
+    } catch (e: any) { toast({ title: e.message, variant: 'destructive' }); }
+  };
+
+  const applyView = (v: SavedView) => {
+    const d = v.data || {};
+    if (d.filters) {
+      setSearch(d.filters.search || '');
+      setStatusFilter(d.filters.statusFilter || 'all');
+      setPipelineFilter(d.filters.pipelineFilter || 'all');
+      setCompanyFilter(d.filters.companyFilter || '');
+      setLocationFilter(d.filters.locationFilter || '');
+      setDesignationFilter(d.filters.designationFilter || '');
+      setLeadFilterValue(d.filters.leadFilterValue || '');
+      setAssignFilterUserId(d.filters.assignFilterUserId || '');
+      setActiveListId(d.filters.activeListId || '');
+      if (d.filters.activeTab) setActiveTab(d.filters.activeTab);
+    }
+    if (d.sort) { setSortBy(d.sort.sortBy || 'createdAt'); setSortOrder(d.sort.sortOrder || 'desc'); }
+    if (Array.isArray(d.columns)) setColumns(d.columns);
+    if (d.density) setDensity(d.density);
+    setCurrentPage(1);
+    toast({ title: `Applied view "${v.name}"` });
+  };
+
+  const deleteView = async (id: string, name: string) => {
+    if (!confirm(`Delete view "${name}"?`)) return;
+    try {
+      const res = await fetch(`/api/my/contact-views/${id}`, { method: 'DELETE', credentials: 'include' });
+      if (!res.ok) throw new Error('Delete failed');
+      await fetchSavedViews();
+    } catch (e: any) { toast({ title: e.message, variant: 'destructive' }); }
+  };
+
+  // PR2: Inline update for nextAction date
+  const updateNextAction = async (contactId: string, date: string) => {
+    try {
+      const res = await fetch(`/api/contacts/${contactId}`, {
+        method: 'PUT', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nextActionDate: date || null }),
+      });
+      if (!res.ok) throw new Error('Update failed');
+      setContacts(prev => prev.map(c => c.id === contactId ? { ...c, nextActionDate: date || null } as any : c));
+      setInlineEdit(null);
+    } catch (e: any) { toast({ title: e.message, variant: 'destructive' }); }
+  };
 
   // PR1: CSV export of current filtered view (respects visible columns)
   const exportVisibleCsv = () => {
@@ -3088,6 +3290,96 @@ export default function ContactsManager() {
         </DialogContent>
       </Dialog>
 
+      {/* ====== PR2: ADD-TO-LIST DIALOG ====== */}
+      <Dialog open={showAddToListDialog} onOpenChange={setShowAddToListDialog}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Add {selectAllMatching ? total : selectedIds.length} contact{(selectAllMatching ? total : selectedIds.length) === 1 ? '' : 's'} to a list</DialogTitle>
+            <DialogDescription>
+              {selectAllMatching
+                ? `All ${total} contacts matching your current filters will be added.`
+                : `${selectedIds.length} selected contact${selectedIds.length === 1 ? '' : 's'} will be added.`}
+              {' '}Note: contacts can only belong to one list, so they'll be moved if already in another list.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            {/* Tab toggle */}
+            <div className="flex items-center gap-1 p-0.5 bg-gray-100 rounded-lg">
+              <button onClick={() => setAddToListMode('new')}
+                className={`flex-1 py-1.5 text-xs font-medium rounded-md transition ${addToListMode === 'new' ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>
+                New List
+              </button>
+              <button onClick={() => setAddToListMode('existing')}
+                className={`flex-1 py-1.5 text-xs font-medium rounded-md transition ${addToListMode === 'existing' ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'}`}>
+                Existing List
+              </button>
+            </div>
+
+            {addToListMode === 'new' ? (
+              <div className="space-y-3">
+                <div>
+                  <Label className="text-xs">List name <span className="text-red-500">*</span></Label>
+                  <Input value={addToListNewName} onChange={e => setAddToListNewName(e.target.value)} placeholder="e.g. Hot AI Leads - March" autoFocus />
+                </div>
+                <div>
+                  <Label className="text-xs">Description (optional)</Label>
+                  <Textarea value={addToListNewDesc} onChange={e => setAddToListNewDesc(e.target.value)} placeholder="What's this list for?" rows={2} />
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <Label className="text-xs">Pick a list</Label>
+                <Input placeholder="Search your lists..." value={addToListSearch} onChange={e => setAddToListSearch(e.target.value)} className="h-8 text-xs" />
+                <div className="max-h-60 overflow-y-auto border rounded-lg divide-y">
+                  {contactLists
+                    .filter(l => !addToListSearch || l.name.toLowerCase().includes(addToListSearch.toLowerCase()))
+                    .map(l => (
+                      <button key={l.id} onClick={() => setAddToListExistingId(l.id)}
+                        className={`w-full flex items-center justify-between px-3 py-2 text-left text-xs hover:bg-gray-50 ${addToListExistingId === l.id ? 'bg-purple-50' : ''}`}>
+                        <div className="truncate">
+                          <div className="font-medium text-gray-900 truncate">{l.name}</div>
+                          <div className="text-[10px] text-gray-400">{l.contactCount || 0} contacts</div>
+                        </div>
+                        {addToListExistingId === l.id && <CheckCircle className="h-4 w-4 text-purple-600 shrink-0" />}
+                      </button>
+                    ))}
+                  {contactLists.filter(l => !addToListSearch || l.name.toLowerCase().includes(addToListSearch.toLowerCase())).length === 0 && (
+                    <div className="px-3 py-6 text-center text-xs text-gray-400">No lists found</div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowAddToListDialog(false)} disabled={addToListSaving}>Cancel</Button>
+            <Button onClick={submitAddToList} disabled={addToListSaving} className="bg-purple-600 hover:bg-purple-700">
+              {addToListSaving ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Adding...</> : <>Add to List</>}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ====== PR2: SAVE VIEW DIALOG ====== */}
+      <Dialog open={showSaveViewDialog} onOpenChange={setShowSaveViewDialog}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Save current view</DialogTitle>
+            <DialogDescription>Saves your current filters, sort, columns, and density so you can quickly switch back.</DialogDescription>
+          </DialogHeader>
+          <div>
+            <Label className="text-xs">View name</Label>
+            <Input value={saveViewName} onChange={e => setSaveViewName(e.target.value)} placeholder="e.g. Hot Leads Pune" autoFocus
+              onKeyDown={e => { if (e.key === 'Enter') saveCurrentView(); }} />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowSaveViewDialog(false)}>Cancel</Button>
+            <Button onClick={saveCurrentView}>Save View</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* ====== ASSIGN LEADS DIALOG ====== */}
       <Dialog open={showAssignDialog} onOpenChange={setShowAssignDialog}>
         <DialogContent className="max-w-md">
@@ -3887,6 +4179,35 @@ export default function ContactsManager() {
                 {hasActiveFilters && <span className="ml-1 bg-white/20 px-1.5 rounded-full text-[10px]">ON</span>}
               </Button>
             )}
+
+            {/* PR2: Saved views dropdown */}
+            {!isSpecialTab && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="sm" className="h-9 text-xs">
+                    <Star className="h-3.5 w-3.5 mr-1" /> Views
+                    {savedViews.length > 0 && <span className="ml-1 text-gray-400">({savedViews.length})</span>}
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-64">
+                  <DropdownMenuItem onSelect={(e) => { e.preventDefault(); setShowSaveViewDialog(true); }} className="text-xs">
+                    <Plus className="h-3 w-3 mr-2" /> Save current view
+                  </DropdownMenuItem>
+                  {savedViews.length > 0 && <DropdownMenuSeparator />}
+                  {savedViews.map(v => (
+                    <div key={v.id} className="flex items-center px-2 py-1 hover:bg-gray-50 group">
+                      <button onClick={() => applyView(v)} className="flex-1 text-left text-xs truncate">{v.name}</button>
+                      <button onClick={() => deleteView(v.id, v.name)} className="opacity-0 group-hover:opacity-100 text-red-500 hover:text-red-700 ml-2" title="Delete view">
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ))}
+                  {savedViews.length === 0 && (
+                    <div className="px-2 py-1.5 text-[11px] text-gray-400 italic">No saved views yet</div>
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
           </div>
 
           {/* Batch actions */}
@@ -3907,6 +4228,9 @@ export default function ContactsManager() {
               </Button>
               <Button variant="outline" size="sm" onClick={openSendEmailDialog} className="text-blue-600 border-blue-200 hover:bg-blue-50">
                 <Mail className="h-3.5 w-3.5 mr-1.5" /> Email ({selectedIds.length})
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => { setShowAddToListDialog(true); setAddToListMode('new'); }} className="text-purple-600 border-purple-200 hover:bg-purple-50">
+                <FolderOpen className="h-3.5 w-3.5 mr-1.5" /> Add to List ({selectAllMatching ? total : selectedIds.length})
               </Button>
             </div>
           )}
@@ -4054,7 +4378,7 @@ export default function ContactsManager() {
               className="grid gap-2 px-4 py-2.5 border-b border-gray-100 bg-gray-50/60 sticky top-0 z-10"
               style={{ gridTemplateColumns: gridTemplate, minWidth: `${totalTableWidth}px` }}
             >
-              <div className="flex items-center">
+              <div className="flex items-center sticky left-4 z-20 bg-gray-50">
                 <input type="checkbox"
                   checked={selectedIds.length === contacts.length && contacts.length > 0}
                   onChange={toggleSelectAll}
@@ -4071,8 +4395,10 @@ export default function ContactsManager() {
                   {visibleCols.map((col, idx) => {
                     const iconMap: Record<string, any> = { company: Building, designation: Briefcase, pipeline: Target, mobile: Smartphone, phone: Phone, location: MapPin, nextAction: Clock };
                     const Icon = iconMap[col.id];
+                    const stickyCls = idx === 0 ? 'sticky z-10 bg-gray-50 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.08)]' : '';
+                    const stickyStyle = idx === 0 ? { left: '56px' } : undefined;
                     return (
-                      <div key={col.id} className="relative flex items-center gap-1 group/col min-w-0">
+                      <div key={col.id} style={stickyStyle} className={`relative flex items-center gap-1 group/col min-w-0 ${stickyCls}`}>
                         {col.sortKey ? (
                           <SortHeader col={col.sortKey} label={col.label} icon={Icon} />
                         ) : (
@@ -4143,10 +4469,11 @@ export default function ContactsManager() {
             </div>
 
             {/* Rows */}
-            {contacts.map((contact) => {
+            {contacts.map((contact, rowIdx) => {
               const sc = getStatusConfig(contact.status);
               const isSelected = selectedIds.includes(contact.id);
               const isFlagged = contact.status === 'bounced' || contact.status === 'unsubscribed';
+              const isActiveRow = rowIdx === activeRowIdx;
               const assignedMember = contact.assignedTo ? teamMembers.find((m: any) => m.userId === contact.assignedTo) : null;
               const stage = PIPELINE_STAGES.find(s => s.value === (contact.pipelineStage || 'new'));
               const isOverdue = contact.nextActionDate && new Date(contact.nextActionDate) < new Date(new Date().toISOString().split('T')[0]);
@@ -4248,16 +4575,38 @@ export default function ContactsManager() {
                       {[contact.city, contact.country].filter(Boolean).join(', ') || <span className="text-gray-300">--</span>}
                     </div>
                   );
-                  case 'nextAction': return (
-                    <div className={`${rowTextSize} truncate`}>
-                      {contact.nextActionDate ? (
-                        <span className={`font-medium ${isOverdue ? 'text-red-600' : 'text-gray-600'}`}>
-                          {new Date(contact.nextActionDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
-                          <span className="text-gray-400 capitalize ml-1">{contact.nextActionType || ''}</span>
-                        </span>
-                      ) : <span className="text-gray-300">--</span>}
-                    </div>
-                  );
+                  case 'nextAction': {
+                    const isEditing = inlineEdit?.contactId === contact.id && inlineEdit.field === 'nextAction';
+                    if (isEditing) {
+                      return (
+                        <div className={`${rowTextSize}`} onClick={e => e.stopPropagation()}>
+                          <Input
+                            type="date"
+                            defaultValue={contact.nextActionDate ? String(contact.nextActionDate).slice(0, 10) : ''}
+                            autoFocus
+                            onBlur={(e) => updateNextAction(contact.id, e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur();
+                              if (e.key === 'Escape') setInlineEdit(null);
+                            }}
+                            className="h-6 text-xs px-1"
+                          />
+                        </div>
+                      );
+                    }
+                    return (
+                      <div className={`${rowTextSize} truncate cursor-pointer hover:bg-yellow-50/50 rounded px-1 -mx-1`}
+                        onClick={e => { e.stopPropagation(); setInlineEdit({ contactId: contact.id, field: 'nextAction' }); }}
+                        title="Click to set Next Action date">
+                        {contact.nextActionDate ? (
+                          <span className={`font-medium ${isOverdue ? 'text-red-600' : 'text-gray-600'}`}>
+                            {new Date(contact.nextActionDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
+                            <span className="text-gray-400 capitalize ml-1">{contact.nextActionType || ''}</span>
+                          </span>
+                        ) : <span className="text-gray-300 hover:text-gray-500">+ set</span>}
+                      </div>
+                    );
+                  }
                   case 'lastRemark': return (
                     <div className={`${rowTextSize} text-gray-500 truncate italic`} title={(contact as any).lastRemark || ''}>
                       {(contact as any).lastRemark || <span className="text-gray-300 not-italic">--</span>}
@@ -4298,13 +4647,14 @@ export default function ContactsManager() {
               return (
                 <div
                   key={contact.id}
-                  onClick={() => openDetail(contact)}
+                  data-row-idx={rowIdx}
+                  onClick={() => { setActiveRowIdx(rowIdx); openDetail(contact); }}
                   className={`grid gap-2 px-4 ${rowPadY} border-b border-gray-50 items-center transition-all group cursor-pointer ${
                     isSelected ? 'bg-blue-50/50' : isFlagged ? 'bg-red-50/20' : 'hover:bg-gray-50/80'
-                  }`}
+                  } ${isActiveRow ? 'ring-2 ring-inset ring-blue-400 bg-blue-50/40' : ''}`}
                   style={{ gridTemplateColumns: gridTemplate, minWidth: `${totalTableWidth}px` }}
                 >
-                  <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
+                  <div className={`flex items-center sticky left-4 z-[5] ${isSelected ? 'bg-blue-50' : isFlagged ? 'bg-red-50/40' : isActiveRow ? 'bg-blue-50/80' : 'bg-white group-hover:bg-gray-50'}`} onClick={(e) => e.stopPropagation()}>
                     <input type="checkbox" checked={isSelected} onChange={() => toggleSelect(contact.id)} className="h-3.5 w-3.5 rounded border-gray-300 text-blue-600" />
                   </div>
 
@@ -4316,8 +4666,14 @@ export default function ContactsManager() {
                     </>
                   ) : (
                     <>
-                      {visibleCols.map(col => (
-                        <React.Fragment key={col.id}>{renderCell(col.id)}</React.Fragment>
+                      {visibleCols.map((col, cIdx) => (
+                        <div
+                          key={col.id}
+                          style={cIdx === 0 ? { left: '56px' } : undefined}
+                          className={cIdx === 0 ? `sticky z-[4] shadow-[2px_0_4px_-2px_rgba(0,0,0,0.08)] ${isSelected ? 'bg-blue-50' : isFlagged ? 'bg-red-50/40' : isActiveRow ? 'bg-blue-50/80' : 'bg-white group-hover:bg-gray-50'}` : ''}
+                        >
+                          {renderCell(col.id)}
+                        </div>
                       ))}
                     </>
                   )}

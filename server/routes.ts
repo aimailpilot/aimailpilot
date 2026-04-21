@@ -4748,6 +4748,178 @@ Which account should I use and why? If I need to split across accounts, provide 
     }
   });
 
+  // PR2: Add selected contacts to a NEW or EXISTING list.
+  // Accepts either explicit `contactIds` OR a `filter` object that mirrors
+  // GET /api/contacts query params (for select-all-matching across pages).
+  // NOTE: contacts.listId is single-valued — adding moves contacts from their
+  // previous list; the response includes `moved` count to surface this in UI.
+  app.post('/api/contact-lists/add-contacts', async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      const { listId: targetListId, newList, contactIds, filter } = req.body || {};
+
+      if (!targetListId && (!newList || !newList.name || !String(newList.name).trim())) {
+        return res.status(400).json({ message: 'Provide listId or newList.name' });
+      }
+      if (!Array.isArray(contactIds) && !filter) {
+        return res.status(400).json({ message: 'Provide contactIds or filter' });
+      }
+
+      // Resolve target list (create if requested)
+      let listRow: any;
+      if (targetListId) {
+        listRow = await storage.rawGet(`SELECT * FROM contact_lists WHERE id = ? AND "organizationId" = ?`, targetListId, orgId);
+        if (!listRow) return res.status(404).json({ message: 'List not found' });
+      } else {
+        const uploaderName = [req.user.firstName, req.user.lastName].filter(Boolean).join(' ') || req.user.email?.split('@')[0] || 'Unknown';
+        listRow = await storage.createContactList({
+          organizationId: orgId,
+          name: String(newList.name).trim(),
+          description: newList.description ? String(newList.description).trim() : undefined,
+          source: 'manual',
+          headers: [],
+          contactCount: 0,
+          uploadedBy: req.user.id,
+          uploadedByName: uploaderName,
+        });
+      }
+
+      // Resolve the set of contact ids to update
+      let idsToUpdate: string[] = [];
+      if (Array.isArray(contactIds) && contactIds.length > 0) {
+        // Validate ownership — only touch contacts in this org the user can see
+        const ph = contactIds.map(() => '?').join(',');
+        const conds: string[] = [`c."organizationId" = ?`, `c.id IN (${ph})`];
+        const params: any[] = [orgId, ...contactIds];
+        if (!isAdmin) { conds.push(`c."assignedTo" = ?`); params.push(req.user.id); }
+        const rows = await storage.rawAll(`SELECT c.id FROM contacts c WHERE ${conds.join(' AND ')}`, ...params);
+        idsToUpdate = rows.map((r: any) => r.id);
+      } else if (filter) {
+        // Build WHERE from filter (mirrors /api/contacts advanced path)
+        const conds: string[] = [`c."organizationId" = ?`];
+        const params: any[] = [orgId];
+        if (!isAdmin) { conds.push(`c."assignedTo" = ?`); params.push(req.user.id); }
+        else if (filter.assignedTo) {
+          if (filter.assignedTo === 'unassigned') conds.push(`(c."assignedTo" IS NULL OR c."assignedTo" = '')`);
+          else { conds.push(`c."assignedTo" = ?`); params.push(filter.assignedTo); }
+        }
+        if (filter.listId) { conds.push(`c."listId" = ?`); params.push(filter.listId); }
+        if (filter.status && filter.status !== 'all') { conds.push(`c.status = ?`); params.push(filter.status); }
+        if (filter.pipelineStage && filter.pipelineStage !== 'all') { conds.push(`c."pipelineStage" = ?`); params.push(filter.pipelineStage); }
+        if (filter.company) { conds.push(`LOWER(c.company) LIKE ?`); params.push(`%${String(filter.company).toLowerCase()}%`); }
+        if (filter.location) {
+          const loc = `%${String(filter.location).toLowerCase()}%`;
+          conds.push(`(LOWER(c.city) LIKE ? OR LOWER(c.state) LIKE ? OR LOWER(c.country) LIKE ?)`);
+          params.push(loc, loc, loc);
+        }
+        if (filter.designation) { conds.push(`LOWER(c."jobTitle") LIKE ?`); params.push(`%${String(filter.designation).toLowerCase()}%`); }
+        if (filter.leadFilter && filter.leadFilter !== 'all') {
+          const lf = String(filter.leadFilter);
+          const bucket = lf === 'hot_leads' ? 'hot_lead' : lf === 'warm_leads' ? 'warm_lead' : lf === 'past_customer' ? 'past_customer' : null;
+          if (bucket) {
+            conds.push(`LOWER(c.email) IN (SELECT LOWER("contactEmail") FROM lead_opportunities WHERE "organizationId" = ? AND bucket = ?)`);
+            params.push(orgId, bucket);
+          } else if (lf === 'engaged') {
+            conds.push(`(c."totalOpened" > 0 OR c."totalClicked" > 0 OR c."totalReplied" > 0)`);
+          } else if (lf === 'never_contacted') {
+            conds.push(`(c."totalSent" = 0 OR c."totalSent" IS NULL)`);
+          }
+        }
+        if (filter.search) {
+          const q = `%${String(filter.search).toLowerCase()}%`;
+          conds.push(`(LOWER(c."firstName") LIKE ? OR LOWER(c."lastName") LIKE ? OR LOWER(c.email) LIKE ? OR LOWER(c.company) LIKE ? OR LOWER(c."jobTitle") LIKE ? OR LOWER(c.city) LIKE ?)`);
+          params.push(q, q, q, q, q, q);
+        }
+        const rows = await storage.rawAll(`SELECT c.id FROM contacts c WHERE ${conds.join(' AND ')}`, ...params);
+        idsToUpdate = rows.map((r: any) => r.id);
+      }
+
+      if (idsToUpdate.length === 0) {
+        return res.json({ success: true, listId: listRow.id, listName: listRow.name, added: 0, moved: 0 });
+      }
+
+      // Count how many are moving from a different list (for UI messaging)
+      const mph = idsToUpdate.map(() => '?').join(',');
+      const movedRow = await storage.rawGet(
+        `SELECT COUNT(*) as cnt FROM contacts WHERE id IN (${mph}) AND "listId" IS NOT NULL AND "listId" != ?`,
+        ...idsToUpdate, listRow.id
+      ) as any;
+      const moved = movedRow?.cnt || 0;
+
+      // Perform the assignment
+      const ts = new Date().toISOString();
+      await storage.rawRun(
+        `UPDATE contacts SET "listId" = ?, "updatedAt" = ? WHERE id IN (${mph}) AND "organizationId" = ?`,
+        listRow.id, ts, ...idsToUpdate, orgId
+      );
+
+      // Refresh contactCount on affected lists (target + sources)
+      try {
+        await storage.rawRun(
+          `UPDATE contact_lists SET "contactCount" = (SELECT COUNT(*) FROM contacts WHERE "listId" = contact_lists.id) WHERE "organizationId" = ?`,
+          orgId
+        );
+      } catch { /* non-fatal */ }
+
+      res.json({ success: true, listId: listRow.id, listName: listRow.name, added: idsToUpdate.length, moved });
+    } catch (error: any) {
+      console.error('[add-contacts] error:', error?.message, error?.stack?.slice(0, 300));
+      res.status(500).json({ message: 'Failed to add contacts to list' });
+    }
+  });
+
+  // PR2: Per-user saved views (filters + columns + sort) stored in api_settings.
+  // Key format: `contact_views:<userId>` → JSON array of { id, name, createdAt, data }.
+  app.get('/api/my/contact-views', async (req: any, res) => {
+    try {
+      const key = `contact_views:${req.user.id}`;
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      const raw = settings?.[key] || '[]';
+      let views: any[] = [];
+      try { views = JSON.parse(raw); if (!Array.isArray(views)) views = []; } catch { views = []; }
+      res.json(views);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to load views' });
+    }
+  });
+
+  app.post('/api/my/contact-views', async (req: any, res) => {
+    try {
+      const { name, data } = req.body || {};
+      if (!name || !String(name).trim()) return res.status(400).json({ message: 'Name required' });
+      if (!data || typeof data !== 'object') return res.status(400).json({ message: 'data object required' });
+      const key = `contact_views:${req.user.id}`;
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      let views: any[] = [];
+      try { views = JSON.parse(settings?.[key] || '[]'); if (!Array.isArray(views)) views = []; } catch { views = []; }
+      const id = `v_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const view = { id, name: String(name).trim(), createdAt: new Date().toISOString(), data };
+      views.push(view);
+      if (views.length > 50) views = views.slice(-50); // cap per-user
+      await storage.setApiSetting(req.user.organizationId, key, JSON.stringify(views));
+      res.status(201).json(view);
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to save view' });
+    }
+  });
+
+  app.delete('/api/my/contact-views/:id', async (req: any, res) => {
+    try {
+      const key = `contact_views:${req.user.id}`;
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      let views: any[] = [];
+      try { views = JSON.parse(settings?.[key] || '[]'); if (!Array.isArray(views)) views = []; } catch { views = []; }
+      const before = views.length;
+      views = views.filter(v => v.id !== req.params.id);
+      if (views.length === before) return res.status(404).json({ message: 'View not found' });
+      await storage.setApiSetting(req.user.organizationId, key, JSON.stringify(views));
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: 'Failed to delete view' });
+    }
+  });
+
   // ========== CONTACTS ==========
 
   app.get('/api/contacts', async (req: any, res) => {
