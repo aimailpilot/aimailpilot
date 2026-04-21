@@ -385,19 +385,36 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
 
   const handleResetBounces = async () => {
     setShowActions(false);
+    let force = false;
     try {
       const previewRes = await fetch(`/api/campaigns/${campaignId}/reset-bounces-preview`, { credentials: 'include' });
       let previewLine = '';
       if (previewRes.ok) {
         const p = await previewRes.json();
         const parts = Object.entries(p.byPattern || {}).map(([k, v]) => `${k}: ${v}`).join(', ');
-        previewLine = `\n\nFound ${p.total} recoverable bounce(s)${parts ? ` (${parts})` : ''}.`;
+        previewLine = `\n\nPattern-matched recoverable bounces: ${p.total}${parts ? ` (${parts})` : ''}\nTotal bounced messages on campaign: ${p.totalBounced}`;
+        if (p.errorSamples && p.errorSamples.length) {
+          previewLine += `\n\nSample error messages on this campaign:\n` + p.errorSamples.map((s: string) => `  • ${s}`).join('\n');
+        }
+        // If pattern matches = 0 but there are bounces, offer force mode
+        if (p.total === 0 && p.totalBounced > 0) {
+          const useForce = confirm(`${previewLine}\n\nNo bounces match known recoverable patterns, but there are ${p.totalBounced} bounced messages.\n\nIf you have unblocked the sender at the provider and know these bounces are recoverable, click OK to FORCE reset all ${p.totalBounced} bounces.\n\nClick Cancel to abort.`);
+          if (!useForce) return;
+          force = true;
+        } else {
+          if (!confirm(`This removes false bounces, restores contacts, clears bounce tracking events, and removes those addresses from the org suppression list.${previewLine}\n\nContinue?`)) return;
+        }
+      } else {
+        if (!confirm('Reset false bounces? This removes recoverable bounces and restores affected contacts.')) return;
       }
-      if (!confirm(`This removes false bounces (OAuth/auth errors AND Outlook/SMTP policy blocks — 5.7.1, blocked, rate-limited, etc.), restores contacts, clears bounce tracking events, and removes those addresses from the org suppression list.${previewLine}\n\nContinue?`)) return;
-      const res = await fetch(`/api/campaigns/${campaignId}/reset-bounces`, { method: 'POST', credentials: 'include' });
+      const res = await fetch(`/api/campaigns/${campaignId}/reset-bounces`, {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force }),
+      });
       if (res.ok) {
         const data = await res.json();
-        alert(`Reset complete:\n  • ${data.deletedMessages} false bounces removed\n  • ${data.restoredContacts} contacts restored\n  • ${data.unsuppressedCount} removed from suppression list\n  • ${data.clearedTrackingEvents} bounce events cleared\n\nActual sent: ${data.actualSent}, actual bounces: ${data.actualBounces}`);
+        alert(`Reset complete:\n  • ${data.deletedMessages} bounces removed\n  • ${data.restoredContacts} contacts restored\n  • ${data.unsuppressedCount} removed from suppression list\n  • ${data.clearedTrackingEvents} bounce events cleared\n\nActual sent: ${data.actualSent}, actual bounces: ${data.actualBounces}`);
         fetchDetail();
       }
     } catch (e) { /* ignore */ }
@@ -405,9 +422,26 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
 
   const handleRetryAfterUnblock = async () => {
     setShowActions(false);
-    if (!confirm('Make sure the sender account has been UNBLOCKED at the provider (Outlook/Gmail/SMTP) before continuing.\n\nThis will:\n  1. Reset all recoverable bounces (auth + policy blocks)\n  2. Restore bounced contacts to active\n  3. Remove affected emails from the suppression list\n  4. Resume the campaign so it re-sends to restored contacts\n\nContinue?')) return;
+    let force = false;
     try {
-      const res = await fetch(`/api/campaigns/${campaignId}/retry-after-unblock`, { method: 'POST', credentials: 'include' });
+      const previewRes = await fetch(`/api/campaigns/${campaignId}/reset-bounces-preview`, { credentials: 'include' });
+      if (previewRes.ok) {
+        const p = await previewRes.json();
+        if (p.total === 0 && p.totalBounced > 0) {
+          // Force path: no pattern matches but bounces exist. Ask explicitly.
+          if (!confirm(`Make sure the sender account has been UNBLOCKED at the provider before continuing.\n\nThis campaign has ${p.totalBounced} bounced messages that do NOT match known recoverable patterns.\n\nForce reset ALL ${p.totalBounced} bounces, restore contacts, unsuppress emails, and resume the campaign?\n\nClick OK to proceed. Click Cancel to abort.`)) return;
+          force = true;
+        } else {
+          if (!confirm(`Make sure the sender account has been UNBLOCKED at the provider before continuing.\n\nThis will:\n  1. Reset ${p.total} recoverable bounce(s)\n  2. Restore bounced contacts to active\n  3. Remove affected emails from the suppression list\n  4. Resume the campaign\n\nContinue?`)) return;
+        }
+      } else {
+        if (!confirm('Make sure the sender has been unblocked at the provider. Retry after unblock?')) return;
+      }
+      const res = await fetch(`/api/campaigns/${campaignId}/retry-after-unblock`, {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force }),
+      });
       if (res.ok) {
         const data = await res.json();
         alert(`Retry complete:\n  • ${data.deletedMessages} bounces reset\n  • ${data.restoredContacts} contacts restored\n  • ${data.unsuppressedCount} removed from suppression\n  • Campaign resumed: ${data.resumed ? 'yes' : 'no (check status)'}`);

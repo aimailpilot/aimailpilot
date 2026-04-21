@@ -3481,18 +3481,41 @@ Which account should I use and why? If I need to split across accounts, provide 
         e.includes('spam') || e.includes('throttle') || e.includes('quota exceeded') ||
         e.includes('access denied') || e.includes('messagerejected') ||
         e.includes('relay access denied') || e.includes('temporarily rate')) return true;
+    // NDR-tracker-marked bounces (Gmail/Outlook reply trackers use these prefixes)
+    // These are candidates for reset when the sender was mass-blocked by the provider.
+    if (e.startsWith('bounce detected:') || e.startsWith('bounce:')) return true;
     return false;
   };
 
-  // Preview which messages would be reset (dry run) — lets UI show a breakdown before committing
+  // A message qualifies for reset in "force all" mode: any failed/bounced row regardless of error text.
+  // Used when the user explicitly confirms (after unblocking sender) that ALL bounces on the campaign
+  // should be treated as recoverable.
+  const shouldResetMessage = (msg: any, force: boolean): boolean => {
+    if (msg.status !== 'failed' && msg.status !== 'bounced') return false;
+    if (force) return true;
+    return isFalseBounceError(msg.errorMessage);
+  };
+
+  // Preview which messages would be reset (dry run) — lets UI show a breakdown before committing.
+  // Returns both "matched" (pattern match) and "totalBounced" (all failed/bounced) so the UI can
+  // offer a "force reset all" option when pattern matches = 0 but bounces exist.
   app.get('/api/campaigns/:id/reset-bounces-preview', async (req: any, res) => {
     try {
       const campaign = await storage.getCampaign(req.params.id);
       if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
       const messages = await storage.getCampaignMessages(req.params.id, 100000, 0) as any[];
       const matches: any[] = [];
+      let totalBounced = 0;
+      let noErrorMessageCount = 0;
+      const errorSamples: string[] = [];
       for (const msg of messages) {
-        if ((msg.status === 'failed' || msg.status === 'bounced') && isFalseBounceError(msg.errorMessage)) {
+        if (msg.status !== 'failed' && msg.status !== 'bounced') continue;
+        totalBounced++;
+        if (!msg.errorMessage) noErrorMessageCount++;
+        else if (errorSamples.length < 5 && !errorSamples.includes(msg.errorMessage)) {
+          errorSamples.push((msg.errorMessage || '').slice(0, 150));
+        }
+        if (isFalseBounceError(msg.errorMessage)) {
           matches.push({ id: msg.id, email: msg.recipientEmail, error: (msg.errorMessage || '').slice(0, 200), status: msg.status });
         }
       }
@@ -3504,9 +3527,17 @@ Which account should I use and why? If I need to split across accounts, provide 
         else if (e.includes('spam')) tag = 'spam_filter';
         else if (e.includes('throttle') || e.includes('quota') || e.includes('rate')) tag = 'throttle';
         else if (e.includes('oauth') || e.includes('token') || e.includes('auth')) tag = 'auth_error';
+        else if (e.startsWith('bounce detected:') || e.startsWith('bounce:')) tag = 'ndr_detected';
         byPattern[tag] = (byPattern[tag] || 0) + 1;
       }
-      res.json({ total: matches.length, byPattern, sample: matches.slice(0, 10) });
+      res.json({
+        total: matches.length,
+        totalBounced,
+        noErrorMessageCount,
+        byPattern,
+        errorSamples,
+        sample: matches.slice(0, 10),
+      });
     } catch (error) {
       console.error('[Campaign] Reset bounces preview error:', error);
       res.status(500).json({ error: 'Failed to preview reset' });
@@ -3526,9 +3557,10 @@ Which account should I use and why? If I need to split across accounts, provide 
       let unsuppressedCount = 0;
       let clearedTrackingEvents = 0;
 
+      const force = !!(req.body && req.body.force);
+
       for (const msg of messages) {
-        if ((msg.status !== 'failed' && msg.status !== 'bounced')) continue;
-        if (!isFalseBounceError(msg.errorMessage)) continue;
+        if (!shouldResetMessage(msg, force)) continue;
 
         // Delete 'bounce' tracking events tied to this message
         try {
@@ -3607,9 +3639,9 @@ Which account should I use and why? If I need to split across accounts, provide 
       let restoredContacts = 0;
       let unsuppressedCount = 0;
 
+      const forceRetry = !!(req.body && req.body.force);
       for (const msg of messages) {
-        if ((msg.status !== 'failed' && msg.status !== 'bounced')) continue;
-        if (!isFalseBounceError(msg.errorMessage)) continue;
+        if (!shouldResetMessage(msg, forceRetry)) continue;
         try {
           await storage.rawRun(`DELETE FROM tracking_events WHERE "messageId" = ? AND type = 'bounce'`, msg.id);
         } catch (e) {}
