@@ -10652,10 +10652,11 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       if (!type) return res.status(400).json({ message: 'type required' });
 
       const id = `act_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const now = new Date().toISOString();
       await storage.rawRun(`
-        INSERT INTO contact_activities (id, "organizationId", "contactId", "userId", type, outcome, notes, "createdAt", "updatedAt")
-        VALUES (?, ?, ?, ?, ?, ?, ?, NOW()::text, NOW()::text)
-      `, id, orgId, contactId || null, userId, type, outcome || null, notes || null);
+        INSERT INTO contact_activities (id, "organizationId", "contactId", "userId", type, outcome, notes, "createdAt")
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `, id, orgId, contactId || null, userId, type, outcome || null, notes || null, now);
 
       res.json({ success: true, id });
     } catch (error: any) {

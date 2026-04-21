@@ -270,16 +270,12 @@ export default function MyDashboard() {
         </div>
       </div>
 
-      {/* Daily Task Queue + Nudges side by side */}
-      <div className="grid grid-cols-2 gap-4">
-        {/* Left: Daily Task Queue */}
-        <DailyTaskQueue />
+      {/* Daily Playbook — full width */}
+      <DailyTaskQueue />
 
-        {/* Right: Nudges / Action Items */}
+      {/* Alerts — compact horizontal strip, only if there are nudges */}
+      {nudges.length > 0 && (
         <div className="space-y-2">
-          <h2 className="text-sm font-semibold text-gray-700 flex items-center gap-1.5">
-            <Zap className="h-4 w-4 text-amber-500" /> Alerts
-          </h2>
           <div className="space-y-2">
             {nudges.map((nudge) => {
               const style = nudgeStyles[nudge.priority] || nudgeStyles.medium;
@@ -407,7 +403,7 @@ export default function MyDashboard() {
             })}
           </div>
         </div>
-      </div>
+      )}
 
       {/* Stats Cards */}
       <div className="grid grid-cols-4 gap-3">
