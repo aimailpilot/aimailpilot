@@ -398,7 +398,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
         }
         // If pattern matches = 0 but there are bounces, offer force mode
         if (p.total === 0 && p.totalBounced > 0) {
-          const useForce = confirm(`${previewLine}\n\nNo bounces match known recoverable patterns, but there are ${p.totalBounced} bounced messages.\n\nIf you have unblocked the sender at the provider and know these bounces are recoverable, click OK to FORCE reset all ${p.totalBounced} bounces.\n\nClick Cancel to abort.`);
+          const useForce = confirm(`${previewLine}\n\nNo bounces match known auto-recoverable patterns.\n\nWARNING: These may include BOTH provider policy blocks (recoverable) AND true hard bounces (invalid addresses — NOT recoverable). Force-resetting will unsuppress all ${p.totalBounced} contacts.\n\nOnly proceed if:\n  1. The sender account has been unblocked at the provider, AND\n  2. You have verified the bounced contacts have valid email addresses.\n\nForce reset all ${p.totalBounced} bounces? OK to proceed, Cancel to abort.`);
           if (!useForce) return;
           force = true;
         } else {

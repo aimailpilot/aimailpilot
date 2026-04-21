@@ -3463,8 +3463,13 @@ Which account should I use and why? If I need to split across accounts, provide 
   });
 
   // Classify a campaign message error as infrastructure/policy-block (false bounce) vs real bounce.
-  // Matches both OAuth/token failures AND provider policy-block bounces (Outlook 550 5.7.1, spam heuristics, throttling)
-  // which are recoverable once the sender is unblocked.
+  // Only matches errors where the message provably never reached a valid inbox:
+  //   - Auth/token failures (email never left our server)
+  //   - SMTP error codes known to be sender-side policy blocks (5.7.x), not recipient-side
+  // NDR-prefix bounces ("Bounce: ..." / "Bounce detected: ...") are NOT auto-matched here
+  // because the Outlook/Gmail reply trackers write this prefix for both true hard bounces
+  // (5.1.1 user unknown) AND policy blocks (5.7.1 blocked sender) — indistinguishable at
+  // this point. Users must use force-mode (explicit confirmation) for those.
   const isFalseBounceError = (errorMessage: string | null | undefined): boolean => {
     const e = (errorMessage || '').toLowerCase();
     if (!e) return false;
@@ -3474,16 +3479,13 @@ Which account should I use and why? If I need to split across accounts, provide 
         e.includes('connection refused') || e.includes('getaddrinfo') ||
         e.includes('invalidauthenticationtoken') || e.includes('credentials') ||
         (e.includes('smtp') && e.includes('auth'))) return true;
-    // Provider policy blocks (recoverable — unblock sender + reset)
-    if (e.includes('5.7.1') || e.includes('5.7.0') || e.includes('5.7.26') ||
-        e.includes('policy') || e.includes('blocked') || e.includes('denied') ||
-        e.includes('message rejected') || e.includes('rejected by') ||
-        e.includes('spam') || e.includes('throttle') || e.includes('quota exceeded') ||
-        e.includes('access denied') || e.includes('messagerejected') ||
-        e.includes('relay access denied') || e.includes('temporarily rate')) return true;
-    // NDR-tracker-marked bounces (Gmail/Outlook reply trackers use these prefixes)
-    // These are candidates for reset when the sender was mass-blocked by the provider.
-    if (e.startsWith('bounce detected:') || e.startsWith('bounce:')) return true;
+    // Sender-side policy blocks with explicit SMTP codes (recoverable — unblock sender + reset)
+    // 5.7.x = policy/auth/security rejection (sender blocked), NOT recipient-side
+    // Exclude 5.7.1 raw alone — too ambiguous (also used for "relay access denied" to bad recipient)
+    if (e.includes('5.7.0') || e.includes('5.7.26') ||
+        e.includes('throttle') || e.includes('quota exceeded') ||
+        e.includes('temporarily rate') || e.includes('messagerejected') ||
+        (e.includes('5.7.1') && (e.includes('policy') || e.includes('blocked') || e.includes('spam') || e.includes('sender')))) return true;
     return false;
   };
 
