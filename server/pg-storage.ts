@@ -3137,7 +3137,7 @@ export class PostgresStorage {
       sql += ` AND "replyType" = 'unsubscribe'`;
     } else if (filters?.status === 'replied') {
       // Emails where a team member has sent a reply back to the contact
-      sql += ` AND "repliedBy" IS NOT NULL` + warmupExclude;
+      sql += ` AND ("repliedBy" IS NOT NULL OR (status = 'replied' AND "repliedAt" IS NOT NULL))` + warmupExclude;
     } else if (filters?.status === 'not_replied') {
       // Human replies that haven't been responded to yet
       sql += ` AND "replyType" IN ('positive','negative','general') AND (status != 'replied' AND "repliedAt" IS NULL)` + warmupExclude;
@@ -3200,7 +3200,7 @@ export class PostgresStorage {
     } else if (filters?.status === 'unsubscribed') {
       sql += ` AND "replyType" = 'unsubscribe'`;
     } else if (filters?.status === 'replied') {
-      sql += ` AND "repliedBy" IS NOT NULL` + warmupExcludeCount;
+      sql += ` AND ("repliedBy" IS NOT NULL OR (status = 'replied' AND "repliedAt" IS NOT NULL))` + warmupExcludeCount;
     } else if (filters?.status === 'not_replied') {
       sql += ` AND "replyType" IN ('positive','negative','general') AND (status != 'replied' AND "repliedAt" IS NULL)` + warmupExcludeCount;
     } else if (filters?.status && filters.status !== 'all') {
@@ -3253,7 +3253,7 @@ export class PostgresStorage {
 
     const total = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 ${warmupExcludeSql}${acctScope}`, params)).c);
     const unread = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'unread' ${warmupExcludeSql}${acctScope}`, params)).c);
-    const replied = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "repliedBy" IS NOT NULL ${warmupExcludeSql}${acctScope}`, params)).c);
+    const replied = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND ("repliedBy" IS NOT NULL OR (status = 'replied' AND "repliedAt" IS NOT NULL)) ${warmupExcludeSql}${acctScope}`, params)).c);
     const archived = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND status = 'archived'${acctScope}`, params)).c);
     const positive = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'positive'${acctScope}`, params)).c);
     const negative = parseInt((await queryOne(`SELECT COUNT(*) as c FROM unified_inbox WHERE "organizationId" = $1 AND "replyType" = 'negative'${acctScope}`, params)).c);
