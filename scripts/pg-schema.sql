@@ -256,6 +256,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_replied ON messages("repliedAt");
 CREATE INDEX IF NOT EXISTS idx_messages_campaign_contact ON messages("campaignId", "contactId");
 CREATE INDEX IF NOT EXISTS idx_messages_campaign_step ON messages("campaignId", "stepNumber");
 CREATE INDEX IF NOT EXISTS idx_messages_campaign_status ON messages("campaignId", status);
+CREATE INDEX IF NOT EXISTS idx_messages_campaign_created ON messages("campaignId", "createdAt" DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_sent_campaign ON messages("sentAt", "campaignId") WHERE status IN ('sent','failed','sending','bounced');
 CREATE INDEX IF NOT EXISTS idx_messages_unreplied ON messages("sentAt", "campaignId") WHERE status = 'sent' AND "repliedAt" IS NULL AND "providerMessageId" IS NOT NULL;
 
