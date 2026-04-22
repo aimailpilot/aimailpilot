@@ -717,6 +717,7 @@ export class CampaignEngine {
 
       // ===== CRITICAL FIX: Skip contacts that already have messages for this campaign/step =====
       // This prevents duplicate sends when resuming a paused campaign
+      let alreadyProcessedCount = 0;
       try {
         const existingMessages = await storage.getCampaignMessages(campaignId, 100000, 0) as any[];
         if (existingMessages && existingMessages.length > 0) {
@@ -726,13 +727,13 @@ export class CampaignEngine {
               .filter((m: any) => (m.stepNumber || 0) === stepNumber)
               .map((m: any) => m.contactId)
           );
-          
+
           if (alreadyProcessedContactIds.size > 0) {
             const beforeCount = contacts.length;
             contacts = contacts.filter(c => !alreadyProcessedContactIds.has(c.id));
-            const skipped = beforeCount - contacts.length;
-            if (skipped > 0) {
-              console.log(`[CampaignEngine] Resuming campaign ${campaignId}: skipped ${skipped} already-processed contacts, ${contacts.length} remaining`);
+            alreadyProcessedCount = beforeCount - contacts.length;
+            if (alreadyProcessedCount > 0) {
+              console.log(`[CampaignEngine] Resuming campaign ${campaignId}: skipped ${alreadyProcessedCount} already-processed contacts, ${contacts.length} remaining`);
             }
           }
         }
@@ -765,9 +766,13 @@ export class CampaignEngine {
       }
 
       // Update campaign to active
+      // totalRecipients = remaining + already-processed. Guard with Math.max against the existing
+      // value so resumes never shrink the displayed audience (previously overwrote 1159 with 303).
+      const intendedTotal = contacts.length + alreadyProcessedCount;
+      const newTotalRecipients = Math.max(campaign.totalRecipients || 0, intendedTotal);
       await storage.updateCampaign(campaignId, {
         status: 'active',
-        totalRecipients: contacts.length,
+        totalRecipients: newTotalRecipients,
       });
 
       // Track active campaign

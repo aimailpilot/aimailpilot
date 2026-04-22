@@ -3167,6 +3167,16 @@ Which account should I use and why? If I need to split across accounts, provide 
       // Auto-fix stale sentCount for campaigns that have messages but sentCount=0
       // Uses lightweight single-SQL aggregation instead of loading all messages
       for (const c of campaigns as any[]) {
+        // Heal totalRecipients if it's smaller than the originally-selected contactIds (fixes campaigns where
+        // totalRecipients got overwritten with post-filter remaining-work count on resume).
+        const originalAudienceSize = Array.isArray(c.contactIds) ? c.contactIds.length : 0;
+        if (originalAudienceSize > (c.totalRecipients || 0)) {
+          try {
+            await storage.updateCampaign(c.id, { totalRecipients: originalAudienceSize });
+            c.totalRecipients = originalAudienceSize;
+          } catch (e) { /* ignore */ }
+        }
+
         if ((c.sentCount || 0) === 0 && (c.status === 'active' || c.status === 'completed')) {
           try {
             const stats = await storage.getCampaignMessageStats(c.id);
@@ -3174,14 +3184,14 @@ Which account should I use and why? If I need to split across accounts, provide 
               await storage.updateCampaign(c.id, {
                 sentCount: stats.sent, bouncedCount: stats.bounced,
                 openedCount: stats.opened, clickedCount: stats.clicked, repliedCount: stats.replied,
-                totalRecipients: Math.max(c.totalRecipients || 0, stats.sent + stats.bounced),
+                totalRecipients: Math.max(c.totalRecipients || 0, stats.sent + stats.bounced, originalAudienceSize),
               });
               c.sentCount = stats.sent;
               c.bouncedCount = stats.bounced;
               c.openedCount = stats.opened;
               c.clickedCount = stats.clicked;
               c.repliedCount = stats.replied;
-              c.totalRecipients = Math.max(c.totalRecipients || 0, stats.sent + stats.bounced);
+              c.totalRecipients = Math.max(c.totalRecipients || 0, stats.sent + stats.bounced, originalAudienceSize);
               console.log(`[Campaigns] Auto-fixed stats for ${c.id}: sent=${stats.sent}`);
             }
           } catch (e) { /* ignore per-campaign errors */ }
@@ -3804,6 +3814,14 @@ Which account should I use and why? If I need to split across accounts, provide 
       // Use lightweight SQL aggregation for stats instead of loading all messages
       const msgStats = await storage.getCampaignMessageStats(req.params.id);
 
+      // Heal totalRecipients if it's smaller than the originally-selected contactIds (fixes campaigns where
+      // totalRecipients got overwritten with post-filter remaining-work count on resume).
+      const originalAudienceSize = Array.isArray((campaign as any).contactIds) ? (campaign as any).contactIds.length : 0;
+      if (originalAudienceSize > (campaign.totalRecipients || 0)) {
+        await storage.updateCampaign(req.params.id, { totalRecipients: originalAudienceSize });
+        campaign = await storage.getCampaign(req.params.id);
+      }
+
       // Auto-recalculate stats if sentCount appears stale
       if (msgStats.sent > 0 && (campaign.sentCount || 0) < msgStats.sent) {
         console.log(`[Campaign] Auto-fixing stale stats for ${req.params.id}: DB sentCount=${campaign.sentCount}, actual=${msgStats.sent}`);
@@ -3813,7 +3831,7 @@ Which account should I use and why? If I need to split across accounts, provide 
           openedCount: msgStats.opened,
           clickedCount: msgStats.clicked,
           repliedCount: msgStats.replied,
-          totalRecipients: Math.max(campaign.totalRecipients || 0, msgStats.sent + msgStats.bounced),
+          totalRecipients: Math.max(campaign.totalRecipients || 0, msgStats.sent + msgStats.bounced, originalAudienceSize),
         });
         campaign = await storage.getCampaign(req.params.id);
       }
