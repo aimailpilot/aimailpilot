@@ -41,11 +41,16 @@ CREATE TABLE IF NOT EXISTS email_accounts (
   "dailySent" INTEGER DEFAULT 0,
   "isActive" INTEGER DEFAULT 1,
   "userId" TEXT,
+  "authStatus" TEXT DEFAULT 'active',
+  "authFailureCount" INTEGER DEFAULT 0,
+  "authLastFailureAt" TEXT,
+  "authLastErrorCode" TEXT,
   "createdAt" TEXT NOT NULL,
   "updatedAt" TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_email_accounts_org ON email_accounts("organizationId");
 CREATE INDEX IF NOT EXISTS idx_email_accounts_user ON email_accounts("userId");
+CREATE INDEX IF NOT EXISTS idx_email_accounts_auth_status ON email_accounts("organizationId", "authStatus");
 
 -- 4. llm_configs
 CREATE TABLE IF NOT EXISTS llm_configs (

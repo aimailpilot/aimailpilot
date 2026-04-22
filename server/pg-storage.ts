@@ -797,6 +797,11 @@ async function initializeSchema() {
       'ALTER TABLE apollo_sync_jobs ADD COLUMN IF NOT EXISTS "nextPage" INTEGER DEFAULT 1',
       'ALTER TABLE apollo_sync_jobs ADD COLUMN IF NOT EXISTS "resumeAfter" TEXT',
       'ALTER TABLE apollo_sync_jobs ADD COLUMN IF NOT EXISTS "batchInfo" TEXT',
+      'ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS "authStatus" TEXT DEFAULT \'active\'',
+      'ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS "authFailureCount" INTEGER DEFAULT 0',
+      'ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS "authLastFailureAt" TEXT',
+      'ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS "authLastErrorCode" TEXT',
+      'CREATE INDEX IF NOT EXISTS idx_email_accounts_auth_status ON email_accounts("organizationId", "authStatus")',
     ];
     for (const alt of alterColumns) {
       try { await client.query(alt); } catch (e) { /* column already exists */ }
