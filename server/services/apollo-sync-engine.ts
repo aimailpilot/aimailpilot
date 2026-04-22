@@ -135,7 +135,7 @@ async function searchPeopleInLabels(
     reveal_personal_emails: false,
     reveal_phone_number: false,
   };
-  const data = await apolloRequest(apiKey, '/v1/mixed_people/search', 'POST', body);
+  const data = await apolloRequest(apiKey, '/v1/mixed_people/api_search', 'POST', body);
   const people: any[] = data?.people || data?.contacts || [];
   const total: number = Number(data?.pagination?.total_entries ?? people.length);
   return { people, total };
