@@ -327,6 +327,24 @@ async function logUsage(params: {
   );
 }
 
+// Apollo api_search pagination cap — Apollo itself maxes at 50k per search
+// across any pagination. Beyond that, results are inaccessible.
+const MAX_PAGES = 500;
+// Per-batch cap to stay under Apollo's 200 req/hour hard limit.
+// 100 pages × ~1.3s throttle ≈ 130s, leaves headroom within the hour bucket.
+const PAGES_PER_BATCH = 100;
+// Cooldown after hitting an hourly 429 before the resumer will retry.
+const HOURLY_COOLDOWN_MS = 65 * 60 * 1000;
+
+function isRateLimitError(msg: string): { isHourly: boolean; isMinute: boolean } {
+  const m = (msg || '').toLowerCase();
+  const isRate = m.includes('429');
+  return {
+    isHourly: isRate && m.includes('per hour'),
+    isMinute: isRate && m.includes('per minute'),
+  };
+}
+
 async function runSyncJob(jobId: string) {
   const job = await getJob(jobId);
   if (!job) return;
@@ -346,20 +364,19 @@ async function runSyncJob(jobId: string) {
     return;
   }
 
-  await updateJob(jobId, { status: 'running', startedAt: nowIso() });
+  // Resume from checkpoint if present.
+  let processed = Number(job.processed || 0);
+  let alreadyCurrent = Number(job.alreadyCurrent || 0);
+  let enriched = Number(job.enriched || 0);
+  let imported = Number(job.imported || 0);
+  let totalFound = Number(job.totalFound || 0);
+  let page = Math.max(1, Number(job.nextPage || 1));
 
-  let processed = 0;
-  let alreadyCurrent = 0;
-  let enriched = 0;
-  let imported = 0;
-  let totalFound = 0;
+  await updateJob(jobId, { status: 'running', startedAt: job.startedAt || nowIso(), errorMessage: null });
+
+  let pagesThisBatch = 0;
 
   try {
-    let page = 1;
-    // Hard safety cap: Apollo api_search maxes at ~50k records via pagination.
-    // 500 pages × 100/page = 50k — well beyond any realistic saved list.
-    const MAX_PAGES = 500;
-    // eslint-disable-next-line no-constant-condition
     while (true) {
       if (page > MAX_PAGES) {
         console.warn('[apollo-sync] hit MAX_PAGES cap', { jobId, page });
@@ -369,36 +386,68 @@ async function runSyncJob(jobId: string) {
         await updateJob(jobId, {
           status: 'cancelled',
           completedAt: nowIso(),
-          processed,
-          alreadyCurrent,
-          enriched,
-          imported,
-          totalFound,
+          processed, alreadyCurrent, enriched, imported, totalFound,
+          nextPage: page,
         });
         cancelFlags.delete(jobId);
         return;
       }
 
-      const { people, total } = await searchPeopleInLabels(apiKey, listIds, page, DEFAULT_PAGE_SIZE);
+      // Batch guard: don't burn the full hourly budget in one run. Let the
+      // resumer pick us up after a short pause so other orgs' jobs can run too,
+      // and so we don't sail into an hourly 429 mid-page.
+      if (pagesThisBatch >= PAGES_PER_BATCH) {
+        const resumeAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+        await updateJob(jobId, {
+          status: 'paused_rate_limited',
+          processed, alreadyCurrent, enriched, imported, totalFound,
+          nextPage: page,
+          resumeAfter: resumeAt,
+          errorMessage: `Batched — ${pagesThisBatch} pages processed, resuming automatically`,
+        });
+        console.log('[apollo-sync] batched, will resume', { jobId, nextPage: page, resumeAt });
+        return;
+      }
+
+      let people: any[]; let total: number;
+      try {
+        const res = await searchPeopleInLabels(apiKey, listIds, page, DEFAULT_PAGE_SIZE);
+        people = res.people; total = res.total;
+      } catch (e: any) {
+        const { isHourly, isMinute } = isRateLimitError(e?.message || '');
+        if (isHourly || isMinute) {
+          // Pause and let the resumer retry after the appropriate cooldown.
+          const cooldownMs = isHourly ? HOURLY_COOLDOWN_MS : 2 * 60 * 1000;
+          const resumeAt = new Date(Date.now() + cooldownMs).toISOString();
+          await updateJob(jobId, {
+            status: 'paused_rate_limited',
+            processed, alreadyCurrent, enriched, imported, totalFound,
+            nextPage: page,
+            resumeAfter: resumeAt,
+            errorMessage: `Apollo rate limit — will auto-resume after ${new Date(resumeAt).toLocaleString()}`,
+          });
+          console.log('[apollo-sync] rate-limited, pausing', { jobId, nextPage: page, resumeAt });
+          return;
+        }
+        throw e;
+      }
+
+      pagesThisBatch++;
+
       if (page === 1) {
-        totalFound = total;
+        // Guard against bogus total from Apollo api_search (seen values like 241M).
+        // Saved lists cannot realistically exceed 1M; beyond that, treat as unknown.
+        totalFound = total > 1_000_000 ? 0 : total;
         await updateJob(jobId, { totalFound });
       }
       if (!people.length) break;
 
       for (const p of people) {
         const email = getPrimaryEmail(p);
-        if (!email) {
-          processed++;
-          continue;
-        }
+        if (!email) { processed++; continue; }
         try {
           const result = await reconcileContact({
-            organizationId,
-            email,
-            apolloPerson: p,
-            targetListId,
-            overwriteMode,
+            organizationId, email, apolloPerson: p, targetListId, overwriteMode,
           });
           if (result === 'skipped') alreadyCurrent++;
           else if (result === 'enriched') enriched++;
@@ -409,12 +458,10 @@ async function runSyncJob(jobId: string) {
         processed++;
       }
 
-      // Checkpoint progress every page.
-      await updateJob(jobId, { processed, alreadyCurrent, enriched, imported });
+      await updateJob(jobId, { processed, alreadyCurrent, enriched, imported, nextPage: page + 1 });
 
-      // Stop if we've processed everything the total claims exists.
+      // Stop conditions (only trust totalFound if we kept a reasonable value).
       if (totalFound > 0 && processed >= totalFound) break;
-      // Short page = last page.
       if (people.length < DEFAULT_PAGE_SIZE) break;
       page++;
     }
@@ -422,11 +469,9 @@ async function runSyncJob(jobId: string) {
     await updateJob(jobId, {
       status: 'completed',
       completedAt: nowIso(),
-      processed,
-      alreadyCurrent,
-      enriched,
-      imported,
-      totalFound,
+      processed, alreadyCurrent, enriched, imported, totalFound,
+      nextPage: page,
+      errorMessage: null,
     });
 
     await logUsage({
@@ -442,13 +487,41 @@ async function runSyncJob(jobId: string) {
       status: 'failed',
       errorMessage: (e?.message || 'Unknown error').slice(0, 500),
       completedAt: nowIso(),
-      processed,
-      alreadyCurrent,
-      enriched,
-      imported,
-      totalFound,
+      processed, alreadyCurrent, enriched, imported, totalFound,
+      nextPage: page,
     });
   }
+}
+
+// --- Auto-resumer for paused_rate_limited jobs ---
+let resumerStarted = false;
+export function startApolloSyncResumer() {
+  if (resumerStarted) return;
+  resumerStarted = true;
+  const TICK_MS = 2 * 60 * 1000; // check every 2 minutes
+  const tick = async () => {
+    try {
+      const due = await storage.rawAll(
+        `SELECT id FROM apollo_sync_jobs
+         WHERE status = 'paused_rate_limited'
+           AND ("resumeAfter" IS NULL OR "resumeAfter" <= ?)
+         ORDER BY "createdAt" ASC
+         LIMIT 5`,
+        nowIso(),
+      );
+      for (const row of due) {
+        console.log('[apollo-sync] resuming job', row.id);
+        setImmediate(() => runSyncJob(row.id).catch((e) => {
+          console.error('[apollo-sync] resume crash', row.id, e);
+        }));
+      }
+    } catch (e) {
+      console.error('[apollo-sync] resumer tick error', e);
+    }
+  };
+  setInterval(tick, TICK_MS);
+  // Kick once shortly after boot to pick up anything that got paused pre-restart.
+  setTimeout(tick, 30_000);
 }
 
 export async function reconcileContact(params: {

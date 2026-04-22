@@ -793,6 +793,9 @@ async function initializeSchema() {
       'ALTER TABLE contacts ADD COLUMN IF NOT EXISTS "apolloLastSyncedAt" TEXT',
       'ALTER TABLE contacts ADD COLUMN IF NOT EXISTS "apolloListIds" JSONB DEFAULT \'[]\'',
       'CREATE INDEX IF NOT EXISTS idx_contacts_apollo_id ON contacts("organizationId", "apolloContactId")',
+      'ALTER TABLE apollo_sync_jobs ADD COLUMN IF NOT EXISTS "nextPage" INTEGER DEFAULT 1',
+      'ALTER TABLE apollo_sync_jobs ADD COLUMN IF NOT EXISTS "resumeAfter" TEXT',
+      'ALTER TABLE apollo_sync_jobs ADD COLUMN IF NOT EXISTS "batchInfo" TEXT',
     ];
     for (const alt of alterColumns) {
       try { await client.query(alt); } catch (e) { /* column already exists */ }

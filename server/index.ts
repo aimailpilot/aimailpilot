@@ -8,6 +8,7 @@ import { startHotLeadsRefiner } from "./services/hot-leads-refiner";
 import { startInboxNudgeEngine } from "./services/inbox-nudge-engine";
 import { startWarmupInboxPurge } from "./services/warmup-inbox-purge";
 import { startWarmupInboxCleanup } from "./services/warmup-inbox-cleanup";
+import { startApolloSyncResumer } from "./services/apollo-sync-engine";
 import { campaignEngine } from "./services/campaign-engine";
 import { classifyReply, classifyReplyWithAI } from "./services/reply-classifier";
 import { storage, initStorage } from "./storage";
@@ -78,6 +79,8 @@ app.use((req, res, next) => {
     startWarmupInboxPurge();
     // Remove INBOX label from already-tagged warmup messages that leaked through
     startWarmupInboxCleanup();
+    // Auto-resume Apollo sync jobs that were paused due to rate limiting
+    startApolloSyncResumer();
     
     // Auto-resume active campaigns that were interrupted by server restart
     // Delay by 10 seconds to let the server fully initialize (OAuth, DB, etc.)

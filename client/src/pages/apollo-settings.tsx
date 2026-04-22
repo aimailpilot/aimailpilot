@@ -361,12 +361,14 @@ export default function ApolloSettingsPage() {
                     const statusColor =
                       job.status === 'completed' ? 'text-green-700' :
                       job.status === 'failed' ? 'text-red-700' :
-                      job.status === 'cancelled' ? 'text-gray-500' : 'text-blue-700';
+                      job.status === 'cancelled' ? 'text-gray-500' :
+                      job.status === 'paused_rate_limited' ? 'text-amber-700' : 'text-blue-700';
+                    const statusLabel = job.status === 'paused_rate_limited' ? 'paused (will auto-resume)' : job.status;
                     return (
                       <div key={job.id} className="border rounded p-3 text-sm">
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2">
-                            <Badge variant="outline" className={statusColor}>{job.status}</Badge>
+                            <Badge variant="outline" className={statusColor}>{statusLabel}</Badge>
                             <span className="text-muted-foreground">{new Date(job.createdAt).toLocaleString()}</span>
                           </div>
                           {job.totalFound > 0 && (
@@ -837,6 +839,7 @@ function SavedListsTab({ disabled }: { disabled: boolean }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [syncStarted, setSyncStarted] = useState<string | null>(null);
+  const [showDestDialog, setShowDestDialog] = useState(false);
 
   useEffect(() => {
     if (disabled) return;
@@ -854,76 +857,225 @@ function SavedListsTab({ disabled }: { disabled: boolean }) {
     else setSelected(new Set(filtered.map((l) => l.id)));
   };
 
-  const handleSync = async () => {
-    if (selected.size === 0) return;
-    const ids = Array.from(selected);
-    const names = apolloLists.filter((l) => ids.includes(l.id)).map((l) => l.name);
-    try {
-      const res = await fetch('/api/apollo/sync/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ listIds: ids, listNames: names }),
-      });
-      const data = await res.json();
-      if (res.ok) setSyncStarted(data.jobId);
-      else setError(data.message || 'Failed to start sync');
-    } catch (e: any) { setError(e?.message || 'Sync failed'); }
-  };
-
   if (disabled) {
     return <Card><CardContent className="py-8 text-center text-muted-foreground">Connect Apollo to import saved lists.</CardContent></Card>;
   }
 
+  const selectedLists = apolloLists.filter((l) => selected.has(l.id));
+  const totalContacts = selectedLists.reduce((n, l) => n + (l.count || 0), 0);
+  const defaultListName = selectedLists.length === 1
+    ? `Apollo · ${selectedLists[0].name}`
+    : `Apollo Import · ${new Date().toLocaleDateString()}`;
+
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base">Your Apollo saved lists</CardTitle>
-        <CardDescription>
-          Pick one or more lists to sync into aimailpilot. Syncing saved data is free — no credits consumed.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <Input placeholder="Search lists…" value={listSearch} onChange={(e) => setListSearch(e.target.value)} />
-        {loading ? (
-          <div className="flex justify-center py-6"><Loader2 className="h-6 w-6 animate-spin text-blue-600" /></div>
-        ) : (
-          <>
-            <div className="flex items-center gap-2 text-sm border-b pb-2">
-              <Checkbox checked={selected.size === filtered.length && filtered.length > 0} onCheckedChange={toggleAll} />
-              <span className="text-muted-foreground">
-                {selected.size > 0 ? `${selected.size} selected` : `${filtered.length} lists`}
-              </span>
-              <Button size="sm" className="ml-auto" disabled={selected.size === 0} onClick={handleSync}>
-                <Play className="h-4 w-4 mr-1.5" />Sync {selected.size} {selected.size === 1 ? 'list' : 'lists'}
-              </Button>
+    <>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Your Apollo saved lists</CardTitle>
+          <CardDescription>
+            Pick one or more lists to sync into aimailpilot. Syncing saved data is free — no credits consumed.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <Input placeholder="Search lists…" value={listSearch} onChange={(e) => setListSearch(e.target.value)} />
+          {loading ? (
+            <div className="flex justify-center py-6"><Loader2 className="h-6 w-6 animate-spin text-blue-600" /></div>
+          ) : (
+            <>
+              <div className="flex items-center gap-2 text-sm border-b pb-2">
+                <Checkbox checked={selected.size === filtered.length && filtered.length > 0} onCheckedChange={toggleAll} />
+                <span className="text-muted-foreground">
+                  {selected.size > 0
+                    ? `${selected.size} selected · ${totalContacts.toLocaleString()} contacts`
+                    : `${filtered.length} lists`}
+                </span>
+                <Button size="sm" className="ml-auto" disabled={selected.size === 0} onClick={() => setShowDestDialog(true)}>
+                  <Play className="h-4 w-4 mr-1.5" />Import {selected.size} {selected.size === 1 ? 'list' : 'lists'}
+                </Button>
+              </div>
+              <div className="max-h-[500px] overflow-auto">
+                {filtered.map((l) => (
+                  <label key={l.id} className="flex items-center gap-2 p-2 hover:bg-gray-50 cursor-pointer text-sm">
+                    <Checkbox
+                      checked={selected.has(l.id)}
+                      onCheckedChange={(c) => {
+                        const next = new Set(selected);
+                        if (c) next.add(l.id); else next.delete(l.id);
+                        setSelected(next);
+                      }}
+                    />
+                    <span className="flex-1">{l.name}</span>
+                    <span className="text-xs text-muted-foreground">{l.count} contacts</span>
+                  </label>
+                ))}
+              </div>
+            </>
+          )}
+          {error && <div className="text-sm text-red-600">{error}</div>}
+          {syncStarted && (
+            <div className="text-sm text-green-700 flex items-center gap-2">
+              <CheckCircle2 className="h-4 w-4" />
+              Sync started. Track progress in Settings & Jobs.
             </div>
-            <div className="max-h-[500px] overflow-auto">
-              {filtered.map((l) => (
-                <label key={l.id} className="flex items-center gap-2 p-2 hover:bg-gray-50 cursor-pointer text-sm">
-                  <Checkbox
-                    checked={selected.has(l.id)}
-                    onCheckedChange={(c) => {
-                      const next = new Set(selected);
-                      if (c) next.add(l.id); else next.delete(l.id);
-                      setSelected(next);
-                    }}
-                  />
-                  <span className="flex-1">{l.name}</span>
-                  <span className="text-xs text-muted-foreground">{l.count} contacts</span>
-                </label>
-              ))}
-            </div>
-          </>
-        )}
-        {error && <div className="text-sm text-red-600">{error}</div>}
-        {syncStarted && (
-          <div className="text-sm text-green-700 flex items-center gap-2">
-            <CheckCircle2 className="h-4 w-4" />
-            Sync started. Track progress in Settings & Jobs.
+          )}
+        </CardContent>
+      </Card>
+
+      <SyncDestinationDialog
+        open={showDestDialog}
+        onOpenChange={setShowDestDialog}
+        selectedListIds={Array.from(selected)}
+        selectedListNames={selectedLists.map((l) => l.name)}
+        defaultListName={defaultListName}
+        onStarted={(jobId) => { setSyncStarted(jobId); setShowDestDialog(false); setSelected(new Set()); }}
+      />
+    </>
+  );
+}
+
+// ============================================================================
+// Sync destination picker — choose where synced Apollo contacts land
+// ============================================================================
+function SyncDestinationDialog({
+  open, onOpenChange, selectedListIds, selectedListNames, defaultListName, onStarted,
+}: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  selectedListIds: string[];
+  selectedListNames: string[];
+  defaultListName: string;
+  onStarted: (jobId: string) => void;
+}) {
+  const [mode, setMode] = useState<'new' | 'existing' | 'none'>('new');
+  const [newListName, setNewListName] = useState(defaultListName);
+  const [lists, setLists] = useState<ContactList[]>([]);
+  const [listSearch, setListSearch] = useState('');
+  const [existingListId, setExistingListId] = useState('');
+  const [starting, setStarting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setNewListName(defaultListName);
+    setError(null);
+    fetch('/api/contact-lists').then((r) => r.ok ? r.json() : { lists: [] })
+      .then((d) => setLists(d.lists || d || []))
+      .catch(() => { });
+  }, [open, defaultListName]);
+
+  const filteredLists = lists.filter((l) => l.name.toLowerCase().includes(listSearch.toLowerCase()));
+
+  const handleStart = async () => {
+    setStarting(true); setError(null);
+    try {
+      let targetListId: string | null = null;
+
+      if (mode === 'new') {
+        if (!newListName.trim()) { setError('List name is required'); setStarting(false); return; }
+        const createRes = await fetch('/api/contact-lists', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: newListName.trim() }),
+        });
+        if (!createRes.ok) {
+          const d = await createRes.json().catch(() => ({}));
+          setError(d.message || 'Failed to create list'); setStarting(false); return;
+        }
+        const created = await createRes.json();
+        targetListId = created.id;
+      } else if (mode === 'existing') {
+        if (!existingListId) { setError('Select a list'); setStarting(false); return; }
+        targetListId = existingListId;
+      }
+
+      const syncRes = await fetch('/api/apollo/sync/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          listIds: selectedListIds,
+          listNames: selectedListNames,
+          targetListId,
+        }),
+      });
+      const syncData = await syncRes.json();
+      if (!syncRes.ok) { setError(syncData.message || 'Failed to start sync'); setStarting(false); return; }
+      onStarted(syncData.jobId);
+    } catch (e: any) {
+      setError(e?.message || 'Failed to start import');
+    } finally { setStarting(false); }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Where should these contacts go?</DialogTitle>
+        </DialogHeader>
+
+        <div className="space-y-4 text-sm">
+          <div className="text-muted-foreground text-xs">
+            Importing {selectedListIds.length} Apollo {selectedListIds.length === 1 ? 'list' : 'lists'}:
+            {' '}{selectedListNames.slice(0, 3).join(', ')}{selectedListNames.length > 3 ? `, +${selectedListNames.length - 3} more` : ''}
           </div>
-        )}
-      </CardContent>
-    </Card>
+
+          <label className="flex items-start gap-2 p-2 rounded border cursor-pointer hover:bg-gray-50">
+            <input type="radio" name="mode" value="new" checked={mode === 'new'}
+              onChange={() => setMode('new')} className="mt-1" />
+            <div className="flex-1">
+              <div className="font-medium">Save as a new aimailpilot list</div>
+              <div className="text-xs text-muted-foreground mb-2">Recommended — keeps Apollo imports grouped.</div>
+              {mode === 'new' && (
+                <Input value={newListName} onChange={(e) => setNewListName(e.target.value)} placeholder="List name" />
+              )}
+            </div>
+          </label>
+
+          <label className="flex items-start gap-2 p-2 rounded border cursor-pointer hover:bg-gray-50">
+            <input type="radio" name="mode" value="existing" checked={mode === 'existing'}
+              onChange={() => setMode('existing')} className="mt-1" />
+            <div className="flex-1">
+              <div className="font-medium">Add to an existing aimailpilot list</div>
+              <div className="text-xs text-muted-foreground mb-2">Merge these contacts into one of your current lists.</div>
+              {mode === 'existing' && (
+                <>
+                  <Input placeholder="Search your lists…" value={listSearch}
+                    onChange={(e) => setListSearch(e.target.value)} className="mb-1" />
+                  <div className="border rounded max-h-40 overflow-auto text-sm">
+                    {filteredLists.length === 0 ? (
+                      <div className="px-2 py-2 text-muted-foreground text-xs">No lists match.</div>
+                    ) : filteredLists.map((l) => (
+                      <div key={l.id} onClick={() => setExistingListId(l.id)}
+                        className={`px-2 py-1.5 cursor-pointer hover:bg-gray-50 ${existingListId === l.id ? 'bg-blue-50 font-medium' : ''}`}>
+                        {l.name}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          </label>
+
+          <label className="flex items-start gap-2 p-2 rounded border cursor-pointer hover:bg-gray-50">
+            <input type="radio" name="mode" value="none" checked={mode === 'none'}
+              onChange={() => setMode('none')} className="mt-1" />
+            <div className="flex-1">
+              <div className="font-medium">Import to All contacts only</div>
+              <div className="text-xs text-muted-foreground">Not attached to any list — accessible only from the main contacts view.</div>
+            </div>
+          </label>
+
+          {error && <div className="text-sm text-red-600 flex items-center gap-2"><XCircle className="h-4 w-4" />{error}</div>}
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button onClick={handleStart} disabled={starting}>
+            {starting ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Play className="h-4 w-4 mr-2" />}
+            Start import
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
