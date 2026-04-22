@@ -208,6 +208,88 @@ app.use((req, res, next) => {
       }
     }, 60 * 1000);
 
+    // One-time boot sweep: flip contacts to 'unsubscribed' when inbox reply was classified
+    // as unsubscribe but contact row was never updated (historical gap — classifier wrote
+    // replyType='unsubscribe' but no caller invoked markContactUnsubscribed).
+    setTimeout(async () => {
+      try {
+        const connectedRows = await storage.rawAll(`
+          SELECT LOWER(email) as email FROM email_accounts
+          UNION
+          SELECT LOWER(email) as email FROM warmup_accounts
+        `) as any[];
+        const protectedEmails = new Set<string>(connectedRows.map((r: any) => r.email).filter(Boolean));
+
+        const candidates = await storage.rawAll(`
+          SELECT DISTINCT c.id, c.email, c."organizationId", ui.id as "msgId", ui."campaignId"
+          FROM unified_inbox ui
+          JOIN contacts c ON LOWER(c.email) = LOWER(ui."fromEmail")
+              AND c."organizationId" = ui."organizationId"
+          WHERE ui."replyType" = 'unsubscribe'
+            AND (c.unsubscribed IS NULL OR c.unsubscribed = 0)
+            AND c.status != 'bounced'
+          LIMIT 5000
+        `) as any[];
+
+        let flipped = 0;
+        for (const c of candidates) {
+          const emailLower = (c.email || '').toLowerCase();
+          if (!emailLower || protectedEmails.has(emailLower)) continue;
+          try {
+            await storage.markContactUnsubscribed(c.id, c.campaignId || undefined);
+            flipped++;
+          } catch (e) { /* non-critical */ }
+        }
+        if (candidates.length > 0) {
+          log(`[UnsubReconcile] Boot sweep: ${candidates.length} inbox unsubscribe replies matched to contacts, ${flipped} flipped`);
+        }
+      } catch (e) {
+        console.error('[UnsubReconcile] Boot sweep error:', e);
+      }
+    }, 75 * 1000);
+
+    // Recurring: every 15 min, auto-flip contacts to 'unsubscribed' when a new inbox reply
+    // has been classified as unsubscribe. Same guard set (own accounts, not-already-bounced).
+    setTimeout(() => {
+      const runUnsubFlip = async () => {
+        try {
+          const connectedRows = await storage.rawAll(`
+            SELECT LOWER(email) as email FROM email_accounts
+            UNION
+            SELECT LOWER(email) as email FROM warmup_accounts
+          `) as any[];
+          const protectedEmails = new Set<string>(connectedRows.map((r: any) => r.email).filter(Boolean));
+
+          const candidates = await storage.rawAll(`
+            SELECT DISTINCT c.id, c.email, c."organizationId", ui."campaignId"
+            FROM unified_inbox ui
+            JOIN contacts c ON LOWER(c.email) = LOWER(ui."fromEmail")
+                AND c."organizationId" = ui."organizationId"
+            WHERE ui."replyType" = 'unsubscribe'
+              AND (c.unsubscribed IS NULL OR c.unsubscribed = 0)
+              AND c.status != 'bounced'
+            LIMIT 500
+          `) as any[];
+
+          let flipped = 0;
+          for (const c of candidates) {
+            const emailLower = (c.email || '').toLowerCase();
+            if (!emailLower || protectedEmails.has(emailLower)) continue;
+            try {
+              await storage.markContactUnsubscribed(c.id, c.campaignId || undefined);
+              flipped++;
+            } catch (e) { /* non-critical */ }
+          }
+          if (flipped > 0) log(`[UnsubAuto] Flipped ${flipped}/${candidates.length} contacts to unsubscribed`);
+        } catch (e) {
+          console.error('[UnsubAuto] sweep error:', e instanceof Error ? e.message : e);
+        }
+      };
+      runUnsubFlip();
+      setInterval(runUnsubFlip, 6 * 60 * 60 * 1000);
+      log('[UnsubAuto] Scheduled: first run now, then every 6 hours');
+    }, 120 * 1000);
+
     // Daily reset of email account send counters (check every hour, reset at midnight UTC)
     let lastResetDay = new Date().getUTCDate();
     setInterval(async () => {
