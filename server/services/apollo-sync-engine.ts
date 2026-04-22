@@ -336,13 +336,50 @@ const PAGES_PER_BATCH = 100;
 // Cooldown after hitting an hourly 429 before the resumer will retry.
 const HOURLY_COOLDOWN_MS = 65 * 60 * 1000;
 
-function isRateLimitError(msg: string): { isHourly: boolean; isMinute: boolean } {
+function isRateLimitError(msg: string): { isHourly: boolean; isMinute: boolean; isDaily: boolean } {
   const m = (msg || '').toLowerCase();
   const isRate = m.includes('429');
   return {
     isHourly: isRate && m.includes('per hour'),
     isMinute: isRate && m.includes('per minute'),
+    isDaily: isRate && m.includes('per day'),
   };
+}
+
+function msUntilNextUtcMidnight(): number {
+  const now = new Date();
+  const next = new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate() + 1,
+    0, 2, 0, 0, // 2 minutes past midnight UTC for safety buffer
+  ));
+  return next.getTime() - now.getTime();
+}
+
+// --- Daily quota tracking (stored in api_settings keyed by UTC date) ---
+// Apollo caps /v1/mixed_people/api_search at 600/day on lower tiers. We self-cap
+// at 550 to leave headroom for other endpoints (labels, auth/health) and so a
+// single org's sync doesn't completely drain shared orgs.
+const DAILY_SEARCH_CAP = 550;
+
+function todayUtcKey(): string {
+  return `apollo_search_calls_${new Date().toISOString().slice(0, 10)}`;
+}
+
+async function getTodaySearchCount(organizationId: string): Promise<number> {
+  const settings = await storage.getApiSettings(organizationId);
+  const raw = settings[todayUtcKey()];
+  const n = Number(raw || 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+async function incrementTodaySearchCount(organizationId: string): Promise<number> {
+  const key = todayUtcKey();
+  const settings = await storage.getApiSettings(organizationId);
+  const next = Number(settings[key] || 0) + 1;
+  await storage.setApiSetting(organizationId, key, String(next));
+  return next;
 }
 
 async function runSyncJob(jobId: string) {
@@ -371,6 +408,22 @@ async function runSyncJob(jobId: string) {
   let imported = Number(job.imported || 0);
   let totalFound = Number(job.totalFound || 0);
   let page = Math.max(1, Number(job.nextPage || 1));
+
+  // Pre-flight: if daily cap already reached at job start (e.g. queued overnight
+  // after another job drained it, or restarted after a daily 429), pause immediately
+  // rather than flipping to running and hitting the gate on page 1.
+  const preflightCount = await getTodaySearchCount(organizationId);
+  if (preflightCount >= DAILY_SEARCH_CAP) {
+    const resumeAt = new Date(Date.now() + msUntilNextUtcMidnight()).toISOString();
+    await updateJob(jobId, {
+      status: 'paused_rate_limited',
+      nextPage: page,
+      resumeAfter: resumeAt,
+      errorMessage: `Apollo daily quota already reached (${preflightCount}/${DAILY_SEARCH_CAP}) — will auto-resume after ${new Date(resumeAt).toLocaleString()}`,
+    });
+    console.log('[apollo-sync] pre-flight daily cap hit, pausing', { jobId, preflightCount, resumeAt });
+    return;
+  }
 
   await updateJob(jobId, { status: 'running', startedAt: job.startedAt || nowIso(), errorMessage: null });
 
@@ -409,24 +462,51 @@ async function runSyncJob(jobId: string) {
         return;
       }
 
+      // Pre-flight daily quota gate — pause if we've already used the self-cap
+      // for today. Cheaper than hitting Apollo's 429 and lets other endpoints
+      // (labels, auth/health) still work.
+      const todayCount = await getTodaySearchCount(organizationId);
+      if (todayCount >= DAILY_SEARCH_CAP) {
+        const resumeAt = new Date(Date.now() + msUntilNextUtcMidnight()).toISOString();
+        await updateJob(jobId, {
+          status: 'paused_rate_limited',
+          processed, alreadyCurrent, enriched, imported, totalFound,
+          nextPage: page,
+          resumeAfter: resumeAt,
+          errorMessage: `Apollo daily quota reached (${todayCount}/${DAILY_SEARCH_CAP}) — will auto-resume after ${new Date(resumeAt).toLocaleString()}`,
+        });
+        console.log('[apollo-sync] daily cap reached, pausing', { jobId, todayCount, resumeAt });
+        return;
+      }
+
       let people: any[]; let total: number;
       try {
         const res = await searchPeopleInLabels(apiKey, listIds, page, DEFAULT_PAGE_SIZE);
         people = res.people; total = res.total;
+        await incrementTodaySearchCount(organizationId);
       } catch (e: any) {
-        const { isHourly, isMinute } = isRateLimitError(e?.message || '');
-        if (isHourly || isMinute) {
+        const { isHourly, isMinute, isDaily } = isRateLimitError(e?.message || '');
+        if (isDaily || isHourly || isMinute) {
           // Pause and let the resumer retry after the appropriate cooldown.
-          const cooldownMs = isHourly ? HOURLY_COOLDOWN_MS : 2 * 60 * 1000;
+          const cooldownMs = isDaily
+            ? msUntilNextUtcMidnight()
+            : isHourly
+              ? HOURLY_COOLDOWN_MS
+              : 2 * 60 * 1000;
           const resumeAt = new Date(Date.now() + cooldownMs).toISOString();
+          // If Apollo says we hit the daily cap, snap our local counter to the
+          // cap so the pre-flight gate holds until tomorrow even if other jobs run.
+          if (isDaily) {
+            await storage.setApiSetting(organizationId, todayUtcKey(), String(DAILY_SEARCH_CAP));
+          }
           await updateJob(jobId, {
             status: 'paused_rate_limited',
             processed, alreadyCurrent, enriched, imported, totalFound,
             nextPage: page,
             resumeAfter: resumeAt,
-            errorMessage: `Apollo rate limit — will auto-resume after ${new Date(resumeAt).toLocaleString()}`,
+            errorMessage: `Apollo ${isDaily ? 'daily' : isHourly ? 'hourly' : 'per-minute'} rate limit — will auto-resume after ${new Date(resumeAt).toLocaleString()}`,
           });
-          console.log('[apollo-sync] rate-limited, pausing', { jobId, nextPage: page, resumeAt });
+          console.log('[apollo-sync] rate-limited, pausing', { jobId, nextPage: page, resumeAt, scope: isDaily ? 'daily' : isHourly ? 'hourly' : 'minute' });
           return;
         }
         throw e;
@@ -442,6 +522,8 @@ async function runSyncJob(jobId: string) {
       }
       if (!people.length) break;
 
+      let pageSkipped = 0;
+      let pageChanged = 0;
       for (const p of people) {
         const email = getPrimaryEmail(p);
         if (!email) { processed++; continue; }
@@ -449,9 +531,9 @@ async function runSyncJob(jobId: string) {
           const result = await reconcileContact({
             organizationId, email, apolloPerson: p, targetListId, overwriteMode,
           });
-          if (result === 'skipped') alreadyCurrent++;
-          else if (result === 'enriched') enriched++;
-          else if (result === 'imported') imported++;
+          if (result === 'skipped') { alreadyCurrent++; pageSkipped++; }
+          else if (result === 'enriched') { enriched++; pageChanged++; }
+          else if (result === 'imported') { imported++; pageChanged++; }
         } catch (e) {
           console.error('[apollo-sync] reconcile error for', email, e);
         }
@@ -463,6 +545,14 @@ async function runSyncJob(jobId: string) {
       // Stop conditions (only trust totalFound if we kept a reasonable value).
       if (totalFound > 0 && processed >= totalFound) break;
       if (people.length < DEFAULT_PAGE_SIZE) break;
+      // Early-exit quota saver: if we've processed at least 2 pages and the
+      // last 2 consecutive pages were 100% already-current (no new imports,
+      // no enrichments), the remainder of the list is almost certainly unchanged.
+      // Bail out instead of burning quota re-confirming what we already know.
+      if (pageChanged === 0 && pageSkipped === people.length && page >= 2) {
+        console.log('[apollo-sync] early-exit: full page was all already-current, skipping remaining pages', { jobId, page, pageSkipped });
+        break;
+      }
       page++;
     }
 

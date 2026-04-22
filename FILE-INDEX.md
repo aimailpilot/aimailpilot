@@ -33,6 +33,7 @@
 | `server/services/oauth-service.ts` | OAuth credential management helpers |
 | `server/services/ai-command.ts` | AI command interface / natural language actions |
 | `server/services/scheduler.ts` | Generic task scheduling utility |
+| `server/services/auth-health.ts` | OAuth reauth flagging — records `invalid_grant` / AADSTS failures, flips `authStatus='reauth_required'` at 3 consecutive failures. Fail-open (never throws). Wired into gmail-reply-tracker, outlook-reply-tracker, warmup-engine |
 | `server/services/spreadsheet-importer.ts` | Excel/CSV/Google Sheets parsing for contact import |
 | `server/google-sheets-service.ts` | Google Sheets API — read rows for contact import |
 
@@ -97,6 +98,7 @@
 | **Team scorecard** | `server/routes.ts` (`/api/team/scorecard`) | `team-scorecard.tsx` |
 | **My dashboard** | `server/routes.ts` (`/api/my/dashboard`) | `my-dashboard.tsx` |
 | **Email account setup** | `server/routes/oauth-routes.ts`, `server/routes.ts` | `email-account-setup.tsx` |
+| **OAuth reauth flagging + UI** | `server/services/auth-health.ts`, `server/routes.ts` (`GET /api/email-accounts/auth-health`, extended `GET /api/email-accounts`), wiring in `gmail-reply-tracker.ts` / `outlook-reply-tracker.ts` / `warmup-engine.ts` | `mailmeteor-dashboard.tsx` (`ReauthBanner`), `email-account-setup.tsx` (badge + Reconnect button) |
 | **Contact import** | `server/routes.ts` (`/api/contacts/import`), `spreadsheet-importer.ts` | `email-import-setup.tsx` |
 | **SuperAdmin** | `server/routes.ts` (`requireSuperAdmin`) | `superadmin-dashboard.tsx` |
 
@@ -117,6 +119,7 @@
 | Warmup not working | `warmup-engine.ts` (token + daily counter reset) |
 | Contact activities/pipeline | `server/routes.ts` (~lines 4838-4930) — quote all camelCase for PG |
 | Email account tokens 401 | `server/routes.ts` (`getGmailAccessToken`, `getOutlookAccessToken`) |
+| Account flagged for reauth but shouldn't be | `server/services/auth-health.ts` — detector only matches `invalid_grant` + AADSTS codes, threshold=3. Check `authFailureCount` / `authLastErrorCode` columns on `email_accounts`. Clear manually via `UPDATE email_accounts SET "authStatus"='active', "authFailureCount"=0 WHERE email=?` |
 | Raw SQL 0 rows in PG | Double-quote camelCase: `"organizationId"`, `"contactId"`, etc. |
 | Import crash | Never import `server/db.ts`. Use `storage.rawGet/rawAll/rawRun` |
 
