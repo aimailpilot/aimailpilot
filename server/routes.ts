@@ -12977,6 +12977,123 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     }
   });
 
+  // ===== Phase 2: Apollo People Search =====
+  // POST /api/apollo/search/preview — filter-based search with dedup overlay. No credits spent.
+  app.post('/api/apollo/search/preview', requireAuth, async (req: any, res) => {
+    try {
+      if (!isOrgAdmin(req.user)) return res.status(403).json({ message: 'Admin access required' });
+      const { filters } = req.body || {};
+      if (!filters || typeof filters !== 'object') {
+        return res.status(400).json({ message: 'filters is required' });
+      }
+      const search = await import('./services/apollo-search-engine.js');
+      const result = await search.previewSearch(req.user.organizationId, filters);
+      res.json(result);
+    } catch (error: any) {
+      console.error('[apollo search preview]', error);
+      res.status(500).json({ message: error?.message || 'Search preview failed' });
+    }
+  });
+
+  // POST /api/apollo/search/import — reveal + import selected people. Spends credits.
+  app.post('/api/apollo/search/import', requireAuth, async (req: any, res) => {
+    try {
+      if (!isOrgAdmin(req.user)) return res.status(403).json({ message: 'Admin access required' });
+      const { peopleIds, allowReveal, revealBudgetCredits, targetListId, saveToApolloListName } = req.body || {};
+      if (!Array.isArray(peopleIds) || !peopleIds.length) {
+        return res.status(400).json({ message: 'peopleIds required' });
+      }
+      if (peopleIds.length > 2000) {
+        return res.status(400).json({ message: 'Max 2000 people per import' });
+      }
+      const budget = Math.max(0, Math.min(Number(revealBudgetCredits) || 0, 10000));
+      const search = await import('./services/apollo-search-engine.js');
+      const jobId = await search.startImportJob({
+        organizationId: req.user.organizationId,
+        triggeredBy: req.user.id,
+        peopleIds: peopleIds.map(String),
+        allowReveal: Boolean(allowReveal),
+        revealBudgetCredits: budget,
+        targetListId: targetListId || null,
+        saveToApolloListName: saveToApolloListName || null,
+      });
+      res.json({ jobId });
+    } catch (error: any) {
+      console.error('[apollo search import]', error);
+      res.status(500).json({ message: error?.message || 'Search import failed' });
+    }
+  });
+
+  // GET /api/apollo/search/import/:jobId — poll import progress.
+  app.get('/api/apollo/search/import/:jobId', requireAuth, async (req: any, res) => {
+    try {
+      if (!isOrgAdmin(req.user)) return res.status(403).json({ message: 'Admin access required' });
+      const search = await import('./services/apollo-search-engine.js');
+      const progress = search.getImportProgress(req.params.jobId);
+      if (!progress) return res.status(404).json({ message: 'Job not found' });
+      res.json(progress);
+    } catch (error: any) {
+      res.status(500).json({ message: 'Failed to fetch progress' });
+    }
+  });
+
+  // ===== Apollo Saved Searches =====
+  app.get('/api/apollo/saved-searches', requireAuth, async (req: any, res) => {
+    try {
+      if (!isOrgAdmin(req.user)) return res.status(403).json({ message: 'Admin access required' });
+      const search = await import('./services/apollo-search-engine.js');
+      const rows = await search.listSavedSearches(req.user.organizationId);
+      const parsed = rows.map((r: any) => ({
+        ...r,
+        filters: typeof r.filters === 'string' ? JSON.parse(r.filters) : r.filters,
+      }));
+      res.json({ searches: parsed });
+    } catch (error: any) {
+      res.status(500).json({ message: error?.message || 'Failed to load saved searches' });
+    }
+  });
+
+  app.post('/api/apollo/saved-searches', requireAuth, async (req: any, res) => {
+    try {
+      if (!isOrgAdmin(req.user)) return res.status(403).json({ message: 'Admin access required' });
+      const { name, filters } = req.body || {};
+      if (!name?.trim()) return res.status(400).json({ message: 'name required' });
+      const search = await import('./services/apollo-search-engine.js');
+      const id = await search.createSavedSearch({
+        organizationId: req.user.organizationId,
+        userId: req.user.id,
+        name: name.trim(),
+        filters: filters || {},
+      });
+      res.json({ id });
+    } catch (error: any) {
+      res.status(500).json({ message: error?.message || 'Failed to save search' });
+    }
+  });
+
+  app.delete('/api/apollo/saved-searches/:id', requireAuth, async (req: any, res) => {
+    try {
+      if (!isOrgAdmin(req.user)) return res.status(403).json({ message: 'Admin access required' });
+      const search = await import('./services/apollo-search-engine.js');
+      await search.deleteSavedSearch(req.user.organizationId, req.params.id);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ message: error?.message || 'Failed to delete saved search' });
+    }
+  });
+
+  app.post('/api/apollo/saved-searches/:id/run', requireAuth, async (req: any, res) => {
+    try {
+      if (!isOrgAdmin(req.user)) return res.status(403).json({ message: 'Admin access required' });
+      const search = await import('./services/apollo-search-engine.js');
+      const result = await search.runSavedSearch(req.user.organizationId, req.params.id);
+      res.json(result);
+    } catch (error: any) {
+      console.error('[apollo saved search run]', error);
+      res.status(500).json({ message: error?.message || 'Failed to run saved search' });
+    }
+  });
+
   const httpServer = createServer(app);
   return httpServer;
 }

@@ -61,7 +61,7 @@ async function throttledFetch(url: string, opts: RequestInit = {}): Promise<Resp
   return fetch(url, opts);
 }
 
-async function apolloRequest(
+export async function apolloRequest(
   apiKey: string,
   path: string,
   method: 'GET' | 'POST' = 'GET',
@@ -208,7 +208,7 @@ export async function previewSync(
   return { totalFound: total, samples: { wouldImport, wouldEnrich, alreadyCurrent } };
 }
 
-function getPrimaryEmail(p: any): string {
+export function getPrimaryEmail(p: any): string {
   return String(p.email || p.primary_email || p.emails?.[0]?.email || '').toLowerCase().trim();
 }
 
@@ -451,7 +451,7 @@ async function runSyncJob(jobId: string) {
   }
 }
 
-async function reconcileContact(params: {
+export async function reconcileContact(params: {
   organizationId: string;
   email: string;
   apolloPerson: any;

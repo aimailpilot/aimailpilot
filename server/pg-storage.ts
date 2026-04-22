@@ -833,6 +833,19 @@ async function initializeSchema() {
         "createdAt" TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_apollo_usage_org ON apollo_usage_log("organizationId", "createdAt" DESC);
+
+      CREATE TABLE IF NOT EXISTS apollo_saved_searches (
+        id TEXT PRIMARY KEY,
+        "organizationId" TEXT NOT NULL,
+        "createdBy" TEXT NOT NULL,
+        name TEXT NOT NULL,
+        filters JSONB NOT NULL DEFAULT '{}',
+        "lastRunAt" TEXT,
+        "lastSeenIds" JSONB DEFAULT '[]',
+        "createdAt" TEXT NOT NULL,
+        "updatedAt" TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_apollo_saved_searches_org ON apollo_saved_searches("organizationId", "updatedAt" DESC);
     `);
 
     await client.query('COMMIT');
