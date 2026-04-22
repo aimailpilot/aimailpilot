@@ -148,7 +148,11 @@ async function searchPeopleInLabels(
   };
   const data = await apolloRequest(apiKey, '/v1/mixed_people/api_search', 'POST', body);
   const people: any[] = data?.people || data?.contacts || [];
-  const total: number = Number(data?.pagination?.total_entries ?? people.length);
+  // Apollo's new api_search returns pagination under several possible shapes.
+  const pg = data?.pagination || {};
+  const total: number = Number(
+    pg.total_entries ?? pg.total ?? pg.total_people ?? data?.total_entries ?? people.length,
+  );
   return { people, total };
 }
 
@@ -352,8 +356,15 @@ async function runSyncJob(jobId: string) {
 
   try {
     let page = 1;
+    // Hard safety cap: Apollo api_search maxes at ~50k records via pagination.
+    // 500 pages × 100/page = 50k — well beyond any realistic saved list.
+    const MAX_PAGES = 500;
     // eslint-disable-next-line no-constant-condition
     while (true) {
+      if (page > MAX_PAGES) {
+        console.warn('[apollo-sync] hit MAX_PAGES cap', { jobId, page });
+        break;
+      }
       if (isCancelled(jobId)) {
         await updateJob(jobId, {
           status: 'cancelled',
@@ -401,6 +412,9 @@ async function runSyncJob(jobId: string) {
       // Checkpoint progress every page.
       await updateJob(jobId, { processed, alreadyCurrent, enriched, imported });
 
+      // Stop if we've processed everything the total claims exists.
+      if (totalFound > 0 && processed >= totalFound) break;
+      // Short page = last page.
       if (people.length < DEFAULT_PAGE_SIZE) break;
       page++;
     }
