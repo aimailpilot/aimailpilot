@@ -290,6 +290,102 @@ app.use((req, res, next) => {
       log('[UnsubAuto] Scheduled: first run now, then every 6 hours');
     }, 120 * 1000);
 
+    // [ContactStatusRecalc] Keep contacts.status (cold/warm/hot/replied) in sync with messages activity.
+    // Tracking endpoints update messages.openedAt/clickedAt/repliedAt in real-time; this sweep flips
+    // contacts.status + counters so Warm/Hot filter chips populate. Does NOT touch tracking hot path.
+    // Boot sweep at 90s: backfill contacts with activity in last 90 days (cap 10000).
+    // Recurring every 6h: delta contacts since last sweep (cap 2000).
+    setTimeout(async () => {
+      try {
+        const rows = await storage.rawAll(`
+          SELECT DISTINCT "contactId" FROM messages
+          WHERE "contactId" IS NOT NULL
+            AND ("openedAt" IS NOT NULL OR "clickedAt" IS NOT NULL OR "repliedAt" IS NOT NULL)
+            AND COALESCE("sentAt", "createdAt") >= NOW() - INTERVAL '90 days'
+          LIMIT 10000
+        `) as any[];
+        let recalced = 0;
+        for (const r of rows) {
+          if (!r.contactId) continue;
+          try { await storage.recalculateContactStatus(r.contactId); recalced++; } catch {}
+        }
+        if (rows.length > 0) log(`[ContactStatusRecalc] Boot sweep: ${rows.length} candidates, ${recalced} contacts recalculated`);
+      } catch (e) {
+        console.error('[ContactStatusRecalc] Boot sweep error:', e instanceof Error ? e.message : e);
+      }
+
+      let lastRecalcAt = new Date().toISOString();
+      const runStatusRecalc = async () => {
+        try {
+          const cutoff = lastRecalcAt;
+          const rows = await storage.rawAll(`
+            SELECT DISTINCT "contactId" FROM messages
+            WHERE "contactId" IS NOT NULL
+              AND (("openedAt" IS NOT NULL AND "openedAt" > ?)
+                OR ("clickedAt" IS NOT NULL AND "clickedAt" > ?)
+                OR ("repliedAt" IS NOT NULL AND "repliedAt" > ?))
+            LIMIT 2000
+          `, cutoff, cutoff, cutoff) as any[];
+          let recalced = 0;
+          for (const r of rows) {
+            if (!r.contactId) continue;
+            try { await storage.recalculateContactStatus(r.contactId); recalced++; } catch {}
+          }
+          lastRecalcAt = new Date().toISOString();
+          if (rows.length > 0) log(`[ContactStatusRecalc] Delta sweep: ${rows.length} candidates, ${recalced} contacts recalculated`);
+        } catch (e) {
+          console.error('[ContactStatusRecalc] Delta sweep error:', e instanceof Error ? e.message : e);
+        }
+      };
+      setInterval(runStatusRecalc, 6 * 60 * 60 * 1000);
+      log('[ContactStatusRecalc] Scheduled: boot sweep complete, delta sweep every 6 hours');
+
+      // [InboxReplyStatusFlip] Flip contacts to 'replied' if they have unified_inbox replies or
+      // email_history received entries, but status is still cold/warm/hot. Never touches bounced/
+      // unsubscribed/replied. Only upgrades — safe to re-run.
+      const runInboxReplyFlip = async () => {
+        try {
+          const rows = await storage.rawAll(`
+            SELECT DISTINCT c.id
+            FROM contacts c
+            WHERE c.status IN ('cold','warm','hot')
+              AND (
+                EXISTS (
+                  SELECT 1 FROM unified_inbox ui
+                  WHERE ui."contactId" = c.id
+                    AND (ui.status = 'replied' OR ui."repliedAt" IS NOT NULL
+                      OR ui."replyType" IN ('positive','negative','general'))
+                )
+                OR EXISTS (
+                  SELECT 1 FROM email_history eh
+                  WHERE eh."organizationId" = c."organizationId"
+                    AND LOWER(eh."fromEmail") = LOWER(c.email)
+                    AND eh.direction = 'received'
+                )
+              )
+            LIMIT 5000
+          `) as any[];
+          let flipped = 0;
+          for (const r of rows) {
+            if (!r.id) continue;
+            try {
+              await storage.rawRun(
+                `UPDATE contacts SET status = 'replied', "updatedAt" = ? WHERE id = ? AND status IN ('cold','warm','hot')`,
+                new Date().toISOString(), r.id
+              );
+              flipped++;
+            } catch {}
+          }
+          if (rows.length > 0) log(`[InboxReplyStatusFlip] ${rows.length} candidates, ${flipped} contacts upgraded to 'replied' from inbox/history signals`);
+        } catch (e) {
+          console.error('[InboxReplyStatusFlip] sweep error:', e instanceof Error ? e.message : e);
+        }
+      };
+      runInboxReplyFlip();
+      setInterval(runInboxReplyFlip, 6 * 60 * 60 * 1000);
+      log('[InboxReplyStatusFlip] Scheduled: boot sweep complete, delta sweep every 6 hours');
+    }, 90 * 1000);
+
     // Daily reset of email account send counters (check every hour, reset at midnight UTC)
     let lastResetDay = new Date().getUTCDate();
     setInterval(async () => {
