@@ -1,5 +1,104 @@
 import { storage } from "../storage";
 import { OAuth2Client } from 'google-auth-library';
+import { classifyReply } from "./reply-classifier";
+
+const SYSTEM_EMAIL_FRAGMENTS = ['mailer-daemon', 'postmaster', 'noreply', 'no-reply', 'bounce', 'googlemail', 'amazonses'];
+
+async function getOrgProtectedEmails(orgId: string): Promise<Set<string>> {
+  const connected = new Set<string>();
+  try {
+    const accounts = await storage.rawAll(`SELECT email FROM email_accounts WHERE "organizationId" = ?`, orgId) as any[];
+    for (const a of accounts) if (a.email) connected.add(a.email.toLowerCase());
+    const warmup = await storage.rawAll(`SELECT email FROM warmup_accounts WHERE "organizationId" = ?`, orgId) as any[];
+    for (const w of warmup) if (w.email) connected.add(w.email.toLowerCase());
+  } catch (e) { /* non-critical */ }
+  return connected;
+}
+
+function isSafeEmailToSuppress(email: string, connected: Set<string>): boolean {
+  const lower = (email || '').toLowerCase();
+  if (!lower || !lower.includes('@')) return false;
+  if (connected.has(lower)) return false;
+  return !SYSTEM_EMAIL_FRAGMENTS.some(f => lower.includes(f));
+}
+
+/**
+ * Scan historical email_history for bounce/unsubscribe/negative signals and
+ * push them to suppression_list + flip contact status. Only flags when the
+ * rule classifier reports high-confidence bounce/unsubscribe — mirrors the
+ * guardrails used by bounce-sync-engine. Additive only (won't un-suppress).
+ */
+export async function sweepSuppressionSignalsFromHistory(orgId: string): Promise<{
+  scanned: number; suppressed: number; contactsBounced: number; contactsUnsubscribed: number;
+}> {
+  const out = { scanned: 0, suppressed: 0, contactsBounced: 0, contactsUnsubscribed: 0 };
+  const connected = await getOrgProtectedEmails(orgId);
+
+  let rows: any[] = [];
+  try {
+    rows = await storage.rawAll(`
+      SELECT "fromEmail", "fromName", subject, snippet
+      FROM email_history
+      WHERE "organizationId" = ? AND direction = 'received'
+        AND "fromEmail" IS NOT NULL AND "fromEmail" != ''
+      ORDER BY "receivedAt" DESC
+      LIMIT 5000
+    `, orgId) as any[];
+  } catch (e) {
+    console.error('[LeadIntel] sweepSuppressionSignals query failed:', e instanceof Error ? e.message : e);
+    return out;
+  }
+
+  // Already-suppressed lookup (avoid dupes)
+  const existing = new Set<string>();
+  try {
+    const supp = await storage.rawAll(`SELECT email FROM suppression_list WHERE "organizationId" = ?`, orgId) as any[];
+    for (const s of supp) if (s.email) existing.add(s.email.toLowerCase());
+  } catch { /* non-critical */ }
+
+  for (const r of rows) {
+    out.scanned++;
+    const email = (r.fromEmail || '').toLowerCase().trim();
+    if (!isSafeEmailToSuppress(email, connected)) continue;
+    if (existing.has(email)) continue;
+
+    const cls = classifyReply(r.subject || '', r.snippet || '', r.fromEmail || '', r.fromName || '');
+    let reason: 'bounce' | 'unsubscribe' | null = null;
+    if (cls.replyType === 'bounce' && cls.confidence >= 0.9) reason = 'bounce';
+    else if (cls.replyType === 'unsubscribe' && cls.confidence >= 0.85) reason = 'unsubscribe';
+    if (!reason) continue;
+
+    try {
+      await storage.addToSuppressionList(orgId, email, reason, {
+        bounceType: reason === 'bounce' ? (cls.bounceType || 'hard') : undefined,
+        source: 'lead-intel-sweep',
+        notes: cls.reason,
+      });
+      existing.add(email);
+      out.suppressed++;
+
+      // Flip contact status if a matching contact row exists
+      try {
+        const contact = await storage.rawGet(
+          `SELECT id FROM contacts WHERE "organizationId" = ? AND LOWER(email) = ? LIMIT 1`,
+          orgId, email
+        ) as any;
+        if (contact?.id) {
+          if (reason === 'bounce') {
+            await storage.markContactBounced(contact.id, cls.bounceType || 'hard');
+            out.contactsBounced++;
+          } else {
+            await storage.markContactUnsubscribed(contact.id);
+            out.contactsUnsubscribed++;
+          }
+        }
+      } catch (e) { /* non-critical */ }
+    } catch (e) { /* non-critical */ }
+  }
+
+  console.log(`[LeadIntel] Suppression sweep org=${orgId}: scanned=${out.scanned} suppressed=${out.suppressed} bounced=${out.contactsBounced} unsubscribed=${out.contactsUnsubscribed}`);
+  return out;
+}
 
 /**
  * Lead Intelligence Engine
@@ -962,6 +1061,13 @@ export async function runFullLeadIntelligence(orgId: string, monthsBack: number 
 
   // Step 1: Scan email history
   const scan = await scanOrgEmailHistory(orgId, monthsBack, emailAccountIds);
+
+  // Step 1b: Sweep historical bounce/unsubscribe signals → suppression_list + contact status
+  try {
+    await sweepSuppressionSignalsFromHistory(orgId);
+  } catch (e) {
+    console.error('[LeadIntel] Suppression sweep failed:', e instanceof Error ? e.message : e);
+  }
 
   // Step 2: Analyze and classify
   const analysis = await analyzeOrgLeads(orgId, emailAccountIds);

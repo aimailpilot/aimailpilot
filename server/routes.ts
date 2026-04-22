@@ -9855,6 +9855,50 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     }
   });
 
+  // Manual "Do not contact" from unified inbox — suppresses the sender and flips
+  // the matching contact row. Used for replies the classifier didn't auto-suppress.
+  app.post('/api/inbox/:id/do-not-contact', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const msg = await storage.getInboxMessage(req.params.id) as any;
+      if (!msg || msg.organizationId !== orgId) return res.status(404).json({ message: 'Not found' });
+
+      const email = (msg.fromEmail || '').toLowerCase().trim();
+      if (!email || !email.includes('@')) return res.status(400).json({ message: 'Invalid sender email' });
+
+      // Guard: don't suppress own sending / warmup accounts
+      const accounts = await storage.rawAll(`SELECT email FROM email_accounts WHERE "organizationId" = ?`, orgId) as any[];
+      const warmup = await storage.rawAll(`SELECT email FROM warmup_accounts WHERE "organizationId" = ?`, orgId) as any[];
+      const protectedSet = new Set<string>();
+      for (const a of accounts) if (a.email) protectedSet.add(a.email.toLowerCase());
+      for (const w of warmup) if (w.email) protectedSet.add(w.email.toLowerCase());
+      if (protectedSet.has(email)) return res.status(400).json({ message: 'Cannot suppress an account you own' });
+
+      const reason = (req.body?.reason === 'bounce' ? 'bounce' : 'unsubscribe') as 'bounce' | 'unsubscribe';
+      await storage.addToSuppressionList(orgId, email, reason, { source: 'manual-inbox', notes: req.body?.notes });
+
+      let contactFlipped = false;
+      const contact = await storage.rawGet(
+        `SELECT id FROM contacts WHERE "organizationId" = ? AND LOWER(email) = ? LIMIT 1`,
+        orgId, email
+      ) as any;
+      if (contact?.id) {
+        if (reason === 'bounce') await storage.markContactBounced(contact.id, 'hard');
+        else await storage.markContactUnsubscribed(contact.id, msg.campaignId);
+        try {
+          await storage.addContactActivity(orgId, contact.id, reason === 'bounce' ? 'bounced' : 'unsubscribed',
+            `Marked ${reason} via inbox by ${req.user.email || req.user.id}`);
+        } catch { /* non-critical */ }
+        contactFlipped = true;
+      }
+
+      res.json({ success: true, email, reason, contactFlipped });
+    } catch (error) {
+      console.error('[do-not-contact] error:', error);
+      res.status(500).json({ message: 'Failed to suppress contact' });
+    }
+  });
+
   // ========== v12: CONTACT ACTIVITY TIMELINE ==========
 
   app.get('/api/contacts/:id/activity', requireAuth, async (req: any, res) => {

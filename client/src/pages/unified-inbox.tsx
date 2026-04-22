@@ -373,6 +373,27 @@ export default function UnifiedInbox() {
     } catch {}
   };
 
+  const markDoNotContact = async (id: string, fromEmail: string, reason: 'unsubscribe' | 'bounce' = 'unsubscribe') => {
+    if (!confirm(`Suppress ${fromEmail}? Future campaigns will skip this address and the contact will be marked ${reason === 'bounce' ? 'bounced' : 'unsubscribed'}.`)) return;
+    try {
+      const resp = await fetch(`/api/inbox/${id}/do-not-contact`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ reason }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        alert(`Suppressed ${data.email}${data.contactFlipped ? ' and updated contact record.' : '. No matching contact to update.'}`);
+      } else {
+        const err = await resp.json().catch(() => ({}));
+        alert(err.message || 'Failed to suppress.');
+      }
+    } catch {
+      alert('Failed to suppress.');
+    }
+  };
+
   const updateLeadStatus = async (id: string, leadStatus: string) => {
     try {
       await fetch(`/api/inbox/${id}/lead-status`, {
@@ -687,6 +708,18 @@ export default function UnifiedInbox() {
             )}
           </div>
           <div className="flex items-center gap-1">
+            {/* Do Not Contact — shown for negative/unsubscribe/bounce replies */}
+            {['negative', 'unsubscribe', 'bounce'].includes(selectedMessage.replyType || '') && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-[10px] gap-1 border-red-200 text-red-700 hover:bg-red-50"
+                onClick={() => markDoNotContact(selectedMessage.id, selectedMessage.fromEmail, selectedMessage.replyType === 'bounce' ? 'bounce' : 'unsubscribe')}
+                title="Add sender to suppression list and flip contact status so future campaigns skip them"
+              >
+                <Ban className="h-3 w-3" /> Do not contact
+              </Button>
+            )}
             {/* Reply Type Classification */}
             <Select value={selectedMessage.replyType || ''} onValueChange={(v) => classifyMessage(selectedMessage.id, v)}>
               <SelectTrigger className="w-[110px] h-7 text-[10px]">
