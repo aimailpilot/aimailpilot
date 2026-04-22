@@ -169,6 +169,45 @@ app.use((req, res, next) => {
       log('[ReplyQualityAuto] Scheduled: first run now, then every 15 minutes');
     }, 90 * 1000);
 
+    // One-time boot sweep: reconcile messages.status='bounced' with contacts.status='bounced'
+    // Covers the gap where a campaign/tracker wrote a bounced message row but contact flip was
+    // missed (crash, partial failure, or contact lookup failed at the time).
+    setTimeout(async () => {
+      try {
+        const connectedRows = await storage.rawAll(`
+          SELECT LOWER(email) as email FROM email_accounts
+          UNION
+          SELECT LOWER(email) as email FROM warmup_accounts
+        `) as any[];
+        const protectedEmails = new Set<string>(connectedRows.map((r: any) => r.email).filter(Boolean));
+
+        const orphans = await storage.rawAll(`
+          SELECT DISTINCT c.id, c.email, c."organizationId"
+          FROM messages m
+          JOIN contacts c ON c.id = m."contactId"
+          WHERE m.status = 'bounced'
+            AND c.status != 'bounced'
+            AND c.status != 'unsubscribed'
+          LIMIT 5000
+        `) as any[];
+
+        let reconciled = 0;
+        for (const c of orphans) {
+          const emailLower = (c.email || '').toLowerCase();
+          if (!emailLower || protectedEmails.has(emailLower)) continue;
+          try {
+            await storage.markContactBounced(c.id, 'hard');
+            reconciled++;
+          } catch (e) { /* non-critical */ }
+        }
+        if (orphans.length > 0) {
+          log(`[BounceReconcile] Boot sweep: ${orphans.length} orphan bounced messages found, ${reconciled} contacts reconciled`);
+        }
+      } catch (e) {
+        console.error('[BounceReconcile] Boot sweep error:', e);
+      }
+    }, 60 * 1000);
+
     // Daily reset of email account send counters (check every hour, reset at midnight UTC)
     let lastResetDay = new Date().getUTCDate();
     setInterval(async () => {
