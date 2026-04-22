@@ -1,5 +1,6 @@
 import { storage } from "../storage";
 import { OAuth2Client } from 'google-auth-library';
+import { recordAuthFailure, recordAuthSuccess } from './auth-health';
 
 /**
  * Warmup Engine — Self-warmup between connected org accounts.
@@ -86,9 +87,11 @@ async function getGmailAccessToken(orgId: string, senderEmail: string): Promise<
             await storage.setApiSetting(orgId, 'gmail_access_token', accessToken);
             if (credentials.expiry_date) await storage.setApiSetting(orgId, 'gmail_token_expiry', String(credentials.expiry_date));
           }
+          recordAuthSuccess(orgId, senderEmail).catch(() => {});
         }
       } catch (e) {
         console.error(`[Warmup] Gmail token refresh failed for ${senderEmail}:`, e instanceof Error ? e.message : e);
+        recordAuthFailure(orgId, senderEmail, e).catch(() => {});
       }
     }
   }
@@ -150,10 +153,15 @@ async function getOutlookAccessToken(orgId: string, senderEmail: string): Promis
                 if (tokens.refresh_token) await storage.setApiSetting(orgId, 'microsoft_refresh_token', tokens.refresh_token);
                 await storage.setApiSetting(orgId, 'microsoft_token_expiry', String(exp));
               }
+              recordAuthSuccess(orgId, senderEmail).catch(() => {});
             }
+          } else {
+            const errText = await resp.text().catch(() => '');
+            recordAuthFailure(orgId, senderEmail, errText).catch(() => {});
           }
         } catch (e) {
           console.error(`[Warmup] Outlook token refresh failed for ${senderEmail}:`, e instanceof Error ? e.message : e);
+          recordAuthFailure(orgId, senderEmail, e).catch(() => {});
         }
       }
     }

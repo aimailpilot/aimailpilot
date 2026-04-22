@@ -11,6 +11,7 @@
 
 import { OAuth2Client } from 'google-auth-library';
 import { storage } from '../storage';
+import { recordAuthFailure, recordAuthSuccess } from './auth-health';
 
 interface GmailMessage {
   id: string;
@@ -155,9 +156,11 @@ export class GmailReplyTracker {
                 if (credentials.expiry_date) await storage.setApiSetting(orgId, 'gmail_token_expiry', String(credentials.expiry_date));
               }
               accessToken = credentials.access_token;
+              if (senderEmail) recordAuthSuccess(orgId, senderEmail).catch(() => {});
             }
           } catch (e) {
             console.error(`[GmailReplyTracker] Token refresh failed for ${senderEmail || 'org-default'}:`, e);
+            if (senderEmail) recordAuthFailure(orgId, senderEmail, e).catch(() => {});
           }
         }
       }

@@ -2279,6 +2279,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
             ...a.smtpConfig,
             auth: { user: a.smtpConfig.auth?.user, pass: isOAuth ? 'OAUTH_TOKEN' : '••••••••' }
           } : null,
+          authStatus: a.authStatus || 'active',
+          authFailureCount: a.authFailureCount || 0,
+          authLastFailureAt: a.authLastFailureAt || null,
+          authLastErrorCode: a.authLastErrorCode || null,
         };
       });
       res.json(safe);
@@ -2288,9 +2292,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Lightweight endpoint for dashboard banner — returns only accounts needing reauth, scoped to caller
+  app.get('/api/email-accounts/auth-health', async (req: any, res) => {
+    try {
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      const all = await storage.getEmailAccounts(req.user.organizationId);
+      const visible = isAdmin ? all : all.filter((a: any) => a.userId === req.user.id);
+      const needsReauth = visible
+        .filter((a: any) => a.authStatus === 'reauth_required')
+        .map((a: any) => ({
+          id: a.id,
+          email: a.email,
+          provider: a.provider,
+          authFailureCount: a.authFailureCount || 0,
+          authLastFailureAt: a.authLastFailureAt || null,
+          authLastErrorCode: a.authLastErrorCode || null,
+        }));
+      res.json({ needsReauth, count: needsReauth.length });
+    } catch (error) {
+      console.error('[AuthHealth] Error:', error);
+      res.status(500).json({ message: 'Failed to fetch auth health', needsReauth: [], count: 0 });
+    }
+  });
+
   app.get('/api/email-accounts/:id', async (req: any, res, next: any) => {
     // Skip if this is a known static sub-path (handled by later routes)
-    if (['quota-summary', 'recommend'].includes(req.params.id)) {
+    if (['quota-summary', 'recommend', 'auth-health'].includes(req.params.id)) {
       return next();
     }
     try {

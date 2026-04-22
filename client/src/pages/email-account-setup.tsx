@@ -28,6 +28,10 @@ interface EmailAccount {
   authMethod?: 'oauth' | 'smtp';
   hasValidTokens?: boolean;
   tokenStatus?: 'connected' | 'tokens_missing' | 'smtp' | 'unknown';
+  authStatus?: 'active' | 'reauth_required';
+  authFailureCount?: number;
+  authLastFailureAt?: string | null;
+  authLastErrorCode?: string | null;
   smtpConfig?: {
     host: string;
     port: number;
@@ -653,6 +657,8 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
                           {(account.authMethod === 'oauth' || account.smtpConfig?.auth?.pass === 'OAUTH_TOKEN') ? (
                             account.tokenStatus === 'tokens_missing' ? (
                               <><AlertTriangle className="h-3 w-3 text-red-500" /> <span className="text-red-600 font-medium">OAuth ({account.provider === 'outlook' || account.provider === 'microsoft' ? 'Microsoft' : 'Gmail'}) - Tokens Missing!</span></>
+                            ) : account.authStatus === 'reauth_required' ? (
+                              <><AlertTriangle className="h-3 w-3 text-amber-500" /> <span className="text-amber-700 font-medium">Reauth required ({account.authFailureCount || 0} failed refresh{(account.authFailureCount || 0) > 1 ? 'es' : ''})</span></>
                             ) : (
                               <><Shield className="h-3 w-3 text-emerald-500" /> <span className="text-emerald-600 font-medium">OAuth ({account.provider === 'outlook' || account.provider === 'microsoft' ? 'Microsoft Graph' : 'Gmail API'})</span></>
                             )
@@ -690,6 +696,24 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
                           className="h-8 text-xs bg-red-50 text-red-700 border-red-200 hover:bg-red-100 hover:text-red-800 animate-pulse"
                         >
                           <AlertTriangle className="h-3 w-3 mr-1" /> Connect OAuth
+                        </Button>
+                      )}
+
+                      {/* OAuth refresh failing repeatedly - Reconnect button */}
+                      {account.tokenStatus !== 'tokens_missing' && account.authStatus === 'reauth_required' && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            if (account.provider === 'outlook' || account.provider === 'microsoft') {
+                              window.location.href = '/api/auth/outlook-connect?email=' + encodeURIComponent(account.email);
+                            } else {
+                              window.location.href = '/api/auth/gmail-connect?email=' + encodeURIComponent(account.email);
+                            }
+                          }}
+                          className="h-8 text-xs bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100 hover:text-amber-800"
+                        >
+                          <AlertTriangle className="h-3 w-3 mr-1" /> Reconnect
                         </Button>
                       )}
 

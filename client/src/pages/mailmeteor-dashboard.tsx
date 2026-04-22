@@ -42,6 +42,40 @@ const LeadOpportunities = lazy(() => import("./lead-opportunities"));
 const KnowledgeBase = lazy(() => import("./knowledge-base"));
 const ApolloSettings = lazy(() => import("./apollo-settings"));
 
+// Banner shown when one or more email accounts need OAuth reauthentication
+function ReauthBanner({ onReconnectClick }: { onReconnectClick: () => void }) {
+  const [data, setData] = useState<{ count: number; needsReauth: Array<{ email: string; provider: string }> }>({ count: 0, needsReauth: [] });
+  useEffect(() => {
+    let cancelled = false;
+    const fetchHealth = async () => {
+      try {
+        const res = await fetch('/api/email-accounts/auth-health', { credentials: 'include' });
+        if (!res.ok) return;
+        const json = await res.json();
+        if (!cancelled) setData(json);
+      } catch {}
+    };
+    fetchHealth();
+    const interval = setInterval(fetchHealth, 60000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
+  if (!data.count) return null;
+  const emails = data.needsReauth.slice(0, 3).map(a => a.email).join(', ');
+  const extra = data.count > 3 ? ` and ${data.count - 3} more` : '';
+  return (
+    <div className="bg-amber-50 border-b border-amber-200 px-4 py-3 flex items-center gap-3">
+      <AlertTriangle className="h-5 w-5 text-amber-600 flex-shrink-0" />
+      <div className="flex-1 text-sm text-amber-900">
+        <span className="font-semibold">{data.count} email account{data.count > 1 ? 's' : ''} need{data.count > 1 ? '' : 's'} reconnection:</span>{' '}
+        <span className="text-amber-800">{emails}{extra}</span>
+      </div>
+      <Button size="sm" variant="outline" className="border-amber-400 text-amber-900 hover:bg-amber-100" onClick={onReconnectClick}>
+        Reconnect
+      </Button>
+    </div>
+  );
+}
+
 // Loading fallback for lazy-loaded pages
 function PageLoader() {
   return (
@@ -826,6 +860,7 @@ export default function MailMeteorDashboard() {
 
         {/* Content */}
         <main className="flex-1 overflow-auto">
+         <ReauthBanner onReconnectClick={() => { setCurrentView('setup'); setViewMode('dashboard'); }} />
          <Suspense fallback={<PageLoader />}>
           {/* Campaign Creator */}
           {viewMode === 'campaign' && (

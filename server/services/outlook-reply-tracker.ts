@@ -15,6 +15,7 @@
  */
 
 import { storage } from '../storage';
+import { recordAuthFailure, recordAuthSuccess } from './auth-health';
 
 interface GraphMessage {
   id: string;
@@ -92,7 +93,9 @@ export class OutlookReplyTracker {
       });
 
       if (!resp.ok) {
-        console.error(`[OutlookReplyTracker] Token refresh failed for ${senderEmail || 'org-default'}:`, await resp.text());
+        const errText = await resp.text();
+        console.error(`[OutlookReplyTracker] Token refresh failed for ${senderEmail || 'org-default'}:`, errText);
+        if (senderEmail) recordAuthFailure(orgId, senderEmail, errText).catch(() => {});
         return null;
       }
 
@@ -113,6 +116,8 @@ export class OutlookReplyTracker {
         if (tokens.refresh_token) await storage.setApiSetting(orgId, 'microsoft_refresh_token', tokens.refresh_token);
         await storage.setApiSetting(orgId, 'microsoft_token_expiry', expiryDate);
       }
+
+      if (senderEmail) recordAuthSuccess(orgId, senderEmail).catch(() => {});
 
       return {
         accessToken: tokens.access_token,
