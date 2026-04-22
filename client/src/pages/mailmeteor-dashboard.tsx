@@ -40,6 +40,7 @@ const TeamScorecard = lazy(() => import("./team-scorecard"));
 const MyDashboard = lazy(() => import("./my-dashboard"));
 const LeadOpportunities = lazy(() => import("./lead-opportunities"));
 const KnowledgeBase = lazy(() => import("./knowledge-base"));
+const ApolloSettings = lazy(() => import("./apollo-settings"));
 
 // Loading fallback for lazy-loaded pages
 function PageLoader() {
@@ -50,7 +51,7 @@ function PageLoader() {
   );
 }
 
-type ViewType = 'campaigns' | 'templates' | 'contacts' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings' | 'team' | 'superadmin' | 'warmup' | 'scorecard' | 'my-dashboard' | 'lead-intelligence' | 'knowledge-base';
+type ViewType = 'campaigns' | 'templates' | 'contacts' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings' | 'team' | 'superadmin' | 'warmup' | 'scorecard' | 'my-dashboard' | 'lead-intelligence' | 'knowledge-base' | 'apollo-settings';
 
 // Live Tracking Feed component - fetches real tracking events
 function LiveTrackingFeed({ dashStats }: { dashStats: any }) {
@@ -205,7 +206,7 @@ export default function MailMeteorDashboard() {
   const [currentView, setCurrentViewRaw] = useState<ViewType>(() => {
     // Restore view from URL hash on initial load (e.g. #contacts, #campaign-detail/abc123)
     const hash = window.location.hash.replace('#', '');
-    const validViews = ['campaigns', 'templates', 'contacts', 'inbox', 'setup', 'analytics', 'verification', 'tracking', 'account', 'billing', 'followups', 'insights', 'tools', 'advanced-settings', 'team', 'superadmin', 'warmup', 'scorecard', 'my-dashboard', 'lead-intelligence', 'knowledge-base', 'campaign-detail'];
+    const validViews = ['campaigns', 'templates', 'contacts', 'inbox', 'setup', 'analytics', 'verification', 'tracking', 'account', 'billing', 'followups', 'insights', 'tools', 'advanced-settings', 'team', 'superadmin', 'warmup', 'scorecard', 'my-dashboard', 'lead-intelligence', 'knowledge-base', 'apollo-settings', 'campaign-detail'];
     if (hash.startsWith('campaign-detail/')) return 'campaign-detail' as ViewType;
     return validViews.includes(hash) ? hash as ViewType : 'campaigns';
   });
@@ -415,6 +416,7 @@ export default function MailMeteorDashboard() {
     { key: 'setup' as ViewType, label: 'Email Accounts', icon: Inbox },
     ...(isAdminOrOwner ? [{ key: 'warmup' as ViewType, label: 'Warmup', icon: Flame }] : []),
     ...(isAdminOrOwner ? [{ key: 'knowledge-base' as ViewType, label: 'Knowledge Base', icon: BookOpen }] : []),
+    ...(isAdminOrOwner ? [{ key: 'apollo-settings' as ViewType, label: 'Apollo', icon: Zap }] : []),
   ];
 
   const sidebarBottomItems = [
@@ -439,6 +441,7 @@ export default function MailMeteorDashboard() {
       'my-dashboard': 'My Dashboard',
       'lead-intelligence': 'AI Lead Intelligence',
       'knowledge-base': 'Knowledge Base',
+      'apollo-settings': 'Apollo',
       superadmin: 'SuperAdmin Console',
       warmup: 'Warmup Monitoring',
     };
@@ -468,6 +471,7 @@ export default function MailMeteorDashboard() {
       'my-dashboard': 'Your personal sales performance, action items, and emails to reply',
       'lead-intelligence': 'AI-powered deep analysis of email history to find missed opportunities, past customers, and hot leads',
       'knowledge-base': 'Upload case studies, proposals, brochures, and company docs to power AI-driven email drafts and proposals',
+      'apollo-settings': 'Connect Apollo.io to sync saved lists and enrich contacts using data you already have',
       superadmin: 'Platform-wide management, monitoring, and user administration',
       warmup: 'Track email warmup progress and sender reputation',
     };
@@ -1276,6 +1280,10 @@ export default function MailMeteorDashboard() {
 
           {viewMode === 'dashboard' && currentView === 'knowledge-base' && (
             <KnowledgeBase />
+          )}
+
+          {viewMode === 'dashboard' && currentView === 'apollo-settings' && (
+            <ApolloSettings />
           )}
          </Suspense>
         </main>

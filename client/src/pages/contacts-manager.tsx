@@ -23,6 +23,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import ApolloSyncDialog from "@/components/apollo-sync-dialog";
 
 interface Contact {
   id: string;
@@ -314,6 +315,7 @@ export default function ContactsManager() {
 
   // Google Sheets import state
   const [showGoogleSheetsDialog, setShowGoogleSheetsDialog] = useState(false);
+  const [showApolloSyncDialog, setShowApolloSyncDialog] = useState(false);
   const [gsUrl, setGsUrl] = useState('');
   const [gsSheets, setGsSheets] = useState<any[]>([]);
   const [gsSelectedSheet, setGsSelectedSheet] = useState<any>(null);
@@ -1670,6 +1672,11 @@ export default function ContactsManager() {
                 }}>
                   <FileSpreadsheet className="h-4 w-4 mr-2 text-green-600" /> Import Google Sheets
                 </DropdownMenuItem>
+                {isAdmin && (
+                  <DropdownMenuItem onClick={() => setShowApolloSyncDialog(true)}>
+                    <Zap className="h-4 w-4 mr-2 text-purple-600" /> Sync from Apollo
+                  </DropdownMenuItem>
+                )}
                 {isAdmin && (
                   <>
                     <DropdownMenuSeparator />
@@ -3124,6 +3131,14 @@ export default function ContactsManager() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Apollo Sync Dialog */}
+      <ApolloSyncDialog
+        open={showApolloSyncDialog}
+        onOpenChange={setShowApolloSyncDialog}
+        contactLists={contactLists.map((l: any) => ({ id: l.id, name: l.name }))}
+        onSyncComplete={() => { fetchContacts(); fetchContactLists(); }}
+      />
 
       {/* Google Sheets Import Dialog */}
       <Dialog open={showGoogleSheetsDialog} onOpenChange={setShowGoogleSheetsDialog}>

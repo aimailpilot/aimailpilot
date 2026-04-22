@@ -789,10 +789,51 @@ async function initializeSchema() {
       'CREATE INDEX IF NOT EXISTS idx_inbox_ai_won ON unified_inbox("organizationId", "aiSuggestedWon")',
       'CREATE INDEX IF NOT EXISTS idx_inbox_ai_meeting ON unified_inbox("organizationId", "aiSuggestedMeeting")',
       'CREATE INDEX IF NOT EXISTS idx_inbox_reply_quality ON unified_inbox("organizationId", "replyQualityScore")',
+      'ALTER TABLE contacts ADD COLUMN IF NOT EXISTS "apolloContactId" TEXT',
+      'ALTER TABLE contacts ADD COLUMN IF NOT EXISTS "apolloLastSyncedAt" TEXT',
+      'ALTER TABLE contacts ADD COLUMN IF NOT EXISTS "apolloListIds" JSONB DEFAULT \'[]\'',
+      'CREATE INDEX IF NOT EXISTS idx_contacts_apollo_id ON contacts("organizationId", "apolloContactId")',
     ];
     for (const alt of alterColumns) {
       try { await client.query(alt); } catch (e) { /* column already exists */ }
     }
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS apollo_sync_jobs (
+        id TEXT PRIMARY KEY,
+        "organizationId" TEXT NOT NULL,
+        "triggeredBy" TEXT NOT NULL,
+        "listIds" JSONB DEFAULT '[]',
+        "listNames" JSONB DEFAULT '[]',
+        "targetListId" TEXT,
+        "overwriteMode" TEXT DEFAULT 'fill_blanks_only',
+        status TEXT NOT NULL DEFAULT 'queued',
+        "totalFound" INTEGER DEFAULT 0,
+        processed INTEGER DEFAULT 0,
+        "alreadyCurrent" INTEGER DEFAULT 0,
+        enriched INTEGER DEFAULT 0,
+        imported INTEGER DEFAULT 0,
+        "errorMessage" TEXT,
+        "startedAt" TEXT,
+        "completedAt" TEXT,
+        "createdAt" TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_apollo_jobs_org ON apollo_sync_jobs("organizationId", "createdAt" DESC);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS apollo_usage_log (
+        id TEXT PRIMARY KEY,
+        "organizationId" TEXT NOT NULL,
+        "userId" TEXT NOT NULL,
+        action TEXT NOT NULL,
+        "creditsUsed" INTEGER DEFAULT 0,
+        "contactsAffected" INTEGER DEFAULT 0,
+        metadata JSONB DEFAULT '{}',
+        "createdAt" TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_apollo_usage_org ON apollo_usage_log("organizationId", "createdAt" DESC);
+    `);
 
     await client.query('COMMIT');
     console.log('[PG] Schema initialized successfully');

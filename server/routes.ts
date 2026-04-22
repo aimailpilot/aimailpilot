@@ -12816,6 +12816,167 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     }
   });
 
+  // ============================================================
+  // Apollo.io integration — per-org API key, saved-data sync, no credit spend in Phase 1
+  // ============================================================
+
+  const isOrgAdmin = (u: any) => u?.role === 'owner' || u?.role === 'admin';
+
+  // GET /api/apollo/settings — key-is-set flag + credit balance + overwrite mode
+  app.get('/api/apollo/settings', requireAuth, async (req: any, res) => {
+    try {
+      if (!isOrgAdmin(req.user)) return res.status(403).json({ message: 'Admin access required' });
+      const apollo = await import('./services/apollo-sync-engine.js');
+      const key = await apollo.getApolloApiKey(req.user.organizationId);
+      const overwriteMode = await apollo.getOverwriteMode(req.user.organizationId);
+      let credits: any = null;
+      let creditsError: string | null = null;
+      if (key) {
+        try { credits = await apollo.fetchCreditBalance(req.user.organizationId); }
+        catch (e: any) { creditsError = e?.message || 'Unable to fetch credits'; }
+      }
+      res.json({
+        configured: !!key,
+        keyPreview: key ? `${key.slice(0, 4)}...${key.slice(-4)}` : null,
+        overwriteMode,
+        credits,
+        creditsError,
+      });
+    } catch (error: any) {
+      console.error('[Apollo] settings error:', error?.message);
+      res.status(500).json({ message: 'Failed to load Apollo settings' });
+    }
+  });
+
+  // POST /api/apollo/settings — save/update API key + overwrite mode
+  app.post('/api/apollo/settings', requireAuth, async (req: any, res) => {
+    try {
+      if (!isOrgAdmin(req.user)) return res.status(403).json({ message: 'Admin access required' });
+      const { apiKey, overwriteMode } = req.body || {};
+      const apollo = await import('./services/apollo-sync-engine.js');
+      const orgId = req.user.organizationId;
+
+      if (typeof apiKey === 'string' && apiKey.trim()) {
+        const check = await apollo.validateApiKey(apiKey.trim());
+        if (!check.valid) return res.status(400).json({ message: 'Invalid Apollo API key', error: check.error });
+        await storage.setApiSetting(orgId, 'apollo_api_key', apiKey.trim());
+      }
+      if (overwriteMode === 'fill_blanks_only' || overwriteMode === 'apollo_wins') {
+        await storage.setApiSetting(orgId, 'apollo_sync_overwrite_mode', overwriteMode);
+      }
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error('[Apollo] save settings error:', error?.message);
+      res.status(500).json({ message: 'Failed to save Apollo settings' });
+    }
+  });
+
+  // DELETE /api/apollo/settings — remove API key
+  app.delete('/api/apollo/settings', requireAuth, async (req: any, res) => {
+    try {
+      if (!isOrgAdmin(req.user)) return res.status(403).json({ message: 'Admin access required' });
+      await storage.setApiSetting(req.user.organizationId, 'apollo_api_key', '');
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ message: 'Failed to remove Apollo key' });
+    }
+  });
+
+  // GET /api/apollo/lists — saved lists from Apollo (no credit cost)
+  app.get('/api/apollo/lists', requireAuth, async (req: any, res) => {
+    try {
+      if (!isOrgAdmin(req.user)) return res.status(403).json({ message: 'Admin access required' });
+      const apollo = await import('./services/apollo-sync-engine.js');
+      const lists = await apollo.fetchSavedLists(req.user.organizationId);
+      res.json({ lists });
+    } catch (error: any) {
+      console.error('[Apollo] lists error:', error?.message);
+      res.status(500).json({ message: error?.message || 'Failed to fetch Apollo lists' });
+    }
+  });
+
+  // POST /api/apollo/sync/preview — dry-run: totals + samples (no DB writes)
+  app.post('/api/apollo/sync/preview', requireAuth, async (req: any, res) => {
+    try {
+      if (!isOrgAdmin(req.user)) return res.status(403).json({ message: 'Admin access required' });
+      const { listIds } = req.body || {};
+      if (!Array.isArray(listIds) || listIds.length === 0) {
+        return res.status(400).json({ message: 'listIds required' });
+      }
+      const apollo = await import('./services/apollo-sync-engine.js');
+      const preview = await apollo.previewSync(req.user.organizationId, listIds.map(String));
+      res.json(preview);
+    } catch (error: any) {
+      console.error('[Apollo] preview error:', error?.message);
+      res.status(500).json({ message: error?.message || 'Preview failed' });
+    }
+  });
+
+  // POST /api/apollo/sync/start — kick off background sync job
+  app.post('/api/apollo/sync/start', requireAuth, async (req: any, res) => {
+    try {
+      if (!isOrgAdmin(req.user)) return res.status(403).json({ message: 'Admin access required' });
+      const { listIds, listNames, targetListId, overwriteMode } = req.body || {};
+      if (!Array.isArray(listIds) || listIds.length === 0) {
+        return res.status(400).json({ message: 'listIds required' });
+      }
+      const apollo = await import('./services/apollo-sync-engine.js');
+      const jobId = await apollo.createSyncJob({
+        organizationId: req.user.organizationId,
+        triggeredBy: req.user.id,
+        listIds: listIds.map(String),
+        listNames: Array.isArray(listNames) ? listNames.map(String) : [],
+        targetListId: targetListId || null,
+        overwriteMode: overwriteMode === 'apollo_wins' ? 'apollo_wins' : 'fill_blanks_only',
+      });
+      res.json({ success: true, jobId });
+    } catch (error: any) {
+      console.error('[Apollo] sync start error:', error?.message);
+      res.status(500).json({ message: error?.message || 'Failed to start sync' });
+    }
+  });
+
+  // GET /api/apollo/sync/jobs — recent jobs
+  app.get('/api/apollo/sync/jobs', requireAuth, async (req: any, res) => {
+    try {
+      if (!isOrgAdmin(req.user)) return res.status(403).json({ message: 'Admin access required' });
+      const apollo = await import('./services/apollo-sync-engine.js');
+      const jobs = await apollo.listJobs(req.user.organizationId, 20);
+      res.json({ jobs });
+    } catch (error: any) {
+      res.status(500).json({ message: 'Failed to load jobs' });
+    }
+  });
+
+  // GET /api/apollo/sync/jobs/:jobId — polling endpoint for progress
+  app.get('/api/apollo/sync/jobs/:jobId', requireAuth, async (req: any, res) => {
+    try {
+      if (!isOrgAdmin(req.user)) return res.status(403).json({ message: 'Admin access required' });
+      const apollo = await import('./services/apollo-sync-engine.js');
+      const job = await apollo.getJob(req.params.jobId);
+      if (!job) return res.status(404).json({ message: 'Job not found' });
+      if (job.organizationId !== req.user.organizationId) return res.status(403).json({ message: 'Access denied' });
+      res.json({ job });
+    } catch (error: any) {
+      res.status(500).json({ message: 'Failed to load job' });
+    }
+  });
+
+  // POST /api/apollo/sync/jobs/:jobId/cancel — request cancellation
+  app.post('/api/apollo/sync/jobs/:jobId/cancel', requireAuth, async (req: any, res) => {
+    try {
+      if (!isOrgAdmin(req.user)) return res.status(403).json({ message: 'Admin access required' });
+      const apollo = await import('./services/apollo-sync-engine.js');
+      const job = await apollo.getJob(req.params.jobId);
+      if (!job) return res.status(404).json({ message: 'Job not found' });
+      if (job.organizationId !== req.user.organizationId) return res.status(403).json({ message: 'Access denied' });
+      apollo.cancelJob(req.params.jobId);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ message: 'Failed to cancel job' });
+    }
+  });
+
   const httpServer = createServer(app);
   return httpServer;
 }
