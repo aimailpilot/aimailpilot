@@ -290,6 +290,31 @@ app.use((req, res, next) => {
       log('[UnsubAuto] Scheduled: first run now, then every 6 hours');
     }, 120 * 1000);
 
+    // [ContactStatusNormalize] Cleanup of non-canonical status values leaked from CSV `stage` column.
+    // Idempotent: WHERE clause excludes already-canonical rows, so re-running is a no-op.
+    // Maps 'clicked' → 'hot', 'active' → 'cold', everything else → 'cold'. Preserves canonical values.
+    setTimeout(async () => {
+      try {
+        const before = await storage.rawGet(
+          `SELECT COUNT(*)::int AS n FROM contacts
+           WHERE status IS NOT NULL AND status NOT IN ('cold','warm','hot','replied','bounced','unsubscribed')`
+        ) as any;
+        const count = before?.n || 0;
+        if (count === 0) return;
+        await storage.rawRun(
+          `UPDATE contacts SET status = CASE LOWER(TRIM(status))
+              WHEN 'clicked' THEN 'hot'
+              WHEN 'active' THEN 'cold'
+              ELSE 'cold'
+            END
+            WHERE status IS NOT NULL AND status NOT IN ('cold','warm','hot','replied','bounced','unsubscribed')`
+        );
+        log(`[ContactStatusNormalize] Normalized ${count} non-canonical status values`);
+      } catch (e) {
+        console.error('[ContactStatusNormalize] Error:', e instanceof Error ? e.message : e);
+      }
+    }, 45 * 1000);
+
     // [ContactStatusRecalc] Keep contacts.status (cold/warm/hot/replied) in sync with messages activity.
     // Tracking endpoints update messages.openedAt/clickedAt/repliedAt in real-time; this sweep flips
     // contacts.status + counters so Warm/Hot filter chips populate. Does NOT touch tracking hot path.
@@ -297,13 +322,14 @@ app.use((req, res, next) => {
     // Recurring every 6h: delta contacts since last sweep (cap 2000).
     setTimeout(async () => {
       try {
+        const cutoff90d = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
         const rows = await storage.rawAll(`
           SELECT DISTINCT "contactId" FROM messages
           WHERE "contactId" IS NOT NULL
             AND ("openedAt" IS NOT NULL OR "clickedAt" IS NOT NULL OR "repliedAt" IS NOT NULL)
-            AND COALESCE("sentAt", "createdAt") >= NOW() - INTERVAL '90 days'
+            AND COALESCE("sentAt", "createdAt") >= ?
           LIMIT 10000
-        `) as any[];
+        `, cutoff90d) as any[];
         let recalced = 0;
         for (const r of rows) {
           if (!r.contactId) continue;

@@ -5499,7 +5499,7 @@ Which account should I use and why? If I need to split across accounts, provide 
         'company phone': 'companyPhone',
         'email status': 'emailStatus', 'email confidence': 'emailStatus',
         'last activity date': 'lastActivityDate', 'last contacted': 'lastActivityDate',
-        'lead status': 'status', 'status': 'status', 'stage': 'status',
+        'lead status': '_leadStatusRaw', 'status': '_statusRaw', 'stage': 'pipelineStage', 'pipeline stage': 'pipelineStage', 'pipeline': 'pipelineStage',
         'lead score': 'score', 'score': 'score',
         'tags': 'tags', 'labels': 'tags',
         'secondary email': 'secondaryEmail', 'secondary_email': 'secondaryEmail', 'alternate email': 'secondaryEmail', 'other email': 'secondaryEmail', 'personal email': 'secondaryEmail',
@@ -5552,6 +5552,14 @@ Which account should I use and why? If I need to split across accounts, provide 
             contact.score = parseInt(trimmedValue) || 0;
           } else if (mappedField === '_source') {
             contact.source = trimmedValue;
+          } else if (mappedField === '_statusRaw' || mappedField === '_leadStatusRaw') {
+            const validStatuses = new Set(['cold','warm','hot','replied','bounced','unsubscribed']);
+            const v = trimmedValue.toLowerCase();
+            if (validStatuses.has(v)) {
+              if (!contact.status) contact.status = v;
+            } else {
+              customFields[csvHeader] = trimmedValue;
+            }
           } else if (mappedField) {
             if (!contact[mappedField]) contact[mappedField] = trimmedValue;
           } else {
@@ -5573,7 +5581,7 @@ Which account should I use and why? If I need to split across accounts, provide 
           companyAddress: contact.companyAddress || '', companyPhone: contact.companyPhone || '',
           secondaryEmail: contact.secondaryEmail || '', homePhone: contact.homePhone || '',
           emailStatus: contact.emailStatus || '', lastActivityDate: contact.lastActivityDate || '',
-          status: contact.status || 'cold', score: contact.score || 0,
+          status: contact.status || 'cold', pipelineStage: contact.pipelineStage || null, score: contact.score || 0,
           tags: contact.tags || [], source: contact.source || source || 'import',
           listId: targetListId,
           customFields: Object.keys(customFields).length > 0 ? customFields : {},
@@ -5982,7 +5990,14 @@ Example response:
 
   app.put('/api/contacts/:id', async (req: any, res) => {
     try {
-      const updated = await storage.updateContact(req.params.id, req.body);
+      const body = { ...req.body };
+      if (body.status !== undefined) {
+        const validStatuses = new Set(['cold','warm','hot','replied','bounced','unsubscribed']);
+        const v = String(body.status).toLowerCase();
+        if (!validStatuses.has(v)) delete body.status;
+        else body.status = v;
+      }
+      const updated = await storage.updateContact(req.params.id, body);
       res.json(updated);
     } catch (error) {
       res.status(500).json({ message: 'Failed to update contact' });
