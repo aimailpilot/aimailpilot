@@ -7801,11 +7801,12 @@ Respond with ONLY a JSON object in this format:
     return rows;
   }
 
-  // Helper: Get a valid Google access token that has the required scope.
-  // Iterates ALL stored tokens (org-level + per-sender), refreshes expired ones,
-  // verifies scope via tokeninfo, and returns the first matching token.
-  // Returns null if none of the stored tokens grant the requested scope.
-  async function getGoogleAccessTokenWithScope(organizationId: string, requiredScope: string): Promise<string | null> {
+  // Helper: Find a Google access token that actually works for the Sheets API.
+  // Authoritative test — probes each stored token (org-level + per-sender) against
+  // a real Sheets API endpoint. Refreshes expired tokens. Returns the first token
+  // that returns 200/404 (404 = auth works, spreadsheet just not found).
+  // Returns null if NONE work (re-auth required).
+  async function getGoogleAccessTokenForSheets(organizationId: string): Promise<string | null> {
     try {
       const settings = await storage.getApiSettings(organizationId);
       let clientId = settings.google_oauth_client_id || '';
@@ -7825,9 +7826,19 @@ Respond with ONLY a JSON object in this format:
       if (!clientId) clientId = process.env.GOOGLE_CLIENT_ID || '';
       if (!clientSecret) clientSecret = process.env.GOOGLE_CLIENT_SECRET || '';
 
-      const candidates: { accessToken: string; refreshToken: string; tokenExpiry: string; label: string; expiryKey: string; tokenKey: string }[] = [];
+      type Cand = { accessToken: string; refreshToken: string; tokenExpiry: string; label: string; expiryKey: string; tokenKey: string };
+      const candidates: Cand[] = [];
+      const seen = new Set<string>();
+
+      const pushCandidate = (c: Cand) => {
+        const key = c.refreshToken || c.accessToken;
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        candidates.push(c);
+      };
+
       if (settings.gmail_access_token && settings.gmail_refresh_token) {
-        candidates.push({
+        pushCandidate({
           accessToken: settings.gmail_access_token,
           refreshToken: settings.gmail_refresh_token,
           tokenExpiry: settings.gmail_token_expiry || '0',
@@ -7836,14 +7847,13 @@ Respond with ONLY a JSON object in this format:
           tokenKey: 'gmail_access_token',
         });
       }
-      const allKeys = Object.keys(settings);
-      const senderTokenKeys = allKeys.filter(k => k.startsWith('gmail_sender_') && k.endsWith('_access_token'));
+      const senderTokenKeys = Object.keys(settings).filter(k => k.startsWith('gmail_sender_') && k.endsWith('_access_token'));
       for (const key of senderTokenKeys) {
         const email = key.replace('gmail_sender_', '').replace('_access_token', '');
         const senderAccess = settings[key];
         const senderRefresh = settings[`gmail_sender_${email}_refresh_token`];
         if (senderAccess && senderRefresh) {
-          candidates.push({
+          pushCandidate({
             accessToken: senderAccess,
             refreshToken: senderRefresh,
             tokenExpiry: settings[`gmail_sender_${email}_token_expiry`] || '0',
@@ -7853,14 +7863,29 @@ Respond with ONLY a JSON object in this format:
           });
         }
       }
-      if (candidates.length === 0) return null;
+      if (candidates.length === 0) {
+        console.log('[GoogleAuth/Sheets] No candidate tokens found in org', organizationId);
+        return null;
+      }
+
+      // Try freshest first
       candidates.sort((a, b) => parseInt(b.tokenExpiry || '0') - parseInt(a.tokenExpiry || '0'));
+      console.log(`[GoogleAuth/Sheets] Probing ${candidates.length} candidate token(s):`, candidates.map(c => c.label).join(', '));
+
+      // Probe URL — a public Google-owned test spreadsheet. We only care about the HTTP status:
+      // 200 = token works AND has spreadsheets scope
+      // 403 with "insufficient" = token lacks spreadsheets scope
+      // 401 = token invalid/expired
+      // 404 = token works but this specific id doesn't exist (still means scope OK — unlikely here)
+      // We use Google's public sample sheet so any authorized account can read it.
+      const probeSpreadsheetId = '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms';
+      const probeUrl = `https://sheets.googleapis.com/v4/spreadsheets/${probeSpreadsheetId}?fields=spreadsheetId`;
 
       for (const candidate of candidates) {
         let accessToken: string | null = candidate.accessToken;
         const isExpired = candidate.tokenExpiry && Date.now() > parseInt(candidate.tokenExpiry) - 5 * 60 * 1000;
         if (isExpired) {
-          if (!clientId || !clientSecret) continue;
+          if (!clientId || !clientSecret) { console.log(`[GoogleAuth/Sheets] No OAuth creds to refresh ${candidate.label}`); continue; }
           try {
             const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
               method: 'POST',
@@ -7872,7 +7897,7 @@ Respond with ONLY a JSON object in this format:
                 grant_type: 'refresh_token',
               }),
             });
-            if (!tokenRes.ok) { accessToken = null; continue; }
+            if (!tokenRes.ok) { console.log(`[GoogleAuth/Sheets] Refresh failed for ${candidate.label}:`, tokenRes.status); continue; }
             const tokenData = await tokenRes.json() as any;
             accessToken = tokenData.access_token;
             if (accessToken) {
@@ -7881,24 +7906,27 @@ Respond with ONLY a JSON object in this format:
                 await storage.setApiSetting(organizationId, candidate.expiryKey, String(Date.now() + tokenData.expires_in * 1000));
               }
             }
-          } catch { accessToken = null; continue; }
+          } catch (e) { console.log(`[GoogleAuth/Sheets] Refresh error for ${candidate.label}:`, e); continue; }
         }
         if (!accessToken) continue;
 
         try {
-          const tokenInfoRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${accessToken}`);
-          if (!tokenInfoRes.ok) continue;
-          const tokenInfo = await tokenInfoRes.json() as any;
-          const scopes = tokenInfo.scope || '';
-          if (scopes.includes(requiredScope)) {
-            console.log(`[GoogleAuth] Found token with scope '${requiredScope}' (${candidate.label})`);
+          const probeRes = await fetch(probeUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
+          if (probeRes.ok) {
+            console.log(`[GoogleAuth/Sheets] Token works for ${candidate.label}`);
             return accessToken;
           }
-        } catch { continue; }
+          const body = await probeRes.text();
+          const insufficientScope = probeRes.status === 403 && (body.includes('insufficient') || body.includes('ACCESS_TOKEN_SCOPE_INSUFFICIENT') || body.includes('Request had insufficient authentication scopes'));
+          console.log(`[GoogleAuth/Sheets] ${candidate.label} probe status=${probeRes.status}${insufficientScope ? ' (insufficient scope)' : ''}: ${body.slice(0, 160)}`);
+          // If it's an auth/scope issue, continue to next candidate.
+        } catch (e) {
+          console.log(`[GoogleAuth/Sheets] Probe error for ${candidate.label}:`, e);
+        }
       }
       return null;
     } catch (e) {
-      console.error('[GoogleAuth] getGoogleAccessTokenWithScope error:', e);
+      console.error('[GoogleAuth/Sheets] getGoogleAccessTokenForSheets error:', e);
       return null;
     }
   }
@@ -8016,26 +8044,52 @@ Respond with ONLY a JSON object in this format:
     }
   }
 
-  // Diagnostic endpoint: check what scopes the current Google token has
+  // Diagnostic endpoint: per-token scope inspection. Lists ALL Google tokens stored
+  // for this org and probes each against both tokeninfo and the Sheets API.
   app.get('/api/debug/google-token', requireAuth, async (req: any, res) => {
     try {
       const settings = await storage.getApiSettings(req.user.organizationId);
-      const accessToken = await getGoogleAccessToken(req.user.organizationId);
-      if (!accessToken) {
-        return res.json({ error: 'No access token available', hasRefresh: !!settings.gmail_refresh_token });
+      const report: any[] = [];
+      const probeSpreadsheetId = '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms';
+
+      const probeToken = async (label: string, token: string) => {
+        const entry: any = { label, tokenPrefix: token.slice(0, 12) + '...' };
+        try {
+          const ti = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${token}`);
+          if (ti.ok) {
+            const info = await ti.json() as any;
+            entry.email = info.email || null;
+            entry.scopes = info.scope || '';
+            entry.tokenInfoHasSpreadsheets = (info.scope || '').includes('spreadsheets');
+          } else {
+            entry.tokenInfoStatus = ti.status;
+            entry.tokenInfoBody = (await ti.text()).slice(0, 200);
+          }
+        } catch (e) { entry.tokenInfoError = String(e); }
+        try {
+          const probe = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${probeSpreadsheetId}?fields=spreadsheetId`, {
+            headers: { 'Authorization': `Bearer ${token}` },
+          });
+          entry.sheetsApiStatus = probe.status;
+          entry.sheetsApiWorks = probe.ok;
+          if (!probe.ok) entry.sheetsApiBody = (await probe.text()).slice(0, 200);
+        } catch (e) { entry.sheetsApiError = String(e); }
+        return entry;
+      };
+
+      if (settings.gmail_access_token) report.push(await probeToken('org-level', settings.gmail_access_token));
+      const senderKeys = Object.keys(settings).filter(k => k.startsWith('gmail_sender_') && k.endsWith('_access_token'));
+      for (const k of senderKeys) {
+        const email = k.replace('gmail_sender_', '').replace('_access_token', '');
+        if (settings[k]) report.push(await probeToken(`sender:${email}`, settings[k]));
       }
-      // Check token info using Google's tokeninfo endpoint
-      const tokenInfoRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${accessToken}`);
-      const tokenInfo = await tokenInfoRes.json() as any;
+
+      const workingToken = await getGoogleAccessTokenForSheets(req.user.organizationId);
       return res.json({
-        scope: tokenInfo.scope || 'unknown',
-        email: tokenInfo.email || 'unknown',
-        expires_in: tokenInfo.expires_in,
-        hasSpreadsheetScope: (tokenInfo.scope || '').includes('spreadsheets'),
-        hasGmailSendScope: (tokenInfo.scope || '').includes('gmail.send'),
-        orgLevelToken: !!settings.gmail_access_token,
-        orgLevelRefresh: !!settings.gmail_refresh_token,
-        orgLevelExpiry: settings.gmail_token_expiry ? new Date(parseInt(settings.gmail_token_expiry)).toISOString() : null,
+        organizationId: req.user.organizationId,
+        candidateCount: report.length,
+        sheetsCapableTokenFound: !!workingToken,
+        tokens: report,
       });
     } catch (e) {
       return res.status(500).json({ error: (e as Error).message });
@@ -8062,9 +8116,9 @@ Respond with ONLY a JSON object in this format:
       console.log('[sheets/fetch-info] Extracted spreadsheet ID:', spreadsheetId);
 
       // Strategy 1: Try Google Sheets API v4 with user's OAuth token.
-      // Scan ALL stored Google tokens and use one that has the 'spreadsheets' scope.
-      const accessToken = await getGoogleAccessTokenWithScope(req.user.organizationId, 'spreadsheets');
-      console.log('[sheets/fetch-info] Got scoped access token:', accessToken ? 'yes (length=' + accessToken.length + ')' : 'no');
+      // Probe ALL stored Google tokens and use the first one that actually works against Sheets API.
+      const accessToken = await getGoogleAccessTokenForSheets(req.user.organizationId);
+      console.log('[sheets/fetch-info] Got sheets-capable access token:', accessToken ? 'yes (length=' + accessToken.length + ')' : 'no');
       if (!accessToken) {
         // No Google token has spreadsheets scope. Check if we have ANY Google tokens at all.
         const anyToken = await getGoogleAccessToken(req.user.organizationId);
@@ -8210,8 +8264,8 @@ Respond with ONLY a JSON object in this format:
       let headers: string[] = [];
       let dataRows: string[][] = [];
 
-      // Strategy 1: Try Google Sheets API v4 with OAuth — scope-scoped token lookup
-      const accessToken = await getGoogleAccessTokenWithScope(req.user.organizationId, 'spreadsheets');
+      // Strategy 1: Try Google Sheets API v4 with OAuth — probe-based token lookup
+      const accessToken = await getGoogleAccessTokenForSheets(req.user.organizationId);
       let usedOAuth = false;
 
       if (accessToken) {
