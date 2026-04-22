@@ -774,6 +774,7 @@ async function initializeSchema() {
       'ALTER TABLE messages ADD COLUMN IF NOT EXISTS "recipientEmail" TEXT',
       'ALTER TABLE messages ADD COLUMN IF NOT EXISTS "messageId" TEXT',
       'ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS "autoPaused" BOOLEAN DEFAULT FALSE',
+      'ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS "sendOrder" TEXT DEFAULT NULL',
       'ALTER TABLE contact_lists ADD COLUMN IF NOT EXISTS "allocatedTo" TEXT',
       'ALTER TABLE contact_lists ADD COLUMN IF NOT EXISTS "allocatedToName" TEXT',
       'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "meetingDetected" BOOLEAN DEFAULT FALSE',
@@ -1551,11 +1552,12 @@ export class PostgresStorage {
   async createCampaign(campaign: any) {
     const id = genId(); const ts = now();
     await execute(
-      `INSERT INTO campaigns (id, "organizationId", name, description, status, "totalRecipients", "sentCount", "openedCount", "clickedCount", "repliedCount", "bouncedCount", "unsubscribedCount", subject, content, "emailAccountId", "templateId", "contactIds", "segmentId", "scheduledAt", "createdBy", "createdAt", "updatedAt")
-       VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 0, 0, 0, 0, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+      `INSERT INTO campaigns (id, "organizationId", name, description, status, "totalRecipients", "sentCount", "openedCount", "clickedCount", "repliedCount", "bouncedCount", "unsubscribedCount", subject, content, "emailAccountId", "templateId", "contactIds", "segmentId", "scheduledAt", "createdBy", "createdAt", "updatedAt", "sendOrder")
+       VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 0, 0, 0, 0, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
       [id, campaign.organizationId, campaign.name, campaign.description || '', campaign.status || 'draft', campaign.totalRecipients || 0,
       campaign.subject || '', campaign.content || '', campaign.emailAccountId || null, campaign.templateId || null,
-      toJson(campaign.contactIds || []), campaign.segmentId || null, campaign.scheduledAt || null, campaign.createdBy || null, ts, ts]
+      toJson(campaign.contactIds || []), campaign.segmentId || null, campaign.scheduledAt || null, campaign.createdBy || null, ts, ts,
+      campaign.sendOrder === 'engagement' ? 'engagement' : null]
     );
     return this.getCampaign(id);
   }
@@ -1569,9 +1571,9 @@ export class PostgresStorage {
     }
     const m = { ...existing, ...cleanData };
     await execute(
-      `UPDATE campaigns SET name=$1, description=$2, status=$3, "totalRecipients"=$4, "sentCount"=$5, "openedCount"=$6, "clickedCount"=$7, "repliedCount"=$8, "bouncedCount"=$9, "unsubscribedCount"=$10, subject=$11, content=$12, "emailAccountId"=$13, "templateId"=$14, "contactIds"=$15, "segmentId"=$16, "scheduledAt"=$17, "sendingConfig"=$18, "trackOpens"=$19, "includeUnsubscribe"=$20, "updatedAt"=$21, "autoPaused"=$22 WHERE id=$23`,
+      `UPDATE campaigns SET name=$1, description=$2, status=$3, "totalRecipients"=$4, "sentCount"=$5, "openedCount"=$6, "clickedCount"=$7, "repliedCount"=$8, "bouncedCount"=$9, "unsubscribedCount"=$10, subject=$11, content=$12, "emailAccountId"=$13, "templateId"=$14, "contactIds"=$15, "segmentId"=$16, "scheduledAt"=$17, "sendingConfig"=$18, "trackOpens"=$19, "includeUnsubscribe"=$20, "updatedAt"=$21, "autoPaused"=$22, "sendOrder"=$23 WHERE id=$24`,
       [m.name, m.description, m.status, m.totalRecipients, m.sentCount, m.openedCount, m.clickedCount, m.repliedCount, m.bouncedCount, m.unsubscribedCount,
-      m.subject, m.content, m.emailAccountId || null, m.templateId || null, toJson(m.contactIds), m.segmentId || null, toSqlDate(m.scheduledAt), toJson(m.sendingConfig), m.trackOpens ?? 1, m.includeUnsubscribe ?? 0, now(), m.autoPaused ?? false, id]
+      m.subject, m.content, m.emailAccountId || null, m.templateId || null, toJson(m.contactIds), m.segmentId || null, toSqlDate(m.scheduledAt), toJson(m.sendingConfig), m.trackOpens ?? 1, m.includeUnsubscribe ?? 0, now(), m.autoPaused ?? false, m.sendOrder || null, id]
     );
     return this.getCampaign(id);
   }

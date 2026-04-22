@@ -3275,7 +3275,16 @@ Which account should I use and why? If I need to split across accounts, provide 
 
   app.put('/api/campaigns/:id', async (req: any, res) => {
     try {
-      const updated = await storage.updateCampaign(req.params.id, req.body);
+      // Lock sendOrder after campaign has started (active/paused/completed/cancelled).
+      // Only 'draft' state allows changing Default <-> Smart.
+      const patch = { ...req.body };
+      if ('sendOrder' in patch) {
+        const existing = await storage.getCampaign(req.params.id);
+        if (existing && existing.status !== 'draft') {
+          delete patch.sendOrder;
+        }
+      }
+      const updated = await storage.updateCampaign(req.params.id, patch);
       res.json(updated);
     } catch (error) {
       res.status(500).json({ message: 'Failed to update campaign' });

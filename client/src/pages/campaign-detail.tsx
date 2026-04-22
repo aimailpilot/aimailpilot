@@ -650,6 +650,14 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
             ) : (
               <div className="flex items-center gap-2 group mb-1">
                 <h1 className="text-2xl font-bold text-gray-900 truncate leading-tight">{campaign.name}</h1>
+                {(campaign as any).sendOrder === 'engagement' && (
+                  <span
+                    title="Smart send: engaged contacts first (beta)"
+                    className="flex-shrink-0 text-[10px] font-semibold bg-amber-100 text-amber-700 rounded px-1.5 py-0.5"
+                  >
+                    Smart
+                  </span>
+                )}
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <button

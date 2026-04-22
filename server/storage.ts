@@ -771,6 +771,7 @@ try { db.exec(`ALTER TABLE campaigns ADD COLUMN sendingConfig TEXT`); } catch (e
 try { db.exec(`ALTER TABLE campaigns ADD COLUMN includeUnsubscribe INTEGER DEFAULT 0`); } catch (e) { /* already exists */ }
 try { db.exec(`ALTER TABLE campaigns ADD COLUMN trackOpens INTEGER DEFAULT 1`); } catch (e) { /* already exists */ }
 try { db.exec(`ALTER TABLE campaigns ADD COLUMN spamCount INTEGER DEFAULT 0`); } catch (e) { /* already exists */ }
+try { db.exec(`ALTER TABLE campaigns ADD COLUMN sendOrder TEXT`); } catch (e) { /* already exists */ }
 
 // ========== v12 Unified Inbox & Contact Engine Migrations ==========
 

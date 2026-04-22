@@ -13,6 +13,36 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 }
 
 /**
+ * Engagement-based send ordering (opt-in per campaign via campaigns.sendOrder='engagement').
+ * Interleaves contacts into 4 tiers so engaged contacts send first but cold contacts
+ * still get reached within the window. Pure in-memory reorder — does NOT filter.
+ * Default-behavior campaigns skip this entirely; this is never called for sendOrder=NULL.
+ */
+function applyEngagementOrdering(contacts: any[]): any[] {
+  const tierA: any[] = [];
+  const tierB: any[] = [];
+  const tierC: any[] = [];
+  const tierD: any[] = [];
+  for (const c of contacts) {
+    if ((c.totalReplied || 0) > 0) tierA.push(c);
+    else if ((c.totalClicked || 0) > 0) tierB.push(c);
+    else if ((c.totalOpened || 0) > 0) tierC.push(c);
+    else tierD.push(c);
+  }
+  // Interleave in a 1A : 1B : 2C : 4D ratio so cold contacts are distributed
+  // throughout the send window instead of being stranded at the end.
+  const out: any[] = [];
+  let ai = 0, bi = 0, ci = 0, di = 0;
+  while (ai < tierA.length || bi < tierB.length || ci < tierC.length || di < tierD.length) {
+    if (ai < tierA.length) out.push(tierA[ai++]);
+    if (bi < tierB.length) out.push(tierB[bi++]);
+    for (let k = 0; k < 2 && ci < tierC.length; k++) out.push(tierC[ci++]);
+    for (let k = 0; k < 4 && di < tierD.length; k++) out.push(tierD[di++]);
+  }
+  return out;
+}
+
+/**
  * RFC 2047 encode a subject line for MIME headers.
  * Non-ASCII subjects must be encoded as =?UTF-8?B?<base64>?= for email headers.
  */
@@ -714,6 +744,14 @@ export class CampaignEngine {
       } catch (e) { /* non-critical, continue sending */ }
 
       if (contacts.length === 0) return { success: false, error: `No contacts to send to (${bouncedContacts.length} bounced, ${unsubscribedContacts.length} unsubscribed, ${invalidEmailCount} invalid email out of ${beforeFilterCount} total)` };
+
+      // Opt-in: engagement-based send ordering (feature-flagged per campaign via sendOrder='engagement').
+      // Default campaigns (sendOrder=NULL or 'default') skip this and keep original array order.
+      if ((campaign as any).sendOrder === 'engagement') {
+        const beforeOrder = contacts.length;
+        contacts = applyEngagementOrdering(contacts);
+        console.log(`[CampaignEngine] Campaign ${campaignId} Smart send ordering applied: ${beforeOrder} contacts reordered by engagement tiers`);
+      }
 
       // ===== CRITICAL FIX: Skip contacts that already have messages for this campaign/step =====
       // This prevents duplicate sends when resuming a paused campaign

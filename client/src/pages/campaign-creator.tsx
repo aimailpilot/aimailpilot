@@ -74,6 +74,7 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
   const [selectedContacts, setSelectedContacts] = useState<string[]>([]);
   const [trackEmails, setTrackEmails] = useState(true);
   const [unsubscribeLink, setUnsubscribeLink] = useState(false);
+  const [sendOrder, setSendOrder] = useState<'default' | 'engagement'>('default');
 
   // Sequence steps
   const [steps, setSteps] = useState<SequenceStep[]>([
@@ -440,6 +441,7 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
           status: schedule.enabled ? 'scheduled' : 'draft',
           trackOpens: trackEmails, trackClicks: trackEmails,
           includeUnsubscribe: unsubscribeLink,
+          sendOrder: sendOrder === 'engagement' ? 'engagement' : null,
         }),
       });
       if (!createRes.ok) throw new Error('Failed to create campaign');
@@ -1369,6 +1371,39 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
           <div className="flex items-center justify-between py-2.5">
             <span className="text-sm text-gray-700 flex items-center gap-1.5">Unsubscribe link <Info className="h-3 w-3 text-gray-300" /></span>
             <Switch checked={unsubscribeLink} onCheckedChange={setUnsubscribeLink} />
+          </div>
+
+          {/* Send order */}
+          <div className="py-2.5 border-t border-gray-100">
+            <div className="text-sm text-gray-700 mb-2 flex items-center gap-1.5">Send order <Info className="h-3 w-3 text-gray-300" /></div>
+            <label className="flex items-start gap-2 py-1.5 cursor-pointer">
+              <input
+                type="radio"
+                name="sendOrder"
+                value="default"
+                checked={sendOrder === 'default'}
+                onChange={() => setSendOrder('default')}
+                className="mt-0.5"
+              />
+              <div className="text-xs">
+                <div className="text-gray-900 font-medium">Default</div>
+                <div className="text-gray-500">Send in list order (stable)</div>
+              </div>
+            </label>
+            <label className="flex items-start gap-2 py-1.5 cursor-pointer">
+              <input
+                type="radio"
+                name="sendOrder"
+                value="engagement"
+                checked={sendOrder === 'engagement'}
+                onChange={() => setSendOrder('engagement')}
+                className="mt-0.5"
+              />
+              <div className="text-xs">
+                <div className="text-gray-900 font-medium">Smart <span className="text-[10px] bg-amber-100 text-amber-700 rounded px-1 py-0.5 ml-1">beta</span></div>
+                <div className="text-gray-500">Engaged contacts first (may improve open rates)</div>
+              </div>
+            </label>
           </div>
         </div>
 
