@@ -12333,7 +12333,10 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       const { extractText, generateDocumentSummary } = await import('./services/context-engine.js');
 
       // Extract text from content
-      const plainText = extractText(content, mimeType || 'text/plain');
+      let plainText = extractText(content, mimeType || 'text/plain');
+      // Strip null bytes and non-printable control chars — PostgreSQL text columns reject  
+      // and binary garbage from mis-uploaded PDFs/DOCX produces it. Keep \t \n \r.
+      plainText = plainText.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
 
       // Auto-generate summary if not provided
       let docSummary = summary || '';
@@ -12373,10 +12376,13 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       if (existing.organizationId !== req.user.organizationId) return res.status(403).json({ message: 'Access denied' });
 
       const { name, docType, content, summary, tags, metadata } = req.body;
+      const cleanContent = typeof content === 'string'
+        ? content.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
+        : content;
       const doc = await storage.updateOrgDocument(req.params.id, {
         ...(name !== undefined && { name }),
         ...(docType !== undefined && { docType }),
-        ...(content !== undefined && { content }),
+        ...(content !== undefined && { content: cleanContent }),
         ...(summary !== undefined && { summary }),
         ...(tags !== undefined && { tags }),
         ...(metadata !== undefined && { metadata }),

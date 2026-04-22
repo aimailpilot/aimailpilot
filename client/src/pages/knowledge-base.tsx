@@ -110,27 +110,32 @@ export default function KnowledgeBase() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Read file as text
+    const isTextFile =
+      ['text/', 'application/json', 'application/csv', 'text/csv', 'text/html', 'text/markdown', 'application/xml']
+        .some(t => file.type.includes(t))
+      || /\.(txt|csv|md|html|json|xml|yml|yaml)$/i.test(file.name);
+
+    if (!isTextFile) {
+      alert(
+        `"${file.name}" is not a supported text format.\n\n` +
+        `Supported: .txt, .csv, .md, .html, .json, .xml, .yml\n\n` +
+        `For PDF or Word documents, please open the file, copy the text, and paste it into the "Add Document" dialog.`
+      );
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+
     const reader = new FileReader();
     reader.onload = (evt) => {
       const content = evt.target?.result as string;
       if (content) {
         setFormContent(content);
-        setFormName(file.name.replace(/\.[^/.]+$/, '')); // Remove extension for name
+        setFormName(file.name.replace(/\.[^/.]+$/, ''));
         setShowAddDialog(true);
       }
     };
+    reader.readAsText(file);
 
-    // For text-based files, read as text
-    const textTypes = ['text/', 'application/json', 'application/csv', 'text/csv', 'text/html', 'text/markdown', 'application/xml'];
-    if (textTypes.some(t => file.type.includes(t)) || file.name.match(/\.(txt|csv|md|html|json|xml|yml|yaml)$/i)) {
-      reader.readAsText(file);
-    } else {
-      // For other types (PDF, DOCX), read as text anyway — limited but works for some
-      reader.readAsText(file);
-    }
-
-    // Reset input
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
