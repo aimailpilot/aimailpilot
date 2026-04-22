@@ -15,7 +15,8 @@ import crypto from 'crypto';
 const APOLLO_BASE = 'https://api.apollo.io';
 const DEFAULT_PAGE_SIZE = 100;
 // Conservative throttle — Apollo plans start around 60 req/min. Stay below that.
-const MIN_MS_BETWEEN_CALLS = 1100;
+// Apollo api_search on lower tiers limits to 50 req/min. 1300ms = ~46 req/min, safe headroom.
+const MIN_MS_BETWEEN_CALLS = 1300;
 
 // --- Job lifecycle state (in-memory cancel flags) ---
 const cancelFlags = new Set<string>();
@@ -75,12 +76,22 @@ async function apolloRequest(
   const init: RequestInit = { method, headers };
   if (body) init.body = JSON.stringify(body);
 
-  const res = await throttledFetch(url, init);
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Apollo ${method} ${path} failed: ${res.status} ${text.slice(0, 300)}`);
+  // Auto-retry on 429 with exponential backoff (up to 3 attempts).
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const res = await throttledFetch(url, init);
+    if (res.status === 429 && attempt < 2) {
+      const retryAfterHdr = res.headers.get('retry-after');
+      const waitMs = retryAfterHdr ? Math.min(parseInt(retryAfterHdr) * 1000, 60000) : (attempt + 1) * 15000;
+      await new Promise((r) => setTimeout(r, waitMs));
+      continue;
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`Apollo ${method} ${path} failed: ${res.status} ${text.slice(0, 300)}`);
+    }
+    return res.json();
   }
-  return res.json();
+  throw new Error(`Apollo ${method} ${path} failed: rate limit exceeded after retries`);
 }
 
 // --- Public API used by routes ---
