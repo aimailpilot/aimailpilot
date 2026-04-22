@@ -617,6 +617,21 @@ export default function EmailAccountSetup({ onAccountAdded }: { onAccountAdded?:
                         ) : (
                           <Badge variant="secondary" className="text-[10px]">Inactive</Badge>
                         )}
+                        {account.authStatus === 'reauth_required' && (
+                          <Badge
+                            className="bg-amber-50 text-amber-800 border-amber-300 border text-[10px] cursor-pointer hover:bg-amber-100"
+                            onClick={() => {
+                              if (account.provider === 'outlook' || account.provider === 'microsoft') {
+                                window.location.href = '/api/auth/outlook-connect?email=' + encodeURIComponent(account.email);
+                              } else {
+                                window.location.href = '/api/auth/gmail-connect?email=' + encodeURIComponent(account.email);
+                              }
+                            }}
+                            title={`${account.authFailureCount || 0} failed refresh attempts. Click to reconnect.`}
+                          >
+                            <AlertTriangle className="h-3 w-3 mr-0.5" /> Reauth Required
+                          </Badge>
+                        )}
                       </div>
                       <div className="text-xs text-gray-400 mb-2">
                         {account.email}
