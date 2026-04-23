@@ -538,7 +538,29 @@ async function runOrgWarmup(orgId: string): Promise<WarmupRunResult> {
   try {
     // Get active warmup accounts with email/provider info
     const warmupAccounts = await storage.getWarmupAccounts(orgId);
-    const activeAccounts = warmupAccounts.filter((a: any) => a.status === 'active');
+    let activeAccounts = warmupAccounts.filter((a: any) => a.status === 'active');
+
+    // Skip accounts flagged as needing reauth — their refresh tokens are revoked
+    // (password reset / user revoked app access). Retrying wastes Google/MS API
+    // calls and floods logs with 401s until user clicks Reconnect in the UI.
+    // The reconnect flow clears authStatus back to 'active' and warmup resumes.
+    try {
+      const reauthRows = await storage.rawAll(
+        `SELECT email FROM email_accounts WHERE "organizationId" = ? AND "authStatus" = 'reauth_required'`,
+        orgId,
+      ) as any[];
+      const reauthSet = new Set(reauthRows.map((r: any) => String(r.email || '').toLowerCase()));
+      if (reauthSet.size > 0) {
+        const before = activeAccounts.length;
+        activeAccounts = activeAccounts.filter((a: any) => !reauthSet.has(String(a.accountEmail || '').toLowerCase()));
+        const skipped = before - activeAccounts.length;
+        if (skipped > 0) {
+          console.log(`[Warmup] Org ${orgId}: skipped ${skipped} account(s) flagged reauth_required (need user reconnect)`);
+        }
+      }
+    } catch (e) {
+      console.error('[Warmup] reauth filter failed (continuing without it):', e);
+    }
 
     if (activeAccounts.length < 2) {
       console.log(`[Warmup] Org ${orgId}: need at least 2 active warmup accounts, have ${activeAccounts.length}`);
