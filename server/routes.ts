@@ -663,9 +663,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         } else {
           console.warn('[Auth] No refresh_token returned on re-auth for', email, '- Google may not have issued one. prompt:consent should force this.');
         }
-        if (tokens.expiry_date) {
-          await storage.setApiSetting(effectiveOrgId, `gmail_sender_${email}_token_expiry`, String(tokens.expiry_date));
-        }
+        // Always store a valid expiry — use expiry_date if provided, otherwise calculate from expires_in.
+        // Google omits expiry_date on re-auth reconnects, which left stale expired values in DB causing refresh hangs.
+        const expiryToStore = tokens.expiry_date || (tokens.expires_in ? Date.now() + (tokens.expires_in * 1000) : Date.now() + 3600000);
+        await storage.setApiSetting(effectiveOrgId, `gmail_sender_${email}_token_expiry`, String(expiryToStore));
 
         // ONLY update org-level tokens if this IS the primary account or no primary exists yet
         // CRITICAL FIX: Do NOT overwrite org-level tokens with a secondary account's tokens!
@@ -749,7 +750,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
               // Store per-sender tokens in this org too
               if (tokens.access_token) await storage.setApiSetting(otherOrgId, `gmail_sender_${email}_access_token`, tokens.access_token);
               if (tokens.refresh_token) await storage.setApiSetting(otherOrgId, `gmail_sender_${email}_refresh_token`, tokens.refresh_token);
-              if (tokens.expiry_date) await storage.setApiSetting(otherOrgId, `gmail_sender_${email}_token_expiry`, String(tokens.expiry_date));
+              await storage.setApiSetting(otherOrgId, `gmail_sender_${email}_token_expiry`, String(expiryToStore));
 
               // Create email account in other org if it doesn't exist
               const otherAccounts = await storage.getEmailAccounts(otherOrgId);
