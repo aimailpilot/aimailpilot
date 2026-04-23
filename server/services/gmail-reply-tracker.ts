@@ -369,17 +369,17 @@ export class GmailReplyTracker {
       const heapMB = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
       console.log(`[GmailReplyTracker] Maps built: ${providerIdToMessage.size} by providerId, ${contactEmailToMessages.size} by email, ${contactCampaignToMessages.size} by contact+campaign, heap=${heapMB}MB`);
 
-      // Build set of org's own sender emails (email_accounts + warmup_accounts) to skip warmup/internal mail
+      // Build set of ALL connected sender emails across ALL orgs (email_accounts + warmup_accounts).
+      // Global-scoped on purpose: the same address is often connected to multiple orgs (shared team
+      // inboxes), and warmup traffic from org A lands in org B's mailbox. A per-org set lets that
+      // traffic slip through as "campaign match: false" inbox noise. Any address connected anywhere
+      // in the system is internal/warmup, not a real external reply.
       const ownEmailsSet = new Set<string>();
       try {
-        const orgAccounts = await storage.getEmailAccounts(orgId);
-        for (const a of orgAccounts) if (a.email) ownEmailsSet.add(a.email.toLowerCase());
-        const warmupRows = await storage.rawAll(
-          `SELECT ea.email FROM warmup_accounts wa
-           JOIN email_accounts ea ON ea.id = wa."emailAccountId"
-           WHERE wa."organizationId" = ? AND ea.email IS NOT NULL`, orgId
+        const allAccounts = await storage.rawAll(
+          `SELECT DISTINCT LOWER(email) as email FROM email_accounts WHERE email IS NOT NULL`
         ) as any[];
-        for (const r of warmupRows) if (r.email) ownEmailsSet.add(r.email.toLowerCase());
+        for (const r of allAccounts) if (r.email) ownEmailsSet.add(r.email);
       } catch (e) { /* non-fatal — if this fails, process all messages as before */ }
 
       // Track already-seen Gmail message IDs to avoid duplicate processing across accounts
