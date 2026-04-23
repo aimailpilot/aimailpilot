@@ -260,9 +260,34 @@ export class OutlookReplyTracker {
     const result = { checked: 0, newReplies: 0, errors: [] as string[], replies: [] as any[] };
 
     try {
-      const outlookAccounts = await this.getAllOutlookTokens(orgId);
+      let outlookAccounts = await this.getAllOutlookTokens(orgId);
       if (outlookAccounts.length === 0) {
         result.errors.push('No Outlook access tokens available. Please re-authenticate with Microsoft.');
+        return result;
+      }
+
+      // Skip accounts flagged reauth_required — their token refresh is failing with
+      // AADSTS50173/invalid_grant on every poll. Polling them burns API quota and log volume.
+      // When user hits Reconnect, authStatus clears back to 'active' and polling resumes.
+      try {
+        const reauthRows = await storage.rawAll(
+          `SELECT email FROM email_accounts WHERE "organizationId" = ? AND "authStatus" = 'reauth_required'`,
+          orgId,
+        ) as any[];
+        const reauthSet = new Set((reauthRows || []).map((r: any) => String(r.email || '').toLowerCase()));
+        if (reauthSet.size > 0) {
+          const before = outlookAccounts.length;
+          outlookAccounts = outlookAccounts.filter((a: any) => !reauthSet.has(String(a.email || '').toLowerCase()));
+          const skipped = before - outlookAccounts.length;
+          if (skipped > 0) {
+            console.log(`[OutlookReplyTracker] Org ${orgId.substring(0, 8)}: skipped ${skipped} account(s) flagged reauth_required`);
+          }
+        }
+      } catch (e) {
+        // Fail-open: if the reauth filter query errors, continue with the full list
+      }
+
+      if (outlookAccounts.length === 0) {
         return result;
       }
 

@@ -304,7 +304,7 @@ export class GmailReplyTracker {
 
     try {
       // Get ALL Gmail accounts for this org (multi-account support)
-      const allTokens = await this.getAllGmailTokens(orgId);
+      let allTokens = await this.getAllGmailTokens(orgId);
       if (allTokens.length === 0) {
         // Fallback to org-level token
         const orgToken = await this.getValidAccessToken(orgId);
@@ -313,6 +313,31 @@ export class GmailReplyTracker {
           return result;
         }
         allTokens.push({ email: 'org-default', accessToken: orgToken });
+      }
+
+      // Skip accounts flagged reauth_required — their token refresh is failing with
+      // invalid_grant on every poll, so polling them just burns API quota and log volume.
+      // When user hits Reconnect, authStatus clears back to 'active' and polling resumes.
+      try {
+        const reauthRows = await storage.rawAll(
+          `SELECT email FROM email_accounts WHERE "organizationId" = ? AND "authStatus" = 'reauth_required'`,
+          orgId,
+        ) as any[];
+        const reauthSet = new Set((reauthRows || []).map((r: any) => String(r.email || '').toLowerCase()));
+        if (reauthSet.size > 0) {
+          const before = allTokens.length;
+          allTokens = allTokens.filter(t => !reauthSet.has(String(t.email || '').toLowerCase()));
+          const skipped = before - allTokens.length;
+          if (skipped > 0) {
+            console.log(`[GmailReplyTracker] Org ${orgId.substring(0, 8)}: skipped ${skipped} account(s) flagged reauth_required`);
+          }
+        }
+      } catch (e) {
+        // Fail-open: if the reauth filter query errors, continue with the full list
+      }
+
+      if (allTokens.length === 0) {
+        return result;
       }
 
       console.log(`[GmailReplyTracker] Checking ${allTokens.length} Gmail account(s): ${allTokens.map(t => t.email).join(', ')}`);
