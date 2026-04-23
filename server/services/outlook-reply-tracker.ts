@@ -357,7 +357,10 @@ export class OutlookReplyTracker {
         `SELECT DISTINCT LOWER(email) as email FROM email_accounts WHERE email IS NOT NULL`
       ) as any[];
       for (const r of allAccounts) if (r.email) ownEmailsSet.add(r.email);
-    } catch (e) { /* non-fatal — if this fails, process all messages as before */ }
+      console.log(`[OutlookReplyTracker] ownEmailsSet built: ${ownEmailsSet.size} internal senders (global)`);
+    } catch (e: any) {
+      console.log(`[OutlookReplyTracker] ownEmailsSet build FAILED: ${e?.message || e}`);
+    }
 
     for (const msg of listData.value) {
       try {

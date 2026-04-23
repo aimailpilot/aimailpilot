@@ -380,7 +380,10 @@ export class GmailReplyTracker {
           `SELECT DISTINCT LOWER(email) as email FROM email_accounts WHERE email IS NOT NULL`
         ) as any[];
         for (const r of allAccounts) if (r.email) ownEmailsSet.add(r.email);
-      } catch (e) { /* non-fatal — if this fails, process all messages as before */ }
+        console.log(`[GmailReplyTracker] ownEmailsSet built: ${ownEmailsSet.size} internal senders (global)`);
+      } catch (e: any) {
+        console.log(`[GmailReplyTracker] ownEmailsSet build FAILED: ${e?.message || e}`);
+      }
 
       // Track already-seen Gmail message IDs to avoid duplicate processing across accounts
       const processedGmailIds = new Set<string>();
