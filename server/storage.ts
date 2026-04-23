@@ -3103,7 +3103,7 @@ export class DatabaseStorage {
   }
 
   async getWarmupAccounts(orgId: string) {
-    return db.prepare('SELECT wa.*, ea.email as accountEmail, ea.provider FROM warmup_accounts wa LEFT JOIN email_accounts ea ON ea.id = wa.emailAccountId WHERE wa.organizationId = ? ORDER BY wa.createdAt DESC').all(orgId).map((r: any) => ({ ...r, settings: fromJson(r.settings) }));
+    return db.prepare('SELECT wa.*, ea.email as accountEmail, ea.provider FROM warmup_accounts wa JOIN email_accounts ea ON ea.id = wa.emailAccountId WHERE wa.organizationId = ? AND ea.email IS NOT NULL ORDER BY wa.createdAt DESC').all(orgId).map((r: any) => ({ ...r, settings: fromJson(r.settings) }));
   }
 
   async updateWarmupAccount(id: string, data: any) {

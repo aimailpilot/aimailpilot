@@ -2991,7 +2991,7 @@ export class PostgresStorage {
   }
 
   async getWarmupAccounts(orgId: string) {
-    return (await queryAll('SELECT wa.*, ea.email as "accountEmail", ea.provider FROM warmup_accounts wa LEFT JOIN email_accounts ea ON ea.id = wa."emailAccountId" WHERE wa."organizationId" = $1 ORDER BY wa."createdAt" DESC', [orgId])).map((r: any) => ({ ...r, settings: fromJson(r.settings) }));
+    return (await queryAll('SELECT wa.*, ea.email as "accountEmail", ea.provider FROM warmup_accounts wa JOIN email_accounts ea ON ea.id = wa."emailAccountId" WHERE wa."organizationId" = $1 AND ea.email IS NOT NULL ORDER BY wa."createdAt" DESC', [orgId])).map((r: any) => ({ ...r, settings: fromJson(r.settings) }));
   }
 
   async updateWarmupAccount(id: string, data: any) {
