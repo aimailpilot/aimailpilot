@@ -1265,8 +1265,13 @@ export class DatabaseStorage {
     const existing = await this.getEmailAccount(id);
     if (!existing) throw new Error('Email account not found');
     const merged = { ...existing, ...data };
-    db.prepare('UPDATE email_accounts SET displayName=?, smtpConfig=?, dailyLimit=?, dailySent=?, isActive=?, provider=?, updatedAt=? WHERE id=?').run(
-      merged.displayName, toJson(merged.smtpConfig), merged.dailyLimit, merged.dailySent, merged.isActive ? 1 : 0, merged.provider || existing.provider, now(), id
+    const authStatus = 'authStatus' in data ? data.authStatus : (existing as any).authStatus;
+    const authFailureCount = 'authFailureCount' in data ? data.authFailureCount : (existing as any).authFailureCount;
+    const authLastFailureAt = 'authLastFailureAt' in data ? data.authLastFailureAt : (existing as any).authLastFailureAt;
+    const authLastErrorCode = 'authLastErrorCode' in data ? data.authLastErrorCode : (existing as any).authLastErrorCode;
+    db.prepare('UPDATE email_accounts SET displayName=?, smtpConfig=?, dailyLimit=?, dailySent=?, isActive=?, provider=?, updatedAt=?, authStatus=?, authFailureCount=?, authLastFailureAt=?, authLastErrorCode=? WHERE id=?').run(
+      merged.displayName, toJson(merged.smtpConfig), merged.dailyLimit, merged.dailySent, merged.isActive ? 1 : 0, merged.provider || existing.provider, now(),
+      authStatus ?? null, authFailureCount ?? 0, authLastFailureAt ?? null, authLastErrorCode ?? null, id
     );
     return this.getEmailAccount(id);
   }

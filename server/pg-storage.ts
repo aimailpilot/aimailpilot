@@ -1032,9 +1032,14 @@ export class PostgresStorage {
     const existing = await this.getEmailAccount(id);
     if (!existing) throw new Error('Email account not found');
     const merged = { ...existing, ...data };
+    // Determine auth health values — allow explicit null to clear fields
+    const authStatus = 'authStatus' in data ? data.authStatus : (existing as any).authStatus;
+    const authFailureCount = 'authFailureCount' in data ? data.authFailureCount : (existing as any).authFailureCount;
+    const authLastFailureAt = 'authLastFailureAt' in data ? data.authLastFailureAt : (existing as any).authLastFailureAt;
+    const authLastErrorCode = 'authLastErrorCode' in data ? data.authLastErrorCode : (existing as any).authLastErrorCode;
     await execute(
-      'UPDATE email_accounts SET "displayName"=$1, "smtpConfig"=$2, "dailyLimit"=$3, "dailySent"=$4, "isActive"=$5, provider=$6, "updatedAt"=$7 WHERE id=$8',
-      [merged.displayName, toJson(merged.smtpConfig), merged.dailyLimit, merged.dailySent, merged.isActive ? 1 : 0, merged.provider || existing.provider, now(), id]
+      'UPDATE email_accounts SET "displayName"=$1, "smtpConfig"=$2, "dailyLimit"=$3, "dailySent"=$4, "isActive"=$5, provider=$6, "updatedAt"=$7, "authStatus"=$8, "authFailureCount"=$9, "authLastFailureAt"=$10, "authLastErrorCode"=$11 WHERE id=$12',
+      [merged.displayName, toJson(merged.smtpConfig), merged.dailyLimit, merged.dailySent, merged.isActive ? 1 : 0, merged.provider || existing.provider, now(), authStatus ?? null, authFailureCount ?? 0, authLastFailureAt ?? null, authLastErrorCode ?? null, id]
     );
     return this.getEmailAccount(id);
   }

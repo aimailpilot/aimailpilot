@@ -719,10 +719,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
               },
               provider: 'gmail',
               displayName: name || existingAccount.displayName,
+              authStatus: null,
+              authFailureCount: 0,
+              authLastFailureAt: null,
+              authLastErrorCode: null,
             });
             console.log(`[Auth] Upgraded Gmail sender ${email} from SMTP password to OAuth`);
           } else {
-            console.log(`[Auth] Gmail sender already exists: ${email}, tokens updated`);
+            // Reset any reauth_required flag so reconnect clears stuck state
+            await storage.updateEmailAccount(existingAccount.id, {
+              authStatus: null,
+              authFailureCount: 0,
+              authLastFailureAt: null,
+              authLastErrorCode: null,
+            });
+            console.log(`[Auth] Gmail sender already exists: ${email}, tokens updated, auth health reset`);
           }
         }
 
@@ -1248,10 +1259,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
               },
               provider: 'outlook',
               displayName: name || existingAccount.displayName,
+              authStatus: null,
+              authFailureCount: 0,
+              authLastFailureAt: null,
+              authLastErrorCode: null,
             });
             console.log(`[Auth] Upgraded Outlook sender ${email} from SMTP password to OAuth`);
           } else {
-            console.log(`[Auth] Outlook sender already exists: ${email}, tokens updated`);
+            // Reset any reauth_required flag so reconnect clears stuck state
+            await storage.updateEmailAccount(existingAccount.id, {
+              authStatus: null,
+              authFailureCount: 0,
+              authLastFailureAt: null,
+              authLastErrorCode: null,
+            });
+            console.log(`[Auth] Outlook sender already exists: ${email}, tokens updated, auth health reset`);
           }
         }
 
