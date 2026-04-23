@@ -769,9 +769,14 @@ export class GmailReplyTracker {
           // Method 3: Match by sender email + subject pattern
           // Also try matching ANY reply from a known contact (not just "Re:" prefix)
           if (trackingIds.length === 0 && senderEmail) {
-            const isReply = subject.toLowerCase().startsWith('re:') || !!inReplyTo;
+            // Accept Re: as prefix OR embedded as a whole word — covers auto-responders
+            // like "Thank you for your email Re: X" that strip In-Reply-To headers.
+            // Use word-boundary on both sides so "Response" / "credibility" don't false-match.
+            const subjLower = subject.toLowerCase();
+            const hasReToken = /(^|\s)re:\s/i.test(subjLower);
+            const isReply = hasReToken || !!inReplyTo;
             if (!isReply) {
-              console.log(`[GmailReplyTracker] Method 3 SKIP: from=${senderEmail} subject doesn't start with Re: and no In-Reply-To header`);
+              console.log(`[GmailReplyTracker] Method 3 SKIP: from=${senderEmail} no Re: token and no In-Reply-To header`);
             }
             // Check if this sender email matches any contact we sent campaigns to
             // First try contactEmailToMessages map (fast O(1) lookup)
