@@ -55,6 +55,20 @@ export class GmailReplyTracker {
   // Per-org lock: prevents overlapping checks for the SAME org while allowing different orgs to check in parallel
   private checkingOrgs: Set<string> = new Set();
   private lastCheckedAt: Map<string, string> = new Map();
+  // Cross-cycle dedupe for bounce NDRs: same msgId reappears in every 120m lookback until rolled off.
+  // Capped FIFO to prevent unbounded growth; 5000 ids covers ~days of bounce volume.
+  private processedBounceIds: Set<string> = new Set();
+  private processedBounceOrder: string[] = [];
+  private readonly BOUNCE_DEDUPE_CAP = 5000;
+  private markBounceProcessed(msgId: string): void {
+    if (this.processedBounceIds.has(msgId)) return;
+    this.processedBounceIds.add(msgId);
+    this.processedBounceOrder.push(msgId);
+    if (this.processedBounceOrder.length > this.BOUNCE_DEDUPE_CAP) {
+      const evict = this.processedBounceOrder.shift();
+      if (evict) this.processedBounceIds.delete(evict);
+    }
+  }
   // Keep backward compat for getStatus()
   private get isChecking(): boolean { return this.checkingOrgs.size > 0; }
 
@@ -487,6 +501,12 @@ export class GmailReplyTracker {
           }
           
           if (isBounceNotification) {
+            // Cross-cycle dedupe: skip NDRs we've already fully processed in a prior poll.
+            // Without this, the same bounce reappears inside every 120m lookback window and
+            // re-runs the full body fetch + contact lookup just to log "already status=bounced".
+            if (this.processedBounceIds.has(msgRef.id)) {
+              continue;
+            }
             console.log(`[GmailReplyTracker] Bounce notification detected: from="${from}", subject="${subject}", msgId=${msgRef.id}`);
             // Extract bounced email from the bounce notification
             // Bounces typically reference the original email in In-Reply-To / References headers
@@ -700,6 +720,8 @@ export class GmailReplyTracker {
             } catch (bounceError) {
               console.error('[GmailReplyTracker] Error processing bounce notification:', bounceError);
             }
+            // Remember this msgId so subsequent polls skip the body-fetch + contact-lookup work
+            this.markBounceProcessed(msgRef.id);
             continue; // Don't process bounce as a reply
           }
 

@@ -42,6 +42,20 @@ export class OutlookReplyTracker {
   // Per-org lock: prevents overlapping checks for the SAME org while allowing different orgs to check in parallel
   private checkingOrgs: Set<string> = new Set();
   private lastCheckedAt: Map<string, string> = new Map();
+  // Cross-cycle dedupe for bounce NDRs: same msgId reappears in each poll window until rolled off.
+  // Capped FIFO to prevent unbounded growth; 5000 ids covers ~days of bounce volume.
+  private processedBounceIds: Set<string> = new Set();
+  private processedBounceOrder: string[] = [];
+  private readonly BOUNCE_DEDUPE_CAP = 5000;
+  private markBounceProcessed(msgId: string): void {
+    if (this.processedBounceIds.has(msgId)) return;
+    this.processedBounceIds.add(msgId);
+    this.processedBounceOrder.push(msgId);
+    if (this.processedBounceOrder.length > this.BOUNCE_DEDUPE_CAP) {
+      const evict = this.processedBounceOrder.shift();
+      if (evict) this.processedBounceIds.delete(evict);
+    }
+  }
   private get isChecking(): boolean { return this.checkingOrgs.size > 0; }
 
   /** Get OAuth client credentials for Microsoft */
@@ -366,6 +380,10 @@ export class OutlookReplyTracker {
         );
         
         if (isBounce) {
+          // Cross-cycle dedupe: skip NDRs we've already fully processed in a prior poll.
+          if (msg.id && this.processedBounceIds.has(msg.id)) {
+            continue;
+          }
           try {
             const bodyText = msg.body?.content || msg.bodyPreview || '';
             const emailPattern = /([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/g;
@@ -500,6 +518,7 @@ export class OutlookReplyTracker {
           } catch (e) {
             console.error('[OutlookReplyTracker] Bounce processing error:', e);
           }
+          if (msg.id) this.markBounceProcessed(msg.id);
           continue; // Don't process as reply
         }
 
