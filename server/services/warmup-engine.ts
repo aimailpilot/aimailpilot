@@ -28,6 +28,30 @@ function randomInt(min: number, max: number): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+/**
+ * fetch() with an AbortController timeout. Default 15s — long enough for
+ * Gmail/Graph round-trips, short enough that a single hung request can't
+ * stall an entire warmup cycle. Mirrors the pattern used in followup-engine.
+ */
+async function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs = 15000): Promise<Response> {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// Concurrency cap for parallel org cycles — each org does many API calls, so
+// 5 in flight is a reasonable ceiling that stays well under Google/MS rate limits
+// while letting small/slow orgs not block large/fast ones.
+const ORG_CONCURRENCY = 5;
+
+// Overlap guard — prevents a second runWarmupCycle() from starting if the
+// previous one hasn't finished. Mirrors the isProcessing pattern in followup-engine.
+let cycleRunning = false;
+
 /** Short human-like reply lines used for warmup replies */
 const REPLY_LINES = [
   "Thanks for the update, noted!",
@@ -136,7 +160,7 @@ async function getOutlookAccessToken(orgId: string, senderEmail: string): Promis
             refresh_token: refreshToken, grant_type: 'refresh_token',
             scope: 'openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/SMTP.Send',
           });
-          const resp = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+          const resp = await fetchWithTimeout('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
             method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString(),
           });
           if (resp.ok) {
@@ -177,7 +201,7 @@ async function sendViaGmailAPI(
   try {
     let raw = `From: ${from}\r\nTo: ${to}\r\nSubject: ${subject}\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset="UTF-8"\r\n\r\n${html}`;
     const base64 = Buffer.from(raw).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    const resp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    const resp = await fetchWithTimeout('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ raw: base64 }),
@@ -197,7 +221,7 @@ async function sendViaMicrosoftGraph(
   token: string, to: string, subject: string, html: string
 ): Promise<{ success: boolean; messageId?: string; error?: string }> {
   try {
-    const resp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+    const resp = await fetchWithTimeout('https://graph.microsoft.com/v1.0/me/sendMail', {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -233,7 +257,7 @@ async function getOrCreateGmailLabel(token: string): Promise<string | null> {
 
   try {
     // Check if label exists
-    const listResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/labels', {
+    const listResp = await fetchWithTimeout('https://gmail.googleapis.com/gmail/v1/users/me/labels', {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!listResp.ok) return null;
@@ -245,7 +269,7 @@ async function getOrCreateGmailLabel(token: string): Promise<string | null> {
     }
 
     // Create label
-    const createResp = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/labels', {
+    const createResp = await fetchWithTimeout('https://gmail.googleapis.com/gmail/v1/users/me/labels', {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -272,7 +296,7 @@ async function getOrCreateOutlookFolder(token: string): Promise<string | null> {
 
   try {
     // Check if folder exists
-    const listResp = await fetch(
+    const listResp = await fetchWithTimeout(
       `https://graph.microsoft.com/v1.0/me/mailFolders?$filter=displayName eq '${WARMUP_LABEL_NAME}'`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
@@ -285,7 +309,7 @@ async function getOrCreateOutlookFolder(token: string): Promise<string | null> {
     }
 
     // Create folder
-    const createResp = await fetch('https://graph.microsoft.com/v1.0/me/mailFolders', {
+    const createResp = await fetchWithTimeout('https://graph.microsoft.com/v1.0/me/mailFolders', {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ displayName: WARMUP_LABEL_NAME }),
@@ -311,7 +335,7 @@ async function gmailEngage(token: string, fromEmail: string): Promise<{ opened: 
 
     // 1. Search INBOX for warmup emails from this sender (read or unread — engagement marks as read)
     const inboxQ = encodeURIComponent(`from:${fromEmail} newer_than:3d in:inbox`);
-    const inboxResp = await fetch(
+    const inboxResp = await fetchWithTimeout(
       `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${inboxQ}&maxResults=20`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
@@ -320,7 +344,7 @@ async function gmailEngage(token: string, fromEmail: string): Promise<{ opened: 
 
     // 2. Search SPAM for warmup emails from this sender
     const spamQ = encodeURIComponent(`from:${fromEmail} newer_than:1d in:spam`);
-    const spamResp = await fetch(
+    const spamResp = await fetchWithTimeout(
       `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${spamQ}&maxResults=20`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
@@ -331,7 +355,7 @@ async function gmailEngage(token: string, fromEmail: string): Promise<{ opened: 
     for (const msg of spamMessages) {
       const addLabels = ['INBOX'];
       if (warmupLabelId) addLabels.push(warmupLabelId);
-      const modResp = await fetch(
+      const modResp = await fetchWithTimeout(
         `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}/modify`,
         {
           method: 'POST',
@@ -352,7 +376,7 @@ async function gmailEngage(token: string, fromEmail: string): Promise<{ opened: 
     for (const msg of inboxMessages) {
       const addLabels = ['STARRED', 'IMPORTANT'];
       if (warmupLabelId) addLabels.push(warmupLabelId);
-      const modResp = await fetch(
+      const modResp = await fetchWithTimeout(
         `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}/modify`,
         {
           method: 'POST',
@@ -383,7 +407,7 @@ async function outlookEngage(token: string, fromEmail: string): Promise<{ opened
 
     // 1. Search Inbox for warmup emails
     const inboxFilter = encodeURIComponent(`from/emailAddress/address eq '${fromEmail}' and isRead eq false`);
-    const inboxResp = await fetch(
+    const inboxResp = await fetchWithTimeout(
       `https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$filter=${inboxFilter}&$top=20&$select=id`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
@@ -392,7 +416,7 @@ async function outlookEngage(token: string, fromEmail: string): Promise<{ opened
 
     // 2. Search JunkEmail for warmup emails
     const junkFilter = encodeURIComponent(`from/emailAddress/address eq '${fromEmail}'`);
-    const junkResp = await fetch(
+    const junkResp = await fetchWithTimeout(
       `https://graph.microsoft.com/v1.0/me/mailFolders/junkemail/messages?$filter=${junkFilter}&$top=20&$select=id`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
@@ -402,7 +426,7 @@ async function outlookEngage(token: string, fromEmail: string): Promise<{ opened
     // 3. Move junk emails → warmup folder (trains Outlook that sender is safe)
     for (const msg of junkMessages) {
       const destId = warmupFolderId || 'inbox';
-      const moveResp = await fetch(
+      const moveResp = await fetchWithTimeout(
         `https://graph.microsoft.com/v1.0/me/messages/${msg.id}/move`,
         {
           method: 'POST',
@@ -419,7 +443,7 @@ async function outlookEngage(token: string, fromEmail: string): Promise<{ opened
     // 4. Process inbox emails: mark read, flag, move to warmup folder
     for (const msg of inboxMessages) {
       // Mark as read + flag
-      await fetch(
+      await fetchWithTimeout(
         `https://graph.microsoft.com/v1.0/me/messages/${msg.id}`,
         {
           method: 'PATCH',
@@ -432,7 +456,7 @@ async function outlookEngage(token: string, fromEmail: string): Promise<{ opened
 
       // Move to warmup folder to keep inbox clean
       if (warmupFolderId) {
-        await fetch(
+        await fetchWithTimeout(
           `https://graph.microsoft.com/v1.0/me/messages/${msg.id}/move`,
           {
             method: 'POST',
@@ -514,18 +538,44 @@ interface WarmupRunResult {
 }
 
 async function runWarmupCycle(): Promise<WarmupRunResult[]> {
+  // Overlap guard — if the previous cycle hasn't finished, skip this tick.
+  // Better than running two concurrent cycles which would double-count sends
+  // and race on currentDaily updates.
+  if (cycleRunning) {
+    console.log('[Warmup] Previous cycle still running, skipping this interval');
+    return [];
+  }
+  cycleRunning = true;
+  const startedAt = Date.now();
   const results: WarmupRunResult[] = [];
 
   try {
     // Get all organizations that have warmup accounts
     const orgs = await storage.rawAll('SELECT DISTINCT "organizationId" FROM warmup_accounts WHERE status = ?', 'active') as any[];
 
-    for (const { organizationId: orgId } of orgs) {
-      const result = await runOrgWarmup(orgId);
-      results.push(result);
+    // Process orgs in parallel, capped at ORG_CONCURRENCY at a time. Each org's
+    // work is independent, so a slow org (many accounts, rate-limited API calls)
+    // no longer blocks every other org's cycle.
+    const orgIds: string[] = orgs.map((o: any) => o.organizationId);
+    for (let i = 0; i < orgIds.length; i += ORG_CONCURRENCY) {
+      const batch = orgIds.slice(i, i + ORG_CONCURRENCY);
+      const batchResults = await Promise.all(
+        batch.map((orgId) =>
+          runOrgWarmup(orgId).catch((e) => {
+            console.error(`[Warmup] Org ${orgId} crashed:`, e instanceof Error ? e.message : e);
+            return { orgId, sent: 0, received: 0, opened: 0, replied: 0, errors: [String(e)], sendPairs: [] } as WarmupRunResult;
+          }),
+        ),
+      );
+      results.push(...batchResults);
     }
+
+    const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+    console.log(`[Warmup] Cycle complete — ${orgIds.length} orgs in ${elapsedSec}s (concurrency=${ORG_CONCURRENCY})`);
   } catch (e) {
     console.error('[Warmup] Cycle error:', e instanceof Error ? e.message : e);
+  } finally {
+    cycleRunning = false;
   }
 
   return results;
@@ -753,9 +803,10 @@ async function runOrgWarmup(orgId: string): Promise<WarmupRunResult> {
           totalSpam += stats.spamCount;
           totalMovedFromSpam += stats.movedFromSpam;
 
-          // Auto-reply ~30% of the time
+          // Auto-reply ~30% of the time. Reuse outer templates array — no need
+          // to re-fetch from DB per (recipient × sender) pair.
           if (stats.opened > 0 && Math.random() < 0.3) {
-            const template = randomPick(await storage.getEmailTemplates(orgId));
+            const template = randomPick(templates);
             const origSubject = (template as any).subject || 'Quick update';
             const replied = await gmailReply(recipientToken, email, sender.accountEmail, origSubject);
             if (replied) { repliedCount++; result.replied++; }
@@ -768,7 +819,7 @@ async function runOrgWarmup(orgId: string): Promise<WarmupRunResult> {
           totalMovedFromSpam += stats.movedFromSpam;
 
           if (stats.opened > 0 && Math.random() < 0.3) {
-            const template = randomPick(await storage.getEmailTemplates(orgId));
+            const template = randomPick(templates);
             const origSubject = (template as any).subject || 'Quick update';
             const replied = await outlookReply(recipientToken, sender.accountEmail, origSubject);
             if (replied) { repliedCount++; result.replied++; }
