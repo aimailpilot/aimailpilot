@@ -954,7 +954,7 @@ export default function MailMeteorDashboard() {
                       <div
                         key={campaign.id}
                         className="grid grid-cols-[2fr_90px_90px_60px_65px_65px_65px_65px_44px] gap-2 px-4 md:px-5 py-3 sm:py-3.5 border-b border-gray-50 hover:bg-blue-50/30 items-center transition-colors group cursor-pointer"
-                        onClick={() => { setSelectedCampaignId(campaign.id); setCurrentView('campaign-detail'); }}
+                        onClick={() => { if (campaign.status === 'draft') { setEditCampaignId(campaign.id); setViewMode('campaign'); window.history.replaceState(null, '', '#campaigns'); } else { setSelectedCampaignId(campaign.id); setCurrentView('campaign-detail'); } }}
                       >
                         <div className="min-w-0">
                           <div className="flex items-center gap-1.5">
@@ -1066,7 +1066,7 @@ export default function MailMeteorDashboard() {
                       <div
                         key={campaign.id}
                         className="bg-white border border-gray-200 rounded-lg p-3 sm:p-4 cursor-pointer hover:bg-blue-50/30 transition-colors"
-                        onClick={() => { setSelectedCampaignId(campaign.id); setCurrentView('campaign-detail'); }}
+                        onClick={() => { if (campaign.status === 'draft') { setEditCampaignId(campaign.id); setViewMode('campaign'); window.history.replaceState(null, '', '#campaigns'); } else { setSelectedCampaignId(campaign.id); setCurrentView('campaign-detail'); } }}
                       >
                         <div className="flex items-start justify-between gap-2 mb-2">
                           <div className="flex-1 min-w-0">
@@ -1237,7 +1237,7 @@ export default function MailMeteorDashboard() {
             <CampaignDetailPage
               campaignId={selectedCampaignId}
               onBack={() => { setCurrentView('campaigns'); setSelectedCampaignId(null); }}
-              onNavigateToCampaign={(id: string) => { setEditCampaignId(id); setViewMode('campaign'); }}
+              onNavigateToCampaign={(id: string) => { setEditCampaignId(id); setViewMode('campaign'); window.history.replaceState(null, '', '#campaigns'); }}
             />
           )}
 
