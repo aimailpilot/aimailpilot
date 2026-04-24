@@ -5737,15 +5737,17 @@ Which account should I use and why? If I need to split across accounts, provide 
         }
       }
 
-      // Update the contact list count from junction table (accurate for multi-list)
+      // Update the contact list count — always recount from junction table for accuracy
       if (contactListRecord && targetListId) {
         try {
           const countRow = await storage.rawGet(
-            `SELECT COUNT(*) as c FROM contact_list_members WHERE "listId" = ?`, targetListId
+            `SELECT COUNT(*) as c FROM contact_list_members WHERE "listId" = $1`, targetListId
           ) as any;
-          await storage.updateContactList(targetListId, { contactCount: parseInt(countRow?.c || '0') });
+          const junctionCount = parseInt(countRow?.c || '0');
+          // Junction count should be >= imported+updated; if it looks wrong fall back to arithmetic
+          const arithmeticCount = (existingListId ? (contactListRecord.contactCount || 0) : 0) + imported;
+          await storage.updateContactList(targetListId, { contactCount: Math.max(junctionCount, arithmeticCount) });
         } catch {
-          // Fallback to simple increment if junction query fails
           const existingCount = existingListId ? (contactListRecord.contactCount || 0) : 0;
           await storage.updateContactList(targetListId, { contactCount: existingCount + imported });
         }
