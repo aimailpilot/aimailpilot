@@ -98,6 +98,11 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
   const [updateError, setUpdateError] = useState("");
   const [emailAccounts, setEmailAccounts] = useState<any[]>([]);
   const editorRef = useRef<HTMLDivElement>(null);
+  // Follow-up steps state for update dialog
+  const [updateFollowupSteps, setUpdateFollowupSteps] = useState<Array<{
+    sequenceId: string; stepId: string; subject: string; content: string; delayDays: number; condition: string;
+  }>>([]);
+  const [updateActiveStepIdx, setUpdateActiveStepIdx] = useState(0);
 
   // Preview mode state
   const [updateDialogMode, setUpdateDialogMode] = useState<'edit' | 'preview'>('edit');
@@ -281,6 +286,7 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
     setUpdateContent(c.content || '');
     setUpdateEmailAccountId(c.emailAccountId || '');
     setUpdateError('');
+    setUpdateActiveStepIdx(0);
     setTrackEmails(c.trackOpens !== 0 && c.trackOpens !== false);
     setUnsubscribeLink(c.includeUnsubscribe === 1 || c.includeUnsubscribe === true);
     // Load autopilot from sendingConfig if it exists
@@ -289,6 +295,25 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
     } else {
       setAutopilot(prev => ({ ...prev, enabled: false }));
     }
+
+    // Build follow-up steps list from sequences
+    const seqs: any[] = detail.followupSequences || [];
+    const followupSteps: typeof updateFollowupSteps = [];
+    for (const seq of seqs) {
+      const steps: any[] = seq.steps || [];
+      steps.sort((a: any, b: any) => (a.stepNumber ?? 0) - (b.stepNumber ?? 0));
+      for (const s of steps) {
+        followupSteps.push({
+          sequenceId: seq.id,
+          stepId: s.id,
+          subject: s.subject || '',
+          content: s.content || '',
+          delayDays: s.delayDays ?? 3,
+          condition: s.trigger || 'no_reply',
+        });
+      }
+    }
+    setUpdateFollowupSteps(followupSteps);
     setShowUpdateDialog(true);
 
     try {
@@ -307,37 +332,90 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
     setUpdateSaving(true);
     setUpdateError('');
     try {
-      const content = editorRef.current?.innerHTML || updateContent;
+      // Capture current editor content into the active step before saving
+      const currentEditorHtml = editorRef.current?.innerHTML || '';
+      let step1Content = updateContent;
+      const followupStepsSaved = [...updateFollowupSteps];
+      if (updateActiveStepIdx === 0) {
+        step1Content = currentEditorHtml;
+      } else {
+        const followupIdx = updateActiveStepIdx - 1;
+        if (followupStepsSaved[followupIdx]) {
+          followupStepsSaved[followupIdx] = { ...followupStepsSaved[followupIdx], content: currentEditorHtml };
+        }
+      }
+
       const sendingConfig = autopilot.enabled ? {
         delayBetweenEmails: autopilot.delayBetween * (autopilot.delayUnit === 'minutes' ? 60000 : 1000),
         autopilot,
         timezoneOffset: new Date().getTimezoneOffset(),
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       } : (detail?.campaign?.sendingConfig || null);
+
+      // Save Step 1
       const res = await fetch(`/api/campaigns/${campaignId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({
           subject: updateSubject,
-          content,
+          content: step1Content,
           emailAccountId: updateEmailAccountId || undefined,
           trackOpens: trackEmails ? 1 : 0,
           includeUnsubscribe: unsubscribeLink ? 1 : 0,
           sendingConfig,
         }),
       });
-      if (res.ok) {
-        setShowUpdateDialog(false);
-        fetchDetail();
-      } else {
+      if (!res.ok) {
         const data = await res.json();
         setUpdateError(data.message || 'Failed to update campaign');
+        setUpdateSaving(false);
+        return;
       }
+
+      // Save each follow-up step
+      for (const step of followupStepsSaved) {
+        if (!step.stepId) continue;
+        await fetch(`/api/followup-steps/${step.stepId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            subject: step.subject,
+            content: step.content,
+            delayDays: step.delayDays,
+            trigger: step.condition,
+          }),
+        }).catch(() => { /* non-critical */ });
+      }
+
+      setShowUpdateDialog(false);
+      fetchDetail();
     } catch (e) {
       setUpdateError('Network error');
     }
     setUpdateSaving(false);
+  };
+
+  const switchUpdateStep = (newIdx: number, stepsSnapshot = updateFollowupSteps, step1Content = updateContent) => {
+    // Save current editor content before switching
+    const currentHtml = editorRef.current?.innerHTML || '';
+    let newStep1Content = step1Content;
+    let newFollowupSteps = stepsSnapshot;
+    if (updateActiveStepIdx === 0) {
+      newStep1Content = currentHtml;
+      setUpdateContent(currentHtml);
+    } else {
+      const followupIdx = updateActiveStepIdx - 1;
+      newFollowupSteps = stepsSnapshot.map((s, i) => i === followupIdx ? { ...s, content: currentHtml } : s);
+      setUpdateFollowupSteps(newFollowupSteps);
+    }
+    setUpdateActiveStepIdx(newIdx);
+    // Load new step content into editor
+    const targetContent = newIdx === 0 ? newStep1Content : (newFollowupSteps[newIdx - 1]?.content || '');
+    requestAnimationFrame(() => {
+      if (editorRef.current) editorRef.current.innerHTML = targetContent;
+    });
   };
 
   const execCommand = (cmd: string, value?: string) => {
@@ -1421,7 +1499,36 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
                   <div>
                     <h3 className="text-sm font-bold text-gray-900 mb-3">Messages</h3>
 
-                    {/* From */}
+                    {/* Step tabs — shown when there are follow-up steps */}
+                    {updateFollowupSteps.length > 0 && (
+                      <div className="flex gap-1 mb-3 border-b border-gray-100 pb-0">
+                        <button
+                          onClick={() => switchUpdateStep(0)}
+                          className={`px-3 py-1.5 text-xs font-semibold rounded-t-lg border-b-2 transition-colors ${updateActiveStepIdx === 0 ? 'border-blue-500 text-blue-600 bg-blue-50' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+                        >
+                          Step 1
+                        </button>
+                        {updateFollowupSteps.map((s, i) => {
+                          const conditionLabel: Record<string, string> = {
+                            no_reply: 'No reply', no_open: 'No open', no_click: 'No click',
+                            opened: 'Opened', clicked: 'Clicked', replied: 'Replied', always: 'Always',
+                          };
+                          return (
+                            <button
+                              key={s.stepId || i}
+                              onClick={() => switchUpdateStep(i + 1)}
+                              className={`px-3 py-1.5 text-xs font-semibold rounded-t-lg border-b-2 transition-colors ${updateActiveStepIdx === i + 1 ? 'border-blue-500 text-blue-600 bg-blue-50' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+                            >
+                              Step {i + 2}
+                              <span className="ml-1 text-[10px] font-normal text-gray-400">+{s.delayDays}d</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* From — only shown on Step 1 */}
+                    {updateActiveStepIdx === 0 && (
                     <div className="flex items-center gap-3 mb-2.5">
                       <label className="text-sm text-gray-500 w-16 flex-shrink-0 font-medium">From</label>
                       <div className="flex-1 relative">
@@ -1440,8 +1547,10 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
                         <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
                       </div>
                     </div>
+                    )}
 
-                    {/* Subject */}
+                    {/* Subject — changes per step */}
+                    {updateActiveStepIdx === 0 && (
                     <div className="flex items-center gap-3 mb-3">
                       <label className="text-sm text-gray-500 w-16 flex-shrink-0 font-medium">Subject</label>
                       <input
@@ -1451,6 +1560,18 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
                         placeholder="Email subject line"
                       />
                     </div>
+                    )}
+                    {updateActiveStepIdx > 0 && updateFollowupSteps[updateActiveStepIdx - 1] && (
+                    <div className="flex items-center gap-3 mb-3">
+                      <label className="text-sm text-gray-500 w-16 flex-shrink-0 font-medium">Subject</label>
+                      <input
+                        value={updateFollowupSteps[updateActiveStepIdx - 1].subject}
+                        onChange={(e) => setUpdateFollowupSteps(prev => prev.map((s, i) => i === updateActiveStepIdx - 1 ? { ...s, subject: e.target.value } : s))}
+                        className="flex-1 h-9 px-3 text-sm border border-gray-200 rounded-lg bg-white focus:border-blue-400 focus:ring-2 focus:ring-blue-50 outline-none"
+                        placeholder="Follow-up subject line"
+                      />
+                    </div>
+                    )}
 
                     {/* Rich text editor */}
                     <div className="border border-gray-200 rounded-xl overflow-hidden">
