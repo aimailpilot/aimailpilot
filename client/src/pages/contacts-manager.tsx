@@ -1315,8 +1315,15 @@ export default function ContactsManager() {
   const fetchFilterOptions = async () => {
     try {
       const res = await fetch('/api/contacts/filter-options', { credentials: 'include' });
-      if (res.ok) setFilterOptions(await res.json());
-    } catch { /* ignore */ }
+      if (res.ok) {
+        setFilterOptions(await res.json());
+      } else {
+        const body = await res.text().catch(() => '');
+        console.error('[FilterOptions] API error', res.status, body);
+      }
+    } catch (e) {
+      console.error('[FilterOptions] fetch failed', e);
+    }
   };
 
   const handleSort = (col: string) => {
