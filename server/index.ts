@@ -91,7 +91,39 @@ app.use((req, res, next) => {
         console.error('[Startup] Failed to resume active campaigns:', e);
       }
     }, 10000);
-    
+
+    // Recover scheduled campaigns whose start time has passed during server downtime.
+    // In-memory setTimeout is lost on restart — this re-fires them at boot.
+    // Runs 15s after startup (after resumeActiveCampaigns, before reclassify).
+    setTimeout(async () => {
+      try {
+        const now = new Date().toISOString();
+        const overdueScheduled = await storage.rawAll(
+          `SELECT id, name, "sendingConfig" FROM campaigns WHERE status = 'scheduled' AND "scheduledAt" IS NOT NULL AND "scheduledAt" <= $1`,
+          now
+        ) as any[];
+        if (overdueScheduled.length > 0) {
+          console.log(`[Startup] Found ${overdueScheduled.length} overdue scheduled campaign(s) — starting now`);
+          for (const row of overdueScheduled) {
+            try {
+              let sendingConfig: any = undefined;
+              if (row.sendingConfig) {
+                try { sendingConfig = typeof row.sendingConfig === 'string' ? JSON.parse(row.sendingConfig) : row.sendingConfig; } catch {}
+              }
+              console.log(`[Startup] Starting overdue scheduled campaign: ${row.name} (${row.id})`);
+              await campaignEngine.startCampaign({ campaignId: row.id, sendingConfig: sendingConfig || undefined });
+              // Stagger to avoid simultaneous contact loading (same pattern as resumeActiveCampaigns)
+              await new Promise(r => setTimeout(r, 2000));
+            } catch (err) {
+              console.error(`[Startup] Failed to start overdue scheduled campaign ${row.id}:`, err);
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[Startup] Failed to recover overdue scheduled campaigns:', e);
+      }
+    }, 15000);
+
     // One-time reclassification of unclassified + general inbox messages on boot
     // Runs 30s after startup to not block initial load
     setTimeout(async () => {
@@ -421,10 +453,56 @@ app.use((req, res, next) => {
         try {
           await storage.resetDailySentAll();
           log('[DailyReset] Email account daily send counters reset');
+          // Immediately resume any campaigns that were auto-paused due to daily limit
+          await resumeDailyLimitPausedCampaigns('midnight-reset');
         } catch (e) {
           console.error('[DailyReset] Failed:', e);
         }
       }
     }, 60 * 60 * 1000); // Check every hour
+
+    // Poll every 15 minutes: resume campaigns that were auto-paused due to daily limit
+    // but now have email accounts with remaining capacity (e.g. after manual limit increase,
+    // or after midnight reset was detected on a different cycle).
+    setInterval(async () => {
+      await resumeDailyLimitPausedCampaigns('poll');
+    }, 15 * 60 * 1000);
+
+    async function resumeDailyLimitPausedCampaigns(trigger: string) {
+      try {
+        // Find campaigns auto-paused by the system that have at least one email account
+        // in their org with remaining send capacity.
+        const candidates = await storage.rawAll(`
+          SELECT DISTINCT c.id, c.name, c."sendingConfig"
+          FROM campaigns c
+          WHERE c.status = 'paused'
+            AND c."autoPaused" = true
+            AND EXISTS (
+              SELECT 1 FROM email_accounts ea
+              WHERE ea."organizationId" = c."organizationId"
+                AND ea."dailySent" < ea."dailyLimit"
+            )
+        `) as any[];
+
+        if (candidates.length === 0) return;
+
+        log(`[DailyLimitResume][${trigger}] Found ${candidates.length} auto-paused campaign(s) with available capacity — resuming`);
+        for (const row of candidates) {
+          try {
+            let sendingConfig: any = undefined;
+            if (row.sendingConfig) {
+              try { sendingConfig = typeof row.sendingConfig === 'string' ? JSON.parse(row.sendingConfig) : row.sendingConfig; } catch {}
+            }
+            log(`[DailyLimitResume] Resuming campaign: ${row.name} (${row.id})`);
+            await campaignEngine.startCampaign({ campaignId: row.id, sendingConfig: sendingConfig || undefined });
+            await new Promise(r => setTimeout(r, 2000));
+          } catch (err) {
+            console.error(`[DailyLimitResume] Failed to resume campaign ${row.id}:`, err);
+          }
+        }
+      } catch (e) {
+        console.error(`[DailyLimitResume][${trigger}] Query failed:`, e);
+      }
+    }
   });
 })();
