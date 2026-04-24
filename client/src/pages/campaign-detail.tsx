@@ -26,6 +26,51 @@ interface CampaignDetailPageProps {
   onBack: () => void;
 }
 
+// Single email card in the preview, used for Step 1 and all follow-up steps
+function PreviewEmailCard({ stepLabel, subject, html, contact, senderName, senderEmail, device, delayDays }: {
+  stepLabel: string; subject: string; html: string; contact: any;
+  senderName: string; senderEmail: string; device: 'desktop' | 'mobile'; delayDays: number | null;
+}) {
+  return (
+    <div>
+      {/* Step connector */}
+      <div className="flex items-center gap-3 mb-3">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold text-blue-700 bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-full">{stepLabel}</span>
+          {delayDays != null && delayDays > 0 && (
+            <span className="text-xs text-gray-400">— sent {delayDays} day{delayDays !== 1 ? 's' : ''} after previous</span>
+          )}
+        </div>
+      </div>
+      <div className={`flex justify-center ${device === 'mobile' ? 'bg-gray-100 rounded-xl p-6' : ''}`}>
+        <div className={`bg-white border border-gray-200 rounded-xl overflow-hidden transition-all duration-300 ${device === 'mobile' ? 'w-[375px] shadow-xl rounded-[2rem] border-[8px] border-gray-800' : 'w-full'}`}>
+          {device === 'mobile' && (
+            <div className="bg-gray-800 text-center py-2">
+              <div className="w-20 h-1.5 bg-gray-600 rounded-full mx-auto" />
+            </div>
+          )}
+          <div className={device === 'mobile' ? 'p-4' : 'p-6'}>
+            <div className="mb-4 pb-4 border-b border-gray-100">
+              <div className="text-base font-semibold text-gray-900 mb-1">{subject}</div>
+              <div className="text-sm font-medium text-gray-700">{senderName} &lt;{senderEmail}&gt;</div>
+              {contact && (
+                <div className="text-xs text-gray-400 mt-0.5">to: {contact.firstName} {contact.lastName} &lt;{contact.email}&gt;</div>
+              )}
+            </div>
+            <div dangerouslySetInnerHTML={{ __html: html }}
+              className={`prose max-w-none text-gray-800 [&_a]:text-blue-600 [&_img]:max-w-full ${device === 'mobile' ? 'prose-sm text-[13px]' : 'prose-sm'}`} />
+          </div>
+          {device === 'mobile' && (
+            <div className="bg-gray-800 text-center py-3">
+              <div className="w-10 h-10 border-2 border-gray-600 rounded-full mx-auto" />
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetailPageProps) {
   const [detail, setDetail] = useState<CampaignDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -60,6 +105,7 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
   const [previewSubjectText, setPreviewSubjectText] = useState('');
   const [previewContact, setPreviewContact] = useState<any>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewFollowupSteps, setPreviewFollowupSteps] = useState<Array<{ stepNumber: number; subject: string; html: string; delayDays: number }>>([]);
   const [testEmail, setTestEmail] = useState('');
   const [testSending, setTestSending] = useState(false);
   const [testSent, setTestSent] = useState(false);
@@ -313,6 +359,33 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
         setPreviewSubjectText(data.subject);
         setPreviewHtml(data.content);
         setPreviewContact(data.contact);
+
+        // Personalize follow-up steps with the same sample contact
+        const steps: Array<{ stepNumber: number; subject: string; html: string; delayDays: number }> = [];
+        if (detail?.followupSequences) {
+          for (const seq of detail.followupSequences) {
+            for (const step of (seq.steps || [])) {
+              try {
+                const fRes = await fetch('/api/campaigns/preview', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  credentials: 'include',
+                  body: JSON.stringify({ subject: step.subject || `Re: ${updateSubject}`, content: step.content || '' }),
+                });
+                if (fRes.ok) {
+                  const fData = await fRes.json();
+                  steps.push({
+                    stepNumber: step.stepNumber,
+                    subject: fData.subject,
+                    html: fData.content,
+                    delayDays: step.delayDays || 0,
+                  });
+                }
+              } catch { /* skip failed steps */ }
+            }
+          }
+        }
+        setPreviewFollowupSteps(steps.sort((a, b) => a.stepNumber - b.stepNumber));
       }
     } catch { /* ignore */ }
     setPreviewLoading(false);
@@ -1532,34 +1605,32 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
                     <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
                   </div>
                 ) : (
-                  <div className={`flex justify-center ${previewDevice === 'mobile' ? 'bg-gray-100 rounded-xl p-6' : ''}`}>
-                    <div className={`bg-white border border-gray-200 rounded-xl overflow-hidden transition-all duration-300 ${previewDevice === 'mobile' ? 'w-[375px] shadow-xl rounded-[2rem] border-[8px] border-gray-800' : 'w-full'}`}>
-                      {previewDevice === 'mobile' && (
-                        <div className="bg-gray-800 text-center py-2">
-                          <div className="w-20 h-1.5 bg-gray-600 rounded-full mx-auto" />
-                        </div>
-                      )}
-                      <div className={previewDevice === 'mobile' ? 'p-4' : 'p-6'}>
-                        {/* Subject + From header */}
-                        <div className="mb-4 pb-4 border-b border-gray-100">
-                          <div className="text-base font-semibold text-gray-900 mb-1">{previewSubjectText || updateSubject}</div>
-                          <div className="text-sm font-medium text-gray-700">
-                            {emailAccounts.find(a => a.id === updateEmailAccountId)?.displayName || emailAccount?.displayName || ''} &lt;{emailAccounts.find(a => a.id === updateEmailAccountId)?.email || emailAccount?.email || ''}&gt;
-                          </div>
-                          {previewContact && (
-                            <div className="text-xs text-gray-400 mt-0.5">to: {previewContact.firstName} {previewContact.lastName} &lt;{previewContact.email}&gt;</div>
-                          )}
-                        </div>
-                        {/* Email body */}
-                        <div dangerouslySetInnerHTML={{ __html: previewHtml }}
-                          className={`prose max-w-none text-gray-800 [&_a]:text-blue-600 [&_img]:max-w-full ${previewDevice === 'mobile' ? 'prose-sm text-[13px]' : 'prose-sm'}`} />
-                      </div>
-                      {previewDevice === 'mobile' && (
-                        <div className="bg-gray-800 text-center py-3">
-                          <div className="w-10 h-10 border-2 border-gray-600 rounded-full mx-auto" />
-                        </div>
-                      )}
-                    </div>
+                  <div className="space-y-4">
+                    {/* Step 1 */}
+                    <PreviewEmailCard
+                      stepLabel="Step 1 — Initial email"
+                      subject={previewSubjectText || updateSubject}
+                      html={previewHtml}
+                      contact={previewContact}
+                      senderName={emailAccounts.find(a => a.id === updateEmailAccountId)?.displayName || emailAccount?.displayName || ''}
+                      senderEmail={emailAccounts.find(a => a.id === updateEmailAccountId)?.email || emailAccount?.email || ''}
+                      device={previewDevice}
+                      delayDays={null}
+                    />
+                    {/* Follow-up steps */}
+                    {previewFollowupSteps.map((step, i) => (
+                      <PreviewEmailCard
+                        key={step.stepNumber}
+                        stepLabel={`Step ${i + 2} — Follow-up`}
+                        subject={step.subject}
+                        html={step.html}
+                        contact={previewContact}
+                        senderName={emailAccounts.find(a => a.id === updateEmailAccountId)?.displayName || emailAccount?.displayName || ''}
+                        senderEmail={emailAccounts.find(a => a.id === updateEmailAccountId)?.email || emailAccount?.email || ''}
+                        device={previewDevice}
+                        delayDays={step.delayDays}
+                      />
+                    ))}
                   </div>
                 )}
               </div>

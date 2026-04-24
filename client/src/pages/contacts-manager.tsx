@@ -103,6 +103,55 @@ interface ContactList {
 
 type TabType = 'all' | 'unsubscribers' | 'blocklist' | 'lists' | 'follow-ups' | 'hot-leads';
 
+// Searchable list picker — replaces plain Select in import modals when org has many lists
+function SearchableListPicker({ lists, value, search, onSearchChange, onChange }: {
+  lists: { id: string; name: string; contactCount: number }[];
+  value: string; search: string;
+  onSearchChange: (s: string) => void;
+  onChange: (id: string) => void;
+}) {
+  const filtered = search.trim()
+    ? lists.filter(l => l.name.toLowerCase().includes(search.trim().toLowerCase()))
+    : lists;
+  const selected = lists.find(l => l.id === value);
+
+  return (
+    <div className="space-y-1.5">
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
+        <input
+          type="text"
+          value={search}
+          onChange={e => onSearchChange(e.target.value)}
+          placeholder="Search lists..."
+          className="h-9 w-full pl-9 pr-3 text-sm border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+          autoFocus
+        />
+      </div>
+      <div className="border border-gray-200 rounded-lg bg-white max-h-44 overflow-y-auto divide-y divide-gray-50">
+        {filtered.length === 0 ? (
+          <p className="px-3 py-4 text-xs text-gray-400 text-center">No lists found</p>
+        ) : filtered.map(l => (
+          <button
+            key={l.id}
+            type="button"
+            onClick={() => onChange(l.id)}
+            className={`w-full flex items-center justify-between px-3 py-2 text-sm text-left hover:bg-blue-50 transition-colors ${value === l.id ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700'}`}
+          >
+            <span className="truncate">{l.name}</span>
+            <span className="text-xs text-gray-400 ml-2 shrink-0">{l.contactCount} contacts</span>
+          </button>
+        ))}
+      </div>
+      {selected && (
+        <p className="text-xs text-blue-600 flex items-center gap-1">
+          <CheckCircle2 className="h-3 w-3" /> Selected: <strong>{selected.name}</strong>
+        </p>
+      )}
+    </div>
+  );
+}
+
 // Autocomplete text input — shows matching suggestions as user types, click to fill
 function AutocompleteInput({ value, onChange, placeholder, suggestions, width }: {
   value: string; onChange: (v: string) => void; placeholder: string; suggestions: string[]; width: number;
@@ -261,6 +310,7 @@ export default function ContactsManager() {
   const [importListName, setImportListName] = useState('');
   const [importFileName, setImportFileName] = useState('');
   const [importToExistingList, setImportToExistingList] = useState<string>('');
+  const [importListSearch, setImportListSearch] = useState('');
   const [aiMappingLoading, setAiMappingLoading] = useState(false);
   const [aiMappingError, setAiMappingError] = useState('');
   const [showAllFields, setShowAllFields] = useState(false);
@@ -441,6 +491,7 @@ export default function ContactsManager() {
   const [gsError, setGsError] = useState('');
   const [gsImportResult, setGsImportResult] = useState<any>(null);
   const [gsToExistingList, setGsToExistingList] = useState<string>('');
+  const [gsListSearch, setGsListSearch] = useState('');
 
   // AI Context Draft state
   const [showDraftDialog, setShowDraftDialog] = useState(false);
@@ -3209,14 +3260,13 @@ export default function ContactsManager() {
                   className="h-10"
                 />
               ) : (
-                <Select value={importToExistingList === '_select' ? undefined : importToExistingList} onValueChange={(v) => setImportToExistingList(v)}>
-                  <SelectTrigger className="h-10"><SelectValue placeholder="Choose a list..." /></SelectTrigger>
-                  <SelectContent>
-                    {contactLists.map(l => (
-                      <SelectItem key={l.id} value={l.id}>{l.name} ({l.contactCount} contacts)</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <SearchableListPicker
+                  lists={contactLists}
+                  value={importToExistingList === '_select' ? '' : importToExistingList}
+                  search={importListSearch}
+                  onSearchChange={setImportListSearch}
+                  onChange={v => { setImportToExistingList(v); setImportListSearch(''); }}
+                />
               )}
             </div>
 
@@ -3386,14 +3436,13 @@ export default function ContactsManager() {
                     )}
                   </div>
                 ) : (
-                  <Select value={gsToExistingList === '_select' ? undefined : gsToExistingList} onValueChange={(v) => setGsToExistingList(v)}>
-                    <SelectTrigger className="h-10"><SelectValue placeholder="Choose a list..." /></SelectTrigger>
-                    <SelectContent>
-                      {contactLists.map(l => (
-                        <SelectItem key={l.id} value={l.id}>{l.name} ({l.contactCount} contacts)</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <SearchableListPicker
+                    lists={contactLists}
+                    value={gsToExistingList === '_select' ? '' : gsToExistingList}
+                    search={gsListSearch}
+                    onSearchChange={setGsListSearch}
+                    onChange={v => { setGsToExistingList(v); setGsListSearch(''); }}
+                  />
                 )}
               </div>
             )}
