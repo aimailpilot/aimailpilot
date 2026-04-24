@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { queryClient } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -517,7 +518,10 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
       const res = await fetch(`/api/campaigns/${campaignId}/duplicate`, { method: 'POST', credentials: 'include' });
       if (res.ok) {
         const dupe = await res.json();
-        // Navigate directly to the duplicate so user can add recipients and launch
+        // Invalidate campaign list so draft appears on dashboard immediately
+        queryClient.invalidateQueries({ queryKey: ['/api/campaigns'] });
+        queryClient.invalidateQueries({ queryKey: ['/api/campaigns/count'] });
+        // Navigate to the duplicate editor so user can add recipients and launch
         if (dupe?.id) {
           if (onNavigateToCampaign) {
             onNavigateToCampaign(dupe.id);

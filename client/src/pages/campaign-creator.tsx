@@ -332,6 +332,18 @@ export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }
     }
   }, [activeStepIndex]);
 
+  // When pre-loaded campaign data arrives AND the editor is mounted (loading=false),
+  // write the step-1 content into the editor DOM (requestAnimationFrame in preload
+  // fires before the editor div is mounted if loading state flips after it)
+  useEffect(() => {
+    if (!initialCampaignId || loading) return;
+    const content = steps[0]?.content || '';
+    if (editorRef.current && editorRef.current.innerHTML !== content) {
+      editorRef.current.innerHTML = content;
+    }
+    setHtmlSource(content);
+  }, [loading, initialCampaignId]);
+
   // Switch between visual and HTML modes
   const toggleEditorMode = () => {
     if (editorMode === 'visual') {

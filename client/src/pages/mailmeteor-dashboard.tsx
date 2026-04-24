@@ -18,6 +18,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useQuery } from "@tanstack/react-query";
+import { queryClient } from "@/lib/queryClient";
 import { useCampaigns } from "@/hooks/use-campaigns";
 import type { Campaign } from "@/types";
 import type { TrackingEvent } from "@/types";
@@ -866,8 +867,8 @@ export default function MailMeteorDashboard() {
           {/* Campaign Creator */}
           {viewMode === 'campaign' && (
             <CampaignCreator
-              onSuccess={() => { setEditCampaignId(null); setViewMode('dashboard'); setCurrentView('campaigns'); }}
-              onBack={() => { setEditCampaignId(null); setViewMode('dashboard'); }}
+              onSuccess={() => { setEditCampaignId(null); setViewMode('dashboard'); setCurrentView('campaigns'); queryClient.invalidateQueries({ queryKey: ['/api/campaigns'] }); queryClient.invalidateQueries({ queryKey: ['/api/campaigns/count'] }); }}
+              onBack={() => { setEditCampaignId(null); setViewMode('dashboard'); if (editCampaignId) { queryClient.invalidateQueries({ queryKey: ['/api/campaigns'] }); queryClient.invalidateQueries({ queryKey: ['/api/campaigns/count'] }); } }}
               initialCampaignId={editCampaignId || undefined}
             />
           )}
