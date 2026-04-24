@@ -4924,17 +4924,26 @@ Which account should I use and why? If I need to split across accounts, provide 
       ) as any;
       const moved = movedRow?.cnt || 0;
 
-      // Perform the assignment
+      // Perform the assignment — update primary listId and write junction rows
       const ts = new Date().toISOString();
       await storage.rawRun(
         `UPDATE contacts SET "listId" = ?, "updatedAt" = ? WHERE id IN (${mph}) AND "organizationId" = ?`,
         listRow.id, ts, ...idsToUpdate, orgId
       );
+      // Write junction membership rows (idempotent — ON CONFLICT DO NOTHING)
+      for (const cid of idsToUpdate) {
+        try {
+          await storage.rawRun(
+            `INSERT INTO contact_list_members ("contactId", "listId", "addedAt") VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
+            cid, listRow.id, ts
+          );
+        } catch { /* non-fatal */ }
+      }
 
-      // Refresh contactCount on affected lists (target + sources)
+      // Refresh contactCount on affected lists (based on junction table)
       try {
         await storage.rawRun(
-          `UPDATE contact_lists SET "contactCount" = (SELECT COUNT(*) FROM contacts WHERE "listId" = contact_lists.id) WHERE "organizationId" = ?`,
+          `UPDATE contact_lists SET "contactCount" = (SELECT COUNT(*) FROM contact_list_members WHERE "listId" = contact_lists.id) WHERE "organizationId" = ?`,
           orgId
         );
       } catch { /* non-fatal */ }
@@ -5651,10 +5660,18 @@ Which account should I use and why? If I need to split across accounts, provide 
         }
       }
 
-      // Update the contact list count
+      // Update the contact list count from junction table (accurate for multi-list)
       if (contactListRecord && targetListId) {
-        const existingCount = existingListId ? (contactListRecord.contactCount || 0) : 0;
-        await storage.updateContactList(targetListId, { contactCount: existingCount + imported });
+        try {
+          const countRow = await storage.rawGet(
+            `SELECT COUNT(*) as c FROM contact_list_members WHERE "listId" = ?`, targetListId
+          ) as any;
+          await storage.updateContactList(targetListId, { contactCount: parseInt(countRow?.c || '0') });
+        } catch {
+          // Fallback to simple increment if junction query fails
+          const existingCount = existingListId ? (contactListRecord.contactCount || 0) : 0;
+          await storage.updateContactList(targetListId, { contactCount: existingCount + imported });
+        }
       }
 
       const listDisplayName = contactListRecord?.name || null;

@@ -802,10 +802,31 @@ async function initializeSchema() {
       'ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS "authLastFailureAt" TEXT',
       'ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS "authLastErrorCode" TEXT',
       'CREATE INDEX IF NOT EXISTS idx_email_accounts_auth_status ON email_accounts("organizationId", "authStatus")',
+      // Multi-list membership junction table
+      `CREATE TABLE IF NOT EXISTS contact_list_members (
+        "contactId" TEXT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+        "listId" TEXT NOT NULL REFERENCES contact_lists(id) ON DELETE CASCADE,
+        "addedAt" TEXT NOT NULL,
+        PRIMARY KEY ("contactId", "listId")
+      )`,
+      'CREATE INDEX IF NOT EXISTS idx_clm_list ON contact_list_members("listId")',
+      'CREATE INDEX IF NOT EXISTS idx_clm_contact ON contact_list_members("contactId")',
     ];
     for (const alt of alterColumns) {
       try { await client.query(alt); } catch (e) { /* column already exists */ }
     }
+
+    // Backfill contact_list_members from existing contacts.listId (idempotent — ON CONFLICT DO NOTHING)
+    try {
+      await client.query(`
+        INSERT INTO contact_list_members ("contactId", "listId", "addedAt")
+        SELECT c.id, c."listId", c."createdAt"
+        FROM contacts c
+        WHERE c."listId" IS NOT NULL AND c."listId" != ''
+          AND EXISTS (SELECT 1 FROM contact_lists cl WHERE cl.id = c."listId")
+        ON CONFLICT DO NOTHING
+      `);
+    } catch (e) { /* non-fatal — table may not exist yet on first boot before index runs */ }
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS apollo_sync_jobs (
@@ -1102,7 +1123,11 @@ export class PostgresStorage {
       WHERE cl."organizationId" = $1
         AND (
           cl."uploadedBy" = $2
-          OR EXISTS (SELECT 1 FROM contacts c WHERE c."listId" = cl.id AND c."assignedTo" = $3)
+          OR EXISTS (
+            SELECT 1 FROM contact_list_members clm
+            JOIN contacts c ON c.id = clm."contactId"
+            WHERE clm."listId" = cl.id AND c."assignedTo" = $3
+          )
         )
       ORDER BY cl."createdAt" DESC
     `, [organizationId, userId, userId])).map(hydrateList);
@@ -1129,8 +1154,18 @@ export class PostgresStorage {
 
   async deleteContactList(id: string, deleteContacts = false) {
     if (deleteContacts) {
-      await execute('DELETE FROM contacts WHERE "listId" = $1', [id]);
+      // Only delete contacts whose sole list membership is this list (multi-list contacts are preserved)
+      await execute(`
+        DELETE FROM contacts WHERE "listId" = $1
+          AND id NOT IN (
+            SELECT "contactId" FROM contact_list_members
+            WHERE "listId" != $1 AND "contactId" IN (
+              SELECT id FROM contacts WHERE "listId" = $1
+            )
+          )
+      `, [id]);
     }
+    // Junction rows are removed by ON DELETE CASCADE on contact_lists FK
     await execute('DELETE FROM contact_lists WHERE id = $1', [id]);
     return true;
   }
@@ -1140,7 +1175,10 @@ export class PostgresStorage {
     let sql = 'SELECT * FROM contacts WHERE "organizationId" = $1';
     const params: any[] = [organizationId];
     let idx = 2;
-    if (filters?.listId) { sql += ` AND "listId" = $${idx++}`; params.push(filters.listId); }
+    if (filters?.listId) {
+      sql += ` AND EXISTS (SELECT 1 FROM contact_list_members clm WHERE clm."contactId" = contacts.id AND clm."listId" = $${idx++})`;
+      params.push(filters.listId);
+    }
     if (filters?.status) { sql += ` AND status = $${idx++}`; params.push(filters.status); }
     if (filters?.assignedTo === 'unassigned') { sql += ` AND ("assignedTo" IS NULL OR "assignedTo" = '')`; }
     else if (filters?.assignedTo) { sql += ` AND "assignedTo" = $${idx++}`; params.push(filters.assignedTo); }
@@ -1153,7 +1191,10 @@ export class PostgresStorage {
     let sql = 'SELECT COUNT(*) as c FROM contacts WHERE "organizationId" = $1';
     const params: any[] = [organizationId];
     let idx = 2;
-    if (filters?.listId) { sql += ` AND "listId" = $${idx++}`; params.push(filters.listId); }
+    if (filters?.listId) {
+      sql += ` AND EXISTS (SELECT 1 FROM contact_list_members clm WHERE clm."contactId" = contacts.id AND clm."listId" = $${idx++})`;
+      params.push(filters.listId);
+    }
     if (filters?.status) { sql += ` AND status = $${idx++}`; params.push(filters.status); }
     if (filters?.assignedTo === 'unassigned') { sql += ` AND ("assignedTo" IS NULL OR "assignedTo" = '')`; }
     else if (filters?.assignedTo) { sql += ` AND "assignedTo" = $${idx++}`; params.push(filters.assignedTo); }
@@ -1246,7 +1287,7 @@ export class PostgresStorage {
               vals.push(JSON.stringify(merged));
             }
           }
-          // Assign to list if not already in one
+          // Assign to list if not already the primary list
           if (listId && !existing.listId) {
             sets.push(`"listId" = $${p++}`);
             vals.push(listId);
@@ -1256,13 +1297,19 @@ export class PostgresStorage {
             vals.push(now());
             vals.push(existing.id);
             await client.query(`UPDATE contacts SET ${sets.join(', ')} WHERE id = $${p}`, vals);
-            results.push({ ...hydrateContact(existing), _updated: true });
-          } else {
-            results.push({ ...hydrateContact(existing), _skipped: true });
           }
+          // Always ensure junction membership even if no field updates
+          if (listId) {
+            await client.query(
+              `INSERT INTO contact_list_members ("contactId", "listId", "addedAt") VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+              [existing.id, listId, now()]
+            );
+          }
+          results.push({ ...hydrateContact(existing), ...(sets.length > 0 ? { _updated: true } : { _skipped: true }) });
           continue;
         }
         const id = genId(); const ts = now();
+        const effectiveListId = listId || contact.listId || null;
         await client.query(`INSERT INTO contacts (id, "organizationId", email, "firstName", "lastName", company, "jobTitle",
           phone, "mobilePhone", "linkedinUrl", seniority, department, city, state, country, website, industry,
           "employeeCount", "annualRevenue", "companyLinkedinUrl", "companyCity", "companyState", "companyCountry", "companyAddress",
@@ -1275,9 +1322,16 @@ export class PostgresStorage {
           contact.companyCity || '', contact.companyState || '', contact.companyCountry || '', contact.companyAddress || '',
           contact.companyPhone || '', contact.secondaryEmail || '', contact.homePhone || '', contact.emailStatus || '', contact.lastActivityDate || '',
           contact.status || 'cold', contact.score || 0, toJson(contact.tags || []), toJson(contact.customFields || {}),
-          contact.source || 'import', listId || contact.listId || null, contact.assignedTo || null, ts, ts]
+          contact.source || 'import', effectiveListId, contact.assignedTo || null, ts, ts]
         );
-        results.push({ id, ...contact, listId: listId || contact.listId || null, tags: contact.tags || [], customFields: contact.customFields || {} });
+        // Write junction row for the new contact
+        if (effectiveListId) {
+          await client.query(
+            `INSERT INTO contact_list_members ("contactId", "listId", "addedAt") VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+            [id, effectiveListId, ts]
+          );
+        }
+        results.push({ id, ...contact, listId: effectiveListId, tags: contact.tags || [], customFields: contact.customFields || {} });
       }
       await client.query('COMMIT');
     } catch (e) {
