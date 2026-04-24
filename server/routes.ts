@@ -5498,17 +5498,17 @@ Which account should I use and why? If I need to split across accounts, provide 
       let rows: any[] = [];
       if (field === 'company') {
         rows = await storage.rawAll(
-          `SELECT DISTINCT company AS val FROM contacts WHERE "organizationId" = ? AND company IS NOT NULL AND company != '' AND LOWER(company) LIKE LOWER(?) AND company NOT LIKE '+%' AND company NOT LIKE '%http%' AND company NOT LIKE '%@%' AND LENGTH(company) BETWEEN 2 AND 100 ORDER BY company LIMIT 30`,
+          `SELECT DISTINCT INITCAP(LOWER(company)) AS val FROM contacts WHERE "organizationId" = ? AND company IS NOT NULL AND company != '' AND LOWER(company) LIKE LOWER(?) AND company NOT LIKE '+%' AND company NOT LIKE '%http%' AND company NOT LIKE '%@%' AND LENGTH(company) BETWEEN 2 AND 100 ORDER BY 1 LIMIT 30`,
           orgId, like
         );
       } else if (field === 'city') {
         rows = await storage.rawAll(
-          `SELECT DISTINCT TRIM(SPLIT_PART(city, ',', 1)) AS val FROM contacts WHERE "organizationId" = ? AND city IS NOT NULL AND city != '' AND city NOT LIKE '+%' AND LOWER(city) LIKE LOWER(?) AND LENGTH(TRIM(SPLIT_PART(city, ',', 1))) BETWEEN 2 AND 50 ORDER BY 1 LIMIT 30`,
+          `SELECT DISTINCT INITCAP(LOWER(TRIM(SPLIT_PART(city, ',', 1)))) AS val FROM contacts WHERE "organizationId" = ? AND city IS NOT NULL AND city != '' AND city NOT LIKE '+%' AND LOWER(city) LIKE LOWER(?) AND LENGTH(TRIM(SPLIT_PART(city, ',', 1))) BETWEEN 2 AND 50 AND LEFT(TRIM(city), 1) NOT BETWEEN '0' AND '9' AND TRIM(SPLIT_PART(city, ',', 1)) NOT ILIKE '%highway%' AND TRIM(SPLIT_PART(city, ',', 1)) NOT ILIKE '% road' AND TRIM(SPLIT_PART(city, ',', 1)) NOT ILIKE '% road %' ORDER BY 1 LIMIT 30`,
           orgId, like
         );
       } else if (field === 'country') {
         rows = await storage.rawAll(
-          `SELECT DISTINCT TRIM(country) AS val FROM contacts WHERE "organizationId" = ? AND country IS NOT NULL AND country != '' AND country NOT LIKE '+%' AND LOWER(country) LIKE LOWER(?) AND LENGTH(TRIM(country)) BETWEEN 2 AND 60 ORDER BY 1 LIMIT 30`,
+          `SELECT DISTINCT INITCAP(LOWER(TRIM(country))) AS val FROM contacts WHERE "organizationId" = ? AND country IS NOT NULL AND country != '' AND country NOT LIKE '+%' AND LOWER(country) LIKE LOWER(?) AND LENGTH(TRIM(country)) BETWEEN 2 AND 60 ORDER BY 1 LIMIT 30`,
           orgId, like
         );
       } else {
@@ -5526,9 +5526,9 @@ Which account should I use and why? If I need to split across accounts, provide 
       const [companies, designations, cities, countries, industries, departments, seniorities, tagRows] = await Promise.all([
         storage.rawAll(`SELECT DISTINCT company FROM contacts WHERE "organizationId" = ? AND company IS NOT NULL AND company != '' AND company NOT LIKE '+%' AND company NOT LIKE '%http%' AND company NOT LIKE '%@%' AND LENGTH(company) BETWEEN 2 AND 100 ORDER BY company LIMIT 200`, orgId),
         storage.rawAll(`SELECT DISTINCT "jobTitle" FROM contacts WHERE "organizationId" = ? AND "jobTitle" IS NOT NULL AND "jobTitle" != '' AND "jobTitle" NOT LIKE '+%' AND "jobTitle" NOT LIKE '%http%' AND "jobTitle" NOT LIKE '%@%' AND LENGTH("jobTitle") BETWEEN 2 AND 100 ORDER BY "jobTitle" LIMIT 300`, orgId),
-        storage.rawAll(`SELECT DISTINCT TRIM(SPLIT_PART(city, ',', 1)) as city FROM contacts WHERE "organizationId" = ? AND city IS NOT NULL AND city != '' AND city NOT LIKE '+%' AND LENGTH(TRIM(SPLIT_PART(city, ',', 1))) BETWEEN 2 AND 60 ORDER BY 1 LIMIT 300`, orgId),
-        storage.rawAll(`SELECT DISTINCT TRIM(SPLIT_PART(country, ',', 1)) as country FROM contacts WHERE "organizationId" = ? AND country IS NOT NULL AND country != '' AND country NOT LIKE '+%' AND LENGTH(TRIM(SPLIT_PART(country, ',', 1))) BETWEEN 2 AND 60 ORDER BY 1 LIMIT 150`, orgId),
-        storage.rawAll(`SELECT DISTINCT industry FROM contacts WHERE "organizationId" = ? AND industry IS NOT NULL AND industry != '' AND industry NOT LIKE '%http%' AND industry NOT LIKE '%@%' AND industry NOT LIKE '%,%' AND LENGTH(industry) BETWEEN 3 AND 60 AND industry ~ '[a-zA-Z]' ORDER BY industry LIMIT 500`, orgId),
+        storage.rawAll(`SELECT DISTINCT INITCAP(LOWER(TRIM(SPLIT_PART(city, ',', 1)))) as city FROM contacts WHERE "organizationId" = ? AND city IS NOT NULL AND city != '' AND city NOT LIKE '+%' AND LEFT(TRIM(city), 1) NOT BETWEEN '0' AND '9' AND LENGTH(TRIM(SPLIT_PART(city, ',', 1))) BETWEEN 2 AND 60 AND TRIM(SPLIT_PART(city, ',', 1)) NOT ILIKE '%highway%' AND TRIM(SPLIT_PART(city, ',', 1)) NOT ILIKE '% road' ORDER BY 1 LIMIT 300`, orgId),
+        storage.rawAll(`SELECT DISTINCT INITCAP(LOWER(TRIM(SPLIT_PART(country, ',', 1)))) as country FROM contacts WHERE "organizationId" = ? AND country IS NOT NULL AND country != '' AND country NOT LIKE '+%' AND LENGTH(TRIM(SPLIT_PART(country, ',', 1))) BETWEEN 2 AND 60 ORDER BY 1 LIMIT 150`, orgId),
+        storage.rawAll(`SELECT DISTINCT INITCAP(LOWER(industry)) as industry FROM contacts WHERE "organizationId" = ? AND industry IS NOT NULL AND industry != '' AND industry NOT LIKE '%http%' AND industry NOT LIKE '%@%' AND industry NOT LIKE '%,%' AND LENGTH(industry) BETWEEN 3 AND 60 AND industry ~ '[a-zA-Z]' ORDER BY 1 LIMIT 500`, orgId),
         storage.rawAll(`SELECT DISTINCT department FROM contacts WHERE "organizationId" = ? AND department IS NOT NULL AND department != '' ORDER BY department LIMIT 100`, orgId),
         storage.rawAll(`SELECT DISTINCT seniority FROM contacts WHERE "organizationId" = ? AND seniority IS NOT NULL AND seniority != '' ORDER BY seniority LIMIT 50`, orgId),
         storage.rawAll(`SELECT DISTINCT t.tag FROM (SELECT tags FROM contacts WHERE "organizationId" = ? AND tags IS NOT NULL AND tags::text NOT IN ('', 'null', '[]') AND tags::text LIKE '[%') AS c CROSS JOIN LATERAL jsonb_array_elements_text(c.tags::jsonb) AS t(tag) WHERE t.tag IS NOT NULL AND t.tag != '' ORDER BY t.tag LIMIT 200`, orgId),

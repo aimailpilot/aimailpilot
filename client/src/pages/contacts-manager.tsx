@@ -287,6 +287,7 @@ function ServerSearchSelect({ field, value, onChange, placeholder, width }: {
   const [loading, setLoading] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  const fetchGen = useRef(0); // increments on each new search; stale fetches check this before updating state
 
   useEffect(() => {
     const handler = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
@@ -297,19 +298,24 @@ function ServerSearchSelect({ field, value, onChange, placeholder, width }: {
   useEffect(() => {
     if (!open) return;
     clearTimeout(timerRef.current);
-    if (!search.trim()) { setResults([]); return; }
+    if (!search.trim()) { setResults([]); setLoading(false); return; }
+    const gen = ++fetchGen.current;
     timerRef.current = setTimeout(async () => {
       setLoading(true);
       try {
         const res = await fetch(`/api/contacts/field-search?field=${field}&q=${encodeURIComponent(search)}`, { credentials: 'include' });
-        if (res.ok) { const d = await res.json(); setResults(d.results || []); }
+        if (res.ok && gen === fetchGen.current) {
+          const d = await res.json();
+          setResults(d.results || []);
+        }
       } catch {}
-      setLoading(false);
+      if (gen === fetchGen.current) setLoading(false);
     }, 300);
     return () => clearTimeout(timerRef.current);
   }, [search, open, field]);
 
-  const closeAndReset = () => { setOpen(false); setSearch(''); setResults([]); };
+  // Invalidate any in-flight fetch before closing so stale results can't update the list
+  const closeAndReset = () => { fetchGen.current++; setOpen(false); setSearch(''); setResults([]); setLoading(false); };
 
   return (
     <div ref={ref} className="relative" style={{ width }}>
