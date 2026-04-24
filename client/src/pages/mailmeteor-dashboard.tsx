@@ -1231,9 +1231,10 @@ export default function MailMeteorDashboard() {
 
           {/* Campaign Detail */}
           {viewMode === 'dashboard' && currentView === 'campaign-detail' && selectedCampaignId && (
-            <CampaignDetailPage 
+            <CampaignDetailPage
               campaignId={selectedCampaignId}
               onBack={() => { setCurrentView('campaigns'); setSelectedCampaignId(null); }}
+              onNavigateToCampaign={(id: string) => { setSelectedCampaignId(id); setCurrentViewRaw('campaign-detail'); }}
             />
           )}
 

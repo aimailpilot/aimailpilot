@@ -4082,11 +4082,13 @@ Which account should I use and why? If I need to split across accounts, provide 
     }
   });
 
-  // Duplicate a campaign
+  // Duplicate a campaign — copies Step 1 + all follow-up sequences/steps; clears contactIds so user picks fresh list
   app.post('/api/campaigns/:id/duplicate', async (req: any, res) => {
     try {
       const original = await storage.getCampaign(req.params.id);
       if (!original) return res.status(404).json({ message: 'Campaign not found' });
+
+      // Create the new campaign — no contactIds, no segmentId, status=draft
       const dupe = await storage.createCampaign({
         organizationId: original.organizationId,
         name: `${original.name} (Copy)`,
@@ -4095,12 +4097,56 @@ Which account should I use and why? If I need to split across accounts, provide 
         content: original.content,
         emailAccountId: original.emailAccountId,
         templateId: original.templateId,
-        contactIds: original.contactIds,
-        segmentId: original.segmentId,
-        trackOpens: original.trackOpens,
-        trackClicks: original.trackClicks,
-        includeUnsubscribe: original.includeUnsubscribe,
+        contactIds: [],      // cleared — user must select recipients
+        segmentId: null,     // cleared
+        sendOrder: (original as any).sendOrder || null,
       });
+      // createCampaign INSERT lacks trackOpens/includeUnsubscribe columns — patch via update
+      await storage.updateCampaign((dupe as any).id, {
+        trackOpens: original.trackOpens ?? 1,
+        includeUnsubscribe: (original as any).includeUnsubscribe ?? 0,
+      });
+
+      // Copy all follow-up sequences + steps linked to the original campaign
+      try {
+        const campaignFollowups = await storage.getCampaignFollowups(req.params.id);
+        for (const cf of campaignFollowups) {
+          const seq = await storage.getFollowupSequence((cf as any).sequenceId);
+          if (!seq) continue;
+          const steps = await storage.getFollowupSteps((seq as any).id);
+
+          // Create a new sequence for the duplicate
+          const newSeq = await storage.createFollowupSequence({
+            organizationId: original.organizationId,
+            name: (seq as any).name,
+            description: (seq as any).description || '',
+            createdBy: req.user?.id || null,
+          });
+
+          // Copy each step into the new sequence
+          for (const step of steps) {
+            await storage.createFollowupStep({
+              sequenceId: (newSeq as any).id,
+              stepNumber: (step as any).stepNumber,
+              trigger: (step as any).trigger || 'no_reply',
+              delayDays: (step as any).delayDays || 0,
+              delayHours: (step as any).delayHours || 0,
+              delayMinutes: (step as any).delayMinutes || 0,
+              subject: (step as any).subject || '',
+              content: (step as any).content || '',
+            });
+          }
+
+          // Link new sequence to the duplicate campaign
+          await storage.createCampaignFollowup({
+            campaignId: (dupe as any).id,
+            sequenceId: (newSeq as any).id,
+          });
+        }
+      } catch (followupErr) {
+        console.error('[duplicate] followup copy error (non-fatal):', followupErr);
+      }
+
       res.json(dupe);
     } catch (error) {
       res.status(500).json({ message: 'Failed to duplicate campaign' });

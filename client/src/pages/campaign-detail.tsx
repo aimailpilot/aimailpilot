@@ -24,6 +24,7 @@ import type { CampaignDetail, CampaignMessage, TrackingEvent, StepAnalytics, Act
 interface CampaignDetailPageProps {
   campaignId: string;
   onBack: () => void;
+  onNavigateToCampaign?: (id: string) => void;
 }
 
 // Single email card in the preview, used for Step 1 and all follow-up steps
@@ -71,7 +72,7 @@ function PreviewEmailCard({ stepLabel, subject, html, contact, senderName, sende
   );
 }
 
-export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetailPageProps) {
+export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCampaign }: CampaignDetailPageProps) {
   const [detail, setDetail] = useState<CampaignDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -436,7 +437,18 @@ export default function CampaignDetailPage({ campaignId, onBack }: CampaignDetai
     setShowActions(false);
     try {
       const res = await fetch(`/api/campaigns/${campaignId}/duplicate`, { method: 'POST', credentials: 'include' });
-      if (res.ok) alert('Campaign duplicated!');
+      if (res.ok) {
+        const dupe = await res.json();
+        // Navigate directly to the duplicate so user can add recipients and launch
+        if (dupe?.id) {
+          if (onNavigateToCampaign) {
+            onNavigateToCampaign(dupe.id);
+          } else {
+            window.history.replaceState(null, '', `#campaign-detail/${dupe.id}`);
+            window.location.reload();
+          }
+        }
+      }
     } catch (e) { /* ignore */ }
   };
 
