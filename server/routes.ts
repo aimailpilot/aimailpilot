@@ -4937,9 +4937,10 @@ Which account should I use and why? If I need to split across accounts, provide 
         if (filter.pipelineStage && filter.pipelineStage !== 'all') { conds.push(`c."pipelineStage" = ?`); params.push(filter.pipelineStage); }
         if (filter.company) { conds.push(`LOWER(c.company) LIKE ?`); params.push(`%${String(filter.company).toLowerCase()}%`); }
         if (filter.location) {
-          const loc = `%${String(filter.location).toLowerCase()}%`;
-          conds.push(`(LOWER(c.city) LIKE ? OR LOWER(c.state) LIKE ? OR LOWER(c.country) LIKE ?)`);
-          params.push(loc, loc, loc);
+          const locExact = String(filter.location).toLowerCase();
+          const locLike = `%${locExact}%`;
+          conds.push(`(LOWER(TRIM(SPLIT_PART(c.city, ',', 1))) = ? OR LOWER(c.city) LIKE ? OR LOWER(c.state) LIKE ? OR LOWER(TRIM(SPLIT_PART(c.country, ',', 1))) = ? OR LOWER(c.country) LIKE ?)`);
+          params.push(locExact, locLike, locLike, locExact, locLike);
         }
         if (filter.designation) { conds.push(`LOWER(c."jobTitle") LIKE ?`); params.push(`%${String(filter.designation).toLowerCase()}%`); }
         if (filter.keywordFilter) {
@@ -4965,11 +4966,11 @@ Which account should I use and why? If I need to split across accounts, provide 
         if (filter.emailRatingGrade) { conds.push('c."emailRatingGrade" = ?'); params.push(String(filter.emailRatingGrade)); }
         if (filter.employeeRange) {
           const ranges: Record<string, string> = {
-            '1-10': `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS INTEGER) BETWEEN 1 AND 10)`,
-            '11-50': `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS INTEGER) BETWEEN 11 AND 50)`,
-            '51-200': `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS INTEGER) BETWEEN 51 AND 200)`,
-            '201-1000': `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS INTEGER) BETWEEN 201 AND 1000)`,
-            '1000+': `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS INTEGER) > 1000)`,
+            '1-10': `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS BIGINT) BETWEEN 1 AND 10)`,
+            '11-50': `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS BIGINT) BETWEEN 11 AND 50)`,
+            '51-200': `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS BIGINT) BETWEEN 51 AND 200)`,
+            '201-1000': `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS BIGINT) BETWEEN 201 AND 1000)`,
+            '1000+': `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS BIGINT) > 1000)`,
           };
           if (ranges[String(filter.employeeRange)]) conds.push(ranges[String(filter.employeeRange)]);
         }
@@ -5172,9 +5173,10 @@ Which account should I use and why? If I need to split across accounts, provide 
           if (pipelineStage && pipelineStage !== 'all') { conditions.push('c."pipelineStage" = ?'); params.push(pipelineStage); }
           if (company) { conditions.push('LOWER(c.company) LIKE ?'); params.push(`%${company.toLowerCase()}%`); }
           if (location) {
-            conditions.push('(LOWER(c.city) LIKE ? OR LOWER(c.state) LIKE ? OR LOWER(c.country) LIKE ?)');
-            const loc = `%${location.toLowerCase()}%`;
-            params.push(loc, loc, loc);
+            const locExact = location.toLowerCase();
+            const locLike = `%${locExact}%`;
+            conditions.push('(LOWER(TRIM(SPLIT_PART(c.city, \',\', 1))) = ? OR LOWER(c.city) LIKE ? OR LOWER(c.state) LIKE ? OR LOWER(TRIM(SPLIT_PART(c.country, \',\', 1))) = ? OR LOWER(c.country) LIKE ?)');
+            params.push(locExact, locLike, locLike, locExact, locLike);
           }
           // Designation: keyword search across jobTitle (free-text, not exact match)
           if (designation) {
@@ -5206,11 +5208,11 @@ Which account should I use and why? If I need to split across accounts, provide 
           if (emailRatingGrade) { conditions.push('c."emailRatingGrade" = ?'); params.push(emailRatingGrade); }
           if (employeeRange) {
             const ranges: Record<string, string> = {
-              '1-10':     `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS INTEGER) BETWEEN 1 AND 10)`,
-              '11-50':    `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS INTEGER) BETWEEN 11 AND 50)`,
-              '51-200':   `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS INTEGER) BETWEEN 51 AND 200)`,
-              '201-1000': `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS INTEGER) BETWEEN 201 AND 1000)`,
-              '1000+':    `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS INTEGER) > 1000)`,
+              '1-10':     `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS BIGINT) BETWEEN 1 AND 10)`,
+              '11-50':    `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS BIGINT) BETWEEN 11 AND 50)`,
+              '51-200':   `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS BIGINT) BETWEEN 51 AND 200)`,
+              '201-1000': `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS BIGINT) BETWEEN 201 AND 1000)`,
+              '1000+':    `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS BIGINT) > 1000)`,
             };
             if (ranges[employeeRange]) conditions.push(ranges[employeeRange]);
           }
@@ -5482,9 +5484,9 @@ Which account should I use and why? If I need to split across accounts, provide 
       const [companies, designations, cities, countries, industries, departments, seniorities, tagRows] = await Promise.all([
         storage.rawAll(`SELECT DISTINCT company FROM contacts WHERE "organizationId" = ? AND company IS NOT NULL AND company != '' AND company NOT LIKE '%http%' AND company NOT LIKE '%@%' AND company !~ '^\+' AND LENGTH(company) BETWEEN 2 AND 100 ORDER BY company LIMIT 200`, orgId),
         storage.rawAll(`SELECT DISTINCT "jobTitle" FROM contacts WHERE "organizationId" = ? AND "jobTitle" IS NOT NULL AND "jobTitle" != '' AND "jobTitle" NOT LIKE '%http%' AND "jobTitle" NOT LIKE '%@%' AND "jobTitle" !~ '^\+' AND LENGTH("jobTitle") BETWEEN 2 AND 100 ORDER BY "jobTitle" LIMIT 300`, orgId),
-        storage.rawAll(`SELECT DISTINCT city FROM contacts WHERE "organizationId" = ? AND city IS NOT NULL AND city != '' AND city NOT LIKE '%,%' AND city !~ '^\+' AND LENGTH(city) BETWEEN 2 AND 60 ORDER BY city LIMIT 200`, orgId),
-        storage.rawAll(`SELECT DISTINCT country FROM contacts WHERE "organizationId" = ? AND country IS NOT NULL AND country != '' AND country NOT LIKE '%,%' AND country !~ '^\+' AND LENGTH(country) BETWEEN 2 AND 60 ORDER BY country LIMIT 100`, orgId),
-        storage.rawAll(`SELECT DISTINCT industry FROM contacts WHERE "organizationId" = ? AND industry IS NOT NULL AND industry != '' AND industry !~ '^[0-9]+$' AND LENGTH(industry) >= 3 AND industry NOT LIKE '%http%' AND industry NOT LIKE '%@%' ORDER BY industry LIMIT 100`, orgId),
+        storage.rawAll(`SELECT DISTINCT TRIM(SPLIT_PART(city, ',', 1)) as city FROM contacts WHERE "organizationId" = ? AND city IS NOT NULL AND city != '' AND TRIM(SPLIT_PART(city, ',', 1)) !~ '^\+' AND LENGTH(TRIM(SPLIT_PART(city, ',', 1))) BETWEEN 2 AND 60 ORDER BY 1 LIMIT 300`, orgId),
+        storage.rawAll(`SELECT DISTINCT TRIM(SPLIT_PART(country, ',', 1)) as country FROM contacts WHERE "organizationId" = ? AND country IS NOT NULL AND country != '' AND TRIM(SPLIT_PART(country, ',', 1)) !~ '^\+' AND LENGTH(TRIM(SPLIT_PART(country, ',', 1))) BETWEEN 2 AND 60 ORDER BY 1 LIMIT 150`, orgId),
+        storage.rawAll(`SELECT DISTINCT industry FROM contacts WHERE "organizationId" = ? AND industry IS NOT NULL AND industry != '' AND industry !~ '^[0-9]+$' AND LENGTH(industry) >= 3 AND industry NOT LIKE '%http%' AND industry NOT LIKE '%@%' ORDER BY industry LIMIT 500`, orgId),
         storage.rawAll(`SELECT DISTINCT department FROM contacts WHERE "organizationId" = ? AND department IS NOT NULL AND department != '' ORDER BY department LIMIT 100`, orgId),
         storage.rawAll(`SELECT DISTINCT seniority FROM contacts WHERE "organizationId" = ? AND seniority IS NOT NULL AND seniority != '' ORDER BY seniority LIMIT 50`, orgId),
         storage.rawAll(`SELECT DISTINCT tag FROM contacts, LATERAL jsonb_array_elements_text(CASE WHEN tags IS NOT NULL AND tags::text != 'null' AND tags::text != '[]' THEN tags::jsonb ELSE '[]'::jsonb END) AS t(tag) WHERE "organizationId" = ? AND tag IS NOT NULL AND tag != '' ORDER BY tag LIMIT 200`, orgId),
@@ -5819,9 +5821,15 @@ Which account should I use and why? If I need to split across accounts, provide 
         'lead status': '_leadStatusRaw', 'status': '_statusRaw', 'stage': 'pipelineStage', 'pipeline stage': 'pipelineStage', 'pipeline': 'pipelineStage',
         'lead score': 'score', 'score': 'score',
         'tags': 'tags', 'labels': 'tags',
+        'lists': 'tags', 'list': 'tags', 'segments': 'tags', 'segment': 'tags',
+        'keywords': 'tags', 'keyword': 'tags',
         'secondary email': 'secondaryEmail', 'secondary_email': 'secondaryEmail', 'alternate email': 'secondaryEmail', 'other email': 'secondaryEmail', 'personal email': 'secondaryEmail',
-        'home phone': 'homePhone', 'home_phone': 'homePhone', 'personal phone': 'homePhone',
+        'home phone': 'homePhone', 'home_phone': 'homePhone', 'personal phone': 'homePhone', 'home': 'homePhone',
+        'other phone': 'mobilePhone', 'other_phone': 'mobilePhone',
+        'sub department': 'department', 'sub-department': 'department', 'subdepartment': 'department',
+        'work direction': 'department', 'work function': 'department',
         'source': '_source', 'lead source': '_source',
+        'person linkedin': 'linkedinUrl',
       };
 
       // List of known direct contact field names (sent by enhanced column mapper)
