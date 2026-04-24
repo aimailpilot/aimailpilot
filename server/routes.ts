@@ -4902,7 +4902,15 @@ Which account should I use and why? If I need to split across accounts, provide 
           conds.push(`(${termClauses.join(' OR ')})`);
           for (const t of terms) { params.push(`%${t}%`, `%${t}%`, `%${t}%`, `%${t}%`, `%${t}%`); }
         }
-        if (filter.seniorityFilter) { conds.push('LOWER(c.seniority) LIKE ?'); params.push(`%${String(filter.seniorityFilter).toLowerCase()}%`); }
+        if (filter.seniorityFilter) {
+          const senTerms = String(filter.seniorityFilter).split(',').map((t: string) => t.trim().toLowerCase()).filter(Boolean);
+          if (senTerms.length === 1) {
+            conds.push('LOWER(c.seniority) LIKE ?'); params.push(`%${senTerms[0]}%`);
+          } else if (senTerms.length > 1) {
+            conds.push(`(${senTerms.map(() => 'LOWER(c.seniority) LIKE ?').join(' OR ')})`);
+            senTerms.forEach((t: string) => params.push(`%${t}%`));
+          }
+        }
         if (filter.industryFilter) { conds.push('LOWER(c.industry) LIKE ?'); params.push(`%${String(filter.industryFilter).toLowerCase()}%`); }
         if (filter.tagsFilter) { conds.push('LOWER(CAST(c.tags AS TEXT)) LIKE ?'); params.push(`%${String(filter.tagsFilter).toLowerCase()}%`); }
         if (filter.emailVerification) { conds.push('c."emailVerificationStatus" = ?'); params.push(String(filter.emailVerification)); }
@@ -5134,7 +5142,16 @@ Which account should I use and why? If I need to split across accounts, provide 
             conditions.push(`(${termClauses.join(' OR ')})`);
             for (const t of terms) { params.push(`%${t}%`, `%${t}%`, `%${t}%`, `%${t}%`, `%${t}%`); }
           }
-          if (seniorityFilter) { conditions.push('LOWER(c.seniority) LIKE ?'); params.push(`%${seniorityFilter.toLowerCase()}%`); }
+          if (seniorityFilter) {
+            // comma-separated multi-select OR logic
+            const senTerms = seniorityFilter.split(',').map((t: string) => t.trim().toLowerCase()).filter(Boolean);
+            if (senTerms.length === 1) {
+              conditions.push('LOWER(c.seniority) LIKE ?'); params.push(`%${senTerms[0]}%`);
+            } else if (senTerms.length > 1) {
+              conditions.push(`(${senTerms.map(() => 'LOWER(c.seniority) LIKE ?').join(' OR ')})`);
+              senTerms.forEach((t: string) => params.push(`%${t}%`));
+            }
+          }
           if (industryFilter) { conditions.push('LOWER(c.industry) LIKE ?'); params.push(`%${industryFilter.toLowerCase()}%`); }
           if (tagsFilter) { conditions.push('LOWER(CAST(c.tags AS TEXT)) LIKE ?'); params.push(`%${tagsFilter.toLowerCase()}%`); }
           if (emailVerification) { conditions.push('c."emailVerificationStatus" = ?'); params.push(emailVerification); }
@@ -5414,7 +5431,7 @@ Which account should I use and why? If I need to split across accounts, provide 
   app.get('/api/contacts/filter-options', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.user.organizationId;
-      const [companies, designations, cities, countries, industries, departments, seniorities] = await Promise.all([
+      const [companies, designations, cities, countries, industries, departments, seniorities, tagRows] = await Promise.all([
         storage.rawAll(`SELECT DISTINCT company FROM contacts WHERE "organizationId" = ? AND company IS NOT NULL AND company != '' ORDER BY company LIMIT 200`, orgId),
         storage.rawAll(`SELECT DISTINCT "jobTitle" FROM contacts WHERE "organizationId" = ? AND "jobTitle" IS NOT NULL AND "jobTitle" != '' ORDER BY "jobTitle" LIMIT 300`, orgId),
         storage.rawAll(`SELECT DISTINCT city FROM contacts WHERE "organizationId" = ? AND city IS NOT NULL AND city != '' ORDER BY city LIMIT 200`, orgId),
@@ -5422,7 +5439,12 @@ Which account should I use and why? If I need to split across accounts, provide 
         storage.rawAll(`SELECT DISTINCT industry FROM contacts WHERE "organizationId" = ? AND industry IS NOT NULL AND industry != '' ORDER BY industry LIMIT 100`, orgId),
         storage.rawAll(`SELECT DISTINCT department FROM contacts WHERE "organizationId" = ? AND department IS NOT NULL AND department != '' ORDER BY department LIMIT 100`, orgId),
         storage.rawAll(`SELECT DISTINCT seniority FROM contacts WHERE "organizationId" = ? AND seniority IS NOT NULL AND seniority != '' ORDER BY seniority LIMIT 50`, orgId),
+        storage.rawAll(`SELECT DISTINCT tag FROM contacts, LATERAL jsonb_array_elements_text(CASE WHEN tags IS NOT NULL AND tags::text != 'null' AND tags::text != '[]' THEN tags::jsonb ELSE '[]'::jsonb END) AS t(tag) WHERE "organizationId" = ? AND tag IS NOT NULL AND tag != '' ORDER BY tag LIMIT 200`, orgId),
       ]);
+      // Clean seniority values — strip anything containing URLs or longer than 40 chars (corrupted data)
+      const cleanSeniorities = seniorities
+        .map((r: any) => r.seniority as string)
+        .filter((s: string) => s && s.length <= 40 && !s.includes('http') && !s.includes('www.') && !s.includes(','));
       res.json({
         companies: companies.map((r: any) => r.company),
         designations: designations.map((r: any) => r.jobTitle),
@@ -5430,7 +5452,8 @@ Which account should I use and why? If I need to split across accounts, provide 
         countries: countries.map((r: any) => r.country),
         industries: industries.map((r: any) => r.industry),
         departments: departments.map((r: any) => r.department),
-        seniorities: seniorities.map((r: any) => r.seniority),
+        seniorities: cleanSeniorities,
+        tags: tagRows.map((r: any) => r.tag),
       });
     } catch (e: any) {
       res.status(500).json({ message: e.message });

@@ -103,6 +103,110 @@ interface ContactList {
 
 type TabType = 'all' | 'unsubscribers' | 'blocklist' | 'lists' | 'follow-ups' | 'hot-leads';
 
+// Autocomplete text input — shows matching suggestions as user types, click to fill
+function AutocompleteInput({ value, onChange, placeholder, suggestions, width }: {
+  value: string; onChange: (v: string) => void; placeholder: string; suggestions: string[]; width: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  // Close on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const term = value.toLowerCase();
+  const matches = term.length < 1 ? [] : suggestions
+    .filter(s => s && s.toLowerCase().includes(term))
+    .slice(0, 8);
+
+  return (
+    <div ref={ref} className="relative" style={{ width }}>
+      <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-gray-400 pointer-events-none z-10" />
+      <input
+        type="text"
+        value={value}
+        onChange={e => { onChange(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        placeholder={placeholder}
+        className="h-8 w-full pl-6 pr-2 text-xs border border-gray-200 rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+      />
+      {open && matches.length > 0 && (
+        <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-md shadow-lg z-50 max-h-48 overflow-y-auto" style={{ minWidth: width }}>
+          {matches.map(s => (
+            <button
+              key={s}
+              onMouseDown={e => { e.preventDefault(); onChange(s); setOpen(false); }}
+              className="w-full text-left px-3 py-1.5 text-xs hover:bg-blue-50 hover:text-blue-700 truncate"
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Multi-select dropdown with checkboxes — stores selections as string array, sends comma-joined to backend
+function MultiSelectDropdown({ options, selected, onChange, placeholder, width }: {
+  options: string[]; selected: string[]; onChange: (vals: string[]) => void; placeholder: string; width: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const toggle = (val: string) => {
+    const next = selected.includes(val) ? selected.filter(s => s !== val) : [...selected, val];
+    onChange(next);
+  };
+
+  const label = selected.length === 0 ? placeholder : selected.length === 1 ? selected[0] : `${selected[0]} +${selected.length - 1}`;
+
+  return (
+    <div ref={ref} className="relative" style={{ width }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        className={`h-8 w-full flex items-center justify-between px-3 text-xs border rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 ${selected.length > 0 ? 'border-blue-400 text-blue-700 font-medium' : 'border-gray-200 text-gray-500'}`}
+      >
+        <span className="truncate">{label}</span>
+        <ChevronDown className="h-3 w-3 ml-1 shrink-0 text-gray-400" />
+      </button>
+      {open && (
+        <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-md shadow-lg z-50 max-h-56 overflow-y-auto" style={{ minWidth: width }}>
+          {selected.length > 0 && (
+            <button
+              onMouseDown={e => { e.preventDefault(); onChange([]); setOpen(false); }}
+              className="w-full text-left px-3 py-1.5 text-xs text-red-500 hover:bg-red-50 border-b border-gray-100"
+            >
+              Clear selection
+            </button>
+          )}
+          {options.map(opt => (
+            <button
+              key={opt}
+              onMouseDown={e => { e.preventDefault(); toggle(opt); }}
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-blue-50 hover:text-blue-700"
+            >
+              <span className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 ${selected.includes(opt) ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
+                {selected.includes(opt) && <span className="text-white text-[9px] font-bold leading-none">✓</span>}
+              </span>
+              <span className="truncate">{opt}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ContactsManager() {
   const { toast } = useToast();
   const [contacts, setContacts] = useState<Contact[]>([]);
@@ -203,7 +307,7 @@ export default function ContactsManager() {
   const [emailRatingGrade, setEmailRatingGrade] = useState('');
   const [tagsFilter, setTagsFilter] = useState('');
   const [leadFilterValue, setLeadFilterValue] = useState('');
-  const [filterOptions, setFilterOptions] = useState<{ companies: string[]; designations: string[]; cities: string[]; countries: string[]; industries: string[]; departments: string[]; seniorities: string[] }>({ companies: [], designations: [], cities: [], countries: [], industries: [], departments: [], seniorities: [] });
+  const [filterOptions, setFilterOptions] = useState<{ companies: string[]; designations: string[]; cities: string[]; countries: string[]; industries: string[]; departments: string[]; seniorities: string[]; tags: string[] }>({ companies: [], designations: [], cities: [], countries: [], industries: [], departments: [], seniorities: [], tags: [] });
   const [showFilters, setShowFilters] = useState(false);
 
   // === PR1: Column customization, density, select-all-matching ===
@@ -4286,29 +4390,32 @@ export default function ContactsManager() {
         {/* Filter panel — two rows */}
         {showFilters && !isSpecialTab && (
           <div className="flex flex-col gap-2 p-3 bg-gray-50 rounded-xl border border-gray-200">
-            {/* Row 1: keyword searches + location + AI leads + member */}
+            {/* Row 1: autocomplete text inputs + location + AI leads + member */}
             <div className="flex items-center gap-2 flex-wrap">
-              <div className="relative">
-                <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-gray-400 pointer-events-none" />
-                <input type="text" value={designationFilter}
-                  onChange={e => { setDesignationFilter(e.target.value); setCurrentPage(1); }}
-                  placeholder="Job title keyword..."
-                  className="h-8 w-[155px] pl-6 pr-2 text-xs border border-gray-200 rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-blue-500" />
-              </div>
-              <div className="relative">
-                <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-gray-400 pointer-events-none" />
-                <input type="text" value={keywordFilter}
-                  onChange={e => { setKeywordFilter(e.target.value); setCurrentPage(1); }}
-                  placeholder="Keyword: AI, telecom, cyber..."
-                  className="h-8 w-[185px] pl-6 pr-2 text-xs border border-gray-200 rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-blue-500" />
-              </div>
-              <div className="relative">
-                <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-gray-400 pointer-events-none" />
-                <input type="text" value={tagsFilter}
-                  onChange={e => { setTagsFilter(e.target.value); setCurrentPage(1); }}
-                  placeholder="Tag keyword..."
-                  className="h-8 w-[130px] pl-6 pr-2 text-xs border border-gray-200 rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-blue-500" />
-              </div>
+              {/* Job title autocomplete */}
+              <AutocompleteInput
+                value={designationFilter}
+                onChange={v => { setDesignationFilter(v); setCurrentPage(1); }}
+                placeholder="Job title keyword..."
+                suggestions={filterOptions.designations}
+                width={155}
+              />
+              {/* Keyword autocomplete (industries + departments) */}
+              <AutocompleteInput
+                value={keywordFilter}
+                onChange={v => { setKeywordFilter(v); setCurrentPage(1); }}
+                placeholder="Keyword: AI, telecom, cyber..."
+                suggestions={[...filterOptions.industries, ...filterOptions.departments]}
+                width={190}
+              />
+              {/* Tag autocomplete */}
+              <AutocompleteInput
+                value={tagsFilter}
+                onChange={v => { setTagsFilter(v); setCurrentPage(1); }}
+                placeholder="Tag keyword..."
+                suggestions={filterOptions.tags}
+                width={135}
+              />
               <Select value={locationFilter || '_all'} onValueChange={v => { setLocationFilter(v === '_all' ? '' : v); setCurrentPage(1); }}>
                 <SelectTrigger className="h-8 w-[140px] text-xs bg-white"><SelectValue placeholder="Location" /></SelectTrigger>
                 <SelectContent>
@@ -4358,16 +4465,14 @@ export default function ContactsManager() {
                   {filterOptions.companies.slice(0, 50).map(c => <SelectItem key={c} value={c} className="text-xs">{c}</SelectItem>)}
                 </SelectContent>
               </Select>
-              <Select value={seniorityFilter || '_all'} onValueChange={v => { setSeniorityFilter(v === '_all' ? '' : v); setCurrentPage(1); }}>
-                <SelectTrigger className="h-8 w-[135px] text-xs bg-white"><SelectValue placeholder="Seniority" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="_all">All Seniority</SelectItem>
-                  {filterOptions.seniorities.length > 0
-                    ? filterOptions.seniorities.map(s => <SelectItem key={s} value={s} className="text-xs">{s}</SelectItem>)
-                    : ['C-Suite', 'VP', 'Director', 'Manager', 'Staff', 'Entry'].map(s => <SelectItem key={s} value={s} className="text-xs">{s}</SelectItem>)
-                  }
-                </SelectContent>
-              </Select>
+              {/* Seniority multi-select with checkboxes */}
+              <MultiSelectDropdown
+                options={filterOptions.seniorities.length > 0 ? filterOptions.seniorities : ['C-Suite', 'VP', 'Director', 'Manager', 'Head', 'Staff', 'Entry', 'Intern', 'Founder', 'Owner']}
+                selected={seniorityFilter ? seniorityFilter.split(',').map(s => s.trim()).filter(Boolean) : []}
+                onChange={vals => { setSeniorityFilter(vals.join(',')); setCurrentPage(1); }}
+                placeholder="All Seniority"
+                width={140}
+              />
               <Select value={industryFilter || '_all'} onValueChange={v => { setIndustryFilter(v === '_all' ? '' : v); setCurrentPage(1); }}>
                 <SelectTrigger className="h-8 w-[145px] text-xs bg-white"><SelectValue placeholder="Industry" /></SelectTrigger>
                 <SelectContent>
@@ -4416,12 +4521,22 @@ export default function ContactsManager() {
           </div>
         )}
 
-        {/* Search results indicator */}
-        {debouncedSearch && (
-          <div className="flex items-center gap-2 px-3 py-2 bg-amber-50/60 border border-amber-100 rounded-lg">
-            <Search className="h-3.5 w-3.5 text-amber-500" />
-            <span className="text-xs text-amber-700">Found <strong>{total}</strong> results for "<strong>{debouncedSearch}</strong>"</span>
-            <button onClick={() => setSearch('')} className="ml-auto text-xs text-amber-500 hover:text-amber-700 font-medium">Clear</button>
+        {/* Search / filter results indicator — shown whenever a filter or search is active */}
+        {(debouncedSearch || hasActiveFilters) && (
+          <div className="flex items-center gap-2 px-3 py-2 bg-blue-50/70 border border-blue-100 rounded-lg">
+            <Search className="h-3.5 w-3.5 text-blue-500 shrink-0" />
+            <span className="text-xs text-blue-700">
+              {loading ? (
+                <span className="text-blue-400">Searching…</span>
+              ) : (
+                <>Found <strong>{total.toLocaleString()}</strong> contact{total !== 1 ? 's' : ''}
+                {debouncedSearch && <> matching "<strong>{debouncedSearch}</strong>"</>}
+                {hasActiveFilters && <span className="text-blue-500 ml-1">(filters active)</span>}
+                {total > pageSize && <span className="text-blue-400 ml-1">— page {currentPage} of {Math.ceil(total / pageSize)}</span>}
+                </>
+              )}
+            </span>
+            <button onClick={clearAllFilters} className="ml-auto text-xs text-blue-500 hover:text-blue-700 font-medium shrink-0">Clear all</button>
           </div>
         )}
 
