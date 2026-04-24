@@ -1156,7 +1156,19 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
             <h3 className="text-base font-bold text-gray-900 mb-4">Campaign details</h3>
             <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden">
               <div className="divide-y divide-gray-50">
-                <DetailRow icon={<Users className="h-4 w-4" />} label="Total recipients" value={`${campaign.totalRecipients || totalMessages}`} />
+                {(() => {
+                  const step0 = stepAnalytics?.find((s: any) => s.stepNumber === 0);
+                  const attempted = step0 ? (step0.sent + step0.bounced) : 0;
+                  const listSize = campaign.totalRecipients || totalMessages || 0;
+                  const filtered = attempted > 0 ? Math.max(0, listSize - attempted) : 0;
+                  return (
+                    <>
+                      <DetailRow icon={<Users className="h-4 w-4" />} label="Total in list" value={`${listSize}`} />
+                      {attempted > 0 && <DetailRow icon={<Send className="h-4 w-4" />} label="Actually attempted" value={`${attempted}`} sub={`${step0?.sent || 0} sent · ${step0?.bounced || 0} bounced`} valueColor="text-emerald-600" />}
+                      {filtered > 0 && <DetailRow icon={<Shield className="h-4 w-4" />} label="Filtered at launch" value={`${filtered}`} sub="bounced/unsubscribed before send" valueColor="text-amber-600" />}
+                    </>
+                  );
+                })()}
                 <DetailRow icon={<Eye className="h-4 w-4" />} label="Tracking" value={campaign.trackOpens !== false ? 'Enabled' : 'Disabled'} valueColor={campaign.trackOpens !== false ? 'text-emerald-600' : 'text-gray-400'} />
                 <DetailRow icon={<Shield className="h-4 w-4" />} label="Unsubscribe" value={campaign.includeUnsubscribe ? 'Enabled' : 'Disabled'} valueColor={campaign.includeUnsubscribe ? 'text-emerald-600' : 'text-gray-400'} />
                 <DetailRow icon={<Timer className="h-4 w-4" />} label="Throttling" value={`Every ${(campaign as any).throttleDelay || 300} seconds`} />

@@ -3231,17 +3231,18 @@ Which account should I use and why? If I need to split across accounts, provide 
           try {
             const stats = await storage.getCampaignMessageStats(c.id);
             if (stats.sent > 0) {
+              const step0Floor = Math.max((stats.step0Sent || 0) + (stats.step0Bounced || 0), originalAudienceSize);
               await storage.updateCampaign(c.id, {
                 sentCount: stats.sent, bouncedCount: stats.bounced,
                 openedCount: stats.opened, clickedCount: stats.clicked, repliedCount: stats.replied,
-                totalRecipients: Math.max(c.totalRecipients || 0, stats.sent + stats.bounced, originalAudienceSize),
+                totalRecipients: step0Floor || (stats.sent + stats.bounced),
               });
               c.sentCount = stats.sent;
               c.bouncedCount = stats.bounced;
               c.openedCount = stats.opened;
               c.clickedCount = stats.clicked;
               c.repliedCount = stats.replied;
-              c.totalRecipients = Math.max(c.totalRecipients || 0, stats.sent + stats.bounced, originalAudienceSize);
+              c.totalRecipients = step0Floor || (stats.sent + stats.bounced);
               console.log(`[Campaigns] Auto-fixed stats for ${c.id}: sent=${stats.sent}`);
             }
           } catch (e) { /* ignore per-campaign errors */ }
@@ -3884,13 +3885,14 @@ Which account should I use and why? If I need to split across accounts, provide 
       // Auto-recalculate stats if sentCount appears stale
       if (msgStats.sent > 0 && (campaign.sentCount || 0) < msgStats.sent) {
         console.log(`[Campaign] Auto-fixing stale stats for ${req.params.id}: DB sentCount=${campaign.sentCount}, actual=${msgStats.sent}`);
+        const step0Floor = Math.max((msgStats.step0Sent || 0) + (msgStats.step0Bounced || 0), originalAudienceSize);
         await storage.updateCampaign(req.params.id, {
           sentCount: msgStats.sent,
           bouncedCount: msgStats.bounced,
           openedCount: msgStats.opened,
           clickedCount: msgStats.clicked,
           repliedCount: msgStats.replied,
-          totalRecipients: Math.max(campaign.totalRecipients || 0, msgStats.sent + msgStats.bounced, originalAudienceSize),
+          totalRecipients: step0Floor || (msgStats.sent + msgStats.bounced),
         });
         campaign = await storage.getCampaign(req.params.id);
       }
@@ -8899,14 +8901,18 @@ Respond with ONLY a JSON object in this format:
             const openedCount = msgs.filter((m: any) => m.openedAt).length;
             const clickedCount = msgs.filter((m: any) => m.clickedAt).length;
             const repliedCount = msgs.filter((m: any) => m.repliedAt).length;
-            
+            const step0Sent = msgs.filter((m: any) => (m.stepNumber || 0) === 0 && (m.status === 'sent' || m.status === 'sending')).length;
+            const step0Bounced = msgs.filter((m: any) => (m.stepNumber || 0) === 0 && (m.status === 'bounced' || (m.status === 'failed' && m.errorMessage?.toLowerCase().includes('bounce')))).length;
+            const inboxAudienceSize = Array.isArray(c.contactIds) ? c.contactIds.length : 0;
+            const inboxStep0Floor = Math.max(step0Sent + step0Bounced, inboxAudienceSize) || (sentCount + bouncedCount);
+
             // Only update if values changed
             if (sentCount !== (c.sentCount || 0) || bouncedCount !== (c.bouncedCount || 0) ||
                 openedCount !== (c.openedCount || 0) || clickedCount !== (c.clickedCount || 0) ||
                 repliedCount !== (c.repliedCount || 0)) {
               await storage.updateCampaign(c.id, {
                 sentCount, bouncedCount, openedCount, clickedCount, repliedCount,
-                totalRecipients: Math.max(c.totalRecipients || 0, sentCount + bouncedCount),
+                totalRecipients: inboxStep0Floor,
               });
               recalculated++;
             }

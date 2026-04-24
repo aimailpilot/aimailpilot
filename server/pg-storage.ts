@@ -1885,12 +1885,15 @@ export class PostgresStorage {
         SUM(CASE WHEN status = 'bounced' OR (status = 'failed' AND "errorMessage" ILIKE '%bounce%') THEN 1 ELSE 0 END) as bounced,
         SUM(CASE WHEN "openedAt" IS NOT NULL THEN 1 ELSE 0 END) as opened,
         SUM(CASE WHEN "clickedAt" IS NOT NULL THEN 1 ELSE 0 END) as clicked,
-        SUM(CASE WHEN "repliedAt" IS NOT NULL THEN 1 ELSE 0 END) as replied
+        SUM(CASE WHEN "repliedAt" IS NOT NULL THEN 1 ELSE 0 END) as replied,
+        SUM(CASE WHEN ("stepNumber" = 0 OR "stepNumber" IS NULL) AND (status = 'sent' OR status = 'sending') THEN 1 ELSE 0 END) as step0sent,
+        SUM(CASE WHEN ("stepNumber" = 0 OR "stepNumber" IS NULL) AND (status = 'bounced' OR (status = 'failed' AND "errorMessage" ILIKE '%bounce%')) THEN 1 ELSE 0 END) as step0bounced
       FROM messages WHERE "campaignId" = $1
     `, [campaignId]);
     return {
       total: parseInt(row.total) || 0, sent: parseInt(row.sent) || 0, bounced: parseInt(row.bounced) || 0,
       opened: parseInt(row.opened) || 0, clicked: parseInt(row.clicked) || 0, replied: parseInt(row.replied) || 0,
+      step0Sent: parseInt(row.step0sent) || 0, step0Bounced: parseInt(row.step0bounced) || 0,
     };
   }
 
