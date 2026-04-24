@@ -5639,7 +5639,8 @@ Which account should I use and why? If I need to split across accounts, provide 
       }).filter((c: any) => c.email && c.email.includes('@'));
 
       const results = await storage.createContactsBulk(contactsToCreate, targetListId);
-      const imported = results.filter((r: any) => !r._skipped).length;
+      const imported = results.filter((r: any) => !r._skipped && !r._updated).length;
+      const updated = results.filter((r: any) => r._updated).length;
       const skipped = results.filter((r: any) => r._skipped).length;
 
       // Auto-assign imported contacts to the uploader (members get their own data)
@@ -5658,14 +5659,19 @@ Which account should I use and why? If I need to split across accounts, provide 
 
       const listDisplayName = contactListRecord?.name || null;
 
+      const parts = [`${imported} new`];
+      if (updated > 0) parts.push(`${updated} updated`);
+      if (skipped > 0) parts.push(`${skipped} skipped (protected)`);
+      const message = `Imported ${parts.join(', ')} contact${imported === 1 && updated === 0 ? '' : 's'}${listDisplayName ? ` to list "${listDisplayName}"` : ''}`;
       res.json({
         success: true,
         imported,
+        updated,
         skipped,
         total: contactList.length,
         listId: targetListId,
         listName: listDisplayName,
-        message: `Imported ${imported} contacts${listDisplayName ? ` to list "${listDisplayName}"` : ''}, ${skipped} duplicates skipped`,
+        message,
       });
     } catch (error) {
       console.error('Import error:', error);

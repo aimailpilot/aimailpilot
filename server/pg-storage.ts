@@ -1207,10 +1207,59 @@ export class PostgresStorage {
       for (const contact of contacts) {
         const existing = (await client.query('SELECT * FROM contacts WHERE "organizationId" = $1 AND email = $2', [contact.organizationId, contact.email])).rows[0];
         if (existing) {
-          if (listId && !existing.listId) {
-            await client.query('UPDATE contacts SET "listId" = $1, "updatedAt" = $2 WHERE id = $3', [listId, now(), existing.id]);
+          // Never touch bounced, unsubscribed, or blocked contacts
+          const protectedStatuses = new Set(['bounced', 'unsubscribed', 'blocked']);
+          if (protectedStatuses.has(existing.status)) {
+            results.push({ ...hydrateContact(existing), _skipped: true });
+            continue;
           }
-          results.push({ ...hydrateContact(existing), _skipped: true });
+          // Fill only empty fields — existing CRM data always wins
+          const sets: string[] = [];
+          const vals: any[] = [];
+          let p = 1;
+          const stringFields: Array<[string, string]> = [
+            ['firstName', 'firstName'], ['lastName', 'lastName'], ['company', 'company'],
+            ['jobTitle', 'jobTitle'], ['phone', 'phone'], ['mobilePhone', 'mobilePhone'],
+            ['linkedinUrl', 'linkedinUrl'], ['seniority', 'seniority'], ['department', 'department'],
+            ['city', 'city'], ['state', 'state'], ['country', 'country'],
+            ['website', 'website'], ['industry', 'industry'], ['employeeCount', 'employeeCount'],
+            ['annualRevenue', 'annualRevenue'], ['companyLinkedinUrl', 'companyLinkedinUrl'],
+            ['companyCity', 'companyCity'], ['companyState', 'companyState'],
+            ['companyCountry', 'companyCountry'], ['companyAddress', 'companyAddress'],
+            ['companyPhone', 'companyPhone'], ['secondaryEmail', 'secondaryEmail'],
+            ['homePhone', 'homePhone'], ['emailStatus', 'emailStatus'],
+          ];
+          for (const [dbCol, srcKey] of stringFields) {
+            const incomingVal = contact[srcKey];
+            if (incomingVal && !existing[dbCol]) {
+              sets.push(`"${dbCol}" = $${p++}`);
+              vals.push(incomingVal);
+            }
+          }
+          // Merge custom fields: only add keys missing from existing
+          if (contact.customFields && typeof contact.customFields === 'object') {
+            let existingCf: Record<string, any> = {};
+            try { existingCf = typeof existing.customFields === 'string' ? JSON.parse(existing.customFields) : (existing.customFields || {}); } catch {}
+            const merged = { ...contact.customFields, ...existingCf }; // existingCf wins on conflict
+            if (JSON.stringify(merged) !== JSON.stringify(existingCf)) {
+              sets.push(`"customFields" = $${p++}`);
+              vals.push(JSON.stringify(merged));
+            }
+          }
+          // Assign to list if not already in one
+          if (listId && !existing.listId) {
+            sets.push(`"listId" = $${p++}`);
+            vals.push(listId);
+          }
+          if (sets.length > 0) {
+            sets.push(`"updatedAt" = $${p++}`);
+            vals.push(now());
+            vals.push(existing.id);
+            await client.query(`UPDATE contacts SET ${sets.join(', ')} WHERE id = $${p}`, vals);
+            results.push({ ...hydrateContact(existing), _updated: true });
+          } else {
+            results.push({ ...hydrateContact(existing), _skipped: true });
+          }
           continue;
         }
         const id = genId(); const ts = now();

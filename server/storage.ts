@@ -1424,12 +1424,48 @@ export class DatabaseStorage {
 
     const batch = db.transaction(() => {
       for (const contact of contacts) {
-        const existing = findStmt.get(contact.organizationId, contact.email);
+        const existing = findStmt.get(contact.organizationId, contact.email) as any;
         if (existing) {
-          if (listId && !(existing as any).listId) {
-            updateListStmt.run(listId, now(), (existing as any).id);
+          // Never touch bounced, unsubscribed, or blocked contacts
+          const protectedStatuses = new Set(['bounced', 'unsubscribed', 'blocked']);
+          if (protectedStatuses.has(existing.status)) {
+            results.push({ ...hydrateContact(existing), _skipped: true });
+            continue;
           }
-          results.push({ ...hydrateContact(existing), _skipped: true });
+          // Fill only empty fields — existing CRM data always wins
+          const stringFields: Array<[string, string]> = [
+            ['firstName', 'firstName'], ['lastName', 'lastName'], ['company', 'company'],
+            ['jobTitle', 'jobTitle'], ['phone', 'phone'], ['mobilePhone', 'mobilePhone'],
+            ['linkedinUrl', 'linkedinUrl'], ['seniority', 'seniority'], ['department', 'department'],
+            ['city', 'city'], ['state', 'state'], ['country', 'country'],
+            ['website', 'website'], ['industry', 'industry'], ['employeeCount', 'employeeCount'],
+            ['annualRevenue', 'annualRevenue'], ['companyLinkedinUrl', 'companyLinkedinUrl'],
+            ['companyCity', 'companyCity'], ['companyState', 'companyState'],
+            ['companyCountry', 'companyCountry'], ['companyAddress', 'companyAddress'],
+            ['companyPhone', 'companyPhone'], ['secondaryEmail', 'secondaryEmail'],
+            ['homePhone', 'homePhone'], ['emailStatus', 'emailStatus'],
+          ];
+          const updates: Record<string, any> = {};
+          for (const [dbCol, srcKey] of stringFields) {
+            if (contact[srcKey] && !existing[dbCol]) updates[dbCol] = contact[srcKey];
+          }
+          // Merge custom fields: only add keys missing from existing
+          if (contact.customFields && typeof contact.customFields === 'object') {
+            let existingCf: Record<string, any> = {};
+            try { existingCf = typeof existing.customFields === 'string' ? JSON.parse(existing.customFields) : (existing.customFields || {}); } catch {}
+            const merged = { ...contact.customFields, ...existingCf };
+            if (JSON.stringify(merged) !== JSON.stringify(existingCf)) updates['customFields'] = JSON.stringify(merged);
+          }
+          if (listId && !existing.listId) updates['listId'] = listId;
+          if (Object.keys(updates).length > 0) {
+            updates['updatedAt'] = now();
+            const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
+            const setVals = [...Object.values(updates), existing.id];
+            db.prepare(`UPDATE contacts SET ${setClauses} WHERE id = ?`).run(...setVals);
+            results.push({ ...hydrateContact(existing), _updated: true });
+          } else {
+            results.push({ ...hydrateContact(existing), _skipped: true });
+          }
           continue;
         }
         const id = genId(); const ts2 = now();
