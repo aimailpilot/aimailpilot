@@ -5173,7 +5173,11 @@ Which account should I use and why? If I need to split across accounts, provide 
           }
           if (status && status !== 'all') { conditions.push('c.status = ?'); params.push(status); }
           if (pipelineStage && pipelineStage !== 'all') { conditions.push('c."pipelineStage" = ?'); params.push(pipelineStage); }
-          if (company) { conditions.push('LOWER(c.company) LIKE ?'); params.push(`%${company.toLowerCase()}%`); }
+          if (company) {
+            const cos = company.split(',').map((s: string) => s.trim().toLowerCase()).filter(Boolean);
+            if (cos.length === 1) { conditions.push('LOWER(c.company) LIKE ?'); params.push(`%${cos[0]}%`); }
+            else if (cos.length > 1) { conditions.push(`(${cos.map(() => 'LOWER(c.company) LIKE ?').join(' OR ')})`); cos.forEach((c: string) => params.push(`%${c}%`)); }
+          }
           if (location) {
             const locExact = location.toLowerCase();
             const locLike = `%${locExact}%`;
@@ -5181,12 +5185,14 @@ Which account should I use and why? If I need to split across accounts, provide 
             params.push(locExact, locLike, locLike, locExact, locLike);
           }
           if (cityFilter) {
-            conditions.push('LOWER(TRIM(SPLIT_PART(c.city, \',\', 1))) LIKE ?');
-            params.push(`%${cityFilter.toLowerCase()}%`);
+            const cities = cityFilter.split(',').map((s: string) => s.trim().toLowerCase()).filter(Boolean);
+            if (cities.length === 1) { conditions.push('LOWER(TRIM(SPLIT_PART(c.city, \',\', 1))) LIKE ?'); params.push(`%${cities[0]}%`); }
+            else if (cities.length > 1) { conditions.push(`(${cities.map(() => 'LOWER(TRIM(SPLIT_PART(c.city, \',\', 1))) LIKE ?').join(' OR ')})`); cities.forEach((c: string) => params.push(`%${c}%`)); }
           }
           if (countryFilter) {
-            conditions.push('LOWER(TRIM(c.country)) LIKE ?');
-            params.push(`%${countryFilter.toLowerCase()}%`);
+            const countries = countryFilter.split(',').map((s: string) => s.trim().toLowerCase()).filter(Boolean);
+            if (countries.length === 1) { conditions.push('LOWER(TRIM(c.country)) LIKE ?'); params.push(`%${countries[0]}%`); }
+            else if (countries.length > 1) { conditions.push(`(${countries.map(() => 'LOWER(TRIM(c.country)) LIKE ?').join(' OR ')})`); countries.forEach((c: string) => params.push(`%${c}%`)); }
           }
           // Designation: keyword search across jobTitle (free-text, not exact match)
           if (designation) {
