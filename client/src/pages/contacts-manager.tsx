@@ -195,8 +195,15 @@ export default function ContactsManager() {
   const [companyFilter, setCompanyFilter] = useState('');
   const [locationFilter, setLocationFilter] = useState('');
   const [designationFilter, setDesignationFilter] = useState('');
+  const [keywordFilter, setKeywordFilter] = useState('');
+  const [seniorityFilter, setSeniorityFilter] = useState('');
+  const [industryFilter, setIndustryFilter] = useState('');
+  const [employeeRange, setEmployeeRange] = useState('');
+  const [emailVerification, setEmailVerification] = useState('');
+  const [emailRatingGrade, setEmailRatingGrade] = useState('');
+  const [tagsFilter, setTagsFilter] = useState('');
   const [leadFilterValue, setLeadFilterValue] = useState('');
-  const [filterOptions, setFilterOptions] = useState<{ companies: string[]; designations: string[]; cities: string[]; countries: string[] }>({ companies: [], designations: [], cities: [], countries: [] });
+  const [filterOptions, setFilterOptions] = useState<{ companies: string[]; designations: string[]; cities: string[]; countries: string[]; industries: string[]; departments: string[]; seniorities: string[] }>({ companies: [], designations: [], cities: [], countries: [], industries: [], departments: [], seniorities: [] });
   const [showFilters, setShowFilters] = useState(false);
 
   // === PR1: Column customization, density, select-all-matching ===
@@ -382,7 +389,7 @@ export default function ContactsManager() {
     }
   }, []);
 
-  useEffect(() => { fetchContacts(); }, [debouncedSearch, statusFilter, activeListId, activeTab, assignFilterUserId, currentPage, sortBy, sortOrder, pipelineFilter, companyFilter, locationFilter, designationFilter, leadFilterValue]);
+  useEffect(() => { fetchContacts(); }, [debouncedSearch, statusFilter, activeListId, activeTab, assignFilterUserId, currentPage, sortBy, sortOrder, pipelineFilter, companyFilter, locationFilter, designationFilter, keywordFilter, seniorityFilter, industryFilter, employeeRange, emailVerification, emailRatingGrade, tagsFilter, leadFilterValue]);
   useEffect(() => { fetchContactLists(); fetchTeamMembers(); fetchFollowUps(); fetchFilterOptions(); fetchHotLeadsCounts(); }, []);
 
   // PR2: Keyboard navigation (j/k/arrows/Enter/e/c)
@@ -478,6 +485,13 @@ export default function ContactsManager() {
       if (companyFilter) params.set('company', companyFilter);
       if (locationFilter) params.set('location', locationFilter);
       if (designationFilter) params.set('designation', designationFilter);
+      if (keywordFilter) params.set('keywordFilter', keywordFilter);
+      if (seniorityFilter) params.set('seniorityFilter', seniorityFilter);
+      if (industryFilter) params.set('industryFilter', industryFilter);
+      if (employeeRange) params.set('employeeRange', employeeRange);
+      if (emailVerification) params.set('emailVerification', emailVerification);
+      if (emailRatingGrade) params.set('emailRatingGrade', emailRatingGrade);
+      if (tagsFilter) params.set('tagsFilter', tagsFilter);
       if (leadFilterValue) params.set('leadFilter', leadFilterValue);
 
       // Pagination & sorting
@@ -973,10 +987,12 @@ export default function ContactsManager() {
   const clearAllFilters = () => {
     setSearch(''); setStatusFilter('all'); setPipelineFilter('all');
     setCompanyFilter(''); setLocationFilter(''); setDesignationFilter('');
-    setAssignFilterUserId(''); setLeadFilterValue(''); setCurrentPage(1);
+    setKeywordFilter(''); setSeniorityFilter(''); setIndustryFilter('');
+    setEmployeeRange(''); setEmailVerification(''); setEmailRatingGrade('');
+    setTagsFilter(''); setAssignFilterUserId(''); setLeadFilterValue(''); setCurrentPage(1);
   };
 
-  const hasActiveFilters = pipelineFilter !== 'all' || companyFilter || locationFilter || designationFilter || !!leadFilterValue;
+  const hasActiveFilters = pipelineFilter !== 'all' || companyFilter || locationFilter || designationFilter || !!keywordFilter || !!seniorityFilter || !!industryFilter || !!employeeRange || !!emailVerification || !!emailRatingGrade || !!tagsFilter || !!leadFilterValue;
 
   const totalPages = Math.ceil(total / pageSize);
 
@@ -1437,6 +1453,13 @@ export default function ContactsManager() {
     company: companyFilter || undefined,
     location: locationFilter || undefined,
     designation: designationFilter || undefined,
+    keywordFilter: keywordFilter || undefined,
+    seniorityFilter: seniorityFilter || undefined,
+    industryFilter: industryFilter || undefined,
+    employeeRange: employeeRange || undefined,
+    emailVerification: emailVerification || undefined,
+    emailRatingGrade: emailRatingGrade || undefined,
+    tagsFilter: tagsFilter || undefined,
     leadFilter: leadFilterValue || undefined,
   });
 
@@ -1489,7 +1512,9 @@ export default function ContactsManager() {
     const data = {
       filters: {
         search, statusFilter, pipelineFilter, companyFilter, locationFilter,
-        designationFilter, leadFilterValue, assignFilterUserId, activeListId, activeTab,
+        designationFilter, keywordFilter, seniorityFilter, industryFilter,
+        employeeRange, emailVerification, emailRatingGrade, tagsFilter,
+        leadFilterValue, assignFilterUserId, activeListId, activeTab,
       },
       sort: { sortBy, sortOrder },
       columns, density,
@@ -1517,6 +1542,13 @@ export default function ContactsManager() {
       setCompanyFilter(d.filters.companyFilter || '');
       setLocationFilter(d.filters.locationFilter || '');
       setDesignationFilter(d.filters.designationFilter || '');
+      setKeywordFilter(d.filters.keywordFilter || '');
+      setSeniorityFilter(d.filters.seniorityFilter || '');
+      setIndustryFilter(d.filters.industryFilter || '');
+      setEmployeeRange(d.filters.employeeRange || '');
+      setEmailVerification(d.filters.emailVerification || '');
+      setEmailRatingGrade(d.filters.emailRatingGrade || '');
+      setTagsFilter(d.filters.tagsFilter || '');
       setLeadFilterValue(d.filters.leadFilterValue || '');
       setAssignFilterUserId(d.filters.assignFilterUserId || '');
       setActiveListId(d.filters.activeListId || '');
@@ -4251,67 +4283,136 @@ export default function ContactsManager() {
           )}
         </div>
 
-        {/* Filter dropdowns row */}
+        {/* Filter panel — two rows */}
         {showFilters && !isSpecialTab && (
-          <div className="flex items-center gap-2 p-3 bg-gray-50 rounded-xl border border-gray-200">
-            <Select value={pipelineFilter} onValueChange={v => { setPipelineFilter(v); setCurrentPage(1); }}>
-              <SelectTrigger className="h-8 w-[140px] text-xs bg-white"><SelectValue placeholder="Pipeline" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All Stages</SelectItem>
-                {PIPELINE_STAGES.map(s => <SelectItem key={s.value} value={s.value} className="text-xs">{s.label}</SelectItem>)}
-              </SelectContent>
-            </Select>
-            <Select value={companyFilter || '_all'} onValueChange={v => { setCompanyFilter(v === '_all' ? '' : v); setCurrentPage(1); }}>
-              <SelectTrigger className="h-8 w-[150px] text-xs bg-white"><SelectValue placeholder="Company" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="_all">All Companies</SelectItem>
-                {filterOptions.companies.slice(0, 50).map(c => <SelectItem key={c} value={c} className="text-xs">{c}</SelectItem>)}
-              </SelectContent>
-            </Select>
-            <Select value={designationFilter || '_all'} onValueChange={v => { setDesignationFilter(v === '_all' ? '' : v); setCurrentPage(1); }}>
-              <SelectTrigger className="h-8 w-[150px] text-xs bg-white"><SelectValue placeholder="Designation" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="_all">All Designations</SelectItem>
-                {filterOptions.designations.slice(0, 50).map(d => <SelectItem key={d} value={d} className="text-xs">{d}</SelectItem>)}
-              </SelectContent>
-            </Select>
-            <Select value={locationFilter || '_all'} onValueChange={v => { setLocationFilter(v === '_all' ? '' : v); setCurrentPage(1); }}>
-              <SelectTrigger className="h-8 w-[140px] text-xs bg-white"><SelectValue placeholder="Location" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="_all">All Locations</SelectItem>
-                {filterOptions.cities.slice(0, 30).map(c => <SelectItem key={c} value={c} className="text-xs">{c}</SelectItem>)}
-                {filterOptions.countries.slice(0, 30).map(c => <SelectItem key={`country-${c}`} value={c} className="text-xs font-medium">{c}</SelectItem>)}
-              </SelectContent>
-            </Select>
-            <Select value={leadFilterValue || '_all'} onValueChange={v => { setLeadFilterValue(v === '_all' ? '' : v); setCurrentPage(1); }}>
-              <SelectTrigger className="h-8 w-[140px] text-xs bg-white"><SelectValue placeholder="AI Lead Type" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="_all">All Leads</SelectItem>
-                <SelectItem value="hot_leads">Hot Leads</SelectItem>
-                <SelectItem value="warm_leads">Warm Leads</SelectItem>
-                <SelectItem value="past_customer">Past Customers</SelectItem>
-                <SelectItem value="engaged">Engaged</SelectItem>
-                <SelectItem value="cold">Gone Cold</SelectItem>
-                <SelectItem value="never_contacted">Never Contacted</SelectItem>
-              </SelectContent>
-            </Select>
-            {isAdmin && teamMembers.length > 0 && (
-              <Select value={assignFilterUserId || '_all'} onValueChange={(v) => { setAssignFilterUserId(v === '_all' ? '' : v); setCurrentPage(1); }}>
-                <SelectTrigger className="h-8 w-[140px] text-xs bg-white"><SelectValue placeholder="Assigned to" /></SelectTrigger>
+          <div className="flex flex-col gap-2 p-3 bg-gray-50 rounded-xl border border-gray-200">
+            {/* Row 1: keyword searches + location + AI leads + member */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="relative">
+                <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-gray-400 pointer-events-none" />
+                <input type="text" value={designationFilter}
+                  onChange={e => { setDesignationFilter(e.target.value); setCurrentPage(1); }}
+                  placeholder="Job title keyword..."
+                  className="h-8 w-[155px] pl-6 pr-2 text-xs border border-gray-200 rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-blue-500" />
+              </div>
+              <div className="relative">
+                <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-gray-400 pointer-events-none" />
+                <input type="text" value={keywordFilter}
+                  onChange={e => { setKeywordFilter(e.target.value); setCurrentPage(1); }}
+                  placeholder="Keyword: AI, telecom, cyber..."
+                  className="h-8 w-[185px] pl-6 pr-2 text-xs border border-gray-200 rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-blue-500" />
+              </div>
+              <div className="relative">
+                <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-gray-400 pointer-events-none" />
+                <input type="text" value={tagsFilter}
+                  onChange={e => { setTagsFilter(e.target.value); setCurrentPage(1); }}
+                  placeholder="Tag keyword..."
+                  className="h-8 w-[130px] pl-6 pr-2 text-xs border border-gray-200 rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-blue-500" />
+              </div>
+              <Select value={locationFilter || '_all'} onValueChange={v => { setLocationFilter(v === '_all' ? '' : v); setCurrentPage(1); }}>
+                <SelectTrigger className="h-8 w-[140px] text-xs bg-white"><SelectValue placeholder="Location" /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="_all">All Members</SelectItem>
-                  <SelectItem value="unassigned">Unassigned</SelectItem>
-                  {teamMembers.map((m: any) => (
-                    <SelectItem key={m.userId} value={m.userId} className="text-xs">{m.firstName || m.email?.split('@')[0]}</SelectItem>
-                  ))}
+                  <SelectItem value="_all">All Locations</SelectItem>
+                  {filterOptions.cities.slice(0, 30).map(c => <SelectItem key={c} value={c} className="text-xs">{c}</SelectItem>)}
+                  {filterOptions.countries.slice(0, 30).map(c => <SelectItem key={`country-${c}`} value={c} className="text-xs font-medium">{c}</SelectItem>)}
                 </SelectContent>
               </Select>
-            )}
-            {hasActiveFilters && (
-              <button onClick={clearAllFilters} className="text-xs text-red-500 hover:text-red-700 font-medium ml-auto flex items-center gap-1">
-                <X className="h-3 w-3" /> Clear all
-              </button>
-            )}
+              <Select value={leadFilterValue || '_all'} onValueChange={v => { setLeadFilterValue(v === '_all' ? '' : v); setCurrentPage(1); }}>
+                <SelectTrigger className="h-8 w-[140px] text-xs bg-white"><SelectValue placeholder="AI Lead Type" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="_all">All Leads</SelectItem>
+                  <SelectItem value="hot_leads">Hot Leads</SelectItem>
+                  <SelectItem value="warm_leads">Warm Leads</SelectItem>
+                  <SelectItem value="past_customer">Past Customers</SelectItem>
+                  <SelectItem value="engaged">Engaged</SelectItem>
+                  <SelectItem value="cold">Gone Cold</SelectItem>
+                  <SelectItem value="never_contacted">Never Contacted</SelectItem>
+                </SelectContent>
+              </Select>
+              {isAdmin && teamMembers.length > 0 && (
+                <Select value={assignFilterUserId || '_all'} onValueChange={v => { setAssignFilterUserId(v === '_all' ? '' : v); setCurrentPage(1); }}>
+                  <SelectTrigger className="h-8 w-[140px] text-xs bg-white"><SelectValue placeholder="Assigned to" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="_all">All Members</SelectItem>
+                    <SelectItem value="unassigned">Unassigned</SelectItem>
+                    {teamMembers.map((m: any) => (
+                      <SelectItem key={m.userId} value={m.userId} className="text-xs">{m.firstName || m.email?.split('@')[0]}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+            {/* Row 2: structured dropdowns */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <Select value={pipelineFilter} onValueChange={v => { setPipelineFilter(v); setCurrentPage(1); }}>
+                <SelectTrigger className="h-8 w-[135px] text-xs bg-white"><SelectValue placeholder="Pipeline" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Stages</SelectItem>
+                  {PIPELINE_STAGES.map(s => <SelectItem key={s.value} value={s.value} className="text-xs">{s.label}</SelectItem>)}
+                </SelectContent>
+              </Select>
+              <Select value={companyFilter || '_all'} onValueChange={v => { setCompanyFilter(v === '_all' ? '' : v); setCurrentPage(1); }}>
+                <SelectTrigger className="h-8 w-[145px] text-xs bg-white"><SelectValue placeholder="Company" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="_all">All Companies</SelectItem>
+                  {filterOptions.companies.slice(0, 50).map(c => <SelectItem key={c} value={c} className="text-xs">{c}</SelectItem>)}
+                </SelectContent>
+              </Select>
+              <Select value={seniorityFilter || '_all'} onValueChange={v => { setSeniorityFilter(v === '_all' ? '' : v); setCurrentPage(1); }}>
+                <SelectTrigger className="h-8 w-[135px] text-xs bg-white"><SelectValue placeholder="Seniority" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="_all">All Seniority</SelectItem>
+                  {filterOptions.seniorities.length > 0
+                    ? filterOptions.seniorities.map(s => <SelectItem key={s} value={s} className="text-xs">{s}</SelectItem>)
+                    : ['C-Suite', 'VP', 'Director', 'Manager', 'Staff', 'Entry'].map(s => <SelectItem key={s} value={s} className="text-xs">{s}</SelectItem>)
+                  }
+                </SelectContent>
+              </Select>
+              <Select value={industryFilter || '_all'} onValueChange={v => { setIndustryFilter(v === '_all' ? '' : v); setCurrentPage(1); }}>
+                <SelectTrigger className="h-8 w-[145px] text-xs bg-white"><SelectValue placeholder="Industry" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="_all">All Industries</SelectItem>
+                  {filterOptions.industries.slice(0, 60).map(i => <SelectItem key={i} value={i} className="text-xs">{i}</SelectItem>)}
+                </SelectContent>
+              </Select>
+              <Select value={employeeRange || '_all'} onValueChange={v => { setEmployeeRange(v === '_all' ? '' : v); setCurrentPage(1); }}>
+                <SelectTrigger className="h-8 w-[135px] text-xs bg-white"><SelectValue placeholder="Company size" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="_all">Any size</SelectItem>
+                  <SelectItem value="1-10" className="text-xs">1–10 employees</SelectItem>
+                  <SelectItem value="11-50" className="text-xs">11–50 employees</SelectItem>
+                  <SelectItem value="51-200" className="text-xs">51–200 employees</SelectItem>
+                  <SelectItem value="201-1000" className="text-xs">201–1000 employees</SelectItem>
+                  <SelectItem value="1000+" className="text-xs">1000+ employees</SelectItem>
+                </SelectContent>
+              </Select>
+              <Select value={emailVerification || '_all'} onValueChange={v => { setEmailVerification(v === '_all' ? '' : v); setCurrentPage(1); }}>
+                <SelectTrigger className="h-8 w-[135px] text-xs bg-white"><SelectValue placeholder="Email status" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="_all">Any email status</SelectItem>
+                  <SelectItem value="verified" className="text-xs">Verified</SelectItem>
+                  <SelectItem value="unverified" className="text-xs">Unverified</SelectItem>
+                  <SelectItem value="risky" className="text-xs">Risky</SelectItem>
+                  <SelectItem value="invalid" className="text-xs">Invalid</SelectItem>
+                </SelectContent>
+              </Select>
+              <Select value={emailRatingGrade || '_all'} onValueChange={v => { setEmailRatingGrade(v === '_all' ? '' : v); setCurrentPage(1); }}>
+                <SelectTrigger className="h-8 w-[120px] text-xs bg-white"><SelectValue placeholder="Email rating" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="_all">Any rating</SelectItem>
+                  <SelectItem value="A" className="text-xs">A — Excellent</SelectItem>
+                  <SelectItem value="B" className="text-xs">B — Good</SelectItem>
+                  <SelectItem value="C" className="text-xs">C — Average</SelectItem>
+                  <SelectItem value="D" className="text-xs">D — Poor</SelectItem>
+                  <SelectItem value="F" className="text-xs">F — Very Poor</SelectItem>
+                </SelectContent>
+              </Select>
+              {hasActiveFilters && (
+                <button onClick={clearAllFilters} className="text-xs text-red-500 hover:text-red-700 font-medium ml-auto flex items-center gap-1">
+                  <X className="h-3 w-3" /> Clear all
+                </button>
+              )}
+            </div>
           </div>
         )}
 

@@ -4881,7 +4881,10 @@ Which account should I use and why? If I need to split across accounts, provide 
           if (filter.assignedTo === 'unassigned') conds.push(`(c."assignedTo" IS NULL OR c."assignedTo" = '')`);
           else { conds.push(`c."assignedTo" = ?`); params.push(filter.assignedTo); }
         }
-        if (filter.listId) { conds.push(`c."listId" = ?`); params.push(filter.listId); }
+        if (filter.listId) {
+          conds.push(`EXISTS (SELECT 1 FROM contact_list_members clm WHERE clm."contactId" = c.id AND clm."listId" = ?)`);
+          params.push(filter.listId);
+        }
         if (filter.status && filter.status !== 'all') { conds.push(`c.status = ?`); params.push(filter.status); }
         if (filter.pipelineStage && filter.pipelineStage !== 'all') { conds.push(`c."pipelineStage" = ?`); params.push(filter.pipelineStage); }
         if (filter.company) { conds.push(`LOWER(c.company) LIKE ?`); params.push(`%${String(filter.company).toLowerCase()}%`); }
@@ -4891,6 +4894,29 @@ Which account should I use and why? If I need to split across accounts, provide 
           params.push(loc, loc, loc);
         }
         if (filter.designation) { conds.push(`LOWER(c."jobTitle") LIKE ?`); params.push(`%${String(filter.designation).toLowerCase()}%`); }
+        if (filter.keywordFilter) {
+          const terms = String(filter.keywordFilter).split(',').map((t: string) => t.trim().toLowerCase()).filter(Boolean);
+          const termClauses = terms.map(() =>
+            `(LOWER(c."jobTitle") LIKE ? OR LOWER(c.industry) LIKE ? OR LOWER(c.department) LIKE ? OR LOWER(c.seniority) LIKE ? OR LOWER(c.company) LIKE ?)`
+          );
+          conds.push(`(${termClauses.join(' OR ')})`);
+          for (const t of terms) { params.push(`%${t}%`, `%${t}%`, `%${t}%`, `%${t}%`, `%${t}%`); }
+        }
+        if (filter.seniorityFilter) { conds.push('LOWER(c.seniority) LIKE ?'); params.push(`%${String(filter.seniorityFilter).toLowerCase()}%`); }
+        if (filter.industryFilter) { conds.push('LOWER(c.industry) LIKE ?'); params.push(`%${String(filter.industryFilter).toLowerCase()}%`); }
+        if (filter.tagsFilter) { conds.push('LOWER(CAST(c.tags AS TEXT)) LIKE ?'); params.push(`%${String(filter.tagsFilter).toLowerCase()}%`); }
+        if (filter.emailVerification) { conds.push('c."emailVerificationStatus" = ?'); params.push(String(filter.emailVerification)); }
+        if (filter.emailRatingGrade) { conds.push('c."emailRatingGrade" = ?'); params.push(String(filter.emailRatingGrade)); }
+        if (filter.employeeRange) {
+          const ranges: Record<string, string> = {
+            '1-10': `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS INTEGER) BETWEEN 1 AND 10)`,
+            '11-50': `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS INTEGER) BETWEEN 11 AND 50)`,
+            '51-200': `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS INTEGER) BETWEEN 51 AND 200)`,
+            '201-1000': `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS INTEGER) BETWEEN 201 AND 1000)`,
+            '1000+': `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS INTEGER) > 1000)`,
+          };
+          if (ranges[String(filter.employeeRange)]) conds.push(ranges[String(filter.employeeRange)]);
+        }
         if (filter.leadFilter && filter.leadFilter !== 'all') {
           const lf = String(filter.leadFilter);
           const bucket = lf === 'hot_leads' ? 'hot_lead' : lf === 'warm_leads' ? 'warm_lead' : lf === 'past_customer' ? 'past_customer' : null;
@@ -5019,8 +5045,15 @@ Which account should I use and why? If I need to split across accounts, provide 
       const pipelineStage = req.query.pipelineStage as string;
       const company = req.query.company as string;
       const location = req.query.location as string;
-      const designation = req.query.designation as string;
-      const leadFilter = req.query.leadFilter as string; // hot_leads, warm_leads, past_customer, engaged, cold, never_contacted
+      const designation = (req.query.designation as string || '').trim();
+      const keywordFilter = (req.query.keywordFilter as string || '').trim();
+      const seniorityFilter = (req.query.seniorityFilter as string || '').trim();
+      const industryFilter = (req.query.industryFilter as string || '').trim();
+      const employeeRange = (req.query.employeeRange as string || '').trim(); // 1-10, 11-50, 51-200, 201-1000, 1000+
+      const emailVerification = (req.query.emailVerification as string || '').trim(); // verified, unverified, risky, unknown
+      const emailRatingGrade = (req.query.emailRatingGrade as string || '').trim(); // A, B, C, D, F
+      const tagsFilter = (req.query.tagsFilter as string || '').trim();
+      const leadFilter = req.query.leadFilter as string;
       const sortByParam = req.query.sortBy as string || 'createdAt';
       const sortOrder = (req.query.sortOrder as string || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
       const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
@@ -5055,7 +5088,7 @@ Which account should I use and why? If I need to split across accounts, provide 
 
       // === ENHANCEMENT: If user requested sorting/search/advanced filters, try SQL path ===
       // On failure, keep the storage-fetched contacts (unsorted but correct data)
-      const needsAdvanced = search || pipelineStage || company || location || designation || leadFilter || (sortByParam && sortByParam !== 'createdAt');
+      const needsAdvanced = search || pipelineStage || company || location || designation || keywordFilter || seniorityFilter || industryFilter || employeeRange || emailVerification || emailRatingGrade || tagsFilter || leadFilter || (sortByParam && sortByParam !== 'createdAt');
       if (needsAdvanced) {
         try {
           // rawGet/rawAll/rawRun used for advanced SQL path
@@ -5075,7 +5108,10 @@ Which account should I use and why? If I need to split across accounts, provide 
             }
           }
 
-          if (listId) { conditions.push('c."listId" = ?'); params.push(listId); }
+          if (listId) {
+            conditions.push(`EXISTS (SELECT 1 FROM contact_list_members clm WHERE clm."contactId" = c.id AND clm."listId" = ?)`);
+            params.push(listId);
+          }
           if (status && status !== 'all') { conditions.push('c.status = ?'); params.push(status); }
           if (pipelineStage && pipelineStage !== 'all') { conditions.push('c."pipelineStage" = ?'); params.push(pipelineStage); }
           if (company) { conditions.push('LOWER(c.company) LIKE ?'); params.push(`%${company.toLowerCase()}%`); }
@@ -5084,7 +5120,35 @@ Which account should I use and why? If I need to split across accounts, provide 
             const loc = `%${location.toLowerCase()}%`;
             params.push(loc, loc, loc);
           }
-          if (designation) { conditions.push('LOWER(c."jobTitle") LIKE ?'); params.push(`%${designation.toLowerCase()}%`); }
+          // Designation: keyword search across jobTitle (free-text, not exact match)
+          if (designation) {
+            conditions.push('LOWER(c."jobTitle") LIKE ?');
+            params.push(`%${designation.toLowerCase()}%`);
+          }
+          // Keyword filter: jobTitle + industry + department + seniority + company (comma = OR)
+          if (keywordFilter) {
+            const terms = keywordFilter.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+            const termClauses = terms.map(() =>
+              `(LOWER(c."jobTitle") LIKE ? OR LOWER(c.industry) LIKE ? OR LOWER(c.department) LIKE ? OR LOWER(c.seniority) LIKE ? OR LOWER(c.company) LIKE ?)`
+            );
+            conditions.push(`(${termClauses.join(' OR ')})`);
+            for (const t of terms) { params.push(`%${t}%`, `%${t}%`, `%${t}%`, `%${t}%`, `%${t}%`); }
+          }
+          if (seniorityFilter) { conditions.push('LOWER(c.seniority) LIKE ?'); params.push(`%${seniorityFilter.toLowerCase()}%`); }
+          if (industryFilter) { conditions.push('LOWER(c.industry) LIKE ?'); params.push(`%${industryFilter.toLowerCase()}%`); }
+          if (tagsFilter) { conditions.push('LOWER(CAST(c.tags AS TEXT)) LIKE ?'); params.push(`%${tagsFilter.toLowerCase()}%`); }
+          if (emailVerification) { conditions.push('c."emailVerificationStatus" = ?'); params.push(emailVerification); }
+          if (emailRatingGrade) { conditions.push('c."emailRatingGrade" = ?'); params.push(emailRatingGrade); }
+          if (employeeRange) {
+            const ranges: Record<string, string> = {
+              '1-10':     `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS INTEGER) BETWEEN 1 AND 10)`,
+              '11-50':    `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS INTEGER) BETWEEN 11 AND 50)`,
+              '51-200':   `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS INTEGER) BETWEEN 51 AND 200)`,
+              '201-1000': `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS INTEGER) BETWEEN 201 AND 1000)`,
+              '1000+':    `(CAST(NULLIF(REGEXP_REPLACE(c."employeeCount", '[^0-9]', '', 'g'), '') AS INTEGER) > 1000)`,
+            };
+            if (ranges[employeeRange]) conditions.push(ranges[employeeRange]);
+          }
 
           // Lead intelligence smart filters (requires subquery to lead_opportunities)
           if (leadFilter && leadFilter !== 'all') {
@@ -5350,11 +5414,24 @@ Which account should I use and why? If I need to split across accounts, provide 
   app.get('/api/contacts/filter-options', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.user.organizationId;
-      const companies = (await storage.rawAll(`SELECT DISTINCT company FROM contacts WHERE "organizationId" = ? AND company IS NOT NULL AND company != '' ORDER BY company LIMIT 200`, orgId)).map((r: any) => r.company);
-      const designations = (await storage.rawAll(`SELECT DISTINCT "jobTitle" FROM contacts WHERE "organizationId" = ? AND "jobTitle" IS NOT NULL AND "jobTitle" != '' ORDER BY "jobTitle" LIMIT 200`, orgId)).map((r: any) => r.jobTitle);
-      const cities = (await storage.rawAll(`SELECT DISTINCT city FROM contacts WHERE "organizationId" = ? AND city IS NOT NULL AND city != '' ORDER BY city LIMIT 200`, orgId)).map((r: any) => r.city);
-      const countries = (await storage.rawAll(`SELECT DISTINCT country FROM contacts WHERE "organizationId" = ? AND country IS NOT NULL AND country != '' ORDER BY country LIMIT 100`, orgId)).map((r: any) => r.country);
-      res.json({ companies, designations, cities, countries });
+      const [companies, designations, cities, countries, industries, departments, seniorities] = await Promise.all([
+        storage.rawAll(`SELECT DISTINCT company FROM contacts WHERE "organizationId" = ? AND company IS NOT NULL AND company != '' ORDER BY company LIMIT 200`, orgId),
+        storage.rawAll(`SELECT DISTINCT "jobTitle" FROM contacts WHERE "organizationId" = ? AND "jobTitle" IS NOT NULL AND "jobTitle" != '' ORDER BY "jobTitle" LIMIT 300`, orgId),
+        storage.rawAll(`SELECT DISTINCT city FROM contacts WHERE "organizationId" = ? AND city IS NOT NULL AND city != '' ORDER BY city LIMIT 200`, orgId),
+        storage.rawAll(`SELECT DISTINCT country FROM contacts WHERE "organizationId" = ? AND country IS NOT NULL AND country != '' ORDER BY country LIMIT 100`, orgId),
+        storage.rawAll(`SELECT DISTINCT industry FROM contacts WHERE "organizationId" = ? AND industry IS NOT NULL AND industry != '' ORDER BY industry LIMIT 100`, orgId),
+        storage.rawAll(`SELECT DISTINCT department FROM contacts WHERE "organizationId" = ? AND department IS NOT NULL AND department != '' ORDER BY department LIMIT 100`, orgId),
+        storage.rawAll(`SELECT DISTINCT seniority FROM contacts WHERE "organizationId" = ? AND seniority IS NOT NULL AND seniority != '' ORDER BY seniority LIMIT 50`, orgId),
+      ]);
+      res.json({
+        companies: companies.map((r: any) => r.company),
+        designations: designations.map((r: any) => r.jobTitle),
+        cities: cities.map((r: any) => r.city),
+        countries: countries.map((r: any) => r.country),
+        industries: industries.map((r: any) => r.industry),
+        departments: departments.map((r: any) => r.department),
+        seniorities: seniorities.map((r: any) => r.seniority),
+      });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
     }
