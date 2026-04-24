@@ -602,8 +602,10 @@ export class FollowupEngine {
       if (!campaign || campaign.status !== 'following_up') continue;
 
       // PERFORMANCE FIX #4: Count step-0 messages via targeted query (not 50k fetch)
+      // Must count only status='sent' — bounced step-0 contacts never get executions created,
+      // so including them inflates totalExpected making the campaign impossible to complete.
       const step0CountRow = await storage.rawGet(
-        'SELECT COUNT(*) as cnt FROM messages WHERE "campaignId" = ? AND ("stepNumber" = 0 OR "stepNumber" IS NULL)',
+        'SELECT COUNT(*) as cnt FROM messages WHERE "campaignId" = ? AND ("stepNumber" = 0 OR "stepNumber" IS NULL) AND status = \'sent\'',
         campaignId
       );
       const step0Count = parseInt(step0CountRow?.cnt || '0');
