@@ -273,12 +273,20 @@ function MultiSelectDropdown({ options, selected, onChange, placeholder, width, 
   );
 }
 
-function SearchableSelectDropdown({ cities, countries, value, onChange, placeholder, width }: {
-  cities: string[]; countries: string[]; value: string; onChange: (v: string) => void; placeholder: string; width: number;
+// Server-side type-ahead single-select — searches DB as user types (no preload limit issue)
+function ServerSearchSelect({ field, value, onChange, placeholder, width }: {
+  field: 'company' | 'city' | 'country';
+  value: string;
+  onChange: (v: string) => void;
+  placeholder: string;
+  width: number;
 }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
+  const [results, setResults] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout>>();
 
   useEffect(() => {
     const handler = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
@@ -286,106 +294,27 @@ function SearchableSelectDropdown({ cities, countries, value, onChange, placehol
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  const q = search.toLowerCase();
-  const filteredCities = cities.filter(c => c.toLowerCase().includes(q));
-  const filteredCountries = countries.filter(c => c.toLowerCase().includes(q));
-
-  return (
-    <div ref={ref} className="relative" style={{ width }}>
-      <button
-        onClick={() => { setOpen(o => !o); setSearch(''); }}
-        className={`h-8 w-full flex items-center justify-between px-3 text-xs border rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 ${value ? 'border-blue-400 text-blue-700 font-medium' : 'border-gray-200 text-gray-500'}`}
-      >
-        <span className="truncate">{value || placeholder}</span>
-        <ChevronDown className="h-3 w-3 ml-1 shrink-0 text-gray-400" />
-      </button>
-      {open && (
-        <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-md shadow-lg z-50" style={{ minWidth: width }}>
-          <div className="p-2 border-b border-gray-100">
-            <input
-              autoFocus
-              type="text"
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              placeholder="Search city or country..."
-              className="w-full h-7 px-2 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"
-            />
-          </div>
-          <div className="overflow-y-auto" style={{ maxHeight: 230 }}>
-            <button
-              onMouseDown={e => { e.preventDefault(); onChange(''); setOpen(false); setSearch(''); }}
-              className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-blue-50 ${!value ? 'text-blue-700 font-medium' : 'text-gray-600'}`}
-            >
-              <span className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center shrink-0 ${!value ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
-                {!value && <span className="text-white text-[8px] font-bold leading-none">✓</span>}
-              </span>
-              All Locations
-            </button>
-            {filteredCities.length > 0 && (
-              <>
-                <div className="px-3 pt-2 pb-1 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-t border-gray-100">Cities</div>
-                {filteredCities.map(c => (
-                  <button
-                    key={c}
-                    onMouseDown={e => { e.preventDefault(); onChange(c); setOpen(false); setSearch(''); }}
-                    className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-blue-50 ${value === c ? 'text-blue-700' : 'text-gray-700'}`}
-                  >
-                    <span className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center shrink-0 ${value === c ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
-                      {value === c && <span className="text-white text-[8px] font-bold leading-none">✓</span>}
-                    </span>
-                    <span className="truncate">{c}</span>
-                  </button>
-                ))}
-              </>
-            )}
-            {filteredCountries.length > 0 && (
-              <>
-                <div className="px-3 pt-2 pb-1 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-t border-gray-100">Countries</div>
-                {filteredCountries.map(c => (
-                  <button
-                    key={`country-${c}`}
-                    onMouseDown={e => { e.preventDefault(); onChange(c); setOpen(false); setSearch(''); }}
-                    className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs font-medium hover:bg-blue-50 ${value === c ? 'text-blue-700' : 'text-gray-700'}`}
-                  >
-                    <span className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center shrink-0 ${value === c ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
-                      {value === c && <span className="text-white text-[8px] font-bold leading-none">✓</span>}
-                    </span>
-                    <span className="truncate">{c}</span>
-                  </button>
-                ))}
-              </>
-            )}
-            {filteredCities.length === 0 && filteredCountries.length === 0 && search && (
-              <div className="px-3 py-4 text-xs text-gray-400 text-center">No results for "{search}"</div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Single-select searchable dropdown — for Company filter and similar single-value filters
-function SearchableSingleSelect({ options, value, onChange, placeholder, width }: {
-  options: string[]; value: string; onChange: (v: string) => void; placeholder: string; width: number;
-}) {
-  const [open, setOpen] = useState(false);
-  const [search, setSearch] = useState('');
-  const ref = useRef<HTMLDivElement>(null);
-
   useEffect(() => {
-    const handler = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
+    if (!open) return;
+    clearTimeout(timerRef.current);
+    if (!search.trim()) { setResults([]); return; }
+    timerRef.current = setTimeout(async () => {
+      setLoading(true);
+      try {
+        const res = await fetch(`/api/contacts/field-search?field=${field}&q=${encodeURIComponent(search)}`, { credentials: 'include' });
+        if (res.ok) { const d = await res.json(); setResults(d.results || []); }
+      } catch {}
+      setLoading(false);
+    }, 300);
+    return () => clearTimeout(timerRef.current);
+  }, [search, open, field]);
 
-  const q = search.toLowerCase();
-  const filtered = q ? options.filter(o => o.toLowerCase().includes(q)) : options;
+  const closeAndReset = () => { setOpen(false); setSearch(''); setResults([]); };
 
   return (
     <div ref={ref} className="relative" style={{ width }}>
       <button
-        onClick={() => { setOpen(o => !o); setSearch(''); }}
+        onClick={() => { setOpen(o => !o); setSearch(''); setResults([]); }}
         className={`h-8 w-full flex items-center justify-between px-3 text-xs border rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 ${value ? 'border-blue-400 text-blue-700 font-medium' : 'border-gray-200 text-gray-500'}`}
       >
         <span className="truncate">{value || placeholder}</span>
@@ -405,7 +334,7 @@ function SearchableSingleSelect({ options, value, onChange, placeholder, width }
           </div>
           <div className="overflow-y-auto" style={{ maxHeight: 240 }}>
             <button
-              onMouseDown={e => { e.preventDefault(); onChange(''); setOpen(false); setSearch(''); }}
+              onMouseDown={e => { e.preventDefault(); onChange(''); closeAndReset(); }}
               className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-blue-50 ${!value ? 'text-blue-700 font-medium' : 'text-gray-600'}`}
             >
               <span className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center shrink-0 ${!value ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
@@ -413,10 +342,13 @@ function SearchableSingleSelect({ options, value, onChange, placeholder, width }
               </span>
               {placeholder}
             </button>
-            {filtered.map(opt => (
+            {!search.trim() && <div className="px-3 py-4 text-xs text-gray-400 text-center">Type to search...</div>}
+            {loading && <div className="px-3 py-3 text-xs text-gray-400 text-center">Searching...</div>}
+            {!loading && search.trim() && results.length === 0 && <div className="px-3 py-3 text-xs text-gray-400 text-center">No results for "{search}"</div>}
+            {results.map(opt => (
               <button
                 key={opt}
-                onMouseDown={e => { e.preventDefault(); onChange(opt); setOpen(false); setSearch(''); }}
+                onMouseDown={e => { e.preventDefault(); onChange(opt); closeAndReset(); }}
                 className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-blue-50 ${value === opt ? 'text-blue-700' : 'text-gray-700'}`}
               >
                 <span className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center shrink-0 ${value === opt ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
@@ -425,7 +357,6 @@ function SearchableSingleSelect({ options, value, onChange, placeholder, width }
                 <span className="truncate">{opt}</span>
               </button>
             ))}
-            {filtered.length === 0 && <div className="px-3 py-3 text-xs text-gray-400 text-center">No results for "{search}"</div>}
           </div>
         </div>
       )}
@@ -533,7 +464,8 @@ export default function ContactsManager() {
   // Advanced filters
   const [pipelineFilter, setPipelineFilter] = useState('all');
   const [companyFilter, setCompanyFilter] = useState('');
-  const [locationFilter, setLocationFilter] = useState('');
+  const [cityFilter, setCityFilter] = useState('');
+  const [countryFilter, setCountryFilter] = useState('');
   const [designationFilter, setDesignationFilter] = useState('');
   const [keywordFilter, setKeywordFilter] = useState('');
   const [seniorityFilter, setSeniorityFilter] = useState('');
@@ -730,7 +662,7 @@ export default function ContactsManager() {
     }
   }, []);
 
-  useEffect(() => { fetchContacts(); }, [debouncedSearch, statusFilter, activeListId, activeTab, assignFilterUserId, currentPage, sortBy, sortOrder, pipelineFilter, companyFilter, locationFilter, designationFilter, keywordFilter, seniorityFilter, industryFilter, employeeRange, emailVerification, emailRatingGrade, tagsFilter, leadFilterValue]);
+  useEffect(() => { fetchContacts(); }, [debouncedSearch, statusFilter, activeListId, activeTab, assignFilterUserId, currentPage, sortBy, sortOrder, pipelineFilter, companyFilter, cityFilter, countryFilter, designationFilter, keywordFilter, seniorityFilter, industryFilter, employeeRange, emailVerification, emailRatingGrade, tagsFilter, leadFilterValue]);
   useEffect(() => { fetchContactLists(); fetchTeamMembers(); fetchFollowUps(); fetchFilterOptions(); fetchHotLeadsCounts(); }, []);
 
   // PR2: Keyboard navigation (j/k/arrows/Enter/e/c)
@@ -824,7 +756,8 @@ export default function ContactsManager() {
       // Advanced filters
       if (pipelineFilter && pipelineFilter !== 'all') params.set('pipelineStage', pipelineFilter);
       if (companyFilter) params.set('company', companyFilter);
-      if (locationFilter) params.set('location', locationFilter);
+      if (cityFilter) params.set('cityFilter', cityFilter);
+      if (countryFilter) params.set('countryFilter', countryFilter);
       if (designationFilter) params.set('designation', designationFilter);
       if (keywordFilter) params.set('keywordFilter', keywordFilter);
       if (seniorityFilter) params.set('seniorityFilter', seniorityFilter);
@@ -1334,13 +1267,13 @@ export default function ContactsManager() {
 
   const clearAllFilters = () => {
     setSearch(''); setStatusFilter('all'); setPipelineFilter('all');
-    setCompanyFilter(''); setLocationFilter(''); setDesignationFilter('');
+    setCompanyFilter(''); setCityFilter(''); setCountryFilter(''); setDesignationFilter('');
     setKeywordFilter(''); setSeniorityFilter(''); setIndustryFilter('');
     setEmployeeRange(''); setEmailVerification(''); setEmailRatingGrade('');
     setTagsFilter(''); setAssignFilterUserId(''); setLeadFilterValue(''); setCurrentPage(1);
   };
 
-  const hasActiveFilters = pipelineFilter !== 'all' || companyFilter || locationFilter || designationFilter || !!keywordFilter || !!seniorityFilter || !!industryFilter || !!employeeRange || !!emailVerification || !!emailRatingGrade || !!tagsFilter || !!leadFilterValue;
+  const hasActiveFilters = pipelineFilter !== 'all' || companyFilter || cityFilter || countryFilter || designationFilter || !!keywordFilter || !!seniorityFilter || !!industryFilter || !!employeeRange || !!emailVerification || !!emailRatingGrade || !!tagsFilter || !!leadFilterValue;
 
   const totalPages = Math.ceil(total / pageSize);
 
@@ -1799,7 +1732,8 @@ export default function ContactsManager() {
     assignedTo: assignFilterUserId || undefined,
     pipelineStage: pipelineFilter !== 'all' ? pipelineFilter : undefined,
     company: companyFilter || undefined,
-    location: locationFilter || undefined,
+    cityFilter: cityFilter || undefined,
+    countryFilter: countryFilter || undefined,
     designation: designationFilter || undefined,
     keywordFilter: keywordFilter || undefined,
     seniorityFilter: seniorityFilter || undefined,
@@ -1859,7 +1793,7 @@ export default function ContactsManager() {
     if (!saveViewName.trim()) { toast({ title: 'Name required', variant: 'destructive' }); return; }
     const data = {
       filters: {
-        search, statusFilter, pipelineFilter, companyFilter, locationFilter,
+        search, statusFilter, pipelineFilter, companyFilter, cityFilter, countryFilter,
         designationFilter, keywordFilter, seniorityFilter, industryFilter,
         employeeRange, emailVerification, emailRatingGrade, tagsFilter,
         leadFilterValue, assignFilterUserId, activeListId, activeTab,
@@ -1888,7 +1822,8 @@ export default function ContactsManager() {
       setStatusFilter(d.filters.statusFilter || 'all');
       setPipelineFilter(d.filters.pipelineFilter || 'all');
       setCompanyFilter(d.filters.companyFilter || '');
-      setLocationFilter(d.filters.locationFilter || '');
+      setCityFilter(d.filters.cityFilter || '');
+      setCountryFilter(d.filters.countryFilter || '');
       setDesignationFilter(d.filters.designationFilter || '');
       setKeywordFilter(d.filters.keywordFilter || '');
       setSeniorityFilter(d.filters.seniorityFilter || '');
@@ -4755,13 +4690,19 @@ export default function ContactsManager() {
                 suggestions={filterOptions.tags}
                 width={135}
               />
-              <SearchableSelectDropdown
-                cities={filterOptions.cities}
-                countries={filterOptions.countries}
-                value={locationFilter}
-                onChange={v => { setLocationFilter(v); setCurrentPage(1); }}
-                placeholder="All Locations"
-                width={150}
+              <ServerSearchSelect
+                field="city"
+                value={cityFilter}
+                onChange={v => { setCityFilter(v); setCurrentPage(1); }}
+                placeholder="All Cities"
+                width={130}
+              />
+              <ServerSearchSelect
+                field="country"
+                value={countryFilter}
+                onChange={v => { setCountryFilter(v); setCurrentPage(1); }}
+                placeholder="All Countries"
+                width={130}
               />
               <Select value={leadFilterValue || '_all'} onValueChange={v => { setLeadFilterValue(v === '_all' ? '' : v); setCurrentPage(1); }}>
                 <SelectTrigger className="h-8 w-[140px] text-xs bg-white"><SelectValue placeholder="AI Lead Type" /></SelectTrigger>
@@ -4797,8 +4738,8 @@ export default function ContactsManager() {
                   {PIPELINE_STAGES.map(s => <SelectItem key={s.value} value={s.value} className="text-xs">{s.label}</SelectItem>)}
                 </SelectContent>
               </Select>
-              <SearchableSingleSelect
-                options={filterOptions.companies}
+              <ServerSearchSelect
+                field="company"
                 value={companyFilter}
                 onChange={v => { setCompanyFilter(v); setCurrentPage(1); }}
                 placeholder="All Companies"

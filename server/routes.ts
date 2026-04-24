@@ -5102,6 +5102,8 @@ Which account should I use and why? If I need to split across accounts, provide 
       const pipelineStage = req.query.pipelineStage as string;
       const company = req.query.company as string;
       const location = req.query.location as string;
+      const cityFilter = (req.query.cityFilter as string || '').trim();
+      const countryFilter = (req.query.countryFilter as string || '').trim();
       const designation = (req.query.designation as string || '').trim();
       const keywordFilter = (req.query.keywordFilter as string || '').trim();
       const seniorityFilter = (req.query.seniorityFilter as string || '').trim();
@@ -5145,7 +5147,7 @@ Which account should I use and why? If I need to split across accounts, provide 
 
       // === ENHANCEMENT: If user requested sorting/search/advanced filters, try SQL path ===
       // On failure, keep the storage-fetched contacts (unsorted but correct data)
-      const needsAdvanced = search || pipelineStage || company || location || designation || keywordFilter || seniorityFilter || industryFilter || employeeRange || emailVerification || emailRatingGrade || tagsFilter || leadFilter || (sortByParam && sortByParam !== 'createdAt');
+      const needsAdvanced = search || pipelineStage || company || location || cityFilter || countryFilter || designation || keywordFilter || seniorityFilter || industryFilter || employeeRange || emailVerification || emailRatingGrade || tagsFilter || leadFilter || (sortByParam && sortByParam !== 'createdAt');
       if (needsAdvanced) {
         try {
           // rawGet/rawAll/rawRun used for advanced SQL path
@@ -5177,6 +5179,14 @@ Which account should I use and why? If I need to split across accounts, provide 
             const locLike = `%${locExact}%`;
             conditions.push('(LOWER(TRIM(SPLIT_PART(c.city, \',\', 1))) = ? OR LOWER(c.city) LIKE ? OR LOWER(c.state) LIKE ? OR LOWER(TRIM(SPLIT_PART(c.country, \',\', 1))) = ? OR LOWER(c.country) LIKE ?)');
             params.push(locExact, locLike, locLike, locExact, locLike);
+          }
+          if (cityFilter) {
+            conditions.push('LOWER(TRIM(SPLIT_PART(c.city, \',\', 1))) LIKE ?');
+            params.push(`%${cityFilter.toLowerCase()}%`);
+          }
+          if (countryFilter) {
+            conditions.push('LOWER(TRIM(c.country)) LIKE ?');
+            params.push(`%${countryFilter.toLowerCase()}%`);
           }
           // Designation: keyword search across jobTitle (free-text, not exact match)
           if (designation) {
@@ -5477,7 +5487,39 @@ Which account should I use and why? If I need to split across accounts, provide 
     }
   });
 
-  // Get unique filter options for contacts dropdowns
+  // Server-side type-ahead search for company / city / country dropdowns
+  app.get('/api/contacts/field-search', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const field = (req.query.field as string || '').trim();
+      const q = (req.query.q as string || '').trim();
+      if (!q) return res.json({ results: [] });
+      const like = `%${q}%`;
+      let rows: any[] = [];
+      if (field === 'company') {
+        rows = await storage.rawAll(
+          `SELECT DISTINCT company AS val FROM contacts WHERE "organizationId" = ? AND company IS NOT NULL AND company != '' AND LOWER(company) LIKE LOWER(?) AND company NOT LIKE '+%' AND company NOT LIKE '%http%' AND company NOT LIKE '%@%' AND LENGTH(company) BETWEEN 2 AND 100 ORDER BY company LIMIT 30`,
+          orgId, like
+        );
+      } else if (field === 'city') {
+        rows = await storage.rawAll(
+          `SELECT DISTINCT TRIM(SPLIT_PART(city, ',', 1)) AS val FROM contacts WHERE "organizationId" = ? AND city IS NOT NULL AND city != '' AND city NOT LIKE '+%' AND LOWER(city) LIKE LOWER(?) AND LENGTH(TRIM(SPLIT_PART(city, ',', 1))) BETWEEN 2 AND 50 ORDER BY 1 LIMIT 30`,
+          orgId, like
+        );
+      } else if (field === 'country') {
+        rows = await storage.rawAll(
+          `SELECT DISTINCT TRIM(country) AS val FROM contacts WHERE "organizationId" = ? AND country IS NOT NULL AND country != '' AND country NOT LIKE '+%' AND LOWER(country) LIKE LOWER(?) AND LENGTH(TRIM(country)) BETWEEN 2 AND 60 ORDER BY 1 LIMIT 30`,
+          orgId, like
+        );
+      } else {
+        return res.status(400).json({ message: 'Invalid field' });
+      }
+      res.json({ results: rows.map((r: any) => r.val).filter(Boolean) });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
   app.get('/api/contacts/filter-options', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.user.organizationId;
@@ -5486,7 +5528,7 @@ Which account should I use and why? If I need to split across accounts, provide 
         storage.rawAll(`SELECT DISTINCT "jobTitle" FROM contacts WHERE "organizationId" = ? AND "jobTitle" IS NOT NULL AND "jobTitle" != '' AND "jobTitle" NOT LIKE '+%' AND "jobTitle" NOT LIKE '%http%' AND "jobTitle" NOT LIKE '%@%' AND LENGTH("jobTitle") BETWEEN 2 AND 100 ORDER BY "jobTitle" LIMIT 300`, orgId),
         storage.rawAll(`SELECT DISTINCT TRIM(SPLIT_PART(city, ',', 1)) as city FROM contacts WHERE "organizationId" = ? AND city IS NOT NULL AND city != '' AND city NOT LIKE '+%' AND LENGTH(TRIM(SPLIT_PART(city, ',', 1))) BETWEEN 2 AND 60 ORDER BY 1 LIMIT 300`, orgId),
         storage.rawAll(`SELECT DISTINCT TRIM(SPLIT_PART(country, ',', 1)) as country FROM contacts WHERE "organizationId" = ? AND country IS NOT NULL AND country != '' AND country NOT LIKE '+%' AND LENGTH(TRIM(SPLIT_PART(country, ',', 1))) BETWEEN 2 AND 60 ORDER BY 1 LIMIT 150`, orgId),
-        storage.rawAll(`SELECT DISTINCT industry FROM contacts WHERE "organizationId" = ? AND industry IS NOT NULL AND industry != '' AND industry NOT LIKE '%http%' AND industry NOT LIKE '%@%' AND LENGTH(industry) >= 3 AND industry ~ '[a-zA-Z]' ORDER BY industry LIMIT 500`, orgId),
+        storage.rawAll(`SELECT DISTINCT industry FROM contacts WHERE "organizationId" = ? AND industry IS NOT NULL AND industry != '' AND industry NOT LIKE '%http%' AND industry NOT LIKE '%@%' AND industry NOT LIKE '%,%' AND LENGTH(industry) BETWEEN 3 AND 60 AND industry ~ '[a-zA-Z]' ORDER BY industry LIMIT 500`, orgId),
         storage.rawAll(`SELECT DISTINCT department FROM contacts WHERE "organizationId" = ? AND department IS NOT NULL AND department != '' ORDER BY department LIMIT 100`, orgId),
         storage.rawAll(`SELECT DISTINCT seniority FROM contacts WHERE "organizationId" = ? AND seniority IS NOT NULL AND seniority != '' ORDER BY seniority LIMIT 50`, orgId),
         storage.rawAll(`SELECT DISTINCT t.tag FROM (SELECT tags FROM contacts WHERE "organizationId" = ? AND tags IS NOT NULL AND tags::text NOT IN ('', 'null', '[]') AND tags::text LIKE '[%') AS c CROSS JOIN LATERAL jsonb_array_elements_text(c.tags::jsonb) AS t(tag) WHERE t.tag IS NOT NULL AND t.tag != '' ORDER BY t.tag LIMIT 200`, orgId),
