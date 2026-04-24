@@ -560,21 +560,42 @@ export class CampaignEngine {
 
     console.log(`[CampaignEngine] checkSendingWindow: currentTime=${currentTime}, window=${dayConfig.startTime}-${dayConfig.endTime}`);
 
-    if (dayConfig.startTime && currentTime < dayConfig.startTime) {
+    const startTime = dayConfig.startTime;
+    const endTime = dayConfig.endTime;
+    // Overnight window: startTime > endTime means window crosses midnight (e.g. 17:00–07:00)
+    const isOvernightWindow = !!(startTime && endTime && startTime > endTime);
+
+    if (isOvernightWindow) {
+      // Allowed if currentTime >= startTime (evening) OR currentTime < endTime (early morning)
+      const inWindow = currentTime >= startTime! || currentTime < endTime!;
+      if (!inWindow) {
+        // In the daytime gap (e.g. 07:00–17:00) — wait until today's startTime
+        const [sh, sm] = startTime!.split(':').map(Number);
+        const startOfWindow = new Date(userLocal);
+        startOfWindow.setHours(sh, sm, 0, 0);
+        const waitMs = startOfWindow.getTime() - userLocal.getTime();
+        console.log(`[CampaignEngine] checkSendingWindow: BLOCKED — overnight gap (${currentTime} not in ${startTime}–${endTime} window)`);
+        return { canSend: false, reason: `Outside sending hours (window: ${startTime}–${endTime})`, pauseUntilMs: Math.max(waitMs, 60000) };
+      }
+      console.log(`[CampaignEngine] checkSendingWindow: OK — within overnight window`);
+      return { canSend: true };
+    }
+
+    if (startTime && currentTime < startTime) {
       // Before start time — wait until start
-      const [sh, sm] = dayConfig.startTime.split(':').map(Number);
+      const [sh, sm] = startTime.split(':').map(Number);
       const startMs = new Date(userLocal);
       startMs.setHours(sh, sm, 0, 0);
       const waitMs = startMs.getTime() - userLocal.getTime();
-      console.log(`[CampaignEngine] checkSendingWindow: BLOCKED — before start (${currentTime} < ${dayConfig.startTime})`);
-      return { canSend: false, reason: `Before sending hours (starts at ${dayConfig.startTime})`, pauseUntilMs: Math.max(waitMs, 60000) };
+      console.log(`[CampaignEngine] checkSendingWindow: BLOCKED — before start (${currentTime} < ${startTime})`);
+      return { canSend: false, reason: `Before sending hours (starts at ${startTime})`, pauseUntilMs: Math.max(waitMs, 60000) };
     }
 
-    if (dayConfig.endTime && currentTime >= dayConfig.endTime) {
+    if (endTime && currentTime >= endTime) {
       // After end time — wait until next day's window
       const pauseMs = this.msUntilNextSendWindow(autopilot, sendingConfig.timezoneOffset || 0, sendingConfig.timezone);
-      console.log(`[CampaignEngine] checkSendingWindow: BLOCKED — after end (${currentTime} >= ${dayConfig.endTime})`);
-      return { canSend: false, reason: `After sending hours (ended at ${dayConfig.endTime})`, pauseUntilMs: pauseMs };
+      console.log(`[CampaignEngine] checkSendingWindow: BLOCKED — after end (${currentTime} >= ${endTime})`);
+      return { canSend: false, reason: `After sending hours (ended at ${endTime})`, pauseUntilMs: pauseMs };
     }
 
     console.log(`[CampaignEngine] checkSendingWindow: OK — within window`);
@@ -600,13 +621,20 @@ export class CampaignEngine {
         windowStart.setHours(sh, sm, 0, 0);
 
         if (daysAhead === 0) {
-          // Same day — check if the window hasn't ended yet or starts later today
-          if (dayConfig.endTime) {
-            const currentHH = String(userLocal.getHours()).padStart(2, '0');
-            const currentMM = String(userLocal.getMinutes()).padStart(2, '0');
-            const currentTime = `${currentHH}:${currentMM}`;
-            if (currentTime >= dayConfig.endTime) continue; // Window ended today, check tomorrow
+          const currentHH = String(userLocal.getHours()).padStart(2, '0');
+          const currentMM = String(userLocal.getMinutes()).padStart(2, '0');
+          const currentTime = `${currentHH}:${currentMM}`;
+          const isOvernightWin = !!(dayConfig.startTime && dayConfig.endTime && dayConfig.startTime > dayConfig.endTime);
+
+          if (isOvernightWin) {
+            // Gap is [endTime, startTime). If in gap, wait until today's startTime.
+            const inGap = currentTime >= dayConfig.endTime! && currentTime < dayConfig.startTime!;
+            if (!inGap) continue; // Inside the overnight window already
+            return windowStart.getTime() - userLocal.getTime(); // ms until today's startTime
           }
+
+          // Normal same-day window
+          if (dayConfig.endTime && currentTime >= dayConfig.endTime) continue; // Window ended today, check tomorrow
           if (windowStart.getTime() > userLocal.getTime()) {
             // Window starts later today
             return windowStart.getTime() - userLocal.getTime();
