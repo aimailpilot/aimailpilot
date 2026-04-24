@@ -8,7 +8,7 @@
 
 | File | What it does |
 |------|-------------|
-| `server/index.ts` | Express entry — mounts middleware, starts followup + warmup engines |
+| `server/index.ts` | Express entry — mounts middleware, starts followup + warmup engines. Boot sequence: (10s) `resumeActiveCampaigns`, (15s) overdue-scheduled recovery, (30s) reply reclassify, (60s) bounce reconcile, (75s) unsubscribe reconcile. Ongoing: 15-min `resumeDailyLimitPausedCampaigns` poll, hourly daily-limit reset, 15-min reply quality scorer. |
 | `server/routes.ts` | ALL API endpoints (campaigns, contacts, inbox, auth, settings) ~10500 lines |
 | `server/storage.ts` | SQLite DB layer — all CRUD, schema init, guardrails |
 | `server/pg-storage.ts` | PostgreSQL DB layer — drop-in replacement (PRODUCTION) |
@@ -110,7 +110,8 @@
 |----------|------------------------|
 | Login / session lost | `server/routes.ts` (`requireAuth` ~line 130), `server/auth/google-oauth.ts` |
 | Campaign not sending | `server/services/campaign-engine.ts`, `server/routes.ts` (`campaigns/send`) |
-| Campaign stranded after restart | `campaign-engine.ts` `resumeActiveCampaigns()` — check `autoPaused` flag in DB; run `scripts/diag-active-campaigns.ts`. Boot has 2s stagger between campaigns to prevent OOM. |
+| Campaign stranded after restart | `campaign-engine.ts` `resumeActiveCampaigns()` — check `autoPaused` flag in DB; run `scripts/diag-active-campaigns.ts`. Boot has 2s stagger between campaigns to prevent OOM. For daily-limit-paused campaigns: `resumeDailyLimitPausedCampaigns()` polls every 15 min and fires immediately after midnight reset. For overdue-scheduled campaigns: 15s boot block fires them automatically. CONFIRMED WORKING 2026-04-24. |
+| Campaign stuck in following_up | `followup-engine.ts checkFollowupCompletion()` — step0Count query MUST filter `AND status='sent'` (bounced excluded). If done >= expected and pending=0, campaign completes on next 30s cycle. Check if follow-up delay hasn't elapsed yet before assuming stuck (e.g. Cloud 32-Nomination had 2d delay, only 1d elapsed). |
 | Server OOM crash on boot | `campaign-engine.ts` — check if a campaign has orphaned contactIds (0 contacts). Abort path added. Also check Azure `NODE_OPTIONS=--max-old-space-size=4096` is set. |
 | Follow-up threading | `server/services/followup-engine.ts` (`executeFollowup`, `sendEmail`) |
 | Inbox not syncing | `gmail-reply-tracker.ts`, `outlook-reply-tracker.ts` |

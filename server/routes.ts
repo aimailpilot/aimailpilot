@@ -4959,7 +4959,7 @@ Which account should I use and why? If I need to split across accounts, provide 
             senTerms.forEach((t: string) => params.push(`%${t}%`));
           }
         }
-        if (filter.industryFilter) { conds.push('LOWER(c.industry) LIKE ?'); params.push(`%${String(filter.industryFilter).toLowerCase()}%`); }
+        if (filter.industryFilter) { const _inds = String(filter.industryFilter).split(',').map((s:string)=>s.trim().toLowerCase()).filter(Boolean); if (_inds.length===1) { conds.push('LOWER(c.industry) LIKE ?'); params.push(`%${_inds[0]}%`); } else if (_inds.length>1) { conds.push('('+_inds.map(()=>'LOWER(c.industry) LIKE ?').join(' OR ')+')'); params.push(..._inds.map(i=>`%${i}%`)); } }
         if (filter.tagsFilter) { conds.push('LOWER(CAST(c.tags AS TEXT)) LIKE ?'); params.push(`%${String(filter.tagsFilter).toLowerCase()}%`); }
         if (filter.emailVerification) { conds.push('c."emailVerificationStatus" = ?'); params.push(String(filter.emailVerification)); }
         if (filter.emailRatingGrade) { conds.push('c."emailRatingGrade" = ?'); params.push(String(filter.emailRatingGrade)); }
@@ -5200,7 +5200,7 @@ Which account should I use and why? If I need to split across accounts, provide 
               senTerms.forEach((t: string) => params.push(`%${t}%`));
             }
           }
-          if (industryFilter) { conditions.push('LOWER(c.industry) LIKE ?'); params.push(`%${industryFilter.toLowerCase()}%`); }
+          if (industryFilter) { const _inds2 = industryFilter.split(',').map((s:string)=>s.trim().toLowerCase()).filter(Boolean); if (_inds2.length===1) { conditions.push('LOWER(c.industry) LIKE ?'); params.push(`%${_inds2[0]}%`); } else if (_inds2.length>1) { conditions.push('('+_inds2.map(()=>'LOWER(c.industry) LIKE ?').join(' OR ')+')'); params.push(..._inds2.map(i=>`%${i}%`)); } }
           if (tagsFilter) { conditions.push('LOWER(CAST(c.tags AS TEXT)) LIKE ?'); params.push(`%${tagsFilter.toLowerCase()}%`); }
           if (emailVerification) { conditions.push('c."emailVerificationStatus" = ?'); params.push(emailVerification); }
           if (emailRatingGrade) { conditions.push('c."emailRatingGrade" = ?'); params.push(emailRatingGrade); }
@@ -5480,11 +5480,11 @@ Which account should I use and why? If I need to split across accounts, provide 
     try {
       const orgId = req.user.organizationId;
       const [companies, designations, cities, countries, industries, departments, seniorities, tagRows] = await Promise.all([
-        storage.rawAll(`SELECT DISTINCT company FROM contacts WHERE "organizationId" = ? AND company IS NOT NULL AND company != '' ORDER BY company LIMIT 200`, orgId),
-        storage.rawAll(`SELECT DISTINCT "jobTitle" FROM contacts WHERE "organizationId" = ? AND "jobTitle" IS NOT NULL AND "jobTitle" != '' ORDER BY "jobTitle" LIMIT 300`, orgId),
-        storage.rawAll(`SELECT DISTINCT city FROM contacts WHERE "organizationId" = ? AND city IS NOT NULL AND city != '' ORDER BY city LIMIT 200`, orgId),
-        storage.rawAll(`SELECT DISTINCT country FROM contacts WHERE "organizationId" = ? AND country IS NOT NULL AND country != '' ORDER BY country LIMIT 100`, orgId),
-        storage.rawAll(`SELECT DISTINCT industry FROM contacts WHERE "organizationId" = ? AND industry IS NOT NULL AND industry != '' ORDER BY industry LIMIT 100`, orgId),
+        storage.rawAll(`SELECT DISTINCT company FROM contacts WHERE "organizationId" = ? AND company IS NOT NULL AND company != '' AND company NOT LIKE '%http%' AND company NOT LIKE '%@%' AND company !~ '^\+' AND LENGTH(company) BETWEEN 2 AND 100 ORDER BY company LIMIT 200`, orgId),
+        storage.rawAll(`SELECT DISTINCT "jobTitle" FROM contacts WHERE "organizationId" = ? AND "jobTitle" IS NOT NULL AND "jobTitle" != '' AND "jobTitle" NOT LIKE '%http%' AND "jobTitle" NOT LIKE '%@%' AND "jobTitle" !~ '^\+' AND LENGTH("jobTitle") BETWEEN 2 AND 100 ORDER BY "jobTitle" LIMIT 300`, orgId),
+        storage.rawAll(`SELECT DISTINCT city FROM contacts WHERE "organizationId" = ? AND city IS NOT NULL AND city != '' AND city NOT LIKE '%,%' AND city !~ '^\+' AND LENGTH(city) BETWEEN 2 AND 60 ORDER BY city LIMIT 200`, orgId),
+        storage.rawAll(`SELECT DISTINCT country FROM contacts WHERE "organizationId" = ? AND country IS NOT NULL AND country != '' AND country NOT LIKE '%,%' AND country !~ '^\+' AND LENGTH(country) BETWEEN 2 AND 60 ORDER BY country LIMIT 100`, orgId),
+        storage.rawAll(`SELECT DISTINCT industry FROM contacts WHERE "organizationId" = ? AND industry IS NOT NULL AND industry != '' AND industry !~ '^[0-9]+$' AND LENGTH(industry) >= 3 AND industry NOT LIKE '%http%' AND industry NOT LIKE '%@%' ORDER BY industry LIMIT 100`, orgId),
         storage.rawAll(`SELECT DISTINCT department FROM contacts WHERE "organizationId" = ? AND department IS NOT NULL AND department != '' ORDER BY department LIMIT 100`, orgId),
         storage.rawAll(`SELECT DISTINCT seniority FROM contacts WHERE "organizationId" = ? AND seniority IS NOT NULL AND seniority != '' ORDER BY seniority LIMIT 50`, orgId),
         storage.rawAll(`SELECT DISTINCT tag FROM contacts, LATERAL jsonb_array_elements_text(CASE WHEN tags IS NOT NULL AND tags::text != 'null' AND tags::text != '[]' THEN tags::jsonb ELSE '[]'::jsonb END) AS t(tag) WHERE "organizationId" = ? AND tag IS NOT NULL AND tag != '' ORDER BY tag LIMIT 200`, orgId),
@@ -5503,6 +5503,116 @@ Which account should I use and why? If I need to split across accounts, provide 
         seniorities: cleanSeniorities,
         tags: tagRows.map((r: any) => r.tag),
       });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // ===== DATA QUALITY =====
+
+  // Preview how many contacts have data quality issues
+  app.get('/api/contacts/data-quality-preview', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      // Count contacts with numeric-only industry (e.g. "100", "500")
+      const numericIndustry = await storage.rawGet(`SELECT COUNT(*) as cnt FROM contacts WHERE "organizationId" = ? AND industry IS NOT NULL AND industry != '' AND industry ~ '^[0-9]+$'`, orgId) as any;
+      // Count contacts with phone number in city field (starts with +, or all digits, or contains parentheses typical of phone)
+      const phoneInCity = await storage.rawGet(`SELECT COUNT(*) as cnt FROM contacts WHERE "organizationId" = ? AND city IS NOT NULL AND city != '' AND (city ~ '^\+[0-9]' OR city ~ '^[0-9]{7,}' OR (city LIKE '(%' AND city LIKE '%)%'))`, orgId) as any;
+      // Count contacts with comma in city (full address stored in city)
+      const addressInCity = await storage.rawGet(`SELECT COUNT(*) as cnt FROM contacts WHERE "organizationId" = ? AND city IS NOT NULL AND city LIKE '%,%'`, orgId) as any;
+      // Count contacts with URL in company name
+      const urlInCompany = await storage.rawGet(`SELECT COUNT(*) as cnt FROM contacts WHERE "organizationId" = ? AND company IS NOT NULL AND (company LIKE '%http%' OR company LIKE '%www.%')`, orgId) as any;
+      res.json({
+        numericIndustry: parseInt(numericIndustry?.cnt || '0'),
+        phoneInCity: parseInt(phoneInCity?.cnt || '0'),
+        addressInCity: parseInt(addressInCity?.cnt || '0'),
+        urlInCompany: parseInt(urlInCompany?.cnt || '0'),
+        total: parseInt(numericIndustry?.cnt || '0') + parseInt(phoneInCity?.cnt || '0') + parseInt(addressInCity?.cnt || '0') + parseInt(urlInCompany?.cnt || '0'),
+      });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Apply rule-based data quality fixes
+  app.post('/api/contacts/data-quality-fix', requireAuth, async (req: any, res) => {
+    try {
+      if (req.user.role !== 'owner' && req.user.role !== 'admin' && req.user.role !== 'superadmin') {
+        return res.status(403).json({ message: 'Admin only' });
+      }
+      const orgId = req.user.organizationId;
+      const { fixTypes, useAI } = req.body as { fixTypes: string[]; useAI?: boolean };
+
+      let fixed = { numericIndustry: 0, phoneInCity: 0, urlInCompany: 0, aiAddressInCity: 0 };
+
+      // 1. Null out numeric-only industry values
+      if (fixTypes.includes('numericIndustry')) {
+        const r = await storage.rawRun(`UPDATE contacts SET industry = NULL WHERE "organizationId" = ? AND industry IS NOT NULL AND industry != '' AND industry ~ '^[0-9]+$'`, orgId);
+        fixed.numericIndustry = (r as any)?.rowCount ?? 0;
+      }
+
+      // 2. Null out phone numbers stored in city
+      if (fixTypes.includes('phoneInCity')) {
+        const r = await storage.rawRun(`UPDATE contacts SET city = NULL WHERE "organizationId" = ? AND city IS NOT NULL AND city != '' AND (city ~ '^\+[0-9]' OR city ~ '^[0-9]{7,}' OR (city LIKE '(%' AND city LIKE '%)%'))`, orgId);
+        fixed.phoneInCity = (r as any)?.rowCount ?? 0;
+      }
+
+      // 3. Null out URLs in company name
+      if (fixTypes.includes('urlInCompany')) {
+        const r = await storage.rawRun(`UPDATE contacts SET company = NULL WHERE "organizationId" = ? AND company IS NOT NULL AND (company LIKE '%http%' OR company LIKE '%www.%')`, orgId);
+        fixed.urlInCompany = (r as any)?.rowCount ?? 0;
+      }
+
+      // 4. AI-assisted: parse "City, Country" → extract city using Azure OpenAI
+      if (fixTypes.includes('addressInCity') && useAI) {
+        try {
+          const settings = await (storage as any).getApiSettingsWithAzureFallback(orgId);
+          const endpoint = settings?.azure_openai_endpoint;
+          const apiKey = settings?.azure_openai_api_key;
+          const deployment = settings?.azure_openai_deployment;
+          const apiVersion = settings?.azure_openai_api_version || '2024-02-01';
+          if (endpoint && apiKey && deployment) {
+            const rows = await storage.rawAll(`SELECT id, city FROM contacts WHERE "organizationId" = ? AND city IS NOT NULL AND city LIKE '%,%' LIMIT 500`, orgId) as any[];
+            for (const row of rows) {
+              try {
+                const resp = await fetch(`${endpoint}/openai/deployments/${deployment}/chat/completions?api-version=${apiVersion}`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json', 'api-key': apiKey },
+                  body: JSON.stringify({
+                    messages: [
+                      { role: 'system', content: 'Extract only the city name from the address string. Reply with ONLY the city name, nothing else. If you cannot determine the city, reply with UNKNOWN.' },
+                      { role: 'user', content: row.city }
+                    ],
+                    max_tokens: 30, temperature: 0,
+                  }),
+                });
+                if (resp.ok) {
+                  const data = await resp.json() as any;
+                  const city = data.choices?.[0]?.message?.content?.trim();
+                  if (city && city !== 'UNKNOWN' && city.length < 60 && !city.includes(',')) {
+                    await storage.rawRun(`UPDATE contacts SET city = ? WHERE id = ?`, city, row.id);
+                    fixed.aiAddressInCity++;
+                  }
+                }
+              } catch (_) { /* skip individual failures */ }
+            }
+          }
+        } catch (e2: any) {
+          console.warn('[DataQuality] AI city fix failed:', e2.message);
+        }
+      } else if (fixTypes.includes('addressInCity') && !useAI) {
+        // Rule-based: take the part before the first comma as city
+        const rows = await storage.rawAll(`SELECT id, city FROM contacts WHERE "organizationId" = ? AND city IS NOT NULL AND city LIKE '%,%' LIMIT 2000`, orgId) as any[];
+        for (const row of rows) {
+          const cityPart = row.city.split(',')[0].trim();
+          if (cityPart && cityPart.length >= 2 && cityPart.length <= 60 && !/^\+/.test(cityPart)) {
+            await storage.rawRun(`UPDATE contacts SET city = ? WHERE id = ?`, cityPart, row.id);
+            fixed.aiAddressInCity++;
+          }
+        }
+      }
+
+      res.json({ success: true, fixed });
     } catch (e: any) {
       res.status(500).json({ message: e.message });
     }

@@ -12,6 +12,7 @@ draft → active → paused → active → following_up → completed
           (auto-pause on window/limit)     |
                                            ↓
                                        completed
+draft → scheduled → active  (at scheduledAt time, or boot recovery)
 ```
 
 | From | To | Trigger | File:Line |
@@ -22,12 +23,15 @@ draft → active → paused → active → following_up → completed
 | active | `paused` | Daily limit reached (auto) | campaign-engine.ts:785, 824 |
 | active | `paused` | 3 consecutive infra failures | campaign-engine.ts:1092-1103 |
 | paused | `active` | Sending window re-opens (auto) | campaign-engine.ts:756 |
-| paused | `active` | Daily limit resets (auto) | campaign-engine.ts:849 |
+| paused | `active` | Daily limit resets at midnight (auto) | campaign-engine.ts:849 + index.ts daily reset block |
+| paused (`autoPaused=true`) | `active` | 15-min poll: account `dailySent < dailyLimit` (auto) | index.ts `resumeDailyLimitPausedCampaigns()` |
 | active | `following_up` | All Step 1 contacts processed + has follow-up steps | campaign-engine.ts:1196 |
 | active | `completed` | All Step 1 contacts processed + no follow-up steps | campaign-engine.ts:1200 |
 | following_up | `completed` | All follow-up executions done (sent/skipped/failed) | followup-engine.ts:496 |
 | any | `paused` | User clicks Stop | routes.ts:3331 |
 | draft | `scheduled` | User schedules campaign | campaign-engine.ts:1299 |
+| scheduled | `active` | scheduledAt time arrives (in-memory setTimeout) | campaign-engine.ts:1615 |
+| scheduled | `active` | Boot recovery: scheduledAt has passed while server was down | index.ts 15s boot block |
 
 **Edge cases identified:**
 - ❌ `stopCampaign()` sets status to `paused` — not a distinct "stopped" status. Stopped campaigns can be resumed.
@@ -56,8 +60,9 @@ draft → active → paused → active → following_up → completed
 ### 2.3 Daily Limits
 - **Account daily limit** (line 806): `accountDailySent + localSentCount >= accountDailyLimit`
   - Per-email-account limit from `emailAccount.dailyLimit` or provider default
-  - On hit → pause, sleep, check every 5 min for reset (max 24h)
-  - Reset via `storage.resetDailySentAll()` polled hourly in index.ts (UTC day boundary)
+  - On hit → sets `status='paused'`, `autoPaused=true`
+  - Auto-resume path 1: midnight UTC — `resetDailySentAll()` runs, immediately calls `resumeDailyLimitPausedCampaigns()` (index.ts)
+  - Auto-resume path 2: every 15 minutes — `resumeDailyLimitPausedCampaigns()` polls for `autoPaused=true` campaigns with any account still having `dailySent < dailyLimit` (catches mid-day limit increases or second accounts with capacity)
 - **Autopilot max per day** (line 764): `autopilotDailySent >= autopilotMaxPerDay`
   - Campaign-level setting from `sendingConfig.autopilot.maxPerDay`
   - On hit → pause, sleep until next window
@@ -167,7 +172,8 @@ For each contact:
 
 ### 3.7 Completion Check (checkFollowupCompletion, lines 470-499)
 - Only runs for campaigns with `status === 'following_up'`
-- Counts: `totalExpected = step0Messages.length * followupSteps.length`
+- Counts: `step0Count` = messages with `stepNumber=0 AND status='sent'` — **bounced step-0 contacts excluded** (they never receive executions, so including them permanently inflates `totalExpected`)
+- Counts: `totalExpected = step0Count * totalFollowupSteps` (across ALL sequences via `getCampaignFollowups`)
 - Counts: `totalDone = executions with status sent/skipped/failed`
 - If `totalDone >= totalExpected && totalPending === 0` → mark campaign `completed`
 
@@ -216,10 +222,13 @@ For a 3000-contact campaign with Step 2 at 3 days:
 
 | State at restart | Recovery behavior |
 |------------------|-------------------|
-| `active` (sending) | Send loop lost. `activeCampaigns` map is empty. Needs manual resume which calls `startCampaign()` → skips sent contacts, sends rest. |
-| `paused` | Same as above — manual resume needed. |
+| `active` (sending) | Pass 1 of `resumeActiveCampaigns()` at 10s boot — calls `startCampaign()` → skips already-sent contacts, continues from where it left off. **Automatic.** |
+| `paused` (user-paused, `autoPaused=false`) | NOT auto-resumed. Manual resume required. |
+| `paused` (system-paused, `autoPaused=true`) + `autopilot.enabled=true` | Pass 2 of `resumeActiveCampaigns()` at 10s boot — auto-resumed. **Automatic.** |
+| `paused` (system-paused, `autoPaused=true`) + `autopilot.enabled=false` | NOT auto-resumed on boot. Will auto-resume when `resumeDailyLimitPausedCampaigns()` next fires (every 15 min or midnight reset) and an account has remaining capacity. |
 | `following_up` | Follow-up engine restarts on boot → polls every 30s → picks up active campaign_followups → continues processing. **Automatic.** |
-| `scheduled` | **Lost.** setTimeout is in-memory only. Campaign stays `scheduled` forever. |
+| `scheduled` (scheduledAt already passed) | Boot block at 15s queries `status='scheduled' AND scheduledAt <= now` → calls `startCampaign()` for each. **Automatic.** |
+| `scheduled` (scheduledAt in future) | `scheduleCampaign()` is called again via the route that created it... but in-memory setTimeout is lost. **Lost on restart** — future-scheduled campaigns need a re-queue mechanism or manual trigger. |
 
 ---
 
@@ -236,14 +245,25 @@ For a 3000-contact campaign with Step 2 at 3 days:
 - ✅ **50k message fetch per cycle**: All three `getCampaignMessages(campaignId, 50000, 0)` calls replaced with targeted indexed queries. ~100-1000x DB load reduction.
 - ✅ **Idempotency gap**: `executeFollowup()` checks for existing sent message record before sending. Prevents duplicate sends on crash recovery.
 - ✅ **Overlapping engine cycles**: `startFollowupEngine()` uses `isProcessing` boolean lock — overlapping 30s cycles skip instead of running concurrently.
+- ✅ **totalRecipients inflated by follow-up sends** — CONFIRMED FIXED 2026-04-24: `getCampaignMessageStats()` now returns `step0Sent`/`step0Bounced` fields. All auto-heal locations use `max(step0Sent+step0Bounced, contactIds.length)`. Production verified: 12/12 campaigns show `totalRecipients = contactIds.length` exactly.
+- ✅ **checkFollowupCompletion bounce-inflated totalExpected** — CONFIRMED FIXED 2026-04-24: step0Count query now filters `AND status='sent'` to exclude bounced step-0 messages. Production verified: `test AGBA 2026 Nominations Open —` (stuck with 0 step-0 sent) correctly completed on first engine cycle after deploy.
+- ✅ **Scheduled campaigns lost on restart (overdue)** — CONFIRMED FIXED 2026-04-24: 15s boot block queries `status='scheduled' AND scheduledAt <= now`. Production verified: zero campaigns stuck in `scheduled` after deploy.
+- ✅ **Daily-limit-paused campaigns not auto-resuming** — CONFIRMED FIXED 2026-04-24: `resumeDailyLimitPausedCampaigns()` polls every 15 min + fires immediately after midnight reset. Production verified: campaigns updated exactly 15 min after pause.
 
 ### 7.2 REMAINING ISSUES (not yet fixed)
 
-#### P1: Scheduled campaigns lost on server restart
+#### P1: Scheduled campaigns with future scheduledAt lost on server restart
 - `scheduleCampaign()` uses `setTimeout` — in-memory only
-- If server restarts before scheduled time, campaign stays `scheduled` forever
-- **Fix needed**: Boot-time check for `status='scheduled'` campaigns where `scheduledAt < now`
-- **Risk**: High blast radius — accidental mass-send on restart if buggy. Needs careful testing before deploying.
+- If server restarts before `scheduledAt`, the campaign stays `scheduled` indefinitely
+- **Partial fix in place (CONFIRMED WORKING 2026-04-24)**: Boot block at 15s recovers campaigns where `scheduledAt` has already passed during downtime — zero campaigns stuck in scheduled after deploy
+- **Still missing**: Re-queuing future-dated `scheduled` campaigns into a new `setTimeout` on boot — low priority since most scheduled campaigns are set for near-term launch
+
+#### P11: BA_AI Panel Host — autoPaused since 2026-04-22, not resuming (monitoring)
+- Campaign has `autoPaused=true` since 2026-04-22, `sentCount=345/393`, 91 org accounts with `dailySent < dailyLimit`
+- The 15-min `resumeDailyLimitPausedCampaigns` poll IS firing (other campaigns resume correctly) but `BA_AI Panel Host` `updatedAt` has not moved
+- Likely cause: `startCampaign` hitting a silent error (OAuth token expiry on specific sending account, or all remaining contacts filtered out at start)
+- **Diagnosis**: Check Azure logs for `[DailyLimitResume] Resuming campaign: BA_AI Panel Host` — if logged, error follows. If not logged, campaign is not matching the poll query (check if all accounts for this org have `dailyLimit IS NULL`)
+- **Not blocking other campaigns**
 
 #### P3: Daily limit counter race (campaign engine only)
 - `autopilotDailySent` in `sendBatched()` resets to 0 when window sleep ends — in-memory, lost on restart

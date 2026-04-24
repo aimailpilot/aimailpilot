@@ -200,10 +200,11 @@ function AutocompleteInput({ value, onChange, placeholder, suggestions, width }:
 }
 
 // Multi-select dropdown with checkboxes — stores selections as string array, sends comma-joined to backend
-function MultiSelectDropdown({ options, selected, onChange, placeholder, width }: {
-  options: string[]; selected: string[]; onChange: (vals: string[]) => void; placeholder: string; width: number;
+function MultiSelectDropdown({ options, selected, onChange, placeholder, width, searchable }: {
+  options: string[]; selected: string[]; onChange: (vals: string[]) => void; placeholder: string; width: number; searchable?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -218,38 +219,146 @@ function MultiSelectDropdown({ options, selected, onChange, placeholder, width }
   };
 
   const label = selected.length === 0 ? placeholder : selected.length === 1 ? selected[0] : `${selected[0]} +${selected.length - 1}`;
+  const visibleOptions = searchable && search ? options.filter(o => o.toLowerCase().includes(search.toLowerCase())) : options;
 
   return (
     <div ref={ref} className="relative" style={{ width }}>
       <button
-        onClick={() => setOpen(o => !o)}
+        onClick={() => { setOpen(o => !o); setSearch(''); }}
         className={`h-8 w-full flex items-center justify-between px-3 text-xs border rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 ${selected.length > 0 ? 'border-blue-400 text-blue-700 font-medium' : 'border-gray-200 text-gray-500'}`}
       >
         <span className="truncate">{label}</span>
         <ChevronDown className="h-3 w-3 ml-1 shrink-0 text-gray-400" />
       </button>
       {open && (
-        <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-md shadow-lg z-50 max-h-56 overflow-y-auto" style={{ minWidth: width }}>
-          {selected.length > 0 && (
-            <button
-              onMouseDown={e => { e.preventDefault(); onChange([]); setOpen(false); }}
-              className="w-full text-left px-3 py-1.5 text-xs text-red-500 hover:bg-red-50 border-b border-gray-100"
-            >
-              Clear selection
-            </button>
+        <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-md shadow-lg z-50" style={{ minWidth: width }}>
+          {searchable && (
+            <div className="p-2 border-b border-gray-100">
+              <input
+                autoFocus
+                type="text"
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Search..."
+                className="w-full h-7 px-2 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"
+              />
+            </div>
           )}
-          {options.map(opt => (
+          <div className="max-h-56 overflow-y-auto">
+            {selected.length > 0 && !search && (
+              <button
+                onMouseDown={e => { e.preventDefault(); onChange([]); setOpen(false); }}
+                className="w-full text-left px-3 py-1.5 text-xs text-red-500 hover:bg-red-50 border-b border-gray-100"
+              >
+                Clear selection
+              </button>
+            )}
+            {visibleOptions.map(opt => (
+              <button
+                key={opt}
+                onMouseDown={e => { e.preventDefault(); toggle(opt); }}
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-blue-50 hover:text-blue-700"
+              >
+                <span className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 ${selected.includes(opt) ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
+                  {selected.includes(opt) && <span className="text-white text-[9px] font-bold leading-none">✓</span>}
+                </span>
+                <span className="truncate">{opt}</span>
+              </button>
+            ))}
+            {visibleOptions.length === 0 && <div className="px-3 py-2 text-xs text-gray-400">No results</div>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SearchableSelectDropdown({ cities, countries, value, onChange, placeholder, width }: {
+  cities: string[]; countries: string[]; value: string; onChange: (v: string) => void; placeholder: string; width: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const q = search.toLowerCase();
+  const filteredCities = cities.filter(c => c.toLowerCase().includes(q));
+  const filteredCountries = countries.filter(c => c.toLowerCase().includes(q));
+
+  return (
+    <div ref={ref} className="relative" style={{ width }}>
+      <button
+        onClick={() => { setOpen(o => !o); setSearch(''); }}
+        className={`h-8 w-full flex items-center justify-between px-3 text-xs border rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 ${value ? 'border-blue-400 text-blue-700 font-medium' : 'border-gray-200 text-gray-500'}`}
+      >
+        <span className="truncate">{value || placeholder}</span>
+        <ChevronDown className="h-3 w-3 ml-1 shrink-0 text-gray-400" />
+      </button>
+      {open && (
+        <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-md shadow-lg z-50" style={{ minWidth: width }}>
+          <div className="p-2 border-b border-gray-100">
+            <input
+              autoFocus
+              type="text"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Search city or country..."
+              className="w-full h-7 px-2 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"
+            />
+          </div>
+          <div className="overflow-y-auto" style={{ maxHeight: 230 }}>
             <button
-              key={opt}
-              onMouseDown={e => { e.preventDefault(); toggle(opt); }}
-              className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-blue-50 hover:text-blue-700"
+              onMouseDown={e => { e.preventDefault(); onChange(''); setOpen(false); setSearch(''); }}
+              className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-blue-50 ${!value ? 'text-blue-700 font-medium' : 'text-gray-600'}`}
             >
-              <span className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 ${selected.includes(opt) ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
-                {selected.includes(opt) && <span className="text-white text-[9px] font-bold leading-none">✓</span>}
+              <span className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center shrink-0 ${!value ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
+                {!value && <span className="text-white text-[8px] font-bold leading-none">✓</span>}
               </span>
-              <span className="truncate">{opt}</span>
+              All Locations
             </button>
-          ))}
+            {filteredCities.length > 0 && (
+              <>
+                <div className="px-3 pt-2 pb-1 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-t border-gray-100">Cities</div>
+                {filteredCities.map(c => (
+                  <button
+                    key={c}
+                    onMouseDown={e => { e.preventDefault(); onChange(c); setOpen(false); setSearch(''); }}
+                    className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-blue-50 ${value === c ? 'text-blue-700' : 'text-gray-700'}`}
+                  >
+                    <span className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center shrink-0 ${value === c ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
+                      {value === c && <span className="text-white text-[8px] font-bold leading-none">✓</span>}
+                    </span>
+                    <span className="truncate">{c}</span>
+                  </button>
+                ))}
+              </>
+            )}
+            {filteredCountries.length > 0 && (
+              <>
+                <div className="px-3 pt-2 pb-1 text-[10px] font-semibold text-gray-400 uppercase tracking-wide border-t border-gray-100">Countries</div>
+                {filteredCountries.map(c => (
+                  <button
+                    key={`country-${c}`}
+                    onMouseDown={e => { e.preventDefault(); onChange(c); setOpen(false); setSearch(''); }}
+                    className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs font-medium hover:bg-blue-50 ${value === c ? 'text-blue-700' : 'text-gray-700'}`}
+                  >
+                    <span className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center shrink-0 ${value === c ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
+                      {value === c && <span className="text-white text-[8px] font-bold leading-none">✓</span>}
+                    </span>
+                    <span className="truncate">{c}</span>
+                  </button>
+                ))}
+              </>
+            )}
+            {filteredCities.length === 0 && filteredCountries.length === 0 && search && (
+              <div className="px-3 py-4 text-xs text-gray-400 text-center">No results for "{search}"</div>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -281,6 +390,15 @@ export default function ContactsManager() {
   // Email verification state
   const [verifyLoading, setVerifyLoading] = useState(false);
   const [verifyResult, setVerifyResult] = useState<{ total: number; verified: number; invalid: number; risky: number } | null>(null);
+
+  // Data quality state
+  const [showDataQualityDialog, setShowDataQualityDialog] = useState(false);
+  const [dqPreview, setDqPreview] = useState<{ numericIndustry: number; phoneInCity: number; addressInCity: number; urlInCompany: number; total: number } | null>(null);
+  const [dqLoading, setDqLoading] = useState(false);
+  const [dqFixing, setDqFixing] = useState(false);
+  const [dqResult, setDqResult] = useState<any>(null);
+  const [dqUseAI, setDqUseAI] = useState(false);
+  const [dqFixTypes, setDqFixTypes] = useState<string[]>(['numericIndustry', 'phoneInCity', 'urlInCompany', 'addressInCity']);
 
   // Active tab
   const [activeTab, setActiveTab] = useState<TabType>('all');
@@ -1927,6 +2045,17 @@ export default function ContactsManager() {
                 }}>
                   <Sparkles className="h-4 w-4 mr-2 text-purple-500" /> {ratingLoading === 'batch-ai' ? 'AI Scoring...' : 'AI Rate (Azure OpenAI)'}
                 </DropdownMenuItem>
+                {isAdmin && (
+                  <DropdownMenuItem onClick={async () => {
+                    setDqPreview(null); setDqResult(null); setDqLoading(true); setShowDataQualityDialog(true);
+                    try {
+                      const r = await fetch('/api/contacts/data-quality-preview', { credentials: 'include' });
+                      if (r.ok) setDqPreview(await r.json());
+                    } finally { setDqLoading(false); }
+                  }}>
+                    <ShieldCheck className="h-4 w-4 mr-2 text-teal-500" /> Fix Data Quality
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={() => handleVerifyEmails(selectedIds.length > 0 ? 'selected' : activeListId ? 'list' : 'all')} disabled={verifyLoading}>
                   <MailCheck className="h-4 w-4 mr-2 text-emerald-500" />
@@ -3318,6 +3447,92 @@ export default function ContactsManager() {
         </DialogContent>
       </Dialog>
 
+      {/* Data Quality Dialog */}
+      <Dialog open={showDataQualityDialog} onOpenChange={setShowDataQualityDialog}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <div className="bg-teal-50 p-2 rounded-lg"><ShieldCheck className="h-4 w-4 text-teal-600" /></div>
+              Fix Data Quality
+            </DialogTitle>
+            <DialogDescription className="text-sm text-gray-500">
+              Detect and fix corrupted or misplaced data in your contacts database.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            {dqLoading && <div className="flex items-center gap-2 text-sm text-gray-500"><Loader2 className="h-4 w-4 animate-spin" /> Scanning for issues...</div>}
+            {dqPreview && !dqLoading && (
+              <div className="space-y-2">
+                <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Issues Found</div>
+                {[
+                  { key: 'numericIndustry', label: 'Numeric-only industry values (e.g. "100", "500")', count: dqPreview.numericIndustry },
+                  { key: 'phoneInCity', label: 'Phone numbers stored in City field', count: dqPreview.phoneInCity },
+                  { key: 'addressInCity', label: 'Full addresses in City field (has comma)', count: dqPreview.addressInCity },
+                  { key: 'urlInCompany', label: 'URLs in Company name', count: dqPreview.urlInCompany },
+                ].map(item => (
+                  <label key={item.key} className="flex items-center gap-3 p-2.5 border rounded-lg cursor-pointer hover:bg-gray-50">
+                    <input
+                      type="checkbox"
+                      checked={dqFixTypes.includes(item.key)}
+                      onChange={e => setDqFixTypes(prev => e.target.checked ? [...prev, item.key] : prev.filter(k => k !== item.key))}
+                      className="h-4 w-4 rounded border-gray-300 text-teal-600"
+                      disabled={item.count === 0}
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className={`text-xs ${item.count === 0 ? 'text-gray-400' : 'text-gray-700'}`}>{item.label}</div>
+                    </div>
+                    <span className={`text-xs font-semibold px-1.5 py-0.5 rounded-full ${item.count > 0 ? 'bg-orange-100 text-orange-700' : 'bg-gray-100 text-gray-400'}`}>{item.count}</span>
+                  </label>
+                ))}
+                {dqPreview.addressInCity > 0 && dqFixTypes.includes('addressInCity') && (
+                  <label className="flex items-center gap-2 px-3 py-2 bg-purple-50 border border-purple-200 rounded-lg cursor-pointer text-xs text-purple-700">
+                    <input type="checkbox" checked={dqUseAI} onChange={e => setDqUseAI(e.target.checked)} className="h-3.5 w-3.5 rounded" />
+                    Use Azure OpenAI to extract city name (more accurate)
+                  </label>
+                )}
+                <div className="text-xs text-gray-400">Total issues: <strong className="text-gray-700">{dqPreview.total}</strong></div>
+              </div>
+            )}
+            {dqResult && (
+              <div className="bg-teal-50 border border-teal-200 rounded-lg p-3 text-sm text-teal-800 space-y-1">
+                <div className="font-medium">Fixes Applied</div>
+                {dqResult.fixed.numericIndustry > 0 && <div className="text-xs">• Cleared {dqResult.fixed.numericIndustry} numeric industry values</div>}
+                {dqResult.fixed.phoneInCity > 0 && <div className="text-xs">• Cleared {dqResult.fixed.phoneInCity} phone numbers from City field</div>}
+                {dqResult.fixed.urlInCompany > 0 && <div className="text-xs">• Cleared {dqResult.fixed.urlInCompany} URLs from Company field</div>}
+                {dqResult.fixed.aiAddressInCity > 0 && <div className="text-xs">• Extracted city from {dqResult.fixed.aiAddressInCity} address strings</div>}
+              </div>
+            )}
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" size="sm" onClick={() => { setShowDataQualityDialog(false); setDqResult(null); }}>Close</Button>
+            {dqPreview && !dqResult && (
+              <Button
+                size="sm"
+                className="bg-teal-600 hover:bg-teal-700 text-white"
+                disabled={dqFixing || dqFixTypes.length === 0 || dqPreview.total === 0}
+                onClick={async () => {
+                  setDqFixing(true);
+                  try {
+                    const r = await fetch('/api/contacts/data-quality-fix', {
+                      method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ fixTypes: dqFixTypes, useAI: dqUseAI }),
+                    });
+                    if (r.ok) {
+                      setDqResult(await r.json());
+                      fetchContacts();
+                    } else {
+                      toast({ title: 'Fix failed', description: 'Server error. Please try again.', variant: 'destructive' });
+                    }
+                  } finally { setDqFixing(false); }
+                }}
+              >
+                {dqFixing ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> Fixing...</> : 'Apply Fixes'}
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Apollo Sync Dialog */}
       <ApolloSyncDialog
         open={showApolloSyncDialog}
@@ -4465,14 +4680,14 @@ export default function ContactsManager() {
                 suggestions={filterOptions.tags}
                 width={135}
               />
-              <Select value={locationFilter || '_all'} onValueChange={v => { setLocationFilter(v === '_all' ? '' : v); setCurrentPage(1); }}>
-                <SelectTrigger className="h-8 w-[140px] text-xs bg-white"><SelectValue placeholder="Location" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="_all">All Locations</SelectItem>
-                  {filterOptions.cities.slice(0, 30).map(c => <SelectItem key={c} value={c} className="text-xs">{c}</SelectItem>)}
-                  {filterOptions.countries.slice(0, 30).map(c => <SelectItem key={`country-${c}`} value={c} className="text-xs font-medium">{c}</SelectItem>)}
-                </SelectContent>
-              </Select>
+              <SearchableSelectDropdown
+                cities={filterOptions.cities}
+                countries={filterOptions.countries}
+                value={locationFilter}
+                onChange={v => { setLocationFilter(v); setCurrentPage(1); }}
+                placeholder="All Locations"
+                width={150}
+              />
               <Select value={leadFilterValue || '_all'} onValueChange={v => { setLeadFilterValue(v === '_all' ? '' : v); setCurrentPage(1); }}>
                 <SelectTrigger className="h-8 w-[140px] text-xs bg-white"><SelectValue placeholder="AI Lead Type" /></SelectTrigger>
                 <SelectContent>
@@ -4522,13 +4737,14 @@ export default function ContactsManager() {
                 placeholder="All Seniority"
                 width={140}
               />
-              <Select value={industryFilter || '_all'} onValueChange={v => { setIndustryFilter(v === '_all' ? '' : v); setCurrentPage(1); }}>
-                <SelectTrigger className="h-8 w-[145px] text-xs bg-white"><SelectValue placeholder="Industry" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="_all">All Industries</SelectItem>
-                  {filterOptions.industries.slice(0, 60).map(i => <SelectItem key={i} value={i} className="text-xs">{i}</SelectItem>)}
-                </SelectContent>
-              </Select>
+              <MultiSelectDropdown
+                options={filterOptions.industries}
+                selected={industryFilter ? industryFilter.split(',').map(s => s.trim()).filter(Boolean) : []}
+                onChange={vals => { setIndustryFilter(vals.join(',')); setCurrentPage(1); }}
+                placeholder="All Industries"
+                width={150}
+                searchable
+              />
               <Select value={employeeRange || '_all'} onValueChange={v => { setEmployeeRange(v === '_all' ? '' : v); setCurrentPage(1); }}>
                 <SelectTrigger className="h-8 w-[135px] text-xs bg-white"><SelectValue placeholder="Company size" /></SelectTrigger>
                 <SelectContent>
