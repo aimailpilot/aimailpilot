@@ -365,6 +365,74 @@ function SearchableSelectDropdown({ cities, countries, value, onChange, placehol
   );
 }
 
+// Single-select searchable dropdown — for Company filter and similar single-value filters
+function SearchableSingleSelect({ options, value, onChange, placeholder, width }: {
+  options: string[]; value: string; onChange: (v: string) => void; placeholder: string; width: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const q = search.toLowerCase();
+  const filtered = q ? options.filter(o => o.toLowerCase().includes(q)) : options;
+
+  return (
+    <div ref={ref} className="relative" style={{ width }}>
+      <button
+        onClick={() => { setOpen(o => !o); setSearch(''); }}
+        className={`h-8 w-full flex items-center justify-between px-3 text-xs border rounded-md bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 ${value ? 'border-blue-400 text-blue-700 font-medium' : 'border-gray-200 text-gray-500'}`}
+      >
+        <span className="truncate">{value || placeholder}</span>
+        <ChevronDown className="h-3 w-3 ml-1 shrink-0 text-gray-400" />
+      </button>
+      {open && (
+        <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-md shadow-lg z-50" style={{ minWidth: width }}>
+          <div className="p-2 border-b border-gray-100">
+            <input
+              autoFocus
+              type="text"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder={`Search ${placeholder.toLowerCase()}...`}
+              className="w-full h-7 px-2 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"
+            />
+          </div>
+          <div className="overflow-y-auto" style={{ maxHeight: 240 }}>
+            <button
+              onMouseDown={e => { e.preventDefault(); onChange(''); setOpen(false); setSearch(''); }}
+              className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-blue-50 ${!value ? 'text-blue-700 font-medium' : 'text-gray-600'}`}
+            >
+              <span className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center shrink-0 ${!value ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
+                {!value && <span className="text-white text-[8px] font-bold leading-none">✓</span>}
+              </span>
+              {placeholder}
+            </button>
+            {filtered.map(opt => (
+              <button
+                key={opt}
+                onMouseDown={e => { e.preventDefault(); onChange(opt); setOpen(false); setSearch(''); }}
+                className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-blue-50 ${value === opt ? 'text-blue-700' : 'text-gray-700'}`}
+              >
+                <span className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center shrink-0 ${value === opt ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
+                  {value === opt && <span className="text-white text-[8px] font-bold leading-none">✓</span>}
+                </span>
+                <span className="truncate">{opt}</span>
+              </button>
+            ))}
+            {filtered.length === 0 && <div className="px-3 py-3 text-xs text-gray-400 text-center">No results for "{search}"</div>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ContactsManager() {
   const { toast } = useToast();
   const [contacts, setContacts] = useState<Contact[]>([]);
@@ -4722,13 +4790,13 @@ export default function ContactsManager() {
                   {PIPELINE_STAGES.map(s => <SelectItem key={s.value} value={s.value} className="text-xs">{s.label}</SelectItem>)}
                 </SelectContent>
               </Select>
-              <Select value={companyFilter || '_all'} onValueChange={v => { setCompanyFilter(v === '_all' ? '' : v); setCurrentPage(1); }}>
-                <SelectTrigger className="h-8 w-[145px] text-xs bg-white"><SelectValue placeholder="Company" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="_all">All Companies</SelectItem>
-                  {filterOptions.companies.slice(0, 50).map(c => <SelectItem key={c} value={c} className="text-xs">{c}</SelectItem>)}
-                </SelectContent>
-              </Select>
+              <SearchableSingleSelect
+                options={filterOptions.companies}
+                value={companyFilter}
+                onChange={v => { setCompanyFilter(v); setCurrentPage(1); }}
+                placeholder="All Companies"
+                width={160}
+              />
               {/* Seniority multi-select with checkboxes */}
               <MultiSelectDropdown
                 options={filterOptions.seniorities.length > 0 ? filterOptions.seniorities : ['C-Suite', 'VP', 'Director', 'Manager', 'Head', 'Staff', 'Entry', 'Intern', 'Founder', 'Owner']}
