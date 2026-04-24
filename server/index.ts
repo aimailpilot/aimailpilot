@@ -494,7 +494,13 @@ app.use((req, res, next) => {
               try { sendingConfig = typeof row.sendingConfig === 'string' ? JSON.parse(row.sendingConfig) : row.sendingConfig; } catch {}
             }
             log(`[DailyLimitResume] Resuming campaign: ${row.name} (${row.id})`);
-            await campaignEngine.startCampaign({ campaignId: row.id, sendingConfig: sendingConfig || undefined });
+            const result = await campaignEngine.startCampaign({ campaignId: row.id, sendingConfig: sendingConfig || undefined }) as any;
+            // If contacts are permanently gone (deleted/re-imported), clear autoPaused so this
+            // campaign stops being picked up every 15 min. Does not change the abort logic in startCampaign.
+            if (result && result.success === false && result.error && result.error.includes('0 contacts')) {
+              console.warn(`[DailyLimitResume] Campaign ${row.id} (${row.name}) has 0 resolvable contacts — clearing autoPaused to stop retry loop`);
+              await storage.rawRun(`UPDATE campaigns SET "autoPaused" = false WHERE id = ?`, row.id);
+            }
             await new Promise(r => setTimeout(r, 2000));
           } catch (err) {
             console.error(`[DailyLimitResume] Failed to resume campaign ${row.id}:`, err);
