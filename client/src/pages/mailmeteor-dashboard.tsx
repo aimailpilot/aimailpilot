@@ -237,6 +237,7 @@ export default function MailMeteorDashboard() {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeFilter, setActiveFilter] = useState("All");
   const [viewMode, setViewMode] = useState<'dashboard' | 'campaign'>('dashboard');
+  const [editCampaignId, setEditCampaignId] = useState<string | null>(null);
   const [currentView, setCurrentViewRaw] = useState<ViewType>(() => {
     // Restore view from URL hash on initial load (e.g. #contacts, #campaign-detail/abc123)
     const hash = window.location.hash.replace('#', '');
@@ -865,8 +866,9 @@ export default function MailMeteorDashboard() {
           {/* Campaign Creator */}
           {viewMode === 'campaign' && (
             <CampaignCreator
-              onSuccess={() => { setViewMode('dashboard'); setCurrentView('campaigns'); }} 
-              onBack={() => setViewMode('dashboard')}
+              onSuccess={() => { setEditCampaignId(null); setViewMode('dashboard'); setCurrentView('campaigns'); }}
+              onBack={() => { setEditCampaignId(null); setViewMode('dashboard'); }}
+              initialCampaignId={editCampaignId || undefined}
             />
           )}
 
@@ -1234,7 +1236,7 @@ export default function MailMeteorDashboard() {
             <CampaignDetailPage
               campaignId={selectedCampaignId}
               onBack={() => { setCurrentView('campaigns'); setSelectedCampaignId(null); }}
-              onNavigateToCampaign={(id: string) => { setSelectedCampaignId(id); setCurrentViewRaw('campaign-detail'); }}
+              onNavigateToCampaign={(id: string) => { setEditCampaignId(id); setViewMode('campaign'); }}
             />
           )}
 

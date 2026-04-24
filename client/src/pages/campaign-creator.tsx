@@ -22,6 +22,7 @@ import {
 interface CampaignFormProps {
   onSuccess: () => void;
   onBack: () => void;
+  initialCampaignId?: string;
 }
 
 interface SequenceStep {
@@ -54,7 +55,7 @@ interface ScheduleConfig {
 }
 
 // ==================== MAIN COMPONENT ====================
-export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps) {
+export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }: CampaignFormProps) {
   // Data
   const [emailAccounts, setEmailAccounts] = useState<any[]>([]);
   const [templates, setTemplates] = useState<any[]>([]);
@@ -75,6 +76,8 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
   const [trackEmails, setTrackEmails] = useState(true);
   const [unsubscribeLink, setUnsubscribeLink] = useState(false);
   const [sendOrder, setSendOrder] = useState<'default' | 'engagement'>('default');
+  // IDs of pre-loaded followup sequences (used to delete before recreating on send)
+  const [preloadedSequenceIds, setPreloadedSequenceIds] = useState<string[]>([]);
 
   // Sequence steps
   const [steps, setSteps] = useState<SequenceStep[]>([
@@ -216,7 +219,8 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
         if (acctRes.ok) {
           const accts = await acctRes.json();
           setEmailAccounts(accts);
-          if (accts.length > 0) setEmailAccountId(accts[0].id);
+          // Only default to first account for new campaigns; duplicate pre-load sets its own account
+          if (accts.length > 0 && !initialCampaignId) setEmailAccountId(accts[0].id);
         }
         if (tmplRes.ok) setTemplates(await tmplRes.json());
         if (ctcRes.ok) {
@@ -231,6 +235,73 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
       setLoading(false);
     })();
   }, []);
+
+  // Pre-load existing campaign (used when duplicating)
+  useEffect(() => {
+    if (!initialCampaignId) return;
+    (async () => {
+      try {
+        const res = await fetch(`/api/campaigns/${initialCampaignId}/detail`, { credentials: 'include' });
+        if (!res.ok) return;
+        const { campaign, followupSequences } = await res.json();
+        if (!campaign) return;
+
+        // Populate campaign-level fields
+        if (campaign.name) setCampaignName(campaign.name);
+        if (campaign.emailAccountId) setEmailAccountId(campaign.emailAccountId);
+        if (campaign.trackOpens !== undefined) setTrackEmails(!!campaign.trackOpens);
+        if (campaign.includeUnsubscribe !== undefined) setUnsubscribeLink(!!campaign.includeUnsubscribe);
+        if (campaign.sendOrder === 'engagement') setSendOrder('engagement');
+
+        // Step 1
+        const step1: SequenceStep = {
+          id: 'step-1',
+          subject: campaign.subject || '',
+          content: campaign.content || '',
+          condition: 'immediate',
+          delayValue: 0,
+          delayUnit: 'days',
+        };
+        const loadedSteps: SequenceStep[] = [step1];
+
+        // Follow-up steps from sequences (preserve API order — sequences are returned in creation order)
+        const seqs: any[] = followupSequences || [];
+        for (const seq of seqs) {
+          const conditionMap: Record<string, SequenceStep['condition']> = {
+            no_reply: 'if_no_reply', if_no_reply: 'if_no_reply',
+            no_open: 'if_no_open', if_no_open: 'if_no_open',
+            no_click: 'if_no_click', if_no_click: 'if_no_click',
+            opened: 'if_opened', if_opened: 'if_opened',
+            clicked: 'if_clicked', if_clicked: 'if_clicked',
+            replied: 'if_replied', if_replied: 'if_replied',
+            always: 'no_matter_what', no_matter_what: 'no_matter_what',
+          };
+          const seqSteps: any[] = seq.steps || [];
+          seqSteps.sort((a: any, b: any) => (a.stepNumber ?? a.stepOrder ?? 0) - (b.stepNumber ?? b.stepOrder ?? 0));
+          for (const s of seqSteps) {
+            const delayDays = s.delayDays ?? s.delayValue ?? 3;
+            loadedSteps.push({
+              id: `step-${loadedSteps.length + 1}`,
+              subject: s.subject || '',
+              content: s.content || '',
+              condition: conditionMap[s.trigger ?? s.condition] || 'if_no_reply',
+              delayValue: delayDays,
+              delayUnit: 'days',
+            });
+          }
+        }
+
+        setSteps(loadedSteps);
+        setActiveStepIndex(0);
+        setHtmlSource(step1.content || '');
+        setPreloadedSequenceIds(seqs.map((s: any) => s.id).filter(Boolean));
+        // Sync the contenteditable editor after React re-renders
+        requestAnimationFrame(() => {
+          if (editorRef.current) editorRef.current.innerHTML = step1.content || '';
+        });
+      } catch (e) { console.error('Failed to load campaign for editing:', e); }
+    })();
+  }, [initialCampaignId]);
 
   // Active step helpers
   const activeStep = steps[activeStepIndex];
@@ -428,24 +499,54 @@ export default function CampaignCreator({ onSuccess, onBack }: CampaignFormProps
     setSending(true);
     try {
       const name = campaignName || `Campaign ${new Date().toLocaleDateString()}`;
-      const createRes = await fetch('/api/campaigns', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          name, emailAccountId,
-          subject: steps[0].subject,
-          content: editorMode === 'html' ? htmlSource : steps[0].content,
-          contactIds: selectedContacts,
-          totalRecipients: recipientCount,
-          status: schedule.enabled ? 'scheduled' : 'draft',
-          trackOpens: trackEmails, trackClicks: trackEmails,
-          includeUnsubscribe: unsubscribeLink,
-          sendOrder: sendOrder === 'engagement' ? 'engagement' : null,
-        }),
-      });
-      if (!createRes.ok) throw new Error('Failed to create campaign');
-      const campaign = await createRes.json();
+      const step1Content = editorMode === 'html' ? htmlSource : steps[0].content;
+      let campaign: any;
+
+      if (initialCampaignId) {
+        // Editing an existing draft (e.g. after duplicate) — update it in place
+        const updateRes = await fetch(`/api/campaigns/${initialCampaignId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            name, emailAccountId,
+            subject: steps[0].subject,
+            content: step1Content,
+            contactIds: selectedContacts,
+            totalRecipients: recipientCount,
+            status: schedule.enabled ? 'scheduled' : 'draft',
+            trackOpens: trackEmails, trackClicks: trackEmails,
+            includeUnsubscribe: unsubscribeLink,
+            sendOrder: sendOrder === 'engagement' ? 'engagement' : null,
+          }),
+        });
+        if (!updateRes.ok) throw new Error('Failed to update campaign');
+        campaign = await updateRes.json();
+
+        // Delete old followup sequences so we can recreate fresh ones from the editor state
+        for (const seqId of preloadedSequenceIds) {
+          await fetch(`/api/followup-sequences/${seqId}`, { method: 'DELETE', credentials: 'include' });
+        }
+      } else {
+        const createRes = await fetch('/api/campaigns', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            name, emailAccountId,
+            subject: steps[0].subject,
+            content: step1Content,
+            contactIds: selectedContacts,
+            totalRecipients: recipientCount,
+            status: schedule.enabled ? 'scheduled' : 'draft',
+            trackOpens: trackEmails, trackClicks: trackEmails,
+            includeUnsubscribe: unsubscribeLink,
+            sendOrder: sendOrder === 'engagement' ? 'engagement' : null,
+          }),
+        });
+        if (!createRes.ok) throw new Error('Failed to create campaign');
+        campaign = await createRes.json();
+      }
 
       // Create follow-up steps if any
       for (let i = 1; i < steps.length; i++) {
