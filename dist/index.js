@@ -10339,7 +10339,7 @@ async function toolCheckSenderQuota(organizationId, args) {
   } else {
     accounts = await storage.rawAll(
       `SELECT id, email, "senderName", "dailyLimit", "dailySent", "isActive"
-       FROM email_accounts WHERE "organizationId" = ? AND "isActive" = 1
+       FROM email_accounts WHERE "organizationId" = ? AND "isActive" = true
        ORDER BY "dailySent" ASC LIMIT 10`,
       organizationId
     );
