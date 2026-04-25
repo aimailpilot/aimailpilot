@@ -1157,10 +1157,19 @@ export class FollowupEngine {
             campaign.emailAccountId
           );
           if (!reserved) {
-            // Limit reached — defer, don't skip. Will retry next cycle after midnight reset.
-            await storage.rawRun('UPDATE followup_executions SET status = ? WHERE id = ?', 'pending', executionId);
-            // Read current values for logging
+            // Either limit reached OR account was deleted — check which
             const acct = await storage.getEmailAccount(campaign.emailAccountId);
+            if (!acct) {
+              // Account no longer exists — fail permanently, don't loop forever
+              await storage.updateFollowupExecution(executionId, {
+                status: 'failed',
+                errorMessage: `Email account ${campaign.emailAccountId} no longer exists`,
+              });
+              console.log(`[Followup] Failed execution ${executionId} — email account ${campaign.emailAccountId} was deleted`);
+              return;
+            }
+            // Account exists but limit reached — defer until midnight reset
+            await storage.rawRun('UPDATE followup_executions SET status = ? WHERE id = ?', 'pending', executionId);
             console.log(`[Followup] Deferring execution ${executionId} — account ${(acct as any)?.email} daily limit reached (${(acct as any)?.dailySent}/${(acct as any)?.dailyLimit})`);
             return;
           }
