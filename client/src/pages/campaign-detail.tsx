@@ -300,6 +300,8 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
     setUpdateEmailAccountId(c.emailAccountId || '');
     setUpdateError('');
     setUpdateActiveStepIdx(0);
+    setAiChanges({});
+    setDiffViewMode({});
     setTrackEmails(c.trackOpens !== 0 && c.trackOpens !== false);
     setUnsubscribeLink(c.includeUnsubscribe === 1 || c.includeUnsubscribe === true);
     // Load autopilot from sendingConfig if it exists
@@ -330,14 +332,42 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
     setShowUpdateDialog(true);
 
     // Auto-load cached AI review into the update dialog
-    if (!reviewData) {
+    const existingReview = reviewData;
+    let loadedReview = existingReview;
+    if (!existingReview) {
       try {
         const rv = await fetch(`/api/campaigns/${campaignId}/review/latest`, { credentials: 'include' });
         if (rv.ok) {
           const d = await rv.json();
-          if (d?.overallScore) setReviewData(d);
+          if (d?.overallScore) { setReviewData(d); loadedReview = d; }
         }
       } catch { /* ignore */ }
+    }
+
+    // Auto-populate inline diff from the review's suggestedBody fields
+    if (loadedReview?.steps) {
+      const stepContents: Record<number, string> = { 0: c.content || '' };
+      let fIdx = 0;
+      for (const seq of seqs) {
+        const sorted = [...(seq.steps || [])].sort((a: any, b: any) => (a.stepNumber ?? 0) - (b.stepNumber ?? 0));
+        for (const s of sorted) { fIdx++; stepContents[fIdx] = s.content || ''; }
+      }
+      const bodyChanges: Record<number, { original: string; suggested: string; changes: string[] }> = {};
+      for (const step of loadedReview.steps) {
+        if (step.suggestedBody) {
+          bodyChanges[step.stepNumber] = {
+            original: stepContents[step.stepNumber] || '',
+            suggested: step.suggestedBody,
+            changes: step.bodyChangesSummary || [],
+          };
+        }
+      }
+      if (Object.keys(bodyChanges).length > 0) {
+        setAiChanges(prev => ({ ...prev, body: bodyChanges }));
+        const newDiffMode: Record<number, boolean> = {};
+        for (const sn of Object.keys(bodyChanges)) newDiffMode[Number(sn)] = true;
+        setDiffViewMode(newDiffMode);
+      }
     }
 
     try {
