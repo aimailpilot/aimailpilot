@@ -19,13 +19,14 @@ export interface StepReview {
   stepNumber: number;
   subject: string;
   scores: {
-    subjectLine: number;    // 1-10
+    subjectLine: number;    // 1-10 (always 10 for follow-up steps — no subject expected)
     bodyContent: number;
     cta: number;
     personalization: number;
     timing: number;
   };
   stepScore: number;        // average of above
+  suggestedSubject?: string; // only for stepNumber === 0
   issues: string[];
   suggestions: string[];
   actualStats?: {
@@ -360,15 +361,23 @@ MANDATORY tool call sequence:
 3. get_performance_stats — check actual metrics (may be empty for pre_launch)
 4. get_org_benchmarks — compare against org history
 
+EMAIL THREADING — CRITICAL:
+- Step 0 (initial email) is the ONLY step with a subject line.
+- Steps 1, 2, 3... are follow-up replies. They intentionally have NO subject — they automatically thread as "Re: {step0 subject}" in Gmail and Outlook.
+- NEVER recommend adding a subject line to follow-up steps (stepNumber >= 1). That would break threading and create separate email chains.
+- For follow-up steps, set subjectLine score to 10 (no subject = correct behavior) and do NOT include subject in issues or suggestions.
+- Only evaluate and suggest a new subject for Step 0.
+
 SCORING RULES:
 - Score each step's subjectLine, bodyContent, cta, personalization, timing on 1-10
-- subjectLine: clarity, curiosity, length (<60 chars ideal), no spam words
+- subjectLine: only scored for stepNumber=0. clarity, curiosity, length (<60 chars ideal), no spam words. Follow-up steps always score 10 here.
 - bodyContent: relevance, brevity, professional tone, value proposition clarity
 - cta: single clear ask, specific action, not vague ("let me know" scores 3)
 - personalization: use of {{firstName}}/{{company}}, contextual relevance
 - timing: appropriate delay between steps (2-5 days ideal for most B2B)
 - overallScore = weighted average of all step scores + campaign-level factors
 - overallGrade: 9-10=A, 7-8=B, 5-6=C, 3-4=D, 1-2=F
+- suggestedSubject: for stepNumber=0 ONLY — if the subject scores < 8, provide a concise improved alternative (under 55 chars). Otherwise omit.
 
 OBJECTIVE INFERENCE RULES:
 - Look at campaign name, subject lines, body CTA, and audience description
@@ -402,6 +411,7 @@ JSON schema (fill every field):
       "subject": "...",
       "scores": { "subjectLine": 7, "bodyContent": 6, "cta": 5, "personalization": 8, "timing": 9 },
       "stepScore": 7,
+      "suggestedSubject": "Shorter alternative subject under 55 chars",
       "issues": ["..."],
       "suggestions": ["..."]
     }

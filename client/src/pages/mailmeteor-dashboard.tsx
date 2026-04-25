@@ -352,6 +352,36 @@ export default function MailMeteorDashboard() {
     }
   }, []);
 
+  // AI Review summaries for the campaign list column
+  const [reviewSummaries, setReviewSummaries] = useState<Record<string, { grade: string; score: number; mode: string; degradation: boolean }>>({});
+  const [bulkReviewing, setBulkReviewing] = useState(false);
+  const [bulkReviewCount, setBulkReviewCount] = useState<number | null>(null);
+
+  const fetchReviewSummaries = async () => {
+    try {
+      const res = await fetch('/api/campaigns/reviews/summary', { credentials: 'include' });
+      if (res.ok) setReviewSummaries(await res.json());
+    } catch {}
+  };
+
+  useEffect(() => { fetchReviewSummaries(); }, []);
+
+  const handleBulkReview = async () => {
+    setBulkReviewing(true);
+    setBulkReviewCount(null);
+    try {
+      const res = await fetch('/api/campaigns/bulk-review', { method: 'POST', credentials: 'include' });
+      if (res.ok) {
+        const { queued } = await res.json();
+        setBulkReviewCount(queued);
+        // Refresh summaries after a delay to pick up completed reviews
+        setTimeout(fetchReviewSummaries, 30000);
+        setTimeout(fetchReviewSummaries, 90000);
+      }
+    } catch {}
+    finally { setBulkReviewing(false); }
+  };
+
   // Fetch inbox unread count for sidebar badge
   const [inboxUnread, setInboxUnread] = useState(0);
   useEffect(() => {
@@ -910,9 +940,24 @@ export default function MailMeteorDashboard() {
                     </button>
                   ))}
                 </div>
-                <Button size="sm" className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 shadow-sm h-8 sm:h-9 text-xs sm:text-sm gap-1 sm:gap-1.5 flex-shrink-0" onClick={() => setViewMode('campaign')}>
-                  <Plus className="h-3 sm:h-3.5 w-3 sm:w-3.5" /> <span className="hidden sm:inline">New Campaign</span><span className="sm:hidden">New</span>
-                </Button>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        onClick={handleBulkReview}
+                        disabled={bulkReviewing}
+                        className="inline-flex items-center gap-1.5 h-8 sm:h-9 px-3 rounded-lg text-xs font-semibold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 transition-colors disabled:opacity-60"
+                      >
+                        {bulkReviewing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                        <span className="hidden sm:inline">{bulkReviewing ? 'Reviewing…' : bulkReviewCount !== null ? `Queued ${bulkReviewCount}` : 'Review All'}</span>
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>AI review all active, paused & completed campaigns</TooltipContent>
+                  </Tooltip>
+                  <Button size="sm" className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 shadow-sm h-8 sm:h-9 text-xs sm:text-sm gap-1 sm:gap-1.5" onClick={() => setViewMode('campaign')}>
+                    <Plus className="h-3 sm:h-3.5 w-3 sm:w-3.5" /> <span className="hidden sm:inline">New Campaign</span><span className="sm:hidden">New</span>
+                  </Button>
+                </div>
               </div>
 
               {/* Campaigns Table */}
@@ -938,7 +983,7 @@ export default function MailMeteorDashboard() {
                 <>
                   {/* Desktop Table View */}
                   <div className="hidden md:block bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden">
-                    <div className="grid grid-cols-[2fr_90px_90px_60px_65px_65px_65px_65px_44px] gap-2 px-4 md:px-5 py-3 border-b border-gray-100 bg-gray-50/50 text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+                    <div className="grid grid-cols-[2fr_90px_90px_60px_65px_65px_65px_44px_65px_44px] gap-2 px-4 md:px-5 py-3 border-b border-gray-100 bg-gray-50/50 text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider text-gray-400">
                       <div>Campaign</div>
                       <div>Sent By</div>
                       <div>List</div>
@@ -946,6 +991,9 @@ export default function MailMeteorDashboard() {
                       <div className="text-right">Opens</div>
                       <div className="text-right">Replies</div>
                       <div className="text-right">Bounced</div>
+                      <div className="text-center flex items-center justify-center gap-1">
+                        <Sparkles className="h-3 w-3 text-purple-400" /> AI
+                      </div>
                       <div className="text-right">Date</div>
                       <div></div>
                     </div>
@@ -953,7 +1001,7 @@ export default function MailMeteorDashboard() {
                     {filteredCampaigns.map((campaign: Campaign) => (
                       <div
                         key={campaign.id}
-                        className="grid grid-cols-[2fr_90px_90px_60px_65px_65px_65px_65px_44px] gap-2 px-4 md:px-5 py-3 sm:py-3.5 border-b border-gray-50 hover:bg-blue-50/30 items-center transition-colors group cursor-pointer"
+                        className="grid grid-cols-[2fr_90px_90px_60px_65px_65px_65px_44px_65px_44px] gap-2 px-4 md:px-5 py-3 sm:py-3.5 border-b border-gray-50 hover:bg-blue-50/30 items-center transition-colors group cursor-pointer"
                         onClick={() => { if (campaign.status === 'draft') { setEditCampaignId(campaign.id); setViewMode('campaign'); window.history.replaceState(null, '', '#campaigns'); } else { setSelectedCampaignId(campaign.id); setCurrentView('campaign-detail'); } }}
                       >
                         <div className="min-w-0">
@@ -1027,6 +1075,29 @@ export default function MailMeteorDashboard() {
                         </div>
                         <div className="text-right">
                           <span className={`text-xs sm:text-sm font-medium ${(campaign.bouncedCount || 0) > 0 ? 'text-red-500' : 'text-gray-700'}`}>{formatPercentage(campaign.bouncedCount || 0, campaign.sentCount || 0)}</span>
+                        </div>
+                        {/* AI Review grade */}
+                        <div className="flex items-center justify-center" onClick={(e: any) => e.stopPropagation()}>
+                          {reviewSummaries[campaign.id] ? (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span className={`text-[11px] font-black px-1.5 py-0.5 rounded-md cursor-default ${
+                                  reviewSummaries[campaign.id].grade === 'A' ? 'bg-emerald-50 text-emerald-700' :
+                                  reviewSummaries[campaign.id].grade === 'B' ? 'bg-blue-50 text-blue-700' :
+                                  reviewSummaries[campaign.id].grade === 'C' ? 'bg-amber-50 text-amber-700' :
+                                  'bg-red-50 text-red-700'
+                                } ${reviewSummaries[campaign.id].degradation ? 'ring-1 ring-red-400' : ''}`}>
+                                  {reviewSummaries[campaign.id].grade}
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                Score: {reviewSummaries[campaign.id].score}/10
+                                {reviewSummaries[campaign.id].degradation ? ' · ⚠ Degradation detected' : ''}
+                              </TooltipContent>
+                            </Tooltip>
+                          ) : (
+                            <span className="text-[10px] text-gray-300">—</span>
+                          )}
                         </div>
                         <div className="text-right">
                           <span className="text-[10px] sm:text-xs text-gray-400">{campaign.createdAt ? formatDate(campaign.createdAt) : '-'}</span>

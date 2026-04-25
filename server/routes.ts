@@ -13072,6 +13072,56 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     }
   });
 
+  // Get cached review grades for all org campaigns (for list column)
+  app.get('/api/campaigns/reviews/summary', requireAuth, async (req: any, res) => {
+    try {
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      if (!settings) return res.json({});
+      const summary: Record<string, { grade: string; score: number; mode: string; degradation: boolean }> = {};
+      for (const [key, val] of Object.entries(settings)) {
+        if (!key.startsWith('campaign_review_') || !val) continue;
+        const campaignId = key.replace('campaign_review_', '');
+        try {
+          const review = JSON.parse(val as string);
+          summary[campaignId] = {
+            grade: review.overallGrade || '?',
+            score: review.overallScore || 0,
+            mode: review.mode || 'pre_launch',
+            degradation: review.degradation?.detected === true,
+          };
+        } catch { /* skip malformed */ }
+      }
+      res.json(summary);
+    } catch (error: any) {
+      res.status(500).json({ message: 'Failed to fetch review summaries.' });
+    }
+  });
+
+  // Bulk review: queue reviews for all active/paused/completed campaigns (fire-and-forget)
+  app.post('/api/campaigns/bulk-review', requireAuth, async (req: any, res) => {
+    try {
+      const campaigns = await storage.rawAll(
+        `SELECT id, status FROM campaigns WHERE "organizationId" = $1 AND status IN ('active','following_up','paused','completed') AND "sentCount" > 0`,
+        req.user.organizationId
+      ) as any[];
+      if (campaigns.length === 0) return res.json({ queued: 0 });
+      res.json({ queued: campaigns.length });
+      // Fire-and-forget — don't block the response
+      setImmediate(async () => {
+        const { runCampaignReviewAgent, saveCachedReview } = await import('./services/campaign-review-agent.js');
+        for (const c of campaigns) {
+          try {
+            const mode = c.status === 'completed' ? 'post_mortem' : 'live';
+            const review = await runCampaignReviewAgent(req.user.organizationId, c.id, mode);
+            await saveCachedReview(req.user.organizationId, c.id, review);
+          } catch { /* skip failed campaigns */ }
+        }
+      });
+    } catch (error: any) {
+      res.status(500).json({ message: 'Failed to start bulk review.' });
+    }
+  });
+
   // Get latest cached review for a campaign
   app.get('/api/campaigns/:id/review/latest', requireAuth, async (req: any, res) => {
     try {

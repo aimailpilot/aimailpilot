@@ -1531,6 +1531,20 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
                 >
                   {reviewLoading ? <><Loader2 className="h-3 w-3 animate-spin" /> Analyzing…</> : <><Sparkles className="h-3 w-3" /> {reviewData ? 'Re-analyze' : 'Analyze'}</>}
                 </button>
+                {reviewData && !reviewLoading && (
+                  <button
+                    onClick={() => {
+                      // Pre-fill subject if AI suggested one for Step 0
+                      const step0 = reviewData.steps?.find((s: any) => s.stepNumber === 0);
+                      if (step0?.suggestedSubject) setUpdateSubject(step0.suggestedSubject);
+                      setShowReviewPanel(false);
+                      setShowUpdateDialog(true);
+                    }}
+                    className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg text-[12px] font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 transition-colors"
+                  >
+                    <Pencil className="h-3 w-3" /> Apply to Campaign
+                  </button>
+                )}
               </div>
             </div>
             <DialogDescription className="sr-only">AI-powered campaign review and performance analysis</DialogDescription>
@@ -1799,6 +1813,16 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
                     <div className="flex items-start gap-3 px-4 py-3 bg-blue-50 border border-blue-200/80 rounded-xl">
                       <Pause className="h-4 w-4 text-blue-600 flex-shrink-0 mt-0.5" />
                       <span className="text-sm text-blue-800">This campaign is paused. Changes will apply when you resume.</span>
+                    </div>
+                  )}
+                  {/* AI suggestions banner — shown when Apply to Campaign was clicked from review */}
+                  {reviewData && !showReviewPanel && (
+                    <div className="flex items-start gap-3 px-4 py-3 bg-purple-50 border border-purple-200/80 rounded-xl">
+                      <Sparkles className="h-4 w-4 text-purple-600 flex-shrink-0 mt-0.5" />
+                      <div className="text-sm text-purple-800">
+                        <span className="font-semibold">AI suggestions loaded.</span> Review the recommendations from your Campaign Intelligence analysis and apply changes below.
+                        <button onClick={() => setShowReviewPanel(true)} className="ml-2 text-purple-600 underline text-xs font-medium">View review</button>
+                      </div>
                     </div>
                   )}
 
