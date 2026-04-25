@@ -10375,6 +10375,38 @@ async function toolGetOrgContext(organizationId) {
   }
   return JSON.stringify({ orgName, docSummaries });
 }
+function extractPlan(text) {
+  if (!text.includes("{")) return null;
+  const fenceIdx = text.indexOf("```");
+  if (fenceIdx !== -1) {
+    const afterFence = text.indexOf("{", fenceIdx);
+    const closeFence = text.lastIndexOf("```");
+    if (afterFence !== -1 && closeFence > afterFence) {
+      const candidate = text.slice(afterFence, text.lastIndexOf("}", closeFence) + 1);
+      const parsed = tryParse(candidate);
+      if (parsed) return parsed;
+    }
+  }
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start !== -1 && end > start) {
+    const parsed = tryParse(text.slice(start, end + 1));
+    if (parsed) return parsed;
+  }
+  return null;
+}
+function tryParse(jsonStr) {
+  try {
+    const plan = JSON.parse(jsonStr);
+    if (!plan || typeof plan !== "object") return null;
+    if (!plan.content?.subject) return null;
+    if (!plan.target) return null;
+    if (!Array.isArray(plan.target.contactIds)) plan.target.contactIds = [];
+    return plan;
+  } catch {
+    return null;
+  }
+}
 async function runCampaignPlannerAgent(organizationId, userBrief) {
   const apiKey = await getClaudeApiKey(organizationId);
   if (!apiKey) {
@@ -10407,43 +10439,33 @@ JSON schema (fill every field):
   const messages = [
     { role: "user", content: userBrief }
   ];
-  for (let iteration = 0; iteration < 6; iteration++) {
+  let toolCallsMade = 0;
+  for (let iteration = 0; iteration < 8; iteration++) {
     const response = await callClaude(apiKey, messages, TOOLS, systemPrompt);
-    const toolUses = response.content?.filter((b) => b.type === "tool_use") || [];
-    const textBlocks = response.content?.filter((b) => b.type === "text") || [];
+    console.log(`[CampaignPlannerAgent] iteration=${iteration} stop_reason=${response.stop_reason} content_types=${(response.content || []).map((b) => b.type).join(",")}`);
+    const toolUses = (response.content || []).filter((b) => b.type === "tool_use");
+    const textBlocks = (response.content || []).filter((b) => b.type === "text");
     if (toolUses.length === 0) {
       const text = textBlocks.map((b) => b.text).join("").trim();
-      let jsonStr = null;
-      const fenceMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
-      if (fenceMatch) {
-        jsonStr = fenceMatch[1];
-      } else {
-        const start = text.indexOf("{");
-        const end = text.lastIndexOf("}");
-        if (start !== -1 && end > start) {
-          jsonStr = text.slice(start, end + 1);
-        }
+      console.log(`[CampaignPlannerAgent] Final text (first 300 chars): ${text.slice(0, 300)}`);
+      if (!text.includes("{") && toolCallsMade > 0) {
+        messages.push({ role: "assistant", content: response.content });
+        messages.push({
+          role: "user",
+          content: "You have gathered all necessary data. Now output ONLY the JSON plan object. Start your response with { and end with }. Do not include any other text."
+        });
+        continue;
       }
-      if (!jsonStr) {
-        console.error("[CampaignPlannerAgent] No JSON found in response:", text.slice(0, 500));
-        throw new Error("Agent did not return a valid plan. Try rephrasing your brief.");
-      }
-      try {
-        const plan = JSON.parse(jsonStr);
-        if (!plan.content?.subject || !plan.target) {
-          throw new Error("Plan is missing required fields (subject or target).");
-        }
-        if (!Array.isArray(plan.target.contactIds)) plan.target.contactIds = [];
-        return plan;
-      } catch (e) {
-        console.error("[CampaignPlannerAgent] JSON parse error:", e.message, jsonStr.slice(0, 200));
-        throw new Error(`Failed to parse agent plan: ${e.message}`);
-      }
+      const plan = extractPlan(text);
+      if (plan) return plan;
+      console.error("[CampaignPlannerAgent] Could not extract JSON from:", text.slice(0, 600));
+      throw new Error("Agent did not return a valid plan. Please try again with a more specific brief.");
     }
     messages.push({ role: "assistant", content: response.content });
     const toolResults = [];
     for (const toolUse of toolUses) {
       let result = "";
+      console.log(`[CampaignPlannerAgent] Calling tool: ${toolUse.name}`, JSON.stringify(toolUse.input || {}).slice(0, 200));
       try {
         if (toolUse.name === "search_contacts") {
           result = await toolSearchContacts(organizationId, toolUse.input || {});
@@ -10456,8 +10478,11 @@ JSON schema (fill every field):
         }
       } catch (err) {
         result = JSON.stringify({ error: err.message });
+        console.error(`[CampaignPlannerAgent] Tool ${toolUse.name} threw:`, err.message);
       }
+      console.log(`[CampaignPlannerAgent] Tool ${toolUse.name} result (first 200): ${result.slice(0, 200)}`);
       toolResults.push({ tool_use_id: toolUse.id, content: result });
+      toolCallsMade++;
     }
     messages.push({
       role: "user",
@@ -10467,9 +10492,8 @@ JSON schema (fill every field):
         content: r.content
       }))
     });
-    if (response.stop_reason === "end_turn" && toolUses.length === 0) break;
   }
-  throw new Error("Agent did not complete within the expected number of steps. Try a more specific brief.");
+  throw new Error("Agent did not complete within the expected steps. Try a more specific brief.");
 }
 var TOOLS;
 var init_campaign_planner_agent = __esm({
