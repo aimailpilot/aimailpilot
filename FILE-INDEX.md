@@ -9,16 +9,16 @@
 | File | What it does |
 |------|-------------|
 | `server/index.ts` | Express entry — mounts middleware, starts followup + warmup engines. Boot sequence: (10s) `resumeActiveCampaigns`, (15s) overdue-scheduled recovery, (30s) reply reclassify, (60s) bounce reconcile, (75s) unsubscribe reconcile. Ongoing: 15-min `resumeDailyLimitPausedCampaigns` poll, hourly daily-limit reset, 15-min reply quality scorer. |
-| `server/routes.ts` | ALL API endpoints (campaigns, contacts, inbox, auth, settings) ~10500 lines |
+| `server/routes.ts` | ALL API endpoints (campaigns, contacts, inbox, auth, settings) ~10500 lines. Gmail/Outlook OAuth callbacks use `getEmailAccountIncludingInactive()` (case-insensitive) to reactivate existing accounts on reconnect instead of creating new UUID. |
 | `server/storage.ts` | SQLite DB layer — all CRUD, schema init, guardrails |
-| `server/pg-storage.ts` | PostgreSQL DB layer — drop-in replacement (PRODUCTION) |
+| `server/pg-storage.ts` | PostgreSQL DB layer — drop-in replacement (PRODUCTION). `deleteEmailAccount()` is a soft-delete (`isActive=0`), NOT hard DELETE. `getEmailAccounts()` filters `isActive != 0`. `getEmailAccountIncludingInactive(orgId, email)` does case-insensitive lookup including inactive rows — use this in OAuth callbacks. |
 | `server/db.ts` | Drizzle/Neon config — **NEVER IMPORT THIS** |
 | `server/vite.ts` | Vite dev server + static file serving |
 | `server/auth/google-oauth.ts` | Google OAuth — token exchange, refresh, user info |
 | `server/auth/microsoft-oauth.ts` | Microsoft OAuth (MSAL) — token exchange, refresh |
 | `server/routes/oauth-routes.ts` | Gmail/Outlook connect, Google Sheets/Excel/CSV import routes |
 | `server/services/campaign-engine.ts` | Email sending, scheduling, throttling, per-account limits. `checkSendingWindow` + `msUntilNextSendWindow` support overnight cross-midnight windows (e.g. 17:00–07:00) via OR logic when `startTime > endTime`. |
-| `server/services/followup-engine.ts` | Auto follow-ups, Gmail/Outlook threading, bounce skip. Has `addTrackingPixel()`, `addClickTracking()`, `getBaseUrl()` helpers for Steps 2/3/4 open+click tracking |
+| `server/services/followup-engine.ts` | Auto follow-ups, Gmail/Outlook threading, bounce skip. Has `addTrackingPixel()`, `addClickTracking()`, `getBaseUrl()` helpers for Steps 2/3/4 open+click tracking. `executeFollowup()` — after atomic daily-limit reservation fails, checks if email account exists: fails permanently (not infinite defer) if account was deleted. |
 | `server/services/warmup-engine.ts` | Self-warmup between org accounts, engagement actions |
 | `server/services/gmail-reply-tracker.ts` | Gmail inbox sync — reply/bounce/open detection. Has warmup filter (`ownEmailsSet` from email_accounts+warmup_accounts), 404 silent skip (returns null), 90-day message cutoff via `getAllRecentCampaignMessages` |
 | `server/services/outlook-reply-tracker.ts` | Outlook Graph inbox sync — reply/bounce/open detection. Has warmup filter (`ownEmailsSet`) |
@@ -120,6 +120,8 @@
 | Warmup not working | `warmup-engine.ts` (token + daily counter reset) |
 | Contact activities/pipeline | `server/routes.ts` (~lines 4838-4930) — quote all camelCase for PG |
 | Email account tokens 401 | `server/routes.ts` (`getGmailAccessToken`, `getOutlookAccessToken`) |
+| Follow-ups all deferring "account undefined" | `followup-engine.ts` — email account was deleted (soft-deleted) but executions still reference old `emailAccountId`. After atomic daily-limit UPDATE returns no row, engine checks if account exists; missing account → execution marked `failed` permanently. To recover: update `campaigns.emailAccountId` to new account UUID in DB, then reset stuck executions back to `pending`. |
+| Reconnecting email account creates new UUID | `server/routes.ts` OAuth callbacks + `pg-storage.ts` `getEmailAccountIncludingInactive()` — already fixed (case-insensitive match + soft-delete). If it recurs, verify the `getEmailAccountIncludingInactive` call path is reached and that `LOWER(email)` comparison works. |
 | Account flagged for reauth but shouldn't be | `server/services/auth-health.ts` — detector only matches `invalid_grant` + AADSTS codes, threshold=3. Check `authFailureCount` / `authLastErrorCode` columns on `email_accounts`. Clear manually via `UPDATE email_accounts SET "authStatus"='active', "authFailureCount"=0 WHERE email=?` |
 | Raw SQL 0 rows in PG | Double-quote camelCase: `"organizationId"`, `"contactId"`, etc. |
 | Import crash | Never import `server/db.ts`. Use `storage.rawGet/rawAll/rawRun` |

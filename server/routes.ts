@@ -13045,6 +13045,50 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     }
   });
 
+  // ========== CAMPAIGN INTELLIGENCE AGENT ==========
+
+  // Run a review (pre_launch | live | post_mortem) — result cached in api_settings
+  app.post('/api/campaigns/:id/review', requireAuth, async (req: any, res) => {
+    try {
+      const campaignId = req.params.id;
+      const { mode } = req.body;
+      if (!mode || !['pre_launch', 'live', 'post_mortem'].includes(mode)) {
+        return res.status(400).json({ message: 'mode must be pre_launch, live, or post_mortem' });
+      }
+
+      // Verify campaign belongs to org
+      const campaign = await storage.getCampaign(campaignId);
+      if (!campaign || campaign.organizationId !== req.user.organizationId) {
+        return res.status(404).json({ message: 'Campaign not found' });
+      }
+
+      const { runCampaignReviewAgent, saveCachedReview } = await import('./services/campaign-review-agent.js');
+      const review = await runCampaignReviewAgent(req.user.organizationId, campaignId, mode);
+      await saveCachedReview(req.user.organizationId, campaignId, review);
+      res.json(review);
+    } catch (error: any) {
+      console.error('[CampaignReviewAgent] Error:', error.message);
+      res.status(500).json({ message: error.message || 'Failed to generate campaign review.' });
+    }
+  });
+
+  // Get latest cached review for a campaign
+  app.get('/api/campaigns/:id/review/latest', requireAuth, async (req: any, res) => {
+    try {
+      const campaignId = req.params.id;
+      const campaign = await storage.getCampaign(campaignId);
+      if (!campaign || campaign.organizationId !== req.user.organizationId) {
+        return res.status(404).json({ message: 'Campaign not found' });
+      }
+      const { getCachedReview } = await import('./services/campaign-review-agent.js');
+      const review = await getCachedReview(req.user.organizationId, campaignId);
+      if (!review) return res.json(null);
+      res.json(review);
+    } catch (error: any) {
+      res.status(500).json({ message: 'Failed to fetch campaign review.' });
+    }
+  });
+
   // Save Claude API key in api_settings
   app.post('/api/agent/settings', requireAuth, async (req: any, res) => {
     try {

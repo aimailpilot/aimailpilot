@@ -468,6 +468,35 @@ app.use((req, res, next) => {
       await resumeDailyLimitPausedCampaigns('poll');
     }, 15 * 60 * 1000);
 
+    // Campaign Intelligence: live monitor every 5 hours for active campaigns.
+    // Runs a degradation check; caches result in api_settings. Only logs if
+    // degradation is detected so logs stay clean.
+    setInterval(async () => {
+      try {
+        const activeCampaigns = await storage.rawAll(
+          `SELECT DISTINCT c.id, c.name, c."organizationId"
+           FROM campaigns c
+           WHERE c.status = 'active' AND c."sentCount" >= 10`
+        ) as any[];
+        if (activeCampaigns.length === 0) return;
+        log(`[CampaignIntelligence] Live monitor: checking ${activeCampaigns.length} active campaign(s)`);
+        const { runCampaignReviewAgent, saveCachedReview } = await import('./services/campaign-review-agent.js');
+        for (const c of activeCampaigns) {
+          try {
+            const review = await runCampaignReviewAgent(c.organizationId, c.id, 'live');
+            await saveCachedReview(c.organizationId, c.id, review);
+            if (review.degradation?.detected) {
+              log(`[CampaignIntelligence] Degradation detected in "${c.name}" — ${review.degradation.details}`);
+            }
+          } catch (err) {
+            // Non-fatal: skip this campaign if Claude API key not set or network error
+          }
+        }
+      } catch (e) {
+        console.error('[CampaignIntelligence] Live monitor error:', e);
+      }
+    }, 5 * 60 * 60 * 1000); // Every 5 hours
+
     async function resumeDailyLimitPausedCampaigns(trigger: string) {
       try {
         // Find campaigns auto-paused by the system that have at least one email account

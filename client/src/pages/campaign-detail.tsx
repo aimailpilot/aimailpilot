@@ -151,6 +151,11 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
 
   // Pagination state
   const [trackingPage, setTrackingPage] = useState(1);
+  const [showReviewPanel, setShowReviewPanel] = useState(false);
+  const [reviewData, setReviewData] = useState<any>(null);
+  const [reviewLoading, setReviewLoading] = useState(false);
+  const [reviewError, setReviewError] = useState('');
+  const [reviewMode, setReviewMode] = useState<'pre_launch' | 'live' | 'post_mortem'>('pre_launch');
   const trackingPerPage = 15;
   const [emailsPage, setEmailsPage] = useState(1);
   const emailsPerPage = 25;
@@ -887,6 +892,26 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
             </div>
           </div>
 
+          {/* AI Review button */}
+          <button
+            onClick={() => {
+              const status = campaign.status;
+              const mode = status === 'completed' ? 'post_mortem' : (status === 'active' || status === 'paused' || status === 'following_up') ? 'live' : 'pre_launch';
+              setReviewMode(mode);
+              setShowReviewPanel(true);
+              if (!reviewData) {
+                // Load cached review first, then allow user to regenerate
+                fetch(`/api/campaigns/${campaignId}/review/latest`, { credentials: 'include' })
+                  .then(r => r.json())
+                  .then(d => { if (d) setReviewData(d); })
+                  .catch(() => {});
+              }
+            }}
+            className="inline-flex items-center gap-1.5 h-9 px-4 rounded-lg text-[13px] font-semibold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 shadow-sm transition-colors flex-shrink-0"
+          >
+            <Sparkles className="h-3.5 w-3.5" /> AI Review
+          </button>
+
           {/* Actions dropdown */}
           <div className="relative flex-shrink-0 pt-0.5" ref={actionsRef}>
             <button
@@ -1454,6 +1479,289 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
           </>
         )}
       </div>
+
+      {/* ===================== AI REVIEW DIALOG ===================== */}
+      <Dialog open={showReviewPanel} onOpenChange={setShowReviewPanel}>
+        <DialogContent className="sm:max-w-[780px] max-h-[88vh] overflow-hidden p-0 gap-0 rounded-2xl flex flex-col">
+          <DialogHeader className="px-6 pt-5 pb-3 shrink-0 border-b border-gray-100">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-4.5 w-4.5 text-purple-600" />
+                <DialogTitle className="text-base font-bold text-gray-900">Campaign Intelligence Review</DialogTitle>
+                {reviewData && (
+                  <span className="text-[10px] text-gray-400 font-normal ml-1">
+                    {reviewData.mode === 'pre_launch' ? 'Pre-launch' : reviewData.mode === 'live' ? 'Live monitor' : 'Post-mortem'} · {new Date(reviewData.generatedAt).toLocaleString()}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                {/* Mode selector */}
+                <div className="flex items-center bg-gray-100 rounded-lg p-0.5 gap-0.5">
+                  {(['pre_launch', 'live', 'post_mortem'] as const).map(m => (
+                    <button key={m} onClick={() => setReviewMode(m)}
+                      className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-colors ${reviewMode === m ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+                      {m === 'pre_launch' ? 'Pre-launch' : m === 'live' ? 'Live' : 'Post-mortem'}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  onClick={async () => {
+                    setReviewLoading(true);
+                    setReviewError('');
+                    try {
+                      const res = await fetch(`/api/campaigns/${campaignId}/review`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        credentials: 'include',
+                        body: JSON.stringify({ mode: reviewMode }),
+                      });
+                      if (!res.ok) {
+                        const err = await res.json();
+                        throw new Error(err.message || 'Failed');
+                      }
+                      setReviewData(await res.json());
+                    } catch (err: any) {
+                      setReviewError(err.message);
+                    } finally {
+                      setReviewLoading(false);
+                    }
+                  }}
+                  disabled={reviewLoading}
+                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg text-[12px] font-semibold text-white bg-purple-600 hover:bg-purple-700 disabled:opacity-60 transition-colors"
+                >
+                  {reviewLoading ? <><Loader2 className="h-3 w-3 animate-spin" /> Analyzing…</> : <><Sparkles className="h-3 w-3" /> {reviewData ? 'Re-analyze' : 'Analyze'}</>}
+                </button>
+              </div>
+            </div>
+            <DialogDescription className="sr-only">AI-powered campaign review and performance analysis</DialogDescription>
+          </DialogHeader>
+
+          <div className="flex-1 overflow-y-auto">
+            {reviewError && (
+              <div className="mx-6 mt-4 px-4 py-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">{reviewError}</div>
+            )}
+            {!reviewData && !reviewLoading && !reviewError && (
+              <div className="flex flex-col items-center justify-center py-16 text-center">
+                <div className="w-14 h-14 rounded-2xl bg-purple-50 border border-purple-100 flex items-center justify-center mb-4">
+                  <Sparkles className="h-6 w-6 text-purple-500" />
+                </div>
+                <div className="text-sm font-semibold text-gray-900 mb-1">No review yet</div>
+                <div className="text-xs text-gray-400 max-w-xs mb-4">Select a mode and click Analyze to get an AI-powered review of this campaign</div>
+                <div className="flex gap-6 text-[11px] text-gray-400">
+                  <span><span className="font-semibold text-gray-600">Pre-launch</span> — predict & rate</span>
+                  <span><span className="font-semibold text-gray-600">Live</span> — degradation check</span>
+                  <span><span className="font-semibold text-gray-600">Post-mortem</span> — deep analysis</span>
+                </div>
+              </div>
+            )}
+            {reviewLoading && (
+              <div className="flex flex-col items-center justify-center py-16">
+                <Loader2 className="h-7 w-7 text-purple-500 animate-spin mb-3" />
+                <div className="text-sm text-gray-500">Analyzing campaign…</div>
+                <div className="text-xs text-gray-400 mt-1">This takes 15-30 seconds</div>
+              </div>
+            )}
+            {reviewData && !reviewLoading && (
+              <div className="p-6 space-y-6">
+                {/* Score card */}
+                <div className="flex items-start gap-4 p-4 bg-gradient-to-br from-purple-50 to-indigo-50 border border-purple-100 rounded-2xl">
+                  <div className="text-center min-w-[64px]">
+                    <div className={`text-4xl font-black ${reviewData.overallScore >= 8 ? 'text-emerald-600' : reviewData.overallScore >= 6 ? 'text-amber-600' : 'text-red-600'}`}>
+                      {reviewData.overallGrade}
+                    </div>
+                    <div className="text-xs text-gray-400 mt-0.5">{reviewData.overallScore}/10</div>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="font-semibold text-gray-900 text-sm mb-1">
+                      {reviewData.objective?.text || 'Unknown objective'}
+                      {!reviewData.objective?.defined && <span className="ml-1.5 text-[10px] font-normal text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded-full">inferred</span>}
+                    </div>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${reviewData.objective?.likelihood === 'High' ? 'bg-emerald-50 text-emerald-700' : reviewData.objective?.likelihood === 'Low' ? 'bg-red-50 text-red-700' : 'bg-amber-50 text-amber-700'}`}>
+                        {reviewData.objective?.likelihood} likelihood
+                      </span>
+                      <span className="text-[11px] text-gray-400">{reviewData.mode === 'pre_launch' ? 'Pre-launch review' : reviewData.mode === 'live' ? 'Live monitor' : 'Post-mortem'}</span>
+                    </div>
+                  </div>
+                  {/* Predictions (pre_launch) */}
+                  {reviewData.predictions && (
+                    <div className="flex gap-4 text-center flex-shrink-0">
+                      {[
+                        { label: 'Open', value: reviewData.predictions.openRate },
+                        { label: 'Click', value: reviewData.predictions.clickRate },
+                        { label: 'Reply', value: reviewData.predictions.replyRate },
+                      ].map(p => (
+                        <div key={p.label}>
+                          <div className="text-sm font-bold text-gray-900">{p.value}</div>
+                          <div className="text-[10px] text-gray-400">{p.label}</div>
+                        </div>
+                      ))}
+                      <div>
+                        <div className={`text-sm font-bold ${reviewData.predictions.confidence === 'High' ? 'text-emerald-600' : reviewData.predictions.confidence === 'Low' ? 'text-red-600' : 'text-amber-600'}`}>
+                          {reviewData.predictions.confidence}
+                        </div>
+                        <div className="text-[10px] text-gray-400">Confidence</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Degradation alert (live) */}
+                {reviewData.degradation?.detected && (
+                  <div className="flex items-start gap-3 px-4 py-3 bg-red-50 border border-red-200 rounded-xl">
+                    <AlertTriangle className="h-4 w-4 text-red-600 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <div className="text-sm font-semibold text-red-900 mb-0.5">Performance degradation detected</div>
+                      <div className="text-xs text-red-700">{reviewData.degradation.details}</div>
+                      <div className="text-xs text-red-600 font-medium mt-1">{reviewData.degradation.recommendation}</div>
+                    </div>
+                  </div>
+                )}
+                {reviewData.degradation && !reviewData.degradation.detected && (
+                  <div className="flex items-center gap-2 px-4 py-2.5 bg-emerald-50 border border-emerald-100 rounded-xl">
+                    <CheckCircle2 className="h-4 w-4 text-emerald-600 flex-shrink-0" />
+                    <span className="text-xs font-medium text-emerald-700">No degradation detected — campaign is performing normally</span>
+                  </div>
+                )}
+
+                {/* Step-by-step analysis */}
+                {reviewData.steps?.length > 0 && (
+                  <div>
+                    <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Step Analysis</div>
+                    <div className="space-y-3">
+                      {reviewData.steps.map((step: any) => (
+                        <div key={step.stepNumber} className="border border-gray-100 rounded-xl overflow-hidden">
+                          <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-100">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[11px] font-semibold text-blue-700 bg-blue-50 border border-blue-100 px-2 py-0.5 rounded-full">
+                                {step.stepNumber === 0 ? 'Step 1 (Initial)' : `Follow-up ${step.stepNumber}`}
+                              </span>
+                              <span className="text-xs text-gray-600 truncate max-w-[280px]">{step.subject}</span>
+                            </div>
+                            <div className="flex items-center gap-2 flex-shrink-0">
+                              {step.actualStats && (
+                                <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${step.performance === 'above_average' ? 'bg-emerald-50 text-emerald-700' : step.performance === 'below_average' ? 'bg-red-50 text-red-700' : 'bg-gray-100 text-gray-600'}`}>
+                                  {step.performance === 'above_average' ? 'Above avg' : step.performance === 'below_average' ? 'Below avg' : 'Average'}
+                                </span>
+                              )}
+                              <span className={`text-sm font-bold ${step.stepScore >= 7 ? 'text-emerald-600' : step.stepScore >= 5 ? 'text-amber-600' : 'text-red-600'}`}>
+                                {step.stepScore}/10
+                              </span>
+                            </div>
+                          </div>
+                          <div className="px-4 py-3 space-y-3">
+                            {/* Score breakdown */}
+                            <div className="flex gap-3 flex-wrap">
+                              {Object.entries(step.scores || {}).map(([k, v]: any) => (
+                                <div key={k} className="text-center">
+                                  <div className={`text-xs font-bold ${v >= 7 ? 'text-emerald-600' : v >= 5 ? 'text-amber-600' : 'text-red-600'}`}>{v}</div>
+                                  <div className="text-[10px] text-gray-400 capitalize">{k.replace(/([A-Z])/g, ' $1').trim()}</div>
+                                </div>
+                              ))}
+                            </div>
+                            {/* Actual stats (live/post_mortem) */}
+                            {step.actualStats && (
+                              <div className="flex gap-4 text-center py-2 border-t border-gray-50">
+                                {[
+                                  { label: 'Sent', value: step.actualStats.sent },
+                                  { label: 'Open', value: `${step.actualStats.openRate}%` },
+                                  { label: 'Click', value: `${step.actualStats.clickRate}%` },
+                                  { label: 'Reply', value: `${step.actualStats.replyRate}%` },
+                                  { label: 'Bounce', value: `${step.actualStats.bounceRate}%` },
+                                ].map(s => (
+                                  <div key={s.label}>
+                                    <div className="text-xs font-bold text-gray-800">{s.value}</div>
+                                    <div className="text-[10px] text-gray-400">{s.label}</div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            {/* Issues */}
+                            {step.issues?.length > 0 && (
+                              <div className="space-y-1">
+                                {step.issues.map((issue: string, i: number) => (
+                                  <div key={i} className="flex items-start gap-1.5 text-xs text-red-700">
+                                    <XCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5 text-red-400" />
+                                    {issue}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            {/* Suggestions */}
+                            {step.suggestions?.length > 0 && (
+                              <div className="space-y-1">
+                                {step.suggestions.map((sug: string, i: number) => (
+                                  <div key={i} className="flex items-start gap-1.5 text-xs text-blue-700">
+                                    <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0 mt-0.5 text-blue-400" />
+                                    {sug}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Post-mortem section */}
+                {reviewData.postMortem && (
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="p-4 bg-emerald-50 border border-emerald-100 rounded-xl">
+                      <div className="text-xs font-semibold text-emerald-700 mb-2">What worked</div>
+                      <ul className="space-y-1">
+                        {reviewData.postMortem.whatWorked?.map((item: string, i: number) => (
+                          <li key={i} className="flex items-start gap-1.5 text-xs text-emerald-800">
+                            <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0 mt-0.5 text-emerald-500" />{item}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div className="p-4 bg-red-50 border border-red-100 rounded-xl">
+                      <div className="text-xs font-semibold text-red-700 mb-2">What didn't work</div>
+                      <ul className="space-y-1">
+                        {reviewData.postMortem.whatDidntWork?.map((item: string, i: number) => (
+                          <li key={i} className="flex items-start gap-1.5 text-xs text-red-800">
+                            <XCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5 text-red-400" />{item}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div className="col-span-2 p-4 bg-blue-50 border border-blue-100 rounded-xl">
+                      <div className="text-xs font-semibold text-blue-700 mb-2">Design better next time</div>
+                      <ul className="space-y-1">
+                        {reviewData.postMortem.improvementsForNext?.map((item: string, i: number) => (
+                          <li key={i} className="flex items-start gap-1.5 text-xs text-blue-800">
+                            <Zap className="h-3.5 w-3.5 flex-shrink-0 mt-0.5 text-blue-400" />{item}
+                          </li>
+                        ))}
+                      </ul>
+                      {reviewData.postMortem.audienceFitAssessment && (
+                        <div className="mt-3 pt-3 border-t border-blue-100 text-xs text-blue-700 italic">{reviewData.postMortem.audienceFitAssessment}</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Recommendations */}
+                {reviewData.recommendations?.length > 0 && (
+                  <div className="p-4 bg-amber-50 border border-amber-100 rounded-xl">
+                    <div className="text-xs font-semibold text-amber-700 mb-2">Recommendations</div>
+                    <ul className="space-y-1.5">
+                      {reviewData.recommendations.map((rec: string, i: number) => (
+                        <li key={i} className="flex items-start gap-1.5 text-xs text-amber-800">
+                          <Zap className="h-3.5 w-3.5 flex-shrink-0 mt-0.5 text-amber-500" />{rec}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* ===================== UPDATE CAMPAIGN DIALOG ===================== */}
       <Dialog open={showUpdateDialog} onOpenChange={(open) => { setShowUpdateDialog(open); if (!open) { setUpdateDialogMode('edit'); setTestSent(false); setTestError(''); } }}>
