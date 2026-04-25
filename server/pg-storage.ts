@@ -1023,7 +1023,11 @@ export class PostgresStorage {
 
   // ========== Email Accounts ==========
   async getEmailAccounts(organizationId: string) {
-    return (await queryAll('SELECT * FROM email_accounts WHERE "organizationId" = $1', [organizationId])).map(hydrateAccount);
+    return (await queryAll('SELECT * FROM email_accounts WHERE "organizationId" = $1 AND "isActive" != 0', [organizationId])).map(hydrateAccount);
+  }
+
+  async getEmailAccountIncludingInactive(organizationId: string, email: string) {
+    return hydrateAccount(await queryOne('SELECT * FROM email_accounts WHERE "organizationId" = $1 AND LOWER(email) = LOWER($2)', [organizationId, email]));
   }
 
   async getEmailAccountsForUser(organizationId: string, userId: string) {
@@ -1065,7 +1069,12 @@ export class PostgresStorage {
     return this.getEmailAccount(id);
   }
 
-  async deleteEmailAccount(id: string) { await execute('DELETE FROM email_accounts WHERE id = $1', [id]); return true; }
+  async deleteEmailAccount(id: string) {
+    // Soft-delete: set isActive=false so reconnecting the same email later reuses this ID
+    // and campaigns pointing to this ID don't get orphaned permanently.
+    await execute('UPDATE email_accounts SET "isActive" = 0, "updatedAt" = $1 WHERE id = $2', [now(), id]);
+    return true;
+  }
 
   async assignEmailAccountToUser(id: string, userId: string) {
     await execute('UPDATE email_accounts SET "userId" = $1, "updatedAt" = $2 WHERE id = $3', [userId, now(), id]);

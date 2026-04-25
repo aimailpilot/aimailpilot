@@ -1051,7 +1051,10 @@ var init_pg_storage = __esm({
       }
       // ========== Email Accounts ==========
       async getEmailAccounts(organizationId) {
-        return (await queryAll('SELECT * FROM email_accounts WHERE "organizationId" = $1', [organizationId])).map(hydrateAccount);
+        return (await queryAll('SELECT * FROM email_accounts WHERE "organizationId" = $1 AND "isActive" != 0', [organizationId])).map(hydrateAccount);
+      }
+      async getEmailAccountIncludingInactive(organizationId, email) {
+        return hydrateAccount(await queryOne('SELECT * FROM email_accounts WHERE "organizationId" = $1 AND LOWER(email) = LOWER($2)', [organizationId, email]));
       }
       async getEmailAccountsForUser(organizationId, userId) {
         return (await queryAll('SELECT * FROM email_accounts WHERE "organizationId" = $1 AND "userId" = $2', [organizationId, userId])).map(hydrateAccount);
@@ -1089,7 +1092,7 @@ var init_pg_storage = __esm({
         return this.getEmailAccount(id);
       }
       async deleteEmailAccount(id) {
-        await execute("DELETE FROM email_accounts WHERE id = $1", [id]);
+        await execute('UPDATE email_accounts SET "isActive" = 0, "updatedAt" = $1 WHERE id = $2', [now(), id]);
         return true;
       }
       async assignEmailAccountToUser(id, userId) {
@@ -17916,8 +17919,7 @@ async function registerRoutes(app2) {
         } else {
           console.log(`[Auth] NOT overwriting org-level tokens: primary is ${primaryEmail}, this is ${email} (per-sender tokens stored above)`);
         }
-        const existingAccounts = await storage.getEmailAccounts(effectiveOrgId);
-        const existingAccount = existingAccounts.find((a) => a.email === email);
+        const existingAccount = await storage.getEmailAccountIncludingInactive ? await storage.getEmailAccountIncludingInactive(effectiveOrgId, email) : (await storage.getEmailAccounts(effectiveOrgId)).find((a) => a.email.toLowerCase() === email.toLowerCase());
         if (!existingAccount) {
           const currentUserId = stateUserId || req.session?.userId || req.cookies?.user_id || null;
           await storage.createEmailAccount({
@@ -17942,30 +17944,19 @@ async function registerRoutes(app2) {
           console.log(`[Auth] New Gmail sender added via OAuth: ${email}`);
         } else {
           const needsOAuthUpgrade = existingAccount.smtpConfig?.auth?.pass && existingAccount.smtpConfig.auth.pass !== "OAUTH_TOKEN";
-          if (needsOAuthUpgrade) {
-            await storage.updateEmailAccount(existingAccount.id, {
-              smtpConfig: {
-                ...existingAccount.smtpConfig,
-                auth: { user: email, pass: "OAUTH_TOKEN" },
-                provider: "gmail"
-              },
+          await storage.updateEmailAccount(existingAccount.id, {
+            ...needsOAuthUpgrade ? {
+              smtpConfig: { ...existingAccount.smtpConfig, auth: { user: email, pass: "OAUTH_TOKEN" }, provider: "gmail" },
               provider: "gmail",
-              displayName: name || existingAccount.displayName,
-              authStatus: null,
-              authFailureCount: 0,
-              authLastFailureAt: null,
-              authLastErrorCode: null
-            });
-            console.log(`[Auth] Upgraded Gmail sender ${email} from SMTP password to OAuth`);
-          } else {
-            await storage.updateEmailAccount(existingAccount.id, {
-              authStatus: null,
-              authFailureCount: 0,
-              authLastFailureAt: null,
-              authLastErrorCode: null
-            });
-            console.log(`[Auth] Gmail sender already exists: ${email}, tokens updated, auth health reset`);
-          }
+              displayName: name || existingAccount.displayName
+            } : {},
+            isActive: true,
+            authStatus: null,
+            authFailureCount: 0,
+            authLastFailureAt: null,
+            authLastErrorCode: null
+          });
+          console.log(`[Auth] Gmail sender ${existingAccount.isActive ? "reconnected" : "reactivated (was soft-deleted)"}: ${email} (id: ${existingAccount.id})`);
         }
         const connectingUserId = stateUserId || req.session?.userId || req.cookies?.user_id || null;
         if (connectingUserId) {
@@ -18066,8 +18057,7 @@ async function registerRoutes(app2) {
         await storage.setApiSetting(userOrgId, "gmail_user_email", email);
         console.log("[Auth] Stored Gmail tokens for reply tracking");
         try {
-          const existingAccounts = await storage.getEmailAccounts(userOrgId);
-          const alreadyExists = existingAccounts.find((a) => a.email === email);
+          const alreadyExists = storage.getEmailAccountIncludingInactive ? await storage.getEmailAccountIncludingInactive(userOrgId, email) : (await storage.getEmailAccounts(userOrgId)).find((a) => a.email.toLowerCase() === email.toLowerCase());
           if (!alreadyExists) {
             await storage.createEmailAccount({
               organizationId: userOrgId,
@@ -18091,19 +18081,14 @@ async function registerRoutes(app2) {
             console.log("[Auth] Auto-created Gmail sender account:", email);
           } else {
             const needsUpgrade = alreadyExists.smtpConfig?.auth?.pass && alreadyExists.smtpConfig.auth.pass !== "OAUTH_TOKEN";
-            if (needsUpgrade) {
-              await storage.updateEmailAccount(alreadyExists.id, {
-                smtpConfig: {
-                  ...alreadyExists.smtpConfig,
-                  auth: { user: email, pass: "OAUTH_TOKEN" },
-                  provider: "gmail"
-                },
+            await storage.updateEmailAccount(alreadyExists.id, {
+              ...needsUpgrade ? {
+                smtpConfig: { ...alreadyExists.smtpConfig, auth: { user: email, pass: "OAUTH_TOKEN" }, provider: "gmail" },
                 provider: "gmail"
-              });
-              console.log("[Auth] Upgraded Gmail sender from SMTP to OAuth:", email);
-            } else {
-              console.log("[Auth] Gmail sender account already exists:", email);
-            }
+              } : {},
+              isActive: true
+            });
+            console.log("[Auth] Gmail sender account reactivated/updated:", email);
           }
         } catch (accountError) {
           console.error("[Auth] Failed to auto-create Gmail sender account:", accountError);
@@ -18359,8 +18344,7 @@ async function registerRoutes(app2) {
           if (tokens.expires_in) await storage.setApiSetting(effectiveOrgId, "microsoft_token_expiry", String(Date.now() + tokens.expires_in * 1e3));
           if (!primaryMsEmail) await storage.setApiSetting(effectiveOrgId, "microsoft_user_email", email);
         }
-        const existingAccounts = await storage.getEmailAccounts(effectiveOrgId);
-        const existingAccount = existingAccounts.find((a) => a.email === email);
+        const existingAccount = await storage.getEmailAccountIncludingInactive ? await storage.getEmailAccountIncludingInactive(effectiveOrgId, email) : (await storage.getEmailAccounts(effectiveOrgId)).find((a) => a.email.toLowerCase() === email.toLowerCase());
         if (!existingAccount) {
           const currentUserId = stateUserId || req.session?.userId || req.cookies?.user_id || null;
           await storage.createEmailAccount({
@@ -18385,30 +18369,19 @@ async function registerRoutes(app2) {
           console.log(`[Auth] New Outlook sender added via OAuth: ${email}`);
         } else {
           const needsOAuthUpgrade = existingAccount.smtpConfig?.auth?.pass && existingAccount.smtpConfig.auth.pass !== "OAUTH_TOKEN";
-          if (needsOAuthUpgrade) {
-            await storage.updateEmailAccount(existingAccount.id, {
-              smtpConfig: {
-                ...existingAccount.smtpConfig,
-                auth: { user: email, pass: "OAUTH_TOKEN" },
-                provider: "outlook"
-              },
+          await storage.updateEmailAccount(existingAccount.id, {
+            ...needsOAuthUpgrade ? {
+              smtpConfig: { ...existingAccount.smtpConfig, auth: { user: email, pass: "OAUTH_TOKEN" }, provider: "outlook" },
               provider: "outlook",
-              displayName: name || existingAccount.displayName,
-              authStatus: null,
-              authFailureCount: 0,
-              authLastFailureAt: null,
-              authLastErrorCode: null
-            });
-            console.log(`[Auth] Upgraded Outlook sender ${email} from SMTP password to OAuth`);
-          } else {
-            await storage.updateEmailAccount(existingAccount.id, {
-              authStatus: null,
-              authFailureCount: 0,
-              authLastFailureAt: null,
-              authLastErrorCode: null
-            });
-            console.log(`[Auth] Outlook sender already exists: ${email}, tokens updated, auth health reset`);
-          }
+              displayName: name || existingAccount.displayName
+            } : {},
+            isActive: true,
+            authStatus: null,
+            authFailureCount: 0,
+            authLastFailureAt: null,
+            authLastErrorCode: null
+          });
+          console.log(`[Auth] Outlook sender ${existingAccount.isActive ? "reconnected" : "reactivated (was soft-deleted)"}: ${email} (id: ${existingAccount.id})`);
         }
         const connectingUserId = stateUserId || req.session?.userId || req.cookies?.user_id || null;
         if (connectingUserId) {
