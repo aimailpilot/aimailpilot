@@ -26,7 +26,9 @@ export interface StepReview {
     timing: number;
   };
   stepScore: number;        // average of above
-  suggestedSubject?: string; // only for stepNumber === 0
+  suggestedSubject?: string;      // only for stepNumber === 0
+  suggestedBody?: string;         // complete improved body HTML when bodyContent < 7
+  bodyChangesSummary?: string[];  // short bullets describing what changed (e.g. "CTA rewritten")
   issues: string[];
   suggestions: string[];
   actualStats?: {
@@ -378,6 +380,8 @@ SCORING RULES:
 - overallScore = weighted average of all step scores + campaign-level factors
 - overallGrade: 9-10=A, 7-8=B, 5-6=C, 3-4=D, 1-2=F
 - suggestedSubject: for stepNumber=0 ONLY — if the subject scores < 8, provide a concise improved alternative (under 55 chars). Otherwise omit.
+- suggestedBody: when bodyContent score < 7, provide a COMPLETE improved version of the email body as plain text (no HTML tags). Write the full rewritten body, not just the changed parts. Otherwise omit.
+- bodyChangesSummary: when suggestedBody is provided, include 2-4 short bullet strings describing what changed (e.g. "Opening rewritten for stronger hook", "CTA changed from 'let me know' to a specific ask", "Shortened to 3 paragraphs"). Otherwise omit.
 
 OBJECTIVE INFERENCE RULES:
 - Look at campaign name, subject lines, body CTA, and audience description
@@ -412,6 +416,8 @@ JSON schema (fill every field):
       "scores": { "subjectLine": 7, "bodyContent": 6, "cta": 5, "personalization": 8, "timing": 9 },
       "stepScore": 7,
       "suggestedSubject": "Shorter alternative subject under 55 chars",
+      "suggestedBody": "Complete rewritten body text here (only when bodyContent < 7)",
+      "bodyChangesSummary": ["Opening rewritten for stronger hook", "CTA changed to specific ask"],
       "issues": ["..."],
       "suggestions": ["..."]
     }
@@ -457,6 +463,8 @@ JSON schema:
       "subject": "...",
       "scores": { "subjectLine": 7, "bodyContent": 6, "cta": 5, "personalization": 8, "timing": 9 },
       "stepScore": 7,
+      "suggestedBody": "Complete rewritten body text (only when bodyContent < 7)",
+      "bodyChangesSummary": ["Opening rewritten", "CTA strengthened"],
       "issues": ["..."],
       "suggestions": ["..."],
       "actualStats": { "sent": 100, "openRate": 22, "clickRate": 2, "replyRate": 3, "bounceRate": 1 },
@@ -496,6 +504,8 @@ JSON schema:
       "subject": "...",
       "scores": { "subjectLine": 7, "bodyContent": 6, "cta": 5, "personalization": 8, "timing": 9 },
       "stepScore": 7,
+      "suggestedBody": "Complete rewritten body text (only when bodyContent < 7)",
+      "bodyChangesSummary": ["Opening rewritten", "CTA strengthened"],
       "issues": ["..."],
       "suggestions": ["..."],
       "actualStats": { "sent": 100, "openRate": 22, "clickRate": 2, "replyRate": 3, "bounceRate": 1 },

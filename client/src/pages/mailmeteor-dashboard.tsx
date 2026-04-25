@@ -374,21 +374,30 @@ export default function MailMeteorDashboard() {
 
   useEffect(() => { fetchReviewSummaries(); }, []);
 
-  const openBulkSelectDialog = async () => {
-    setShowBulkSelectDialog(true);
+  const openBulkSelectDialog = () => {
+    setBulkCandidates([]);
     setSelectedReviewIds(new Set());
     setLoadingCandidates(true);
-    try {
-      const res = await fetch('/api/campaigns/bulk-review/candidates', { credentials: 'include' });
-      if (res.ok) {
-        const data = await res.json();
-        setBulkCandidates(data);
-        // Pre-select all by default
-        setSelectedReviewIds(new Set(data.map((c: any) => c.id)));
-      }
-    } catch {}
-    finally { setLoadingCandidates(false); }
+    setShowBulkSelectDialog(true);
   };
+
+  // Fetch candidates whenever the bulk-select dialog opens
+  useEffect(() => {
+    if (!showBulkSelectDialog) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/campaigns/bulk-review/candidates', { credentials: 'include' });
+        if (!cancelled && res.ok) {
+          const data = await res.json();
+          setBulkCandidates(data);
+          setSelectedReviewIds(new Set(data.map((c: any) => c.id)));
+        }
+      } catch {}
+      finally { if (!cancelled) setLoadingCandidates(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [showBulkSelectDialog]);
 
   const handleBulkReview = async () => {
     if (selectedReviewIds.size === 0) return;

@@ -157,7 +157,10 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
   const [reviewError, setReviewError] = useState('');
   const [reviewMode, setReviewMode] = useState<'pre_launch' | 'live' | 'post_mortem'>('pre_launch');
   // Tracks fields changed by AI when "Apply to Campaign" is clicked
-  const [aiChanges, setAiChanges] = useState<{ subject?: { original: string; suggested: string } }>({});
+  const [aiChanges, setAiChanges] = useState<{
+    subject?: { original: string; suggested: string };
+    body?: Record<number, { original: string; suggested: string; changes: string[] }>;
+  }>({});
   const trackingPerPage = 15;
   const [emailsPage, setEmailsPage] = useState(1);
   const emailsPerPage = 25;
@@ -419,8 +422,9 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
       setUpdateFollowupSteps(newFollowupSteps);
     }
     setUpdateActiveStepIdx(newIdx);
-    // Load new step content into editor
-    const targetContent = newIdx === 0 ? newStep1Content : (newFollowupSteps[newIdx - 1]?.content || '');
+    // Load new step — prefer AI-suggested body if present for this step
+    const aiBody = aiChanges.body?.[newIdx]?.suggested;
+    const targetContent = aiBody || (newIdx === 0 ? newStep1Content : (newFollowupSteps[newIdx - 1]?.content || ''));
     requestAnimationFrame(() => {
       if (editorRef.current) editorRef.current.innerHTML = targetContent;
     });
@@ -1537,16 +1541,47 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
                   <button
                     onClick={async () => {
                       setShowReviewPanel(false);
-                      setAiChanges({});
+                      const newAiChanges: typeof aiChanges = {};
                       // openUpdateDialog loads all existing content first
                       await openUpdateDialog();
-                      // Then override subject if AI suggested a better one
+                      // Apply subject suggestion for step 0
                       const step0 = reviewData.steps?.find((s: any) => s.stepNumber === 0);
                       if (step0?.suggestedSubject) {
                         const original = detail?.campaign?.subject || '';
                         setUpdateSubject(step0.suggestedSubject);
-                        setAiChanges({ subject: { original, suggested: step0.suggestedSubject } });
+                        newAiChanges.subject = { original, suggested: step0.suggestedSubject };
                       }
+                      // Apply body suggestions for all steps that have suggestedBody
+                      const bodyChanges: Record<number, { original: string; suggested: string; changes: string[] }> = {};
+                      const steps: any[] = reviewData.steps || [];
+                      const seqs = detail?.followupSequences || [];
+                      // Map reviewData step index to campaign step content
+                      const stepContents: Record<number, string> = { 0: detail?.campaign?.content || '' };
+                      let fIdx = 0;
+                      for (const seq of seqs) {
+                        const sorted = [...(seq.steps || [])].sort((a: any, b: any) => (a.stepNumber ?? 0) - (b.stepNumber ?? 0));
+                        for (const s of sorted) {
+                          fIdx++;
+                          stepContents[fIdx] = s.content || '';
+                        }
+                      }
+                      for (const step of steps) {
+                        if (step.suggestedBody) {
+                          bodyChanges[step.stepNumber] = {
+                            original: stepContents[step.stepNumber] || '',
+                            suggested: step.suggestedBody,
+                            changes: step.bodyChangesSummary || [],
+                          };
+                        }
+                      }
+                      if (Object.keys(bodyChanges).length > 0) {
+                        newAiChanges.body = bodyChanges;
+                        // Load step 0 body into editor immediately
+                        if (bodyChanges[0] && editorRef.current) {
+                          editorRef.current.innerHTML = bodyChanges[0].suggested;
+                        }
+                      }
+                      setAiChanges(newAiChanges);
                     }}
                     className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg text-[12px] font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 transition-colors"
                   >
@@ -1936,7 +1971,7 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
                             <span className="text-gray-500 line-through truncate">{aiChanges.subject.original || '(none)'}</span>
                           </div>
                           <button
-                            onClick={() => { setUpdateSubject(aiChanges.subject!.original); setAiChanges({}); }}
+                            onClick={() => { setUpdateSubject(aiChanges.subject!.original); setAiChanges(prev => ({ ...prev, subject: undefined })); }}
                             className="text-gray-400 hover:text-gray-600 font-medium flex-shrink-0 hover:underline"
                           >
                             Undo
@@ -1958,40 +1993,83 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
                     )}
 
                     {/* Rich text editor */}
-                    <div className="border border-gray-200 rounded-xl overflow-hidden">
-                      <div className="flex items-center gap-0.5 px-2 py-1.5 bg-gray-50/80 border-b border-gray-200 flex-wrap">
-                        <ToolbarBtn icon={<Bold className="h-3.5 w-3.5" />} onClick={() => execCommand('bold')} title="Bold" />
-                        <ToolbarBtn icon={<Italic className="h-3.5 w-3.5" />} onClick={() => execCommand('italic')} title="Italic" />
-                        <ToolbarBtn icon={<Underline className="h-3.5 w-3.5" />} onClick={() => execCommand('underline')} title="Underline" />
-                        <ToolbarSep />
-                        <ToolbarBtn icon={<Link className="h-3.5 w-3.5" />} onClick={() => {
-                          const url = prompt('Enter URL:');
-                          if (url) execCommand('createLink', url);
-                        }} title="Insert link" />
-                        <ToolbarBtn icon={<Image className="h-3.5 w-3.5" />} onClick={() => {
-                          const url = prompt('Image URL:');
-                          if (url) execCommand('insertImage', url);
-                        }} title="Insert image" />
-                        <ToolbarBtn icon={<Code className="h-3.5 w-3.5" />} onClick={() => {
-                          const tag = prompt('Variable name (e.g. firstName, lastName, company):');
-                          if (tag) execCommand('insertText', `{{${tag}}}`);
-                        }} title="Merge tag {{}}" />
-                        <ToolbarSep />
-                        <ToolbarBtn icon={<List className="h-3.5 w-3.5" />} onClick={() => execCommand('insertUnorderedList')} title="Bullet list" />
-                        <ToolbarBtn icon={<ListOrdered className="h-3.5 w-3.5" />} onClick={() => execCommand('insertOrderedList')} title="Numbered list" />
-                        <ToolbarBtn icon={<AlignLeft className="h-3.5 w-3.5" />} onClick={() => execCommand('justifyLeft')} title="Align left" />
-                        <ToolbarSep />
-                        <ToolbarBtn icon={<FileText className="h-3.5 w-3.5" />} onClick={() => execCommand('removeFormat')} title="Clear formatting" />
-                      </div>
+                    {(() => {
+                      const currentAiBody = aiChanges.body?.[updateActiveStepIdx];
+                      return (
+                        <div className={`rounded-xl overflow-hidden transition-all ${currentAiBody ? 'border-2 border-purple-400' : 'border border-gray-200'}`}>
+                          {/* Toolbar row */}
+                          <div className="flex items-center gap-0.5 px-2 py-1.5 bg-gray-50/80 border-b border-gray-200 flex-wrap">
+                            <ToolbarBtn icon={<Bold className="h-3.5 w-3.5" />} onClick={() => execCommand('bold')} title="Bold" />
+                            <ToolbarBtn icon={<Italic className="h-3.5 w-3.5" />} onClick={() => execCommand('italic')} title="Italic" />
+                            <ToolbarBtn icon={<Underline className="h-3.5 w-3.5" />} onClick={() => execCommand('underline')} title="Underline" />
+                            <ToolbarSep />
+                            <ToolbarBtn icon={<Link className="h-3.5 w-3.5" />} onClick={() => {
+                              const url = prompt('Enter URL:');
+                              if (url) execCommand('createLink', url);
+                            }} title="Insert link" />
+                            <ToolbarBtn icon={<Image className="h-3.5 w-3.5" />} onClick={() => {
+                              const url = prompt('Image URL:');
+                              if (url) execCommand('insertImage', url);
+                            }} title="Insert image" />
+                            <ToolbarBtn icon={<Code className="h-3.5 w-3.5" />} onClick={() => {
+                              const tag = prompt('Variable name (e.g. firstName, lastName, company):');
+                              if (tag) execCommand('insertText', `{{${tag}}}`);
+                            }} title="Merge tag {{}}" />
+                            <ToolbarSep />
+                            <ToolbarBtn icon={<List className="h-3.5 w-3.5" />} onClick={() => execCommand('insertUnorderedList')} title="Bullet list" />
+                            <ToolbarBtn icon={<ListOrdered className="h-3.5 w-3.5" />} onClick={() => execCommand('insertOrderedList')} title="Numbered list" />
+                            <ToolbarBtn icon={<AlignLeft className="h-3.5 w-3.5" />} onClick={() => execCommand('justifyLeft')} title="Align left" />
+                            <ToolbarSep />
+                            <ToolbarBtn icon={<FileText className="h-3.5 w-3.5" />} onClick={() => execCommand('removeFormat')} title="Clear formatting" />
+                            {/* AI body badge + undo */}
+                            {currentAiBody && (
+                              <div className="ml-auto flex items-center gap-2 pl-2">
+                                <span className="text-[10px] font-bold text-purple-600 bg-purple-100 px-2 py-0.5 rounded-full flex items-center gap-1">
+                                  <Sparkles className="h-2.5 w-2.5" /> AI Rewritten
+                                </span>
+                                <button
+                                  onClick={() => {
+                                    if (editorRef.current) editorRef.current.innerHTML = currentAiBody.original;
+                                    setAiChanges(prev => {
+                                      const next = { ...prev };
+                                      if (next.body) {
+                                        const b = { ...next.body };
+                                        delete b[updateActiveStepIdx];
+                                        next.body = Object.keys(b).length > 0 ? b : undefined;
+                                      }
+                                      return next;
+                                    });
+                                  }}
+                                  className="text-[10px] text-gray-400 hover:text-gray-600 font-medium hover:underline"
+                                >
+                                  Undo
+                                </button>
+                              </div>
+                            )}
+                          </div>
 
-                      <div
-                        ref={editorRef}
-                        contentEditable
-                        className="min-h-[280px] max-h-[400px] overflow-y-auto px-4 py-3 text-sm text-gray-800 focus:outline-none leading-relaxed [&_a]:text-blue-600 [&_a]:underline [&_img]:max-w-full [&_img]:rounded-lg [&_ul]:list-disc [&_ul]:pl-6 [&_ul]:my-1 [&_ol]:list-decimal [&_ol]:pl-6 [&_ol]:my-1 [&_li]:my-0.5"
-                        style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' }}
-                        suppressContentEditableWarning
-                      />
-                    </div>
+                          {/* AI changes summary bar */}
+                          {currentAiBody && currentAiBody.changes.length > 0 && (
+                            <div className="px-3 py-2 bg-purple-50 border-b border-purple-100 flex flex-wrap gap-x-3 gap-y-1">
+                              {currentAiBody.changes.map((change, i) => (
+                                <span key={i} className="text-[10px] text-purple-700 flex items-center gap-1">
+                                  <Sparkles className="h-2.5 w-2.5 text-purple-400 flex-shrink-0" />
+                                  {change}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+
+                          <div
+                            ref={editorRef}
+                            contentEditable
+                            className={`min-h-[280px] max-h-[400px] overflow-y-auto px-4 py-3 text-sm text-gray-800 focus:outline-none leading-relaxed [&_a]:text-blue-600 [&_a]:underline [&_img]:max-w-full [&_img]:rounded-lg [&_ul]:list-disc [&_ul]:pl-6 [&_ul]:my-1 [&_ol]:list-decimal [&_ol]:pl-6 [&_ol]:my-1 [&_li]:my-0.5 ${currentAiBody ? 'bg-purple-50/20' : ''}`}
+                            style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' }}
+                            suppressContentEditableWarning
+                          />
+                        </div>
+                      );
+                    })()}
 
                     {/* AI suggestions panel for current step */}
                     {reviewData && (() => {
