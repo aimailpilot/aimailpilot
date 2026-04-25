@@ -15,6 +15,7 @@ import {
   AlertTriangle, Building2, Shield, Flame, Loader2, Trophy, Brain, BookOpen
 } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useQuery } from "@tanstack/react-query";
@@ -355,7 +356,14 @@ export default function MailMeteorDashboard() {
   // AI Review summaries for the campaign list column
   const [reviewSummaries, setReviewSummaries] = useState<Record<string, { grade: string; score: number; mode: string; degradation: boolean }>>({});
   const [bulkReviewing, setBulkReviewing] = useState(false);
-  const [bulkReviewCount, setBulkReviewCount] = useState<number | null>(null);
+  const [bulkReviewQueued, setBulkReviewQueued] = useState<number | null>(null);
+  const [bulkReviewDone, setBulkReviewDone] = useState(0);
+
+  // Selection dialog state
+  const [showBulkSelectDialog, setShowBulkSelectDialog] = useState(false);
+  const [bulkCandidates, setBulkCandidates] = useState<Array<{ id: string; name: string; status: string; sentCount: number; openedCount: number; repliedCount: number }>>([]);
+  const [selectedReviewIds, setSelectedReviewIds] = useState<Set<string>>(new Set());
+  const [loadingCandidates, setLoadingCandidates] = useState(false);
 
   const fetchReviewSummaries = async () => {
     try {
@@ -366,20 +374,58 @@ export default function MailMeteorDashboard() {
 
   useEffect(() => { fetchReviewSummaries(); }, []);
 
-  const handleBulkReview = async () => {
-    setBulkReviewing(true);
-    setBulkReviewCount(null);
+  const openBulkSelectDialog = async () => {
+    setShowBulkSelectDialog(true);
+    setSelectedReviewIds(new Set());
+    setLoadingCandidates(true);
     try {
-      const res = await fetch('/api/campaigns/bulk-review', { method: 'POST', credentials: 'include' });
+      const res = await fetch('/api/campaigns/bulk-review/candidates', { credentials: 'include' });
       if (res.ok) {
-        const { queued } = await res.json();
-        setBulkReviewCount(queued);
-        // Refresh summaries after a delay to pick up completed reviews
-        setTimeout(fetchReviewSummaries, 30000);
-        setTimeout(fetchReviewSummaries, 90000);
+        const data = await res.json();
+        setBulkCandidates(data);
+        // Pre-select all by default
+        setSelectedReviewIds(new Set(data.map((c: any) => c.id)));
       }
     } catch {}
-    finally { setBulkReviewing(false); }
+    finally { setLoadingCandidates(false); }
+  };
+
+  const handleBulkReview = async () => {
+    if (selectedReviewIds.size === 0) return;
+    setShowBulkSelectDialog(false);
+    setBulkReviewing(true);
+    setBulkReviewQueued(null);
+    setBulkReviewDone(0);
+    try {
+      const res = await fetch('/api/campaigns/bulk-review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ campaignIds: Array.from(selectedReviewIds) }),
+      });
+      if (res.ok) {
+        const { queued } = await res.json();
+        setBulkReviewQueued(queued);
+        // Poll summaries every 30s to show grades as they complete
+        const poll = setInterval(() => {
+          fetchReviewSummaries();
+          setBulkReviewDone(prev => {
+            const next = prev + 1;
+            if (next >= queued) { clearInterval(poll); setBulkReviewing(false); }
+            return next;
+          });
+        }, 30000);
+      }
+    } catch { setBulkReviewing(false); }
+  };
+
+  const handleCancelBulkReview = async () => {
+    try {
+      await fetch('/api/campaigns/bulk-review/cancel', { method: 'POST', credentials: 'include' });
+    } catch {}
+    setBulkReviewing(false);
+    setBulkReviewQueued(null);
+    setBulkReviewDone(0);
   };
 
   // Fetch inbox unread count for sidebar badge
@@ -941,19 +987,41 @@ export default function MailMeteorDashboard() {
                   ))}
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0">
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <button
-                        onClick={handleBulkReview}
-                        disabled={bulkReviewing}
-                        className="inline-flex items-center gap-1.5 h-8 sm:h-9 px-3 rounded-lg text-xs font-semibold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 transition-colors disabled:opacity-60"
-                      >
-                        {bulkReviewing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-                        <span className="hidden sm:inline">{bulkReviewing ? 'Reviewing…' : bulkReviewCount !== null ? `Queued ${bulkReviewCount}` : 'Review All'}</span>
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent>AI review all active, paused & completed campaigns</TooltipContent>
-                  </Tooltip>
+                  {bulkReviewing ? (
+                    <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1.5 h-8 sm:h-9 px-3 rounded-lg text-xs font-semibold text-purple-700 bg-purple-50 border border-purple-200">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        <span className="hidden sm:inline">
+                          {bulkReviewQueued !== null ? `${bulkReviewDone}/${bulkReviewQueued} reviewed` : 'Starting…'}
+                        </span>
+                      </div>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            onClick={handleCancelBulkReview}
+                            className="inline-flex items-center gap-1 h-8 sm:h-9 px-2.5 rounded-lg text-xs font-semibold text-red-600 bg-red-50 hover:bg-red-100 border border-red-200 transition-colors"
+                          >
+                            <XCircle className="h-3.5 w-3.5" />
+                            <span className="hidden sm:inline">Stop</span>
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>Stop the bulk review queue</TooltipContent>
+                      </Tooltip>
+                    </div>
+                  ) : (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          onClick={openBulkSelectDialog}
+                          className="inline-flex items-center gap-1.5 h-8 sm:h-9 px-3 rounded-lg text-xs font-semibold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 transition-colors"
+                        >
+                          <Sparkles className="h-3.5 w-3.5" />
+                          <span className="hidden sm:inline">Review All</span>
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent>Select campaigns to AI review</TooltipContent>
+                    </Tooltip>
+                  )}
                   <Button size="sm" className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 shadow-sm h-8 sm:h-9 text-xs sm:text-sm gap-1 sm:gap-1.5" onClick={() => setViewMode('campaign')}>
                     <Plus className="h-3 sm:h-3.5 w-3 sm:w-3.5" /> <span className="hidden sm:inline">New Campaign</span><span className="sm:hidden">New</span>
                   </Button>
@@ -1398,6 +1466,103 @@ export default function MailMeteorDashboard() {
          </Suspense>
         </main>
       </div>
+
+      {/* ===== BULK REVIEW SELECTION DIALOG ===== */}
+      <Dialog open={showBulkSelectDialog} onOpenChange={setShowBulkSelectDialog}>
+        <DialogContent className="sm:max-w-[560px] max-h-[80vh] flex flex-col p-0 gap-0 rounded-2xl overflow-hidden">
+          <DialogHeader className="px-6 pt-5 pb-4 border-b border-gray-100 shrink-0">
+            <div className="flex items-center gap-2">
+              <Sparkles className="h-4 w-4 text-purple-500" />
+              <DialogTitle className="text-base font-bold text-gray-900">Select Campaigns to Review</DialogTitle>
+            </div>
+            <DialogDescription className="text-xs text-gray-400 mt-0.5">
+              Each review uses ~1 Claude API call. Select only the campaigns you need.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex-1 overflow-y-auto">
+            {loadingCandidates ? (
+              <div className="flex items-center justify-center py-12">
+                <Loader2 className="h-5 w-5 animate-spin text-purple-400 mr-2" />
+                <span className="text-sm text-gray-400">Loading campaigns…</span>
+              </div>
+            ) : bulkCandidates.length === 0 ? (
+              <div className="text-center py-12 text-sm text-gray-400">No eligible campaigns found (need at least 1 send)</div>
+            ) : (
+              <>
+                {/* Select all / none */}
+                <div className="flex items-center justify-between px-6 py-2.5 bg-gray-50 border-b border-gray-100">
+                  <span className="text-[11px] text-gray-500 font-medium">{selectedReviewIds.size} of {bulkCandidates.length} selected</span>
+                  <div className="flex items-center gap-3">
+                    <button onClick={() => setSelectedReviewIds(new Set(bulkCandidates.map(c => c.id)))} className="text-[11px] text-blue-600 hover:underline font-medium">Select all</button>
+                    <button onClick={() => setSelectedReviewIds(new Set())} className="text-[11px] text-gray-400 hover:underline font-medium">Clear</button>
+                  </div>
+                </div>
+
+                {/* Campaign list */}
+                <div className="divide-y divide-gray-50">
+                  {bulkCandidates.map(c => {
+                    const checked = selectedReviewIds.has(c.id);
+                    const existing = reviewSummaries[c.id];
+                    const openRate = c.sentCount > 0 ? Math.round((c.openedCount / c.sentCount) * 100) : 0;
+                    return (
+                      <label key={c.id} className={`flex items-center gap-3 px-6 py-3 cursor-pointer transition-colors ${checked ? 'bg-purple-50/40' : 'hover:bg-gray-50'}`}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => setSelectedReviewIds(prev => {
+                            const next = new Set(prev);
+                            checked ? next.delete(c.id) : next.add(c.id);
+                            return next;
+                          })}
+                          className="h-4 w-4 rounded border-gray-300 text-purple-600 accent-purple-600 flex-shrink-0"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-medium text-gray-900 truncate">{c.name}</span>
+                            <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full flex-shrink-0 ${
+                              c.status === 'active' || c.status === 'following_up' ? 'bg-green-50 text-green-700' :
+                              c.status === 'paused' ? 'bg-amber-50 text-amber-700' :
+                              'bg-gray-100 text-gray-500'
+                            }`}>{c.status === 'following_up' ? 'Active' : c.status}</span>
+                          </div>
+                          <div className="text-[10px] text-gray-400 mt-0.5">{c.sentCount.toLocaleString()} sent · {openRate}% open</div>
+                        </div>
+                        {/* Existing grade badge */}
+                        {existing ? (
+                          <span className={`text-[11px] font-black px-1.5 py-0.5 rounded-md flex-shrink-0 ${
+                            existing.grade === 'A' ? 'bg-emerald-50 text-emerald-700' :
+                            existing.grade === 'B' ? 'bg-blue-50 text-blue-700' :
+                            existing.grade === 'C' ? 'bg-amber-50 text-amber-700' :
+                            'bg-red-50 text-red-700'
+                          }`}>{existing.grade}</span>
+                        ) : (
+                          <span className="text-[10px] text-gray-300 flex-shrink-0">Not reviewed</span>
+                        )}
+                      </label>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+
+          <DialogFooter className="px-6 py-4 border-t border-gray-100 shrink-0 flex items-center justify-between">
+            <span className="text-xs text-gray-400">~{selectedReviewIds.size} API call{selectedReviewIds.size !== 1 ? 's' : ''}</span>
+            <div className="flex gap-2">
+              <Button variant="outline" size="sm" onClick={() => setShowBulkSelectDialog(false)}>Cancel</Button>
+              <Button
+                size="sm"
+                disabled={selectedReviewIds.size === 0}
+                onClick={handleBulkReview}
+                className="bg-purple-600 hover:bg-purple-700 text-white gap-1.5"
+              >
+                <Sparkles className="h-3.5 w-3.5" /> Review {selectedReviewIds.size} campaign{selectedReviewIds.size !== 1 ? 's' : ''}
+              </Button>
+            </div>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

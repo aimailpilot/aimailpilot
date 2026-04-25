@@ -13098,23 +13098,68 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   });
 
   // Bulk review: queue reviews for all active/paused/completed campaigns (fire-and-forget)
-  app.post('/api/campaigns/bulk-review', requireAuth, async (req: any, res) => {
+  // In-memory cancellation flags — org IDs that have requested cancel
+  const bulkReviewCancelled = new Set<string>();
+
+  // Cancel a running bulk review
+  app.post('/api/campaigns/bulk-review/cancel', requireAuth, async (req: any, res) => {
+    bulkReviewCancelled.add(req.user.organizationId);
+    res.json({ success: true });
+  });
+
+  // List candidates eligible for bulk review (for selection dialog)
+  app.get('/api/campaigns/bulk-review/candidates', requireAuth, async (req: any, res) => {
     try {
-      const campaigns = await storage.rawAll(
-        `SELECT id, status FROM campaigns WHERE "organizationId" = $1 AND status IN ('active','following_up','paused','completed') AND "sentCount" > 0`,
+      const candidates = await storage.rawAll(
+        `SELECT id, name, status, "sentCount", "openedCount", "repliedCount"
+         FROM campaigns
+         WHERE "organizationId" = $1
+           AND status IN ('active','following_up','paused','completed')
+           AND "sentCount" > 0
+         ORDER BY "updatedAt" DESC`,
         req.user.organizationId
       ) as any[];
+      res.json(candidates);
+    } catch (error: any) {
+      res.status(500).json({ message: 'Failed to fetch candidates.' });
+    }
+  });
+
+  app.post('/api/campaigns/bulk-review', requireAuth, async (req: any, res) => {
+    try {
+      // Accept optional list of specific campaign IDs; if omitted fall back to all eligible
+      const { campaignIds } = req.body as { campaignIds?: string[] };
+      let campaigns: any[];
+      if (campaignIds && campaignIds.length > 0) {
+        const placeholders = campaignIds.map((_: any, i: number) => `$${i + 2}`).join(',');
+        campaigns = await storage.rawAll(
+          `SELECT id, status FROM campaigns WHERE "organizationId" = $1 AND id IN (${placeholders}) AND "sentCount" > 0`,
+          req.user.organizationId, ...campaignIds
+        ) as any[];
+      } else {
+        campaigns = await storage.rawAll(
+          `SELECT id, status FROM campaigns WHERE "organizationId" = $1 AND status IN ('active','following_up','paused','completed') AND "sentCount" > 0`,
+          req.user.organizationId
+        ) as any[];
+      }
       if (campaigns.length === 0) return res.json({ queued: 0 });
       res.json({ queued: campaigns.length });
+      const orgId = req.user.organizationId;
+      bulkReviewCancelled.delete(orgId); // clear any stale cancel flag
       // Fire-and-forget — don't block the response
       setImmediate(async () => {
         const { runCampaignReviewAgent, saveCachedReview } = await import('./services/campaign-review-agent.js');
         for (const c of campaigns) {
+          if (bulkReviewCancelled.has(orgId)) {
+            bulkReviewCancelled.delete(orgId);
+            console.log(`[BulkReview] Cancelled for org ${orgId}`);
+            break;
+          }
           try {
             const mode = c.status === 'completed' ? 'post_mortem' : 'live';
-            const review = await runCampaignReviewAgent(req.user.organizationId, c.id, mode);
-            await saveCachedReview(req.user.organizationId, c.id, review);
-          } catch { /* skip failed campaigns */ }
+            const review = await runCampaignReviewAgent(orgId, c.id, mode);
+            await saveCachedReview(orgId, c.id, review);
+          } catch { /* skip failed campaign */ }
         }
       });
     } catch (error: any) {
