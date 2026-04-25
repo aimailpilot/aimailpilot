@@ -270,6 +270,47 @@ const TOOLS = [
   },
 ];
 
+// ─── JSON Extraction Helper ───────────────────────────────────────────────────
+
+function extractPlan(text: string): CampaignPlan | null {
+  if (!text.includes('{')) return null;
+
+  // Try markdown fence first (greedy inner match via lastIndexOf)
+  const fenceIdx = text.indexOf('```');
+  if (fenceIdx !== -1) {
+    const afterFence = text.indexOf('{', fenceIdx);
+    const closeFence = text.lastIndexOf('```');
+    if (afterFence !== -1 && closeFence > afterFence) {
+      const candidate = text.slice(afterFence, text.lastIndexOf('}', closeFence) + 1);
+      const parsed = tryParse(candidate);
+      if (parsed) return parsed;
+    }
+  }
+
+  // Fallback: outermost { ... } by position
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start !== -1 && end > start) {
+    const parsed = tryParse(text.slice(start, end + 1));
+    if (parsed) return parsed;
+  }
+
+  return null;
+}
+
+function tryParse(jsonStr: string): CampaignPlan | null {
+  try {
+    const plan = JSON.parse(jsonStr) as CampaignPlan;
+    if (!plan || typeof plan !== 'object') return null;
+    if (!plan.content?.subject) return null;
+    if (!plan.target) return null;
+    if (!Array.isArray(plan.target.contactIds)) plan.target.contactIds = [];
+    return plan;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Main Agent Function ───────────────────────────────────────────────────────
 
 export async function runCampaignPlannerAgent(
@@ -310,57 +351,46 @@ JSON schema (fill every field):
     { role: 'user', content: userBrief }
   ];
 
-  // Agentic tool-use loop (max 6 iterations)
-  for (let iteration = 0; iteration < 6; iteration++) {
+  let toolCallsMade = 0;
+
+  // Agentic tool-use loop (max 8 iterations)
+  for (let iteration = 0; iteration < 8; iteration++) {
     const response = await callClaude(apiKey, messages, TOOLS, systemPrompt);
+    console.log(`[CampaignPlannerAgent] iteration=${iteration} stop_reason=${response.stop_reason} content_types=${(response.content||[]).map((b:any)=>b.type).join(',')}`);
 
-    // Collect tool calls from this response
-    const toolUses = response.content?.filter((b: any) => b.type === 'tool_use') || [];
-    const textBlocks = response.content?.filter((b: any) => b.type === 'text') || [];
+    const toolUses = (response.content || []).filter((b: any) => b.type === 'tool_use');
+    const textBlocks = (response.content || []).filter((b: any) => b.type === 'text');
 
-    // If no tool calls and we have text — agent is done
+    // Claude finished calling tools — try to extract JSON from text
     if (toolUses.length === 0) {
       const text = textBlocks.map((b: any) => b.text).join('').trim();
+      console.log(`[CampaignPlannerAgent] Final text (first 300 chars): ${text.slice(0, 300)}`);
 
-      // Extract JSON — handle both raw JSON and markdown code fence wrapping
-      let jsonStr: string | null = null;
-      const fenceMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
-      if (fenceMatch) {
-        jsonStr = fenceMatch[1];
-      } else {
-        // Find outermost { } — greedy from first { to last }
-        const start = text.indexOf('{');
-        const end = text.lastIndexOf('}');
-        if (start !== -1 && end > start) {
-          jsonStr = text.slice(start, end + 1);
-        }
+      // If no JSON yet but tools were called, force one more turn asking for JSON only
+      if (!text.includes('{') && toolCallsMade > 0) {
+        messages.push({ role: 'assistant', content: response.content });
+        messages.push({
+          role: 'user',
+          content: 'You have gathered all necessary data. Now output ONLY the JSON plan object. Start your response with { and end with }. Do not include any other text.',
+        });
+        continue;
       }
 
-      if (!jsonStr) {
-        console.error('[CampaignPlannerAgent] No JSON found in response:', text.slice(0, 500));
-        throw new Error('Agent did not return a valid plan. Try rephrasing your brief.');
-      }
-      try {
-        const plan = JSON.parse(jsonStr) as CampaignPlan;
-        if (!plan.content?.subject || !plan.target) {
-          throw new Error('Plan is missing required fields (subject or target).');
-        }
-        // Ensure contactIds is always an array
-        if (!Array.isArray(plan.target.contactIds)) plan.target.contactIds = [];
-        return plan;
-      } catch (e) {
-        console.error('[CampaignPlannerAgent] JSON parse error:', (e as Error).message, jsonStr.slice(0, 200));
-        throw new Error(`Failed to parse agent plan: ${(e as Error).message}`);
-      }
+      const plan = extractPlan(text);
+      if (plan) return plan;
+
+      console.error('[CampaignPlannerAgent] Could not extract JSON from:', text.slice(0, 600));
+      throw new Error('Agent did not return a valid plan. Please try again with a more specific brief.');
     }
 
     // Add assistant turn with tool_use blocks
     messages.push({ role: 'assistant', content: response.content });
 
-    // Execute each tool and collect results
+    // Execute each tool
     const toolResults: ToolResult[] = [];
     for (const toolUse of toolUses) {
       let result = '';
+      console.log(`[CampaignPlannerAgent] Calling tool: ${toolUse.name}`, JSON.stringify(toolUse.input || {}).slice(0, 200));
       try {
         if (toolUse.name === 'search_contacts') {
           result = await toolSearchContacts(organizationId, toolUse.input || {});
@@ -373,8 +403,11 @@ JSON schema (fill every field):
         }
       } catch (err) {
         result = JSON.stringify({ error: (err as Error).message });
+        console.error(`[CampaignPlannerAgent] Tool ${toolUse.name} threw:`, (err as Error).message);
       }
+      console.log(`[CampaignPlannerAgent] Tool ${toolUse.name} result (first 200): ${result.slice(0, 200)}`);
       toolResults.push({ tool_use_id: toolUse.id, content: result });
+      toolCallsMade++;
     }
 
     // Add tool results as user turn
@@ -386,10 +419,7 @@ JSON schema (fill every field):
         content: r.content,
       })),
     });
-
-    // If stop_reason is end_turn with no tool use, we're done
-    if (response.stop_reason === 'end_turn' && toolUses.length === 0) break;
   }
 
-  throw new Error('Agent did not complete within the expected number of steps. Try a more specific brief.');
+  throw new Error('Agent did not complete within the expected steps. Try a more specific brief.');
 }
