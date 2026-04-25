@@ -744,7 +744,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
               // Create email account in other org if it doesn't exist
               const otherAccounts = await storage.getEmailAccounts(otherOrgId);
-              const existsInOtherOrg = otherAccounts.find((a: any) => a.email === email);
+              const existsInOtherOrg = otherAccounts.find((a: any) => a.email.toLowerCase() === email.toLowerCase());
               if (!existsInOtherOrg) {
                 await storage.createEmailAccount({
                   organizationId: otherOrgId,
@@ -1268,7 +1268,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
               // Create email account in other org if it doesn't exist
               const otherAccounts = await storage.getEmailAccounts(otherOrgId);
-              const existsInOtherOrg = otherAccounts.find((a: any) => a.email === email);
+              const existsInOtherOrg = otherAccounts.find((a: any) => a.email.toLowerCase() === email.toLowerCase());
               if (!existsInOtherOrg) {
                 await storage.createEmailAccount({
                   organizationId: otherOrgId,
@@ -1366,7 +1366,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         // Auto-create Outlook email account for sending campaigns
         try {
           const existingAccounts = await storage.getEmailAccounts(userOrgId);
-          const alreadyExists = existingAccounts.find((a: any) => a.email === email);
+          const alreadyExists = existingAccounts.find((a: any) => a.email.toLowerCase() === email.toLowerCase());
           if (!alreadyExists) {
             await storage.createEmailAccount({
               organizationId: userOrgId,

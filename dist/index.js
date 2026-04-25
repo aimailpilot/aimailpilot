@@ -1063,10 +1063,10 @@ var init_pg_storage = __esm({
         return hydrateAccount(await queryOne("SELECT * FROM email_accounts WHERE id = $1", [id]));
       }
       async getEmailAccountByEmail(organizationId, email) {
-        return hydrateAccount(await queryOne('SELECT * FROM email_accounts WHERE "organizationId" = $1 AND email = $2', [organizationId, email]));
+        return hydrateAccount(await queryOne('SELECT * FROM email_accounts WHERE "organizationId" = $1 AND LOWER(email) = LOWER($2)', [organizationId, email]));
       }
       async findEmailAccountByEmail(email) {
-        return hydrateAccount(await queryOne("SELECT * FROM email_accounts WHERE email = $1 LIMIT 1", [email]));
+        return hydrateAccount(await queryOne("SELECT * FROM email_accounts WHERE LOWER(email) = LOWER($1) LIMIT 1", [email]));
       }
       async createEmailAccount(account) {
         const id = genId();
@@ -17969,7 +17969,7 @@ async function registerRoutes(app2) {
               if (tokens.refresh_token) await storage.setApiSetting(otherOrgId, `gmail_sender_${email}_refresh_token`, tokens.refresh_token);
               await storage.setApiSetting(otherOrgId, `gmail_sender_${email}_token_expiry`, String(expiryToStore));
               const otherAccounts = await storage.getEmailAccounts(otherOrgId);
-              const existsInOtherOrg = otherAccounts.find((a) => a.email === email);
+              const existsInOtherOrg = otherAccounts.find((a) => a.email.toLowerCase() === email.toLowerCase());
               if (!existsInOtherOrg) {
                 await storage.createEmailAccount({
                   organizationId: otherOrgId,
@@ -18394,7 +18394,7 @@ async function registerRoutes(app2) {
               if (tokens.refresh_token) await storage.setApiSetting(otherOrgId, `outlook_sender_${email}_refresh_token`, tokens.refresh_token);
               if (tokens.expires_in) await storage.setApiSetting(otherOrgId, `outlook_sender_${email}_token_expiry`, String(Date.now() + tokens.expires_in * 1e3));
               const otherAccounts = await storage.getEmailAccounts(otherOrgId);
-              const existsInOtherOrg = otherAccounts.find((a) => a.email === email);
+              const existsInOtherOrg = otherAccounts.find((a) => a.email.toLowerCase() === email.toLowerCase());
               if (!existsInOtherOrg) {
                 await storage.createEmailAccount({
                   organizationId: otherOrgId,
@@ -18480,7 +18480,7 @@ async function registerRoutes(app2) {
         console.log("[Auth] Stored Microsoft tokens for mail integration");
         try {
           const existingAccounts = await storage.getEmailAccounts(userOrgId);
-          const alreadyExists = existingAccounts.find((a) => a.email === email);
+          const alreadyExists = existingAccounts.find((a) => a.email.toLowerCase() === email.toLowerCase());
           if (!alreadyExists) {
             await storage.createEmailAccount({
               organizationId: userOrgId,

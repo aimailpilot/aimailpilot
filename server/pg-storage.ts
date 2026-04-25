@@ -1037,11 +1037,11 @@ export class PostgresStorage {
   async getEmailAccount(id: string) { return hydrateAccount(await queryOne('SELECT * FROM email_accounts WHERE id = $1', [id])); }
 
   async getEmailAccountByEmail(organizationId: string, email: string) {
-    return hydrateAccount(await queryOne('SELECT * FROM email_accounts WHERE "organizationId" = $1 AND email = $2', [organizationId, email]));
+    return hydrateAccount(await queryOne('SELECT * FROM email_accounts WHERE "organizationId" = $1 AND LOWER(email) = LOWER($2)', [organizationId, email]));
   }
 
   async findEmailAccountByEmail(email: string) {
-    return hydrateAccount(await queryOne('SELECT * FROM email_accounts WHERE email = $1 LIMIT 1', [email]));
+    return hydrateAccount(await queryOne('SELECT * FROM email_accounts WHERE LOWER(email) = LOWER($1) LIMIT 1', [email]));
   }
 
   async createEmailAccount(account: any) {
