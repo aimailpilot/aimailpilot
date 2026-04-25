@@ -180,6 +180,13 @@ export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }
   const [aiResult, setAiResult] = useState<{ content: string; model: string; provider: string; textContent?: string; htmlContent?: string; format?: string } | null>(null);
   const [aiError, setAiError] = useState('');
 
+  // AI Campaign Planner
+  const [showPlanner, setShowPlanner] = useState(false);
+  const [plannerBrief, setPlannerBrief] = useState('');
+  const [plannerLoading, setPlannerLoading] = useState(false);
+  const [plannerError, setPlannerError] = useState('');
+  const [campaignPlan, setCampaignPlan] = useState<any>(null);
+
   // Editor ref
   const editorRef = useRef<HTMLDivElement>(null);
   const moreMenuRef = useRef<HTMLDivElement>(null);
@@ -823,6 +830,11 @@ export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }
             )}
           </div>
           <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm"
+              onClick={() => { setShowPlanner(true); setPlannerError(''); setCampaignPlan(null); }}
+              className="text-purple-600 border-purple-200 hover:bg-purple-50">
+              <Sparkles className="h-3.5 w-3.5 mr-1.5" /> Plan with AI
+            </Button>
             <Button variant="outline" size="sm" className="text-blue-600 border-blue-200 hover:bg-blue-50"
               onClick={handleShowPreview}>
               <Eye className="h-3.5 w-3.5 mr-1.5" /> Show preview
@@ -1784,6 +1796,226 @@ export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }
                 <div className="flex items-center justify-center flex-1 text-gray-400">No preview data available</div>
               )}
             </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ==================== AI CAMPAIGN PLANNER DIALOG ==================== */}
+      <Dialog open={showPlanner} onOpenChange={setShowPlanner}>
+        <DialogContent className="max-w-2xl p-0 overflow-hidden max-h-[90vh] flex flex-col">
+          <DialogHeader className="px-6 pt-5 pb-4 border-b border-gray-100 flex-shrink-0">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center">
+                <Sparkles className="h-5 w-5 text-white" />
+              </div>
+              <div>
+                <DialogTitle className="text-base font-bold text-gray-900">Campaign Planner Agent</DialogTitle>
+                <p className="text-xs text-gray-400 mt-0.5">Powered by Claude — describes your goal, the agent builds the plan</p>
+              </div>
+            </div>
+          </DialogHeader>
+
+          <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+            {/* Brief input */}
+            {!campaignPlan && (
+              <div className="space-y-3">
+                <div>
+                  <label className="text-xs font-semibold text-gray-700 mb-1.5 block">Describe your campaign</label>
+                  <textarea
+                    value={plannerBrief}
+                    onChange={e => setPlannerBrief(e.target.value)}
+                    rows={4}
+                    placeholder="e.g. Send a campaign to AI leaders about our 2026 nominations. Target CTOs and AI Directors. Keep it professional and concise."
+                    className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-purple-400 focus:border-transparent placeholder:text-gray-300"
+                  />
+                  <p className="text-[11px] text-gray-400 mt-1.5">The agent will find matching contacts, check your sending quota, and draft subject + body + follow-ups.</p>
+                </div>
+
+                {plannerError && (
+                  <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700 flex items-start gap-2">
+                    <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+                    <span>{plannerError}</span>
+                  </div>
+                )}
+
+                <div className="flex gap-2 pt-1">
+                  <Button
+                    onClick={async () => {
+                      if (!plannerBrief.trim() || plannerBrief.trim().length < 10) {
+                        setPlannerError('Please describe your campaign in at least 10 characters.');
+                        return;
+                      }
+                      setPlannerLoading(true);
+                      setPlannerError('');
+                      try {
+                        const res = await fetch('/api/agent/plan-campaign', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          credentials: 'include',
+                          body: JSON.stringify({ brief: plannerBrief }),
+                        });
+                        const data = await res.json();
+                        if (!res.ok) throw new Error(data.message || 'Failed to generate plan');
+                        setCampaignPlan(data);
+                      } catch (err: any) {
+                        setPlannerError(err.message || 'Something went wrong. Try again.');
+                      } finally {
+                        setPlannerLoading(false);
+                      }
+                    }}
+                    disabled={plannerLoading || plannerBrief.trim().length < 10}
+                    className="bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white"
+                  >
+                    {plannerLoading
+                      ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Agent thinking...</>
+                      : <><Sparkles className="h-4 w-4 mr-2" /> Generate Plan</>}
+                  </Button>
+                  <Button variant="outline" onClick={() => setShowPlanner(false)}>Cancel</Button>
+                </div>
+              </div>
+            )}
+
+            {/* Plan review */}
+            {campaignPlan && (
+              <div className="space-y-4">
+                {/* Campaign name */}
+                <div className="bg-purple-50 border border-purple-100 rounded-xl p-4">
+                  <p className="text-[10px] font-semibold text-purple-500 uppercase tracking-wider mb-1">Campaign Name</p>
+                  <p className="text-sm font-bold text-gray-900">{campaignPlan.campaignName}</p>
+                  {campaignPlan.reasoning && (
+                    <p className="text-xs text-gray-500 mt-1.5">{campaignPlan.reasoning}</p>
+                  )}
+                </div>
+
+                {/* Target audience */}
+                <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-2">
+                  <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Target Audience</p>
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <span className="flex items-center gap-1.5 text-sm font-semibold text-gray-900">
+                      <Users className="h-4 w-4 text-blue-500" />
+                      {campaignPlan.target?.contactCount?.toLocaleString()} contacts
+                    </span>
+                    {campaignPlan.target?.suppressedCount > 0 && (
+                      <span className="text-xs text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full">
+                        {campaignPlan.target.suppressedCount} suppressed
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-gray-500">{campaignPlan.target?.description}</p>
+                  {campaignPlan.target?.sampleContacts?.length > 0 && (
+                    <div className="mt-2 space-y-1">
+                      <p className="text-[10px] text-gray-400 font-medium">Sample contacts:</p>
+                      {campaignPlan.target.sampleContacts.slice(0, 3).map((c: any, i: number) => (
+                        <div key={i} className="text-xs text-gray-600 flex items-center gap-2">
+                          <div className="w-5 h-5 rounded-full bg-gray-100 flex items-center justify-center text-[10px] font-bold text-gray-500">
+                            {c.name?.[0]?.toUpperCase() || '?'}
+                          </div>
+                          <span>{c.name}</span>
+                          {c.jobTitle && <span className="text-gray-400">· {c.jobTitle}</span>}
+                          {c.company && <span className="text-gray-400">· {c.company}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Sender + quota */}
+                {campaignPlan.sender?.email && (
+                  <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-2">
+                    <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Sender Account</p>
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-semibold text-gray-900">{campaignPlan.sender.name}</p>
+                        <p className="text-xs text-gray-400">{campaignPlan.sender.email}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-xs text-gray-500">
+                          <span className="font-semibold text-green-600">{campaignPlan.sender.dailyRemaining}</span> / {campaignPlan.sender.dailyLimit} remaining today
+                        </p>
+                        {campaignPlan.estimatedDays > 0 && (
+                          <p className="text-[11px] text-gray-400 mt-0.5">~{campaignPlan.estimatedDays} day{campaignPlan.estimatedDays > 1 ? 's' : ''} to complete</p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Content preview */}
+                <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-2">
+                  <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Email Content</p>
+                  <div className="bg-gray-50 rounded-lg p-3">
+                    <p className="text-[10px] text-gray-400 font-medium mb-1">Subject:</p>
+                    <p className="text-sm font-semibold text-gray-900">{campaignPlan.content?.subject}</p>
+                  </div>
+                  {campaignPlan.content?.followups?.length > 0 && (
+                    <p className="text-xs text-gray-500">
+                      + {campaignPlan.content.followups.length} follow-up{campaignPlan.content.followups.length > 1 ? 's' : ''} planned
+                      ({campaignPlan.content.followups.map((f: any) => `${f.delayValue}d`).join(', ')} delays)
+                    </p>
+                  )}
+                </div>
+
+                {/* Risks */}
+                {campaignPlan.risks?.length > 0 && (
+                  <div className="bg-amber-50 border border-amber-100 rounded-xl p-4 space-y-1.5">
+                    <p className="text-[10px] font-semibold text-amber-600 uppercase tracking-wider">Risk Flags</p>
+                    {campaignPlan.risks.map((r: string, i: number) => (
+                      <div key={i} className="flex items-start gap-2 text-xs text-amber-700">
+                        <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+                        <span>{r}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Actions */}
+                <div className="flex gap-2 pt-1">
+                  <Button
+                    onClick={() => {
+                      const plan = campaignPlan;
+                      // Populate campaign name
+                      if (plan.campaignName) setCampaignName(plan.campaignName);
+                      // Populate sender
+                      if (plan.sender?.emailAccountId) setEmailAccountId(plan.sender.emailAccountId);
+                      // Populate contacts
+                      if (plan.target?.contactIds?.length > 0) setSelectedContacts(plan.target.contactIds);
+                      // Populate steps
+                      if (plan.content?.subject || plan.content?.body) {
+                        const newSteps: SequenceStep[] = [
+                          {
+                            id: 'step-1',
+                            subject: plan.content.subject || '',
+                            content: plan.content.body || '',
+                            condition: 'immediate',
+                            delayValue: 0,
+                            delayUnit: 'days',
+                          },
+                          ...(plan.content.followups || []).map((fu: any, idx: number) => ({
+                            id: `step-${idx + 2}`,
+                            subject: fu.subject || '',
+                            content: fu.body || '',
+                            condition: fu.condition || 'if_no_reply',
+                            delayValue: fu.delayValue || 3,
+                            delayUnit: fu.delayUnit || 'days',
+                          })),
+                        ];
+                        setSteps(newSteps);
+                        setActiveStepIndex(0);
+                      }
+                      setShowPlanner(false);
+                    }}
+                    className="bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white flex-1"
+                  >
+                    <Rocket className="h-4 w-4 mr-2" /> Use This Plan
+                  </Button>
+                  <Button variant="outline"
+                    onClick={() => { setCampaignPlan(null); setPlannerBrief(''); }}>
+                    Start Over
+                  </Button>
+                  <Button variant="outline" onClick={() => setShowPlanner(false)}>Close</Button>
+                </div>
+              </div>
+            )}
           </div>
         </DialogContent>
       </Dialog>

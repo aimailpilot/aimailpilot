@@ -13054,6 +13054,51 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     }
   });
 
+  // ========== CAMPAIGN PLANNER AGENT ==========
+
+  app.post('/api/agent/plan-campaign', requireAuth, async (req: any, res) => {
+    try {
+      const { brief } = req.body;
+      if (!brief || typeof brief !== 'string' || brief.trim().length < 10) {
+        return res.status(400).json({ message: 'Please provide a campaign brief (at least 10 characters).' });
+      }
+      const { runCampaignPlannerAgent } = await import('./services/campaign-planner-agent.js');
+      const plan = await runCampaignPlannerAgent(req.user.organizationId, brief.trim());
+      res.json(plan);
+    } catch (error: any) {
+      console.error('[CampaignPlannerAgent] Error:', error.message);
+      res.status(500).json({ message: error.message || 'Failed to generate campaign plan.' });
+    }
+  });
+
+  // Save Claude API key in api_settings
+  app.post('/api/agent/settings', requireAuth, async (req: any, res) => {
+    try {
+      const { role } = req.user;
+      if (role !== 'owner' && role !== 'admin') {
+        return res.status(403).json({ message: 'Admin access required.' });
+      }
+      const { claudeApiKey } = req.body;
+      if (!claudeApiKey || typeof claudeApiKey !== 'string') {
+        return res.status(400).json({ message: 'claudeApiKey is required.' });
+      }
+      await storage.setApiSetting(req.user.organizationId, 'claude_api_key', claudeApiKey);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ message: 'Failed to save agent settings.' });
+    }
+  });
+
+  app.get('/api/agent/settings', requireAuth, async (req: any, res) => {
+    try {
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      const hasKey = !!(settings?.claude_api_key);
+      res.json({ hasClaudeKey: hasKey });
+    } catch (error: any) {
+      res.status(500).json({ message: 'Failed to fetch agent settings.' });
+    }
+  });
+
   // ========== LEAD INTELLIGENCE ==========
 
   // Helper: get member's own account IDs (for filtering)

@@ -17,7 +17,7 @@
 | `server/auth/google-oauth.ts` | Google OAuth — token exchange, refresh, user info |
 | `server/auth/microsoft-oauth.ts` | Microsoft OAuth (MSAL) — token exchange, refresh |
 | `server/routes/oauth-routes.ts` | Gmail/Outlook connect, Google Sheets/Excel/CSV import routes |
-| `server/services/campaign-engine.ts` | Email sending, scheduling, throttling, per-account limits |
+| `server/services/campaign-engine.ts` | Email sending, scheduling, throttling, per-account limits. `checkSendingWindow` + `msUntilNextSendWindow` support overnight cross-midnight windows (e.g. 17:00–07:00) via OR logic when `startTime > endTime`. |
 | `server/services/followup-engine.ts` | Auto follow-ups, Gmail/Outlook threading, bounce skip. Has `addTrackingPixel()`, `addClickTracking()`, `getBaseUrl()` helpers for Steps 2/3/4 open+click tracking |
 | `server/services/warmup-engine.ts` | Self-warmup between org accounts, engagement actions |
 | `server/services/gmail-reply-tracker.ts` | Gmail inbox sync — reply/bounce/open detection. Has warmup filter (`ownEmailsSet` from email_accounts+warmup_accounts), 404 silent skip (returns null), 90-day message cutoff via `getAllRecentCampaignMessages` |
@@ -109,7 +109,7 @@
 | Bug area | Check these files FIRST |
 |----------|------------------------|
 | Login / session lost | `server/routes.ts` (`requireAuth` ~line 130), `server/auth/google-oauth.ts` |
-| Campaign not sending | `server/services/campaign-engine.ts`, `server/routes.ts` (`campaigns/send`) |
+| Campaign not sending / blocked by window | `server/services/campaign-engine.ts`, `server/routes.ts` (`campaigns/send`). For overnight windows (17:00–07:00), check `isOvernightWindow` logic in `checkSendingWindow` — log says `"BLOCKED — overnight gap"` when in gap, `"OK — within overnight window"` when allowed. |
 | Campaign stranded after restart | `campaign-engine.ts` `resumeActiveCampaigns()` — check `autoPaused` flag in DB; run `scripts/diag-active-campaigns.ts`. Boot has 2s stagger between campaigns to prevent OOM. For daily-limit-paused campaigns: `resumeDailyLimitPausedCampaigns()` polls every 15 min and fires immediately after midnight reset. For overdue-scheduled campaigns: 15s boot block fires them automatically. CONFIRMED WORKING 2026-04-24. |
 | Campaign stuck in following_up | `followup-engine.ts checkFollowupCompletion()` — step0Count query MUST filter `AND status='sent'` (bounced excluded). If done >= expected and pending=0, campaign completes on next 30s cycle. Check if follow-up delay hasn't elapsed yet before assuming stuck (e.g. Cloud 32-Nomination had 2d delay, only 1d elapsed). |
 | Server OOM crash on boot | `campaign-engine.ts` — check if a campaign has orphaned contactIds (0 contacts). Abort path added. Also check Azure `NODE_OPTIONS=--max-old-space-size=4096` is set. |
