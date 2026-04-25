@@ -62,7 +62,15 @@ async function getClaudeApiKey(organizationId: string): Promise<string | null> {
   return (settings?.claude_api_key || superSettings?.claude_api_key || process.env.CLAUDE_API_KEY) as string | null;
 }
 
-async function callClaude(apiKey: string, messages: any[], tools: any[]): Promise<any> {
+async function callClaude(apiKey: string, messages: any[], tools: any[], system?: string): Promise<any> {
+  const body: any = {
+    model: 'claude-sonnet-4-6',
+    max_tokens: 4096,
+    tools,
+    messages,
+  };
+  if (system) body.system = system;
+
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -70,12 +78,7 @@ async function callClaude(apiKey: string, messages: any[], tools: any[]): Promis
       'x-api-key': apiKey,
       'anthropic-version': '2023-06-01',
     },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 4096,
-      tools,
-      messages,
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!response.ok) {
@@ -123,16 +126,19 @@ async function toolSearchContacts(
   let filtered = contacts;
   if (args.leadBucket && contacts.length > 0) {
     const emails = contacts.map((c: any) => c.email?.toLowerCase()).filter(Boolean);
-    try {
-      const opps = await storage.rawAll(
-        `SELECT LOWER("contactEmail") as ce FROM lead_opportunities
-         WHERE "organizationId" = ? AND bucket = ? AND LOWER("contactEmail") = ANY(?)`,
-        organizationId, args.leadBucket, emails
-      ) as any[];
-      const matchSet = new Set(opps.map((o: any) => o.ce));
-      filtered = contacts.filter((c: any) => matchSet.has(c.email?.toLowerCase()));
-    } catch {
-      // lead_opportunities may not exist yet — skip filter
+    if (emails.length > 0) {
+      try {
+        const placeholders = emails.map(() => '?').join(',');
+        const opps = await storage.rawAll(
+          `SELECT LOWER("contactEmail") as ce FROM lead_opportunities
+           WHERE "organizationId" = ? AND bucket = ? AND LOWER("contactEmail") IN (${placeholders})`,
+          organizationId, args.leadBucket, ...emails
+        ) as any[];
+        const matchSet = new Set(opps.map((o: any) => o.ce));
+        filtered = contacts.filter((c: any) => matchSet.has(c.email?.toLowerCase()));
+      } catch {
+        // lead_opportunities may not exist yet — skip filter
+      }
     }
   }
 
@@ -140,12 +146,15 @@ async function toolSearchContacts(
   let suppressedCount = 0;
   if (filtered.length > 0) {
     try {
-      const emails = filtered.map((c: any) => c.email?.toLowerCase()).filter(Boolean);
-      const suppressed = await storage.rawAll(
-        `SELECT email FROM suppression_list WHERE "organizationId" = ? AND LOWER(email) = ANY(?)`,
-        organizationId, emails
-      ) as any[];
-      suppressedCount = suppressed.length;
+      const emails = filtered.slice(0, 100).map((c: any) => c.email?.toLowerCase()).filter(Boolean);
+      if (emails.length > 0) {
+        const placeholders = emails.map(() => '?').join(',');
+        const suppressed = await storage.rawAll(
+          `SELECT email FROM suppression_list WHERE "organizationId" = ? AND LOWER(email) IN (${placeholders})`,
+          organizationId, ...emails
+        ) as any[];
+        suppressedCount = suppressed.length;
+      }
     } catch { /* suppression_list may not exist */ }
   }
 
@@ -274,58 +283,28 @@ export async function runCampaignPlannerAgent(
 
   const systemPrompt = `You are a campaign planning assistant for AImailPilot, a B2B email outreach platform.
 
-Your job: turn a user's campaign brief into a complete, ready-to-launch campaign plan.
+Your job: turn a user's campaign brief into a complete campaign plan using the available tools.
 
-ALWAYS follow this sequence:
-1. Call get_org_context to understand the organization
-2. Call search_contacts with appropriate filters to find the target audience
-3. Call check_sender_quota to find the best sender account
-4. Generate the campaign plan with email content and follow-ups
+MANDATORY sequence — do NOT skip any step:
+1. Call get_org_context first to understand the organization name and knowledge base
+2. Call search_contacts to find the target audience (use jobTitle filter based on the brief)
+3. Call check_sender_quota to find the best available sender account
+4. Output the final plan as a JSON object
 
-RULES for the plan:
-- Campaign name: concise, specific (e.g. "AI Leaders — Nominations 2026")
-- Subject lines: specific, under 60 chars, no spam words (FREE, URGENT, !!!)
-- Email body: professional HTML, 3-4 short paragraphs, personalization variables like {{firstName}}, {{company}}, {{jobTitle}}
-- Always include 2-3 follow-up steps with if_no_reply condition and 3-5 day delays
-- risks: list 1-3 actual risks (quota, suppression, bounces) — be specific with numbers
-- estimatedDays: totalContacts / dailyRemaining (rounded up)
-- reasoning: 2-3 sentences explaining your targeting and content choices
+CONTENT RULES:
+- campaignName: concise and specific (e.g. "AGBA Nominations 2026 — AI Leaders")
+- subject: under 60 chars, no spam words
+- body: professional HTML with {{firstName}}, {{company}} variables, 3-4 short paragraphs
+- followups: always include exactly 2 follow-up steps, delayValue 3-5, delayUnit "days", condition "if_no_reply"
+- risks: 2-3 specific risk strings (mention actual numbers from tool results)
+- estimatedDays: Math.ceil(contactCount / dailyRemaining) — compute this
+- reasoning: 2 sentences on why you chose these contacts and this content angle
 
-Return the final plan as a JSON object in this exact format — no markdown, no explanation, just JSON:
-{
-  "campaignName": "...",
-  "target": {
-    "description": "...",
-    "contactIds": [...],
-    "contactCount": N,
-    "sampleContacts": [...],
-    "suppressedCount": N
-  },
-  "sender": {
-    "emailAccountId": "...",
-    "email": "...",
-    "name": "...",
-    "dailyLimit": N,
-    "dailySent": N,
-    "dailyRemaining": N
-  },
-  "content": {
-    "subject": "...",
-    "body": "<p>...</p>",
-    "followups": [
-      {
-        "subject": "...",
-        "body": "<p>...</p>",
-        "delayValue": 3,
-        "delayUnit": "days",
-        "condition": "if_no_reply"
-      }
-    ]
-  },
-  "risks": ["..."],
-  "estimatedDays": N,
-  "reasoning": "..."
-}`;
+CRITICAL OUTPUT RULE:
+After calling all three tools, output ONLY a raw JSON object — no markdown fences, no explanation text before or after, no \`\`\`json wrapper. Start your response with { and end with }.
+
+JSON schema (fill every field):
+{"campaignName":"...","target":{"description":"...","contactIds":[...],"contactCount":0,"sampleContacts":[{"name":"...","email":"...","company":"...","jobTitle":"..."}],"suppressedCount":0},"sender":{"emailAccountId":"...","email":"...","name":"...","dailyLimit":0,"dailySent":0,"dailyRemaining":0},"content":{"subject":"...","body":"<p>...</p>","followups":[{"subject":"...","body":"<p>...</p>","delayValue":3,"delayUnit":"days","condition":"if_no_reply"}]},"risks":["..."],"estimatedDays":1,"reasoning":"..."}`;
 
   const messages: any[] = [
     { role: 'user', content: userBrief }
@@ -333,7 +312,7 @@ Return the final plan as a JSON object in this exact format — no markdown, no 
 
   // Agentic tool-use loop (max 6 iterations)
   for (let iteration = 0; iteration < 6; iteration++) {
-    const response = await callClaude(apiKey, messages, TOOLS);
+    const response = await callClaude(apiKey, messages, TOOLS, systemPrompt);
 
     // Collect tool calls from this response
     const toolUses = response.content?.filter((b: any) => b.type === 'tool_use') || [];
@@ -342,16 +321,35 @@ Return the final plan as a JSON object in this exact format — no markdown, no 
     // If no tool calls and we have text — agent is done
     if (toolUses.length === 0) {
       const text = textBlocks.map((b: any) => b.text).join('').trim();
-      // Extract JSON from the response
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) throw new Error('Agent did not return a valid plan. Try rephrasing your brief.');
-      try {
-        const plan = JSON.parse(jsonMatch[0]) as CampaignPlan;
-        if (!plan.content?.subject || !plan.target?.contactIds) {
-          throw new Error('Plan is missing required fields.');
+
+      // Extract JSON — handle both raw JSON and markdown code fence wrapping
+      let jsonStr: string | null = null;
+      const fenceMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+      if (fenceMatch) {
+        jsonStr = fenceMatch[1];
+      } else {
+        // Find outermost { } — greedy from first { to last }
+        const start = text.indexOf('{');
+        const end = text.lastIndexOf('}');
+        if (start !== -1 && end > start) {
+          jsonStr = text.slice(start, end + 1);
         }
+      }
+
+      if (!jsonStr) {
+        console.error('[CampaignPlannerAgent] No JSON found in response:', text.slice(0, 500));
+        throw new Error('Agent did not return a valid plan. Try rephrasing your brief.');
+      }
+      try {
+        const plan = JSON.parse(jsonStr) as CampaignPlan;
+        if (!plan.content?.subject || !plan.target) {
+          throw new Error('Plan is missing required fields (subject or target).');
+        }
+        // Ensure contactIds is always an array
+        if (!Array.isArray(plan.target.contactIds)) plan.target.contactIds = [];
         return plan;
       } catch (e) {
+        console.error('[CampaignPlannerAgent] JSON parse error:', (e as Error).message, jsonStr.slice(0, 200));
         throw new Error(`Failed to parse agent plan: ${(e as Error).message}`);
       }
     }
