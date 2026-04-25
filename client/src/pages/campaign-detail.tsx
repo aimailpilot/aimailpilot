@@ -156,6 +156,8 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
   const [reviewLoading, setReviewLoading] = useState(false);
   const [reviewError, setReviewError] = useState('');
   const [reviewMode, setReviewMode] = useState<'pre_launch' | 'live' | 'post_mortem'>('pre_launch');
+  // Tracks fields changed by AI when "Apply to Campaign" is clicked
+  const [aiChanges, setAiChanges] = useState<{ subject?: { original: string; suggested: string } }>({});
   const trackingPerPage = 15;
   const [emailsPage, setEmailsPage] = useState(1);
   const emailsPerPage = 25;
@@ -1533,12 +1535,18 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
                 </button>
                 {reviewData && !reviewLoading && (
                   <button
-                    onClick={() => {
-                      // Pre-fill subject if AI suggested one for Step 0
-                      const step0 = reviewData.steps?.find((s: any) => s.stepNumber === 0);
-                      if (step0?.suggestedSubject) setUpdateSubject(step0.suggestedSubject);
+                    onClick={async () => {
                       setShowReviewPanel(false);
-                      setShowUpdateDialog(true);
+                      setAiChanges({});
+                      // openUpdateDialog loads all existing content first
+                      await openUpdateDialog();
+                      // Then override subject if AI suggested a better one
+                      const step0 = reviewData.steps?.find((s: any) => s.stepNumber === 0);
+                      if (step0?.suggestedSubject) {
+                        const original = detail?.campaign?.subject || '';
+                        setUpdateSubject(step0.suggestedSubject);
+                        setAiChanges({ subject: { original, suggested: step0.suggestedSubject } });
+                      }
                     }}
                     className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg text-[12px] font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 transition-colors"
                   >
@@ -1778,7 +1786,7 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
       </Dialog>
 
       {/* ===================== UPDATE CAMPAIGN DIALOG ===================== */}
-      <Dialog open={showUpdateDialog} onOpenChange={(open) => { setShowUpdateDialog(open); if (!open) { setUpdateDialogMode('edit'); setTestSent(false); setTestError(''); } }}>
+      <Dialog open={showUpdateDialog} onOpenChange={(open) => { setShowUpdateDialog(open); if (!open) { setUpdateDialogMode('edit'); setTestSent(false); setTestError(''); setAiChanges({}); } }}>
         <DialogContent className="sm:max-w-[900px] max-h-[92vh] overflow-hidden p-0 gap-0 rounded-2xl flex flex-col">
           {updateDialogMode === 'edit' ? (
             <>
@@ -1899,14 +1907,42 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
 
                     {/* Subject — changes per step */}
                     {updateActiveStepIdx === 0 && (
-                    <div className="flex items-center gap-3 mb-3">
-                      <label className="text-sm text-gray-500 w-16 flex-shrink-0 font-medium">Subject</label>
-                      <input
-                        value={updateSubject}
-                        onChange={(e) => setUpdateSubject(e.target.value)}
-                        className="flex-1 h-9 px-3 text-sm border border-gray-200 rounded-lg bg-white focus:border-blue-400 focus:ring-2 focus:ring-blue-50 outline-none"
-                        placeholder="Email subject line"
-                      />
+                    <div className="mb-3">
+                      <div className="flex items-center gap-3">
+                        <label className="text-sm text-gray-500 w-16 flex-shrink-0 font-medium">Subject</label>
+                        <div className="flex-1 relative">
+                          <input
+                            value={updateSubject}
+                            onChange={(e) => { setUpdateSubject(e.target.value); if (aiChanges.subject) setAiChanges(prev => ({ ...prev, subject: { ...prev.subject!, suggested: e.target.value } })); }}
+                            className={`w-full h-9 px-3 text-sm rounded-lg outline-none transition-all ${
+                              aiChanges.subject
+                                ? 'border-2 border-purple-400 bg-purple-50 focus:ring-2 focus:ring-purple-100'
+                                : 'border border-gray-200 bg-white focus:border-blue-400 focus:ring-2 focus:ring-blue-50'
+                            }`}
+                            placeholder="Email subject line"
+                          />
+                          {aiChanges.subject && (
+                            <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] font-bold text-purple-600 bg-purple-100 px-1.5 py-0.5 rounded-full flex items-center gap-1">
+                              <Sparkles className="h-2.5 w-2.5" /> AI
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      {/* Show original vs AI suggestion with undo */}
+                      {aiChanges.subject && (
+                        <div className="ml-[76px] mt-1.5 flex items-start gap-2 text-[11px]">
+                          <div className="flex-1 min-w-0">
+                            <span className="text-gray-400">Original: </span>
+                            <span className="text-gray-500 line-through truncate">{aiChanges.subject.original || '(none)'}</span>
+                          </div>
+                          <button
+                            onClick={() => { setUpdateSubject(aiChanges.subject!.original); setAiChanges({}); }}
+                            className="text-gray-400 hover:text-gray-600 font-medium flex-shrink-0 hover:underline"
+                          >
+                            Undo
+                          </button>
+                        </div>
+                      )}
                     </div>
                     )}
                     {updateActiveStepIdx > 0 && updateFollowupSteps[updateActiveStepIdx - 1] && (
@@ -1956,6 +1992,40 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
                         suppressContentEditableWarning
                       />
                     </div>
+
+                    {/* AI suggestions panel for current step */}
+                    {reviewData && (() => {
+                      const stepNum = updateActiveStepIdx; // 0 = step1, 1 = followup1, etc.
+                      const stepReview = reviewData.steps?.find((s: any) => s.stepNumber === stepNum);
+                      if (!stepReview) return null;
+                      const hasIssues = stepReview.issues?.length > 0;
+                      const hasSuggestions = stepReview.suggestions?.length > 0;
+                      if (!hasIssues && !hasSuggestions) return null;
+                      return (
+                        <div className="mt-3 border border-purple-100 rounded-xl overflow-hidden">
+                          <div className="flex items-center gap-2 px-3 py-2 bg-purple-50 border-b border-purple-100">
+                            <Sparkles className="h-3.5 w-3.5 text-purple-500 flex-shrink-0" />
+                            <span className="text-[11px] font-semibold text-purple-700">
+                              AI Review — Step {stepNum + 1} · Score {stepReview.stepScore}/10
+                            </span>
+                          </div>
+                          <div className="px-3 py-2.5 space-y-1.5 bg-white">
+                            {stepReview.issues?.map((issue: string, i: number) => (
+                              <div key={i} className="flex items-start gap-2 text-[11px] text-red-700">
+                                <XCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5 text-red-400" />
+                                <span>{issue}</span>
+                              </div>
+                            ))}
+                            {stepReview.suggestions?.map((sug: string, i: number) => (
+                              <div key={i} className="flex items-start gap-2 text-[11px] text-blue-700">
+                                <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0 mt-0.5 text-blue-400" />
+                                <span>{sug}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })()}
 
                     {updateError && (
                       <p className="text-sm text-red-600 mt-3 flex items-center gap-1.5 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
