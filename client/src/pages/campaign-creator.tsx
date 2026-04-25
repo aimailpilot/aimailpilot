@@ -107,6 +107,11 @@ export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }
     return () => document.removeEventListener('mousedown', close);
   }, [showVarsDropdown]);
 
+  // AI Review (for existing draft campaigns)
+  const [reviewData, setReviewData] = useState<any>(null);
+  const [reviewLoading, setReviewLoading] = useState(false);
+  const [showReviewPanel, setShowReviewPanel] = useState(false);
+
   // Dialogs
   const [showRecipients, setShowRecipients] = useState(false);
   const [showAutopilot, setShowAutopilot] = useState(false);
@@ -830,6 +835,36 @@ export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }
             )}
           </div>
           <div className="flex items-center gap-2">
+            {/* AI Analyse — only for existing draft campaigns (not new) */}
+            {initialCampaignId && (
+              <Button variant="outline" size="sm"
+                disabled={reviewLoading}
+                onClick={async () => {
+                  if (reviewData) { setShowReviewPanel(true); return; }
+                  setReviewLoading(true);
+                  try {
+                    // Try cached first
+                    const cached = await fetch(`/api/campaigns/${initialCampaignId}/review/latest`, { credentials: 'include' });
+                    if (cached.ok) {
+                      const data = await cached.json();
+                      if (data?.overallScore) { setReviewData(data); setShowReviewPanel(true); setReviewLoading(false); return; }
+                    }
+                    // No cache — run fresh pre_launch review
+                    const res = await fetch(`/api/campaigns/${initialCampaignId}/review`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      credentials: 'include',
+                      body: JSON.stringify({ mode: 'pre_launch' }),
+                    });
+                    if (res.ok) { setReviewData(await res.json()); setShowReviewPanel(true); }
+                  } catch {}
+                  setReviewLoading(false);
+                }}
+                className="text-purple-600 border-purple-200 hover:bg-purple-50">
+                {reviewLoading ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5 mr-1.5" />}
+                {reviewLoading ? 'Analysing…' : reviewData ? 'AI Review' : 'AI Analyse'}
+              </Button>
+            )}
             <Button variant="outline" size="sm"
               onClick={() => { setShowPlanner(true); setPlannerError(''); setCampaignPlan(null); }}
               className="text-purple-600 border-purple-200 hover:bg-purple-50">
@@ -2434,6 +2469,102 @@ export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* ===== AI REVIEW PANEL (draft campaign) ===== */}
+      {reviewData && (
+        <Dialog open={showReviewPanel} onOpenChange={setShowReviewPanel}>
+          <DialogContent className="sm:max-w-[680px] max-h-[85vh] overflow-hidden p-0 gap-0 rounded-2xl flex flex-col">
+            <DialogHeader className="px-6 pt-5 pb-3 shrink-0 border-b border-gray-100">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-4.5 w-4.5 text-purple-500" />
+                <DialogTitle className="text-base font-bold text-gray-900">Campaign Intelligence Review</DialogTitle>
+                <span className="text-[10px] text-gray-400 ml-1">Pre-launch · {new Date(reviewData.generatedAt).toLocaleString()}</span>
+              </div>
+              <DialogDescription className="sr-only">AI review of this draft campaign</DialogDescription>
+            </DialogHeader>
+
+            <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
+              {/* Grade + objective */}
+              <div className="flex items-center gap-4 p-4 bg-gray-50 rounded-xl">
+                <span className={`text-4xl font-black ${reviewData.overallGrade === 'A' ? 'text-emerald-600' : reviewData.overallGrade === 'B' ? 'text-blue-600' : reviewData.overallGrade === 'C' ? 'text-amber-600' : 'text-red-600'}`}>
+                  {reviewData.overallGrade}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-semibold text-gray-900">{reviewData.overallScore}/10 — {reviewData.objective?.text}</div>
+                  <div className="text-xs text-gray-400 mt-0.5">{reviewData.objective?.likelihood} likelihood · {reviewData.objective?.defined ? 'Defined' : 'Inferred'}</div>
+                </div>
+                {reviewData.predictions && (
+                  <div className="text-right text-xs text-gray-500 flex-shrink-0">
+                    <div>Opens: <span className="font-semibold text-gray-700">{reviewData.predictions.openRate}</span></div>
+                    <div>Replies: <span className="font-semibold text-gray-700">{reviewData.predictions.replyRate}</span></div>
+                    <div className="text-[10px] text-gray-400">{reviewData.predictions.confidence} confidence</div>
+                  </div>
+                )}
+              </div>
+
+              {/* Per-step scores */}
+              {(reviewData.steps || []).map((step: any) => (
+                <div key={step.stepNumber} className="border border-gray-100 rounded-xl overflow-hidden">
+                  <div className="flex items-center gap-2 px-4 py-2.5 bg-gray-50 border-b border-gray-100">
+                    <span className="text-xs font-bold text-gray-700">Step {step.stepNumber + 1}</span>
+                    {step.subject && <span className="text-xs text-gray-400 truncate flex-1">"{step.subject}"</span>}
+                    <span className={`text-xs font-bold ml-auto flex-shrink-0 ${step.stepScore >= 8 ? 'text-emerald-600' : step.stepScore >= 6 ? 'text-amber-600' : 'text-red-600'}`}>{step.stepScore}/10</span>
+                  </div>
+                  <div className="px-4 py-3 space-y-1">
+                    {step.issues?.map((issue: string, i: number) => (
+                      <div key={i} className="flex items-start gap-2 text-[11px] text-red-700">
+                        <span className="text-red-400 mt-0.5 flex-shrink-0">✕</span>{issue}
+                      </div>
+                    ))}
+                    {step.suggestions?.map((sug: string, i: number) => (
+                      <div key={i} className="flex items-start gap-2 text-[11px] text-blue-700">
+                        <span className="text-blue-400 mt-0.5 flex-shrink-0">→</span>{sug}
+                      </div>
+                    ))}
+                    {step.suggestedSubject && (
+                      <div className="mt-2 px-2 py-1.5 bg-purple-50 rounded-lg text-[11px] text-purple-700">
+                        <span className="font-semibold">Suggested subject:</span> {step.suggestedSubject}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+
+              {/* Recommendations */}
+              {reviewData.recommendations?.length > 0 && (
+                <div className="border border-purple-100 rounded-xl overflow-hidden">
+                  <div className="px-4 py-2.5 bg-purple-50 border-b border-purple-100 text-xs font-bold text-purple-700">Recommendations</div>
+                  <div className="px-4 py-3 space-y-1.5">
+                    {reviewData.recommendations.map((r: string, i: number) => (
+                      <div key={i} className="flex items-start gap-2 text-[11px] text-gray-700">
+                        <span className="text-purple-400 flex-shrink-0 mt-0.5">◆</span>{r}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="px-6 py-4 border-t border-gray-100 shrink-0 flex justify-between">
+              <Button variant="outline" size="sm" onClick={async () => {
+                setReviewLoading(true);
+                setShowReviewPanel(false);
+                try {
+                  const res = await fetch(`/api/campaigns/${initialCampaignId}/review`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include', body: JSON.stringify({ mode: 'pre_launch' }),
+                  });
+                  if (res.ok) { setReviewData(await res.json()); setShowReviewPanel(true); }
+                } catch {}
+                setReviewLoading(false);
+              }}>
+                {reviewLoading ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5 mr-1.5" />} Re-analyse
+              </Button>
+              <Button size="sm" onClick={() => setShowReviewPanel(false)}>Close</Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   );
 }

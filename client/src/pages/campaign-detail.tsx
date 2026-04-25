@@ -329,6 +329,17 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
     setUpdateFollowupSteps(followupSteps);
     setShowUpdateDialog(true);
 
+    // Auto-load cached AI review into the update dialog
+    if (!reviewData) {
+      try {
+        const rv = await fetch(`/api/campaigns/${campaignId}/review/latest`, { credentials: 'include' });
+        if (rv.ok) {
+          const d = await rv.json();
+          if (d?.overallScore) setReviewData(d);
+        }
+      } catch { /* ignore */ }
+    }
+
     try {
       const res = await fetch('/api/email-accounts', { credentials: 'include' });
       if (res.ok) setEmailAccounts(await res.json());
@@ -1922,14 +1933,44 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
                       <span className="text-sm text-blue-800">This campaign is paused. Changes will apply when you resume.</span>
                     </div>
                   )}
-                  {/* AI suggestions banner — shown when Apply to Campaign was clicked from review */}
-                  {reviewData && !showReviewPanel && (
-                    <div className="flex items-start gap-3 px-4 py-3 bg-purple-50 border border-purple-200/80 rounded-xl">
-                      <Sparkles className="h-4 w-4 text-purple-600 flex-shrink-0 mt-0.5" />
-                      <div className="text-sm text-purple-800">
-                        <span className="font-semibold">AI suggestions loaded.</span> Review the recommendations from your Campaign Intelligence analysis and apply changes below.
-                        <button onClick={() => setShowReviewPanel(true)} className="ml-2 text-purple-600 underline text-xs font-medium">View review</button>
+                  {/* AI Review inline section — always shown in update dialog */}
+                  {reviewData ? (
+                    /* Review loaded: show grade summary */
+                    <div className="border border-purple-100 rounded-xl overflow-hidden">
+                      <div className="flex items-center gap-3 px-4 py-2.5 bg-purple-50">
+                        <Sparkles className="h-3.5 w-3.5 text-purple-500 flex-shrink-0" />
+                        <span className="text-xs font-semibold text-purple-700 flex-1">Campaign Intelligence Review</span>
+                        <span className={`text-sm font-black px-1.5 py-0.5 rounded-md ${reviewData.overallGrade === 'A' ? 'bg-emerald-100 text-emerald-700' : reviewData.overallGrade === 'B' ? 'bg-blue-100 text-blue-700' : reviewData.overallGrade === 'C' ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'}`}>
+                          {reviewData.overallGrade}
+                        </span>
+                        <span className="text-[10px] text-gray-400 flex-shrink-0">{reviewData.overallScore}/10</span>
+                        <button onClick={() => setShowReviewPanel(true)} className="text-[11px] text-purple-600 font-semibold hover:underline flex-shrink-0">View full →</button>
                       </div>
+                      {/* Top 2 recommendations */}
+                      {reviewData.recommendations?.slice(0, 2).map((r: string, i: number) => (
+                        <div key={i} className="flex items-start gap-2 px-4 py-1.5 text-[11px] text-gray-600 border-t border-purple-50">
+                          <Sparkles className="h-3 w-3 text-purple-300 flex-shrink-0 mt-0.5" />{r}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    /* No review: show run button */
+                    <div className="flex items-center gap-3 px-4 py-3 bg-purple-50 border border-purple-100 rounded-xl">
+                      <Sparkles className="h-4 w-4 text-purple-400 flex-shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <span className="text-sm text-gray-600">Get AI-powered content recommendations for this campaign.</span>
+                      </div>
+                      <button
+                        onClick={() => {
+                          const status = detail?.campaign?.status;
+                          const mode = status === 'completed' ? 'post_mortem' : (status === 'active' || status === 'paused') ? 'live' : 'pre_launch';
+                          setReviewMode(mode);
+                          setShowReviewPanel(true);
+                        }}
+                        className="flex-shrink-0 inline-flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs font-semibold text-white bg-purple-600 hover:bg-purple-700 transition-colors"
+                      >
+                        <Sparkles className="h-3 w-3" /> Run AI Review
+                      </button>
                     </div>
                   )}
 
