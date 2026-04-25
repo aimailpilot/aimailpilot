@@ -161,6 +161,8 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
     subject?: { original: string; suggested: string };
     body?: Record<number, { original: string; suggested: string; changes: string[] }>;
   }>({});
+  // When true, show inline diff view instead of editable editor (per-step)
+  const [diffViewMode, setDiffViewMode] = useState<Record<number, boolean>>({});
   const trackingPerPage = 15;
   const [emailsPage, setEmailsPage] = useState(1);
   const emailsPerPage = 25;
@@ -422,12 +424,67 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
       setUpdateFollowupSteps(newFollowupSteps);
     }
     setUpdateActiveStepIdx(newIdx);
-    // Load new step — prefer AI-suggested body if present for this step
-    const aiBody = aiChanges.body?.[newIdx]?.suggested;
-    const targetContent = aiBody || (newIdx === 0 ? newStep1Content : (newFollowupSteps[newIdx - 1]?.content || ''));
+    // When switching to a step with AI body: show diff view (default true if body exists)
+    // If already accepted (diffViewMode[newIdx] === false), keep accepted state
+    // Load original content into editor (diff view shows on top of it)
+    const newStepHasAiBody = !!(aiChanges.body?.[newIdx]);
+    const targetContent = newStepHasAiBody
+      ? (aiChanges.body![newIdx].original)
+      : (newIdx === 0 ? newStep1Content : (newFollowupSteps[newIdx - 1]?.content || ''));
+    if (newStepHasAiBody && diffViewMode[newIdx] === undefined) {
+      setDiffViewMode(prev => ({ ...prev, [newIdx]: true }));
+    }
     requestAnimationFrame(() => {
       if (editorRef.current) editorRef.current.innerHTML = targetContent;
     });
+  };
+
+  // ── Inline diff helpers ──────────────────────────────────────────────────
+  const stripHtmlForDiff = (html: string) =>
+    html.replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ').trim();
+
+  const splitIntoLines = (text: string): string[] =>
+    text.split(/\n+/).map(l => l.trim()).filter(Boolean);
+
+  // LCS on array of strings, returns matched index pairs
+  const computeLCS = (a: string[], b: string[]): [number, number][] => {
+    const m = a.length, n = b.length;
+    const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+    for (let i = m - 1; i >= 0; i--)
+      for (let j = n - 1; j >= 0; j--)
+        dp[i][j] = a[i] === b[j] ? 1 + dp[i + 1][j + 1] : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    const pairs: [number, number][] = [];
+    let i = 0, j = 0;
+    while (i < m && j < n) {
+      if (a[i] === b[j]) { pairs.push([i, j]); i++; j++; }
+      else if (dp[i + 1][j] >= dp[i][j + 1]) i++;
+      else j++;
+    }
+    return pairs;
+  };
+
+  // Build diff HTML: red strikethrough for removed, green highlight for added
+  const buildDiffHtml = (originalHtml: string, suggested: string): string => {
+    const origLines = splitIntoLines(stripHtmlForDiff(originalHtml));
+    const sugLines = splitIntoLines(suggested);
+    const pairs = computeLCS(origLines, sugLines);
+
+    const result: string[] = [];
+    let oi = 0, si = 0;
+    for (const [origIdx, sugIdx] of pairs) {
+      for (let i = oi; i < origIdx; i++)
+        result.push(`<span style="text-decoration:line-through;color:#dc2626;background:#fee2e2;border-radius:2px;padding:0 2px">${origLines[i]}</span>`);
+      for (let i = si; i < sugIdx; i++)
+        result.push(`<span style="background:#dcfce7;color:#15803d;border-radius:2px;padding:0 2px">${sugLines[i]}</span>`);
+      result.push(origLines[origIdx]);
+      oi = origIdx + 1; si = sugIdx + 1;
+    }
+    for (let i = oi; i < origLines.length; i++)
+      result.push(`<span style="text-decoration:line-through;color:#dc2626;background:#fee2e2;border-radius:2px;padding:0 2px">${origLines[i]}</span>`);
+    for (let i = si; i < sugLines.length; i++)
+      result.push(`<span style="background:#dcfce7;color:#15803d;border-radius:2px;padding:0 2px">${sugLines[i]}</span>`);
+
+    return result.join('<br><br>');
   };
 
   const execCommand = (cmd: string, value?: string) => {
@@ -1576,9 +1633,16 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
                       }
                       if (Object.keys(bodyChanges).length > 0) {
                         newAiChanges.body = bodyChanges;
-                        // Load step 0 body into editor immediately
+                        // Start in diff view mode for all steps that have body changes
+                        // so user sees the inline track-changes first
+                        const newDiffMode: Record<number, boolean> = {};
+                        for (const stepNum of Object.keys(bodyChanges)) {
+                          newDiffMode[Number(stepNum)] = true;
+                        }
+                        setDiffViewMode(newDiffMode);
+                        // Keep editor content as original — diff view is shown on top
                         if (bodyChanges[0] && editorRef.current) {
-                          editorRef.current.innerHTML = bodyChanges[0].suggested;
+                          editorRef.current.innerHTML = bodyChanges[0].original;
                         }
                       }
                       setAiChanges(newAiChanges);
@@ -1821,7 +1885,7 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
       </Dialog>
 
       {/* ===================== UPDATE CAMPAIGN DIALOG ===================== */}
-      <Dialog open={showUpdateDialog} onOpenChange={(open) => { setShowUpdateDialog(open); if (!open) { setUpdateDialogMode('edit'); setTestSent(false); setTestError(''); setAiChanges({}); } }}>
+      <Dialog open={showUpdateDialog} onOpenChange={(open) => { setShowUpdateDialog(open); if (!open) { setUpdateDialogMode('edit'); setTestSent(false); setTestError(''); setAiChanges({}); setDiffViewMode({}); } }}>
         <DialogContent className="sm:max-w-[900px] max-h-[92vh] overflow-hidden p-0 gap-0 rounded-2xl flex flex-col">
           {updateDialogMode === 'edit' ? (
             <>
@@ -1995,75 +2059,119 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
                     {/* Rich text editor */}
                     {(() => {
                       const currentAiBody = aiChanges.body?.[updateActiveStepIdx];
-                      return (
-                        <div className={`rounded-xl overflow-hidden transition-all ${currentAiBody ? 'border-2 border-purple-400' : 'border border-gray-200'}`}>
-                          {/* Toolbar row */}
-                          <div className="flex items-center gap-0.5 px-2 py-1.5 bg-gray-50/80 border-b border-gray-200 flex-wrap">
-                            <ToolbarBtn icon={<Bold className="h-3.5 w-3.5" />} onClick={() => execCommand('bold')} title="Bold" />
-                            <ToolbarBtn icon={<Italic className="h-3.5 w-3.5" />} onClick={() => execCommand('italic')} title="Italic" />
-                            <ToolbarBtn icon={<Underline className="h-3.5 w-3.5" />} onClick={() => execCommand('underline')} title="Underline" />
-                            <ToolbarSep />
-                            <ToolbarBtn icon={<Link className="h-3.5 w-3.5" />} onClick={() => {
-                              const url = prompt('Enter URL:');
-                              if (url) execCommand('createLink', url);
-                            }} title="Insert link" />
-                            <ToolbarBtn icon={<Image className="h-3.5 w-3.5" />} onClick={() => {
-                              const url = prompt('Image URL:');
-                              if (url) execCommand('insertImage', url);
-                            }} title="Insert image" />
-                            <ToolbarBtn icon={<Code className="h-3.5 w-3.5" />} onClick={() => {
-                              const tag = prompt('Variable name (e.g. firstName, lastName, company):');
-                              if (tag) execCommand('insertText', `{{${tag}}}`);
-                            }} title="Merge tag {{}}" />
-                            <ToolbarSep />
-                            <ToolbarBtn icon={<List className="h-3.5 w-3.5" />} onClick={() => execCommand('insertUnorderedList')} title="Bullet list" />
-                            <ToolbarBtn icon={<ListOrdered className="h-3.5 w-3.5" />} onClick={() => execCommand('insertOrderedList')} title="Numbered list" />
-                            <ToolbarBtn icon={<AlignLeft className="h-3.5 w-3.5" />} onClick={() => execCommand('justifyLeft')} title="Align left" />
-                            <ToolbarSep />
-                            <ToolbarBtn icon={<FileText className="h-3.5 w-3.5" />} onClick={() => execCommand('removeFormat')} title="Clear formatting" />
-                            {/* AI body badge + undo */}
-                            {currentAiBody && (
-                              <div className="ml-auto flex items-center gap-2 pl-2">
-                                <span className="text-[10px] font-bold text-purple-600 bg-purple-100 px-2 py-0.5 rounded-full flex items-center gap-1">
-                                  <Sparkles className="h-2.5 w-2.5" /> AI Rewritten
-                                </span>
-                                <button
-                                  onClick={() => {
-                                    if (editorRef.current) editorRef.current.innerHTML = currentAiBody.original;
-                                    setAiChanges(prev => {
-                                      const next = { ...prev };
-                                      if (next.body) {
-                                        const b = { ...next.body };
-                                        delete b[updateActiveStepIdx];
-                                        next.body = Object.keys(b).length > 0 ? b : undefined;
-                                      }
-                                      return next;
-                                    });
-                                  }}
-                                  className="text-[10px] text-gray-400 hover:text-gray-600 font-medium hover:underline"
-                                >
-                                  Undo
-                                </button>
-                              </div>
-                            )}
-                          </div>
+                      const inDiffMode = !!(currentAiBody && diffViewMode[updateActiveStepIdx] !== false);
 
-                          {/* AI changes summary bar */}
-                          {currentAiBody && currentAiBody.changes.length > 0 && (
-                            <div className="px-3 py-2 bg-purple-50 border-b border-purple-100 flex flex-wrap gap-x-3 gap-y-1">
-                              {currentAiBody.changes.map((change, i) => (
-                                <span key={i} className="text-[10px] text-purple-700 flex items-center gap-1">
-                                  <Sparkles className="h-2.5 w-2.5 text-purple-400 flex-shrink-0" />
-                                  {change}
-                                </span>
-                              ))}
+                      const acceptAiBody = () => {
+                        setDiffViewMode(prev => ({ ...prev, [updateActiveStepIdx]: false }));
+                        requestAnimationFrame(() => {
+                          if (editorRef.current) editorRef.current.innerHTML = currentAiBody!.suggested;
+                        });
+                      };
+
+                      const rejectAiBody = () => {
+                        setDiffViewMode(prev => ({ ...prev, [updateActiveStepIdx]: false }));
+                        setAiChanges(prev => {
+                          const next = { ...prev };
+                          if (next.body) {
+                            const b = { ...next.body };
+                            delete b[updateActiveStepIdx];
+                            next.body = Object.keys(b).length > 0 ? b : undefined;
+                          }
+                          return next;
+                        });
+                        requestAnimationFrame(() => {
+                          if (editorRef.current) editorRef.current.innerHTML = currentAiBody!.original;
+                        });
+                      };
+
+                      return (
+                        <div className={`rounded-xl overflow-hidden transition-all ${inDiffMode ? 'border-2 border-purple-400' : currentAiBody ? 'border-2 border-amber-400' : 'border border-gray-200'}`}>
+
+                          {/* Diff mode header */}
+                          {inDiffMode ? (
+                            <div className="flex items-center gap-2 px-3 py-2 bg-purple-50 border-b border-purple-200">
+                              <Sparkles className="h-3.5 w-3.5 text-purple-500 flex-shrink-0" />
+                              <span className="text-[11px] font-semibold text-purple-700 flex-1">
+                                AI suggested changes — <span style={{color:'#dc2626'}}>red</span> = removed · <span style={{color:'#15803d'}}>green</span> = added
+                              </span>
+                              {currentAiBody.changes.length > 0 && (
+                                <span className="text-[10px] text-purple-500 hidden sm:block truncate max-w-[180px]">{currentAiBody.changes[0]}{currentAiBody.changes.length > 1 ? ` +${currentAiBody.changes.length - 1} more` : ''}</span>
+                              )}
+                              <button
+                                onClick={acceptAiBody}
+                                className="ml-auto flex-shrink-0 flex items-center gap-1 text-[11px] font-semibold text-white bg-green-600 hover:bg-green-700 px-2.5 py-1 rounded-lg transition-colors"
+                              >
+                                <Check className="h-3 w-3" /> Accept
+                              </button>
+                              <button
+                                onClick={rejectAiBody}
+                                className="flex-shrink-0 flex items-center gap-1 text-[11px] font-semibold text-gray-600 bg-gray-100 hover:bg-gray-200 px-2.5 py-1 rounded-lg transition-colors"
+                              >
+                                <X className="h-3 w-3" /> Reject
+                              </button>
+                            </div>
+                          ) : (
+                            /* Normal toolbar */
+                            <div className="flex items-center gap-0.5 px-2 py-1.5 bg-gray-50/80 border-b border-gray-200 flex-wrap">
+                              <ToolbarBtn icon={<Bold className="h-3.5 w-3.5" />} onClick={() => execCommand('bold')} title="Bold" />
+                              <ToolbarBtn icon={<Italic className="h-3.5 w-3.5" />} onClick={() => execCommand('italic')} title="Italic" />
+                              <ToolbarBtn icon={<Underline className="h-3.5 w-3.5" />} onClick={() => execCommand('underline')} title="Underline" />
+                              <ToolbarSep />
+                              <ToolbarBtn icon={<Link className="h-3.5 w-3.5" />} onClick={() => {
+                                const url = prompt('Enter URL:');
+                                if (url) execCommand('createLink', url);
+                              }} title="Insert link" />
+                              <ToolbarBtn icon={<Image className="h-3.5 w-3.5" />} onClick={() => {
+                                const url = prompt('Image URL:');
+                                if (url) execCommand('insertImage', url);
+                              }} title="Insert image" />
+                              <ToolbarBtn icon={<Code className="h-3.5 w-3.5" />} onClick={() => {
+                                const tag = prompt('Variable name (e.g. firstName, lastName, company):');
+                                if (tag) execCommand('insertText', `{{${tag}}}`);
+                              }} title="Merge tag {{}}" />
+                              <ToolbarSep />
+                              <ToolbarBtn icon={<List className="h-3.5 w-3.5" />} onClick={() => execCommand('insertUnorderedList')} title="Bullet list" />
+                              <ToolbarBtn icon={<ListOrdered className="h-3.5 w-3.5" />} onClick={() => execCommand('insertOrderedList')} title="Numbered list" />
+                              <ToolbarBtn icon={<AlignLeft className="h-3.5 w-3.5" />} onClick={() => execCommand('justifyLeft')} title="Align left" />
+                              <ToolbarSep />
+                              <ToolbarBtn icon={<FileText className="h-3.5 w-3.5" />} onClick={() => execCommand('removeFormat')} title="Clear formatting" />
+                              {/* If accepted AI body but now in edit mode — show diff button to go back */}
+                              {currentAiBody && !inDiffMode && (
+                                <div className="ml-auto flex items-center gap-2 pl-2">
+                                  <span className="text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full flex items-center gap-1">
+                                    <Sparkles className="h-2.5 w-2.5" /> AI Applied
+                                  </span>
+                                  <button
+                                    onClick={() => setDiffViewMode(prev => ({ ...prev, [updateActiveStepIdx]: true }))}
+                                    className="text-[10px] text-purple-600 hover:text-purple-800 font-medium hover:underline"
+                                  >
+                                    View diff
+                                  </button>
+                                  <button
+                                    onClick={rejectAiBody}
+                                    className="text-[10px] text-gray-400 hover:text-gray-600 font-medium hover:underline"
+                                  >
+                                    Undo
+                                  </button>
+                                </div>
+                              )}
                             </div>
                           )}
 
+                          {/* DIFF VIEW — read-only inline track-changes */}
+                          {inDiffMode && (
+                            <div
+                              className="min-h-[280px] max-h-[400px] overflow-y-auto px-4 py-4 text-sm text-gray-800 leading-loose bg-white"
+                              style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' }}
+                              dangerouslySetInnerHTML={{ __html: buildDiffHtml(currentAiBody!.original, currentAiBody!.suggested) }}
+                            />
+                          )}
+
+                          {/* EDITABLE EDITOR — hidden in diff mode but kept in DOM so ref stays valid */}
                           <div
                             ref={editorRef}
-                            contentEditable
-                            className={`min-h-[280px] max-h-[400px] overflow-y-auto px-4 py-3 text-sm text-gray-800 focus:outline-none leading-relaxed [&_a]:text-blue-600 [&_a]:underline [&_img]:max-w-full [&_img]:rounded-lg [&_ul]:list-disc [&_ul]:pl-6 [&_ul]:my-1 [&_ol]:list-decimal [&_ol]:pl-6 [&_ol]:my-1 [&_li]:my-0.5 ${currentAiBody ? 'bg-purple-50/20' : ''}`}
+                            contentEditable={!inDiffMode}
+                            className={`min-h-[280px] max-h-[400px] overflow-y-auto px-4 py-3 text-sm text-gray-800 focus:outline-none leading-relaxed [&_a]:text-blue-600 [&_a]:underline [&_img]:max-w-full [&_img]:rounded-lg [&_ul]:list-disc [&_ul]:pl-6 [&_ul]:my-1 [&_ol]:list-decimal [&_ol]:pl-6 [&_ol]:my-1 [&_li]:my-0.5 ${inDiffMode ? 'hidden' : ''}`}
                             style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' }}
                             suppressContentEditableWarning
                           />
