@@ -380,7 +380,19 @@ SCORING RULES:
 - overallScore = weighted average of all step scores + campaign-level factors
 - overallGrade: 9-10=A, 7-8=B, 5-6=C, 3-4=D, 1-2=F
 - suggestedSubject: for stepNumber=0 ONLY — if the subject scores < 8, provide a concise improved alternative (under 55 chars). Otherwise omit.
-- suggestedBody: when bodyContent score < 7, provide a COMPLETE improved version of the email body as plain text (no HTML tags). Write the full rewritten body, not just the changed parts. CRITICAL PRESERVATION RULES: (1) Keep the closing signature block EXACTLY as it appears in the original — name, title, company, any sign-off words like "Best," or "Regards," must be copied verbatim. (2) Preserve ALL factual details exactly — event names, dates, locations, company names, product names, numbers, URLs, deadlines. Never paraphrase or omit facts. Only rewrite the opening hook, value proposition phrasing, and CTA wording. Otherwise omit.
+- suggestedBody: when bodyContent score < 7, provide a COMPLETE improved version of the email body as plain text (no HTML tags). Write the full rewritten body, not just the changed parts.
+
+  **NON-NEGOTIABLE PRESERVATION RULES — violating these is worse than not providing suggestedBody at all:**
+
+  (1) **SIGNATURE BLOCK — copy character-for-character from the original.** The signature is everything from the closing salutation ("Best,", "Regards,", "Thanks,", "Warm regards,", etc.) through the end of the body. This includes: sender name, job title, company name, phone number, website, social links, any disclaimers, any HTML tags inside the signature converted to plain text equivalents. NEVER write generic placeholders like "[Sender Name]", "[Your Name]", "[Title]", "[Company]". NEVER substitute the real signature with "Best,\n[Sender Name]" — if you do this, omit suggestedBody entirely. If the original ends with "Best,\nAyesha Ansari\nDirector, AGBA\nayesha.a@aegis.edu.in", your suggestedBody MUST end with that exact same block, identical down to punctuation and line breaks.
+
+  (2) **FACTUAL DETAILS — copy verbatim.** Event names (e.g. "AGBA 17th Edition", "Bharat AI Innovation 2026"), dates, edition numbers, locations, company names, product names, deadlines, URLs, phone numbers, prices, percentages, statistics. Never paraphrase, abbreviate, or update these. If the original says "17th Edition", do not write "this edition" or "the 2026 edition".
+
+  (3) **MERGE TAGS — keep all {{firstName}}, {{company}}, {{title}}, {{lastName}} etc. tags exactly as they appear.** Do not invent new merge tags. Do not remove existing ones. Do not change `{{firstName}}` to `[firstName]` or `{first name}`.
+
+  Only rewrite: the opening hook sentence(s), the value proposition phrasing, and the CTA sentence. Everything else stays untouched.
+
+  If you cannot preserve the signature and facts verbatim, omit suggestedBody entirely — a missing suggestedBody is far better than a rewrite that strips the signature.
 - bodyChangesSummary: when suggestedBody is provided, include 2-4 short bullet strings describing what changed (e.g. "Opening rewritten for stronger hook", "CTA changed from 'let me know' to a specific ask", "Shortened to 3 paragraphs"). Otherwise omit.
 
 OBJECTIVE INFERENCE RULES:
