@@ -7205,11 +7205,11 @@ Return ONLY a JSON array of strings, each 1-2 sentences. Example: ["Add a person
       // Strip HTML for plain-text body used in retrieval and the LLM prompt
       const textOnly = (content || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ').trim();
 
-      // Build a focused query: subject + first ~150 chars of body
+      // Build query: subject + first 150 chars of body. getRelevantDocuments handles
+      // the multi-tier fallback internally (full query → first sentence → distinctive tokens).
       const query = `${subject || ''} ${textOnly.slice(0, 150)}`.trim();
       if (!query) return res.status(400).json({ message: 'Empty query — provide subject or content' });
 
-      // FTS5 retrieval — top 2 docs only (per architectural decision)
       const { getRelevantDocuments } = await import('./services/context-engine.js');
       const kbDocs = await getRelevantDocuments(orgId, query, undefined, 2);
 

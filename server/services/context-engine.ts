@@ -126,21 +126,84 @@ export async function getContactContext(orgId: string, contactId?: string, conta
   };
 }
 
+// Common stopwords / non-distinctive capitalized words to skip when extracting topic anchors.
+// (Used only by the FTS fallback below — does not affect the primary search.)
+// Includes greeting words, pronouns, common geographic/role nouns that aren't topic-specific.
+const RETRIEVAL_STOPWORDS = new Set([
+  'Dear', 'Hi', 'Hello', 'Hey', 'Greetings', 'Mr', 'Mrs', 'Ms', 'Dr', 'Prof',
+  'The', 'This', 'That', 'These', 'Those',
+  'When', 'Where', 'What', 'How', 'Why', 'Who', 'Which',
+  'For', 'And', 'But', 'Yet', 'Nor',
+  'Our', 'Your', 'Their', 'His', 'Her', 'Its',
+  'India', 'Mumbai', 'Delhi', 'Bangalore', 'Chennai', 'Kolkata', 'Hyderabad', 'Pune',
+  'Re', 'Fwd', 'Team', 'Company', 'Office', 'Email',
+]);
+
 /**
- * Get relevant org documents — search by tags, doc type, or free text
+ * Get relevant org documents — search by tags, doc type, or free text.
+ *
+ * PostgreSQL's plainto_tsquery joins all tokens with AND — so a long query containing
+ * filler words ("Dear", "Showcase", "premier") fails when those tokens don't appear in
+ * any doc, even if obvious topic anchors do. To fix this we layer 3 progressively
+ * narrower queries: full → first-sentence → distinctive-tokens. Each tier only fires
+ * when the previous tier returned 0 results, so successful queries are unchanged.
  */
 export async function getRelevantDocuments(orgId: string, query: string, docTypes?: string[], limit = 10): Promise<any[]> {
-  // Try full-text search first
-  let docs = await storage.searchOrgDocuments(orgId, query, limit);
+  if (!query || !query.trim()) return [];
 
-  // If FTS returned nothing, try tag-based matching
+  let tierHit = 0;
+  let queryUsed = '';
+
+  // Tier 1: original query as-is (existing behavior — preserved exactly)
+  let docs = await storage.searchOrgDocuments(orgId, query, limit);
+  if (docs.length > 0) { tierHit = 1; queryUsed = query; }
+
+  // Tier 2: first sentence only (often contains the topic, fewer filler tokens)
+  if (docs.length === 0) {
+    const firstSentence = (query.split(/(?<=[.!?])\s+/)[0] || '').slice(0, 150).trim();
+    if (firstSentence && firstSentence !== query.trim()) {
+      docs = await storage.searchOrgDocuments(orgId, firstSentence, limit);
+      if (docs.length > 0) { tierHit = 2; queryUsed = firstSentence; }
+    }
+  }
+
+  // Tier 3: tag-based / docType-structured fallback (more precise than heuristics — runs before capitalized tokens).
+  // Only fires when caller provided docTypes; otherwise skips to Tier 4. Existing behavior preserved exactly.
   if (docs.length === 0 && docTypes && docTypes.length > 0) {
     const allDocs = await storage.getOrgDocuments(orgId, {}, 100, 0) as any[];
-    docs = allDocs.filter((d: any) => {
+    const tagFiltered = allDocs.filter((d: any) => {
       if (docTypes.includes(d.docType)) return true;
       const tags = typeof d.tags === 'string' ? JSON.parse(d.tags) : (d.tags || []);
       return tags.some((t: string) => query.toLowerCase().includes(t.toLowerCase()));
     }).slice(0, limit);
+    if (tagFiltered.length > 0) {
+      docs = tagFiltered;
+      tierHit = 3;
+      queryUsed = `docTypes:${docTypes.join(',')}`;
+    }
+  }
+
+  // Tier 4 (last resort): distinctive capitalized tokens (proper nouns, acronyms — topic anchors).
+  // Tightened: tokens must be ≥4 chars (skips noise like "We", "Mr"), filtered against expanded
+  // stopword list, and capped at 3 tokens to balance precision and recall. Requires ≥2 distinct
+  // tokens to prevent weak single-keyword matches.
+  if (docs.length === 0) {
+    const distinctiveTokens = Array.from(new Set(
+      (query.match(/\b[A-Z][A-Za-z0-9]{3,}\b/g) || []) // ≥4 chars total (1 leading uppercase + 3+ more)
+        .filter(w => !RETRIEVAL_STOPWORDS.has(w))
+    )).slice(0, 3);
+    if (distinctiveTokens.length >= 2) {
+      const tokenQuery = distinctiveTokens.join(' ');
+      docs = await storage.searchOrgDocuments(orgId, tokenQuery, limit);
+      if (docs.length > 0) { tierHit = 4; queryUsed = tokenQuery; }
+    }
+  }
+
+  // Debug observability — exposes tier and exact query that matched, for log-based tuning.
+  if (docs.length > 0) {
+    console.log(`[getRelevantDocuments] org=${orgId} tier=${tierHit} hits=${docs.length}/${limit} qLen=${query.length} queryUsed=${JSON.stringify(queryUsed.slice(0, 80))}`);
+  } else {
+    console.log(`[getRelevantDocuments] org=${orgId} tier=0 NO_MATCH qLen=${query.length}`);
   }
 
   return docs;
