@@ -151,62 +151,76 @@ const RETRIEVAL_STOPWORDS = new Set([
 export async function getRelevantDocuments(orgId: string, query: string, docTypes?: string[], limit = 10): Promise<any[]> {
   if (!query || !query.trim()) return [];
 
-  let tierHit = 0;
-  let queryUsed = '';
+  // Merged result set with dedup by id. Ranked by tier order (Tier 1 first = highest priority).
+  const seen = new Set<string>();
+  const merged: any[] = [];
+  const tiersUsed: number[] = [];
+  const queriesUsed: string[] = [];
 
-  // Tier 1: original query as-is (existing behavior — preserved exactly)
-  let docs = await storage.searchOrgDocuments(orgId, query, limit);
-  if (docs.length > 0) { tierHit = 1; queryUsed = query; }
+  const addUnique = (newDocs: any[], tier: number, qStr: string) => {
+    let added = 0;
+    for (const d of newDocs) {
+      if (merged.length >= limit) break;
+      if (!d?.id || seen.has(d.id)) continue;
+      merged.push(d);
+      seen.add(d.id);
+      added++;
+    }
+    if (added > 0) {
+      tiersUsed.push(tier);
+      queriesUsed.push(qStr.slice(0, 80));
+    }
+  };
 
-  // Tier 2: first sentence only (often contains the topic, fewer filler tokens)
-  if (docs.length === 0) {
+  // Tier 1: original query as-is. If this fills the limit, we're done — existing behavior preserved.
+  const t1 = await storage.searchOrgDocuments(orgId, query, limit);
+  addUnique(t1, 1, query);
+
+  // Augment from subsequent tiers ONLY if Tier 1 didn't fill the limit. This catches cases
+  // where plainto_tsquery's strict AND excluded relevant docs (e.g. one AGBA doc lacks a filler
+  // word from the email body that the other doc has).
+  if (merged.length < limit) {
+    // Tier 2: first sentence only (fewer filler tokens — often catches related docs)
     const firstSentence = (query.split(/(?<=[.!?])\s+/)[0] || '').slice(0, 150).trim();
     if (firstSentence && firstSentence !== query.trim()) {
-      docs = await storage.searchOrgDocuments(orgId, firstSentence, limit);
-      if (docs.length > 0) { tierHit = 2; queryUsed = firstSentence; }
+      const t2 = await storage.searchOrgDocuments(orgId, firstSentence, limit);
+      addUnique(t2, 2, firstSentence);
     }
   }
 
-  // Tier 3: tag-based / docType-structured fallback (more precise than heuristics — runs before capitalized tokens).
-  // Only fires when caller provided docTypes; otherwise skips to Tier 4. Existing behavior preserved exactly.
-  if (docs.length === 0 && docTypes && docTypes.length > 0) {
+  if (merged.length < limit && docTypes && docTypes.length > 0) {
+    // Tier 3: tag-based / docType-structured fallback (only when caller provided docTypes)
     const allDocs = await storage.getOrgDocuments(orgId, {}, 100, 0) as any[];
     const tagFiltered = allDocs.filter((d: any) => {
       if (docTypes.includes(d.docType)) return true;
       const tags = typeof d.tags === 'string' ? JSON.parse(d.tags) : (d.tags || []);
       return tags.some((t: string) => query.toLowerCase().includes(t.toLowerCase()));
-    }).slice(0, limit);
-    if (tagFiltered.length > 0) {
-      docs = tagFiltered;
-      tierHit = 3;
-      queryUsed = `docTypes:${docTypes.join(',')}`;
-    }
+    });
+    addUnique(tagFiltered, 3, `docTypes:${docTypes.join(',')}`);
   }
 
-  // Tier 4 (last resort): distinctive capitalized tokens (proper nouns, acronyms — topic anchors).
-  // Tightened: tokens must be ≥4 chars (skips noise like "We", "Mr"), filtered against expanded
-  // stopword list, and capped at 3 tokens to balance precision and recall. Requires ≥2 distinct
-  // tokens to prevent weak single-keyword matches.
-  if (docs.length === 0) {
+  if (merged.length < limit) {
+    // Tier 4 (last resort): distinctive capitalized tokens (proper nouns, acronyms — topic anchors).
+    // ≥4 chars per token, filtered against expanded stopword list, capped at 3 tokens, requires ≥2 distinct.
     const distinctiveTokens = Array.from(new Set(
-      (query.match(/\b[A-Z][A-Za-z0-9]{3,}\b/g) || []) // ≥4 chars total (1 leading uppercase + 3+ more)
+      (query.match(/\b[A-Z][A-Za-z0-9]{3,}\b/g) || [])
         .filter(w => !RETRIEVAL_STOPWORDS.has(w))
     )).slice(0, 3);
     if (distinctiveTokens.length >= 2) {
       const tokenQuery = distinctiveTokens.join(' ');
-      docs = await storage.searchOrgDocuments(orgId, tokenQuery, limit);
-      if (docs.length > 0) { tierHit = 4; queryUsed = tokenQuery; }
+      const t4 = await storage.searchOrgDocuments(orgId, tokenQuery, limit);
+      addUnique(t4, 4, tokenQuery);
     }
   }
 
-  // Debug observability — exposes tier and exact query that matched, for log-based tuning.
-  if (docs.length > 0) {
-    console.log(`[getRelevantDocuments] org=${orgId} tier=${tierHit} hits=${docs.length}/${limit} qLen=${query.length} queryUsed=${JSON.stringify(queryUsed.slice(0, 80))}`);
+  // Debug observability — shows which tier(s) contributed and queries used.
+  if (merged.length > 0) {
+    console.log(`[getRelevantDocuments] org=${orgId} tiers=[${tiersUsed.join(',')}] hits=${merged.length}/${limit} qLen=${query.length} queries=${JSON.stringify(queriesUsed)}`);
   } else {
-    console.log(`[getRelevantDocuments] org=${orgId} tier=0 NO_MATCH qLen=${query.length}`);
+    console.log(`[getRelevantDocuments] org=${orgId} tiers=[] NO_MATCH qLen=${query.length}`);
   }
 
-  return docs;
+  return merged;
 }
 
 /**
