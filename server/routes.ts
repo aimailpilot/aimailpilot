@@ -7215,6 +7215,7 @@ Return ONLY a JSON array of strings, each 1-2 sentences. Example: ["Add a person
 
       // Gate: no matching KB doc → skip validation entirely
       if (!kbDocs || kbDocs.length === 0) {
+        console.log('[validate-kb]', JSON.stringify({ orgId, kbDocsCount: 0, skipped: true, bodyChars: textOnly.length, ai_called: false }));
         return res.json({
           factualIssues: [],
           missingKeyPoints: [],
@@ -7242,13 +7243,18 @@ Return ONLY a JSON array of strings, each 1-2 sentences. Example: ["Add a person
         return `[DOC ${i + 1}: ${d.name || 'Untitled'}]\n${docContent}`;
       }).join('\n\n---\n\n');
 
+      // Body truncation: capture intro + CTA/signature (head + tail) instead of blind front-load
+      const bodyForPrompt = textOnly.length <= 3000
+        ? textOnly
+        : textOnly.slice(0, 1500) + '\n...[middle truncated]...\n' + textOnly.slice(-1500);
+
       const validationPrompt = `You validate a B2B email template against the organization's Knowledge Base. The KB documents below are AUTHORITATIVE — they reflect the org's verified facts. Flag any direct contradictions in the email and identify important key points from the KB that are missing.
 
 KB DOCUMENTS (authoritative source of truth):
 ${kbContext}
 
 EMAIL SUBJECT: ${subject || '(empty)'}
-EMAIL BODY (plain text): ${textOnly.slice(0, 3000)}
+EMAIL BODY (plain text): ${bodyForPrompt}
 
 RULES:
 - Only flag DIRECT factual contradictions (wrong number, date, name, edition, location, price, claim) — NOT stylistic or phrasing differences.
@@ -7301,6 +7307,20 @@ Output schema:
       const factualIssues = Array.isArray(parsed?.factualIssues) ? parsed.factualIssues.slice(0, 10) : [];
       const missingKeyPoints = Array.isArray(parsed?.missingKeyPoints) ? parsed.missingKeyPoints.slice(0, 10) : [];
       const suggestions = Array.isArray(parsed?.suggestions) ? parsed.suggestions.slice(0, 5) : [];
+
+      const usage = aiData?.usage || {};
+      console.log('[validate-kb]', JSON.stringify({
+        orgId,
+        kbDocsCount: kbDocs.length,
+        kbDocNames: kbDocs.map((d: any) => d.name || 'Untitled'),
+        skipped: false,
+        bodyChars: textOnly.length,
+        ai_called: true,
+        prompt_tokens: usage.prompt_tokens,
+        completion_tokens: usage.completion_tokens,
+        issues: factualIssues.length,
+        missing: missingKeyPoints.length,
+      }));
 
       res.json({
         factualIssues,

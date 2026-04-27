@@ -131,6 +131,8 @@ export default function TemplateManager() {
     skipReason?: string;
   } | null>(null);
   const [kbError, setKbError] = useState<string>('');
+  const [lastKbHash, setLastKbHash] = useState<string>(''); // sha256(subject|content) of last successful validation — skips API call on re-click if unchanged
+  const kbAbortRef = useRef<AbortController | null>(null);
 
   // AI email feedback state
   const [aiFeedback, setAiFeedback] = useState<string>('');
@@ -298,8 +300,33 @@ export default function TemplateManager() {
     return () => { if (deliverabilityTimerRef.current) clearTimeout(deliverabilityTimerRef.current); };
   }, [formSubject, formContent, showDeliverability]);
 
+  const computeKbHash = async (subj: string, cont: string): Promise<string> => {
+    try {
+      // Normalize whitespace so formatting-only edits don't trigger re-validation
+      const norm = (s: string) => s.replace(/\s+/g, ' ').trim();
+      const enc = new TextEncoder().encode(`${norm(subj)}|${norm(cont)}`);
+      const buf = await crypto.subtle.digest('SHA-256', enc);
+      return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+    } catch {
+      return ''; // hash fails → fall through to fresh API call (safe default)
+    }
+  };
+
   const validateAgainstKB = async () => {
     if (!formSubject && !formContent) { setKbResult(null); setKbError('Add subject or content first'); return; }
+
+    // Skip API call if content hasn't changed since last successful validation
+    const hash = await computeKbHash(formSubject, formContent);
+    if (hash && hash === lastKbHash && kbResult) {
+      // No state change needed — existing result is still valid
+      return;
+    }
+
+    // Cancel any in-flight request to prevent stale-response races
+    kbAbortRef.current?.abort();
+    const controller = new AbortController();
+    kbAbortRef.current = controller;
+
     setKbLoading(true);
     setKbError('');
     setKbResult(null);
@@ -309,17 +336,28 @@ export default function TemplateManager() {
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({ subject: formSubject, content: formContent }),
+        signal: controller.signal,
       });
+      // If a newer call replaced this one, abort here without writing state
+      if (controller.signal.aborted) return;
       if (res.ok) {
-        setKbResult(await res.json());
+        const data = await res.json();
+        setKbResult(data);
+        if (hash) setLastKbHash(hash);
       } else {
         const data = await res.json().catch(() => ({}));
         setKbError(data.message || 'Validation failed');
       }
-    } catch {
+    } catch (err: any) {
+      if (err?.name === 'AbortError') return; // superseded by newer call — silent
       setKbError('Network error');
+    } finally {
+      // Only clear loading if this is still the active controller
+      if (kbAbortRef.current === controller) {
+        setKbLoading(false);
+        kbAbortRef.current = null;
+      }
     }
-    setKbLoading(false);
   };
 
   // Highlight spam words in visual editor using CSS Custom Highlight API or fallback
@@ -448,6 +486,9 @@ export default function TemplateManager() {
     setShowKbValidation(false);
     setKbResult(null);
     setKbError('');
+    setLastKbHash('');
+    kbAbortRef.current?.abort();
+    kbAbortRef.current = null;
     setAiResult(null);
     setAiError('');
     setShowEditor(true);
@@ -1137,7 +1178,7 @@ export default function TemplateManager() {
                     <span className="text-xs font-bold text-gray-800">Deliverability</span>
                     {deliverabilityLoading && <Loader2 className="h-3 w-3 animate-spin text-green-600" />}
                   </div>
-                  <button onClick={() => setShowDeliverability(false)} className="p-1 hover:bg-green-100 rounded">
+                  <button onClick={() => { setShowDeliverability(false); setShowKbValidation(false); }} className="p-1 hover:bg-green-100 rounded">
                     <X className="h-3.5 w-3.5 text-gray-400" />
                   </button>
                 </div>
@@ -1272,7 +1313,7 @@ export default function TemplateManager() {
                     <span className="text-xs font-bold text-gray-800">KB Validation</span>
                     {kbLoading && <Loader2 className="h-3 w-3 animate-spin text-blue-600" />}
                   </div>
-                  <button onClick={() => setShowKbValidation(false)} className="p-1 hover:bg-blue-100 rounded">
+                  <button onClick={() => { setShowDeliverability(false); setShowKbValidation(false); }} className="p-1 hover:bg-blue-100 rounded">
                     <X className="h-3.5 w-3.5 text-gray-400" />
                   </button>
                 </div>
