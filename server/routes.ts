@@ -7205,9 +7205,11 @@ Return ONLY a JSON array of strings, each 1-2 sentences. Example: ["Add a person
       // Strip HTML for plain-text body used in retrieval and the LLM prompt
       const textOnly = (content || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ').trim();
 
-      // Build query: subject + first 150 chars of body. getRelevantDocuments handles
-      // the multi-tier fallback internally (full query → first sentence → distinctive tokens).
-      const query = `${subject || ''} ${textOnly.slice(0, 150)}`.trim();
+      // Build retrieval query from subject + full body. getRelevantDocuments handles
+      // multi-tier fallback (full query → first sentence → acronyms/proper nouns) — its
+      // distinctive-token tier needs the full body text to spot acronyms like "AGBA"
+      // that often appear several lines into the email, not just in the first 150 chars.
+      const query = `${subject || ''} ${textOnly}`.trim();
       if (!query) return res.status(400).json({ message: 'Empty query — provide subject or content' });
 
       const { getRelevantDocuments } = await import('./services/context-engine.js');

@@ -154,7 +154,7 @@ export async function getRelevantDocuments(orgId: string, query: string, docType
   // Merged result set with dedup by id. Ranked by tier order (Tier 1 first = highest priority).
   const seen = new Set<string>();
   const merged: any[] = [];
-  const tiersUsed: number[] = [];
+  const tierHits: Record<string, number> = {}; // per-tier doc count, e.g. { "1": 1, "4": 1 }
   const queriesUsed: string[] = [];
 
   const addUnique = (newDocs: any[], tier: number, qStr: string) => {
@@ -167,7 +167,7 @@ export async function getRelevantDocuments(orgId: string, query: string, docType
       added++;
     }
     if (added > 0) {
-      tiersUsed.push(tier);
+      tierHits[String(tier)] = added;
       queriesUsed.push(qStr.slice(0, 80));
     }
   };
@@ -228,11 +228,11 @@ export async function getRelevantDocuments(orgId: string, query: string, docType
     }
   }
 
-  // Debug observability — shows which tier(s) contributed and queries used.
+  // Debug observability — tierHits shows per-tier doc count, queries shows the actual strings used.
   if (merged.length > 0) {
-    console.log(`[getRelevantDocuments] org=${orgId} tiers=[${tiersUsed.join(',')}] hits=${merged.length}/${limit} qLen=${query.length} queries=${JSON.stringify(queriesUsed)}`);
+    console.log(`[getRelevantDocuments] org=${orgId} tierHits=${JSON.stringify(tierHits)} hits=${merged.length}/${limit} qLen=${query.length} queries=${JSON.stringify(queriesUsed)}`);
   } else {
-    console.log(`[getRelevantDocuments] org=${orgId} tiers=[] NO_MATCH qLen=${query.length}`);
+    console.log(`[getRelevantDocuments] org=${orgId} tierHits={} NO_MATCH qLen=${query.length}`);
   }
 
   return merged;
