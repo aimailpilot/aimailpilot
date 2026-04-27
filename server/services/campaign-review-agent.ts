@@ -388,7 +388,7 @@ SCORING RULES:
 
   (2) **FACTUAL DETAILS — copy verbatim.** Event names (e.g. "AGBA 17th Edition", "Bharat AI Innovation 2026"), dates, edition numbers, locations, company names, product names, deadlines, URLs, phone numbers, prices, percentages, statistics. Never paraphrase, abbreviate, or update these. If the original says "17th Edition", do not write "this edition" or "the 2026 edition".
 
-  (3) **MERGE TAGS — keep all {{firstName}}, {{company}}, {{title}}, {{lastName}} etc. tags exactly as they appear.** Do not invent new merge tags. Do not remove existing ones. Do not change `{{firstName}}` to `[firstName]` or `{first name}`.
+  (3) **MERGE TAGS — keep all double-curly merge tags (firstName, company, title, lastName, etc.) exactly as they appear in the original.** Do not invent new merge tags. Do not remove existing ones. Do not change the double-curly format to square brackets or any other syntax.
 
   Only rewrite: the opening hook sentence(s), the value proposition phrasing, and the CTA sentence. Everything else stays untouched.
 
