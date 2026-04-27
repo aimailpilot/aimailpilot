@@ -7192,6 +7192,129 @@ Return ONLY a JSON array of strings, each 1-2 sentences. Example: ["Add a person
     }
   });
 
+  // KB validation: check email template against the org's Knowledge Base for factual correctness
+  // Pulls top 2 most relevant org_documents via FTS and asks Azure OpenAI to flag contradictions or missing key points.
+  // Skips entirely if no matching KB doc exists — saves tokens and avoids irrelevant validation.
+  app.post('/api/templates/validate-kb', requireAuth, async (req: any, res) => {
+    try {
+      const { subject, content } = req.body;
+      if (!subject && !content) return res.status(400).json({ message: 'Subject or content required' });
+
+      const orgId = req.user.organizationId;
+
+      // Strip HTML for plain-text body used in retrieval and the LLM prompt
+      const textOnly = (content || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ').trim();
+
+      // Build a focused query: subject + first ~150 chars of body
+      const query = `${subject || ''} ${textOnly.slice(0, 150)}`.trim();
+      if (!query) return res.status(400).json({ message: 'Empty query — provide subject or content' });
+
+      // FTS5 retrieval — top 2 docs only (per architectural decision)
+      const { getRelevantDocuments } = await import('./services/context-engine.js');
+      const kbDocs = await getRelevantDocuments(orgId, query, undefined, 2);
+
+      // Gate: no matching KB doc → skip validation entirely
+      if (!kbDocs || kbDocs.length === 0) {
+        return res.json({
+          factualIssues: [],
+          missingKeyPoints: [],
+          suggestions: [],
+          kbDocsUsed: [],
+          skipped: true,
+          skipReason: 'No matching Knowledge Base document for this email\'s topic. Upload a relevant doc to enable KB validation.',
+        });
+      }
+
+      // Read Azure OpenAI settings (same pattern as analyze-deliverability)
+      const settings = await storage.getApiSettingsWithAzureFallback(orgId);
+      const endpoint = settings.azure_openai_endpoint;
+      const apiKey = settings.azure_openai_api_key;
+      const deploymentName = settings.azure_openai_deployment;
+      const apiVersion = settings.azure_openai_api_version || '2024-08-01-preview';
+
+      if (!endpoint || !apiKey || !deploymentName) {
+        return res.status(503).json({ message: 'Azure OpenAI not configured. Add credentials in Settings.' });
+      }
+
+      // Truncate each doc to ~2000 chars to keep tokens bounded
+      const kbContext = kbDocs.map((d: any, i: number) => {
+        const docContent = (d.content || '').slice(0, 2000);
+        return `[DOC ${i + 1}: ${d.name || 'Untitled'}]\n${docContent}`;
+      }).join('\n\n---\n\n');
+
+      const validationPrompt = `You validate a B2B email template against the organization's Knowledge Base. The KB documents below are AUTHORITATIVE — they reflect the org's verified facts. Flag any direct contradictions in the email and identify important key points from the KB that are missing.
+
+KB DOCUMENTS (authoritative source of truth):
+${kbContext}
+
+EMAIL SUBJECT: ${subject || '(empty)'}
+EMAIL BODY (plain text): ${textOnly.slice(0, 3000)}
+
+RULES:
+- Only flag DIRECT factual contradictions (wrong number, date, name, edition, location, price, claim) — NOT stylistic or phrasing differences.
+- "high" severity = clear factual error that will damage credibility (e.g. wrong edition number, wrong date)
+- "medium" severity = stale/ambiguous claim that may mislead
+- "low" severity = minor inconsistency
+- For missingKeyPoints, only suggest things that materially improve credibility or completeness — NOT every detail in the KB.
+- Keep all text concise. Each issue/point/suggestion should be 1-2 sentences.
+- Empty arrays if everything is consistent.
+- Return ONLY valid JSON. No markdown fences, no commentary.
+
+Output schema:
+{
+  "factualIssues": [{ "claim": "what the email says", "kbReference": "what the KB says", "severity": "high|medium|low" }],
+  "missingKeyPoints": [{ "point": "key point missing", "kbSource": "which doc supports it" }],
+  "suggestions": ["short actionable improvement"]
+}`;
+
+      const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${deploymentName}/chat/completions?api-version=${apiVersion}`;
+      const aiResp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'api-key': apiKey },
+        body: JSON.stringify({
+          messages: [
+            { role: 'system', content: 'You validate B2B emails against an organization knowledge base. Output ONLY valid JSON matching the schema given. No markdown, no commentary.' },
+            { role: 'user', content: validationPrompt },
+          ],
+          temperature: 0.2,
+          max_tokens: 1200,
+        }),
+      });
+
+      if (!aiResp.ok) {
+        const errText = await aiResp.text().catch(() => '');
+        console.error('[validate-kb] Azure OpenAI error:', aiResp.status, errText.slice(0, 200));
+        return res.status(502).json({ message: 'KB validation service temporarily unavailable. Try again.' });
+      }
+
+      const aiData = await aiResp.json() as any;
+      const raw = aiData.choices?.[0]?.message?.content || '';
+
+      let parsed: any = null;
+      try {
+        parsed = JSON.parse(raw.replace(/```json\n?|```/g, '').trim());
+      } catch {
+        console.error('[validate-kb] AI returned non-JSON:', raw.slice(0, 200));
+        return res.status(502).json({ message: 'KB validation returned malformed response. Try again.' });
+      }
+
+      const factualIssues = Array.isArray(parsed?.factualIssues) ? parsed.factualIssues.slice(0, 10) : [];
+      const missingKeyPoints = Array.isArray(parsed?.missingKeyPoints) ? parsed.missingKeyPoints.slice(0, 10) : [];
+      const suggestions = Array.isArray(parsed?.suggestions) ? parsed.suggestions.slice(0, 5) : [];
+
+      res.json({
+        factualIssues,
+        missingKeyPoints,
+        suggestions,
+        kbDocsUsed: kbDocs.map((d: any) => ({ id: d.id, name: d.name || 'Untitled' })),
+        skipped: false,
+      });
+    } catch (error: any) {
+      console.error('[validate-kb] error:', error?.message || error);
+      res.status(500).json({ message: 'Failed to validate against Knowledge Base' });
+    }
+  });
+
   // AI Auto-fix: rewrite subject + content to fix deliverability issues
   app.post('/api/templates/fix-deliverability', async (req: any, res) => {
     try {

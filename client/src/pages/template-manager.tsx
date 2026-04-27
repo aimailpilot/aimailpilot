@@ -119,6 +119,19 @@ export default function TemplateManager() {
   const [fixLoading, setFixLoading] = useState(false);
   const [fixChanges, setFixChanges] = useState<string[]>([]);
 
+  // KB validation state
+  const [showKbValidation, setShowKbValidation] = useState(false);
+  const [kbLoading, setKbLoading] = useState(false);
+  const [kbResult, setKbResult] = useState<{
+    factualIssues: { claim: string; kbReference: string; severity: 'high' | 'medium' | 'low' }[];
+    missingKeyPoints: { point: string; kbSource: string }[];
+    suggestions: string[];
+    kbDocsUsed: { id: string; name: string }[];
+    skipped?: boolean;
+    skipReason?: string;
+  } | null>(null);
+  const [kbError, setKbError] = useState<string>('');
+
   // AI email feedback state
   const [aiFeedback, setAiFeedback] = useState<string>('');
   const [aiFeedbackLoading, setAiFeedbackLoading] = useState(false);
@@ -285,6 +298,30 @@ export default function TemplateManager() {
     return () => { if (deliverabilityTimerRef.current) clearTimeout(deliverabilityTimerRef.current); };
   }, [formSubject, formContent, showDeliverability]);
 
+  const validateAgainstKB = async () => {
+    if (!formSubject && !formContent) { setKbResult(null); setKbError('Add subject or content first'); return; }
+    setKbLoading(true);
+    setKbError('');
+    setKbResult(null);
+    try {
+      const res = await fetch('/api/templates/validate-kb', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ subject: formSubject, content: formContent }),
+      });
+      if (res.ok) {
+        setKbResult(await res.json());
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setKbError(data.message || 'Validation failed');
+      }
+    } catch {
+      setKbError('Network error');
+    }
+    setKbLoading(false);
+  };
+
   // Highlight spam words in visual editor using CSS Custom Highlight API or fallback
   useEffect(() => {
     if (!editorRef.current || editorMode !== 'visual') return;
@@ -408,6 +445,9 @@ export default function TemplateManager() {
     setShowAiSection(false);
     setShowDeliverability(false);
     setDeliverabilityResult(null);
+    setShowKbValidation(false);
+    setKbResult(null);
+    setKbError('');
     setAiResult(null);
     setAiError('');
     setShowEditor(true);
@@ -903,11 +943,17 @@ export default function TemplateManager() {
           )}
 
           <div className="flex items-center gap-2">
-            <button onClick={() => { setShowDeliverability(!showDeliverability); if (!showDeliverability && !deliverabilityResult) analyzeDeliverability(); }}
+            <button onClick={() => {
+              const opening = !showDeliverability;
+              setShowDeliverability(opening);
+              setShowKbValidation(opening);
+              if (opening && !deliverabilityResult) analyzeDeliverability();
+              // KB validation is manual-trigger only (uses AI tokens) — user clicks "Validate against KB" inside the panel
+            }}
               className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md transition-all font-medium ${
                 showDeliverability ? 'bg-green-100 text-green-700 border border-green-300' : 'text-gray-500 hover:bg-green-50 hover:text-green-600 border border-transparent'
               }`}>
-              <Shield className="h-3.5 w-3.5" /> Deliverability
+              <Shield className="h-3.5 w-3.5" /> Analyze
             </button>
             <button onClick={() => setShowAiSection(!showAiSection)}
               className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md transition-all font-medium ${
@@ -1209,6 +1255,124 @@ export default function TemplateManager() {
                 ) : (
                   <div className="text-[11px] text-gray-500 text-center py-6">
                     {deliverabilityLoading ? 'Analyzing...' : 'Add subject and content, then click Re-analyze'}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {showKbValidation && (
+            <div className="w-[340px] shrink-0 ml-3 rounded-lg border border-blue-200 bg-gradient-to-b from-blue-50 to-indigo-50 overflow-y-auto shadow-sm">
+              <div className="p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-5 h-5 rounded-md bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center">
+                      <CheckCircle className="h-3 w-3 text-white" />
+                    </div>
+                    <span className="text-xs font-bold text-gray-800">KB Validation</span>
+                    {kbLoading && <Loader2 className="h-3 w-3 animate-spin text-blue-600" />}
+                  </div>
+                  <button onClick={() => setShowKbValidation(false)} className="p-1 hover:bg-blue-100 rounded">
+                    <X className="h-3.5 w-3.5 text-gray-400" />
+                  </button>
+                </div>
+
+                <div className="flex items-center justify-between gap-1.5">
+                  <button onClick={validateAgainstKB} disabled={kbLoading}
+                    className="text-[11px] px-2.5 py-1 bg-white border border-blue-200 rounded-md text-blue-700 hover:bg-blue-50 font-medium disabled:opacity-50">
+                    {kbLoading ? 'Validating...' : kbResult ? 'Re-validate' : 'Validate against KB'}
+                  </button>
+                  <span className="text-[9px] text-gray-400">uses AI tokens</span>
+                </div>
+
+                {kbError && (
+                  <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-[11px] text-red-700">
+                    {kbError}
+                  </div>
+                )}
+
+                {kbResult?.skipped && (
+                  <div className="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2.5 text-[11px] text-gray-600">
+                    {kbResult.skipReason || 'Validation skipped — no matching KB document.'}
+                  </div>
+                )}
+
+                {kbResult && !kbResult.skipped && (
+                  <div className="space-y-3">
+                    {kbResult.kbDocsUsed.length > 0 && (
+                      <div className="bg-white border border-blue-100 rounded-lg px-2.5 py-1.5">
+                        <div className="text-[9px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Validated against</div>
+                        {kbResult.kbDocsUsed.map(d => (
+                          <div key={d.id} className="text-[11px] text-gray-700 flex items-start gap-1.5">
+                            <FileText className="h-3 w-3 text-blue-500 mt-0.5 flex-shrink-0" />
+                            <span className="truncate">{d.name}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {kbResult.factualIssues.length > 0 && (
+                      <div className="space-y-1.5">
+                        <div className="text-[10px] font-semibold text-gray-600 uppercase tracking-wider flex items-center gap-1">
+                          <AlertTriangle className="h-2.5 w-2.5 text-red-500" /> Factual Issues ({kbResult.factualIssues.length})
+                        </div>
+                        {kbResult.factualIssues.map((iss, i) => (
+                          <div key={i} className={`rounded-lg px-2.5 py-2 text-[11px] border ${
+                            iss.severity === 'high' ? 'bg-red-50 border-red-200' :
+                            iss.severity === 'medium' ? 'bg-yellow-50 border-yellow-200' :
+                            'bg-blue-50 border-blue-200'
+                          }`}>
+                            <div className="flex items-start gap-1.5">
+                              <span className={`mt-0.5 flex-shrink-0 w-3.5 h-3.5 rounded-full flex items-center justify-center text-[8px] font-bold text-white uppercase ${
+                                iss.severity === 'high' ? 'bg-red-500' : iss.severity === 'medium' ? 'bg-yellow-500' : 'bg-blue-400'
+                              }`}>{iss.severity[0]}</span>
+                              <div className="flex-1 min-w-0">
+                                <div className="text-gray-700"><span className="font-semibold">Email:</span> {iss.claim}</div>
+                                <div className="text-gray-600 mt-0.5"><span className="font-semibold">KB:</span> {iss.kbReference}</div>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {kbResult.missingKeyPoints.length > 0 && (
+                      <div className="space-y-1.5">
+                        <div className="text-[10px] font-semibold text-gray-600 uppercase tracking-wider">Missing Key Points ({kbResult.missingKeyPoints.length})</div>
+                        {kbResult.missingKeyPoints.map((pt, i) => (
+                          <div key={i} className="rounded-lg px-2.5 py-2 text-[11px] border bg-white border-blue-100">
+                            <div className="text-gray-700">{pt.point}</div>
+                            {pt.kbSource && <div className="text-gray-500 mt-0.5 text-[10px]">From: {pt.kbSource}</div>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {kbResult.suggestions.length > 0 && (
+                      <div className="space-y-1.5">
+                        <div className="text-[10px] font-semibold text-gray-600 uppercase tracking-wider flex items-center gap-1">
+                          <Sparkles className="h-2.5 w-2.5 text-purple-500" /> Suggestions
+                        </div>
+                        {kbResult.suggestions.map((tip, i) => (
+                          <div key={i} className="flex items-start gap-1.5 bg-white border border-purple-200 rounded-lg px-2.5 py-1.5 text-[11px] text-gray-700">
+                            <span className="text-purple-500 font-bold mt-px">{i + 1}.</span>
+                            <span>{tip}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {kbResult.factualIssues.length === 0 && kbResult.missingKeyPoints.length === 0 && kbResult.suggestions.length === 0 && (
+                      <div className="bg-green-100 border border-green-200 rounded-lg px-3 py-2.5 text-[11px] text-green-800 font-medium">
+                        Email aligns with the Knowledge Base — no issues found.
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {!kbResult && !kbLoading && !kbError && (
+                  <div className="text-[11px] text-gray-500 text-center py-6 leading-relaxed">
+                    Click <span className="font-semibold text-blue-700">Validate against KB</span> to check this email against your Knowledge Base for factual accuracy.
                   </div>
                 )}
               </div>

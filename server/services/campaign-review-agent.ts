@@ -380,19 +380,31 @@ SCORING RULES:
 - overallScore = weighted average of all step scores + campaign-level factors
 - overallGrade: 9-10=A, 7-8=B, 5-6=C, 3-4=D, 1-2=F
 - suggestedSubject: for stepNumber=0 ONLY — if the subject scores < 8, provide a concise improved alternative (under 55 chars). Otherwise omit.
-- suggestedBody: when bodyContent score < 7, provide a COMPLETE improved version of the email body as plain text (no HTML tags). Write the full rewritten body, not just the changed parts.
+- suggestedBody: provide a COMPLETE improved version of the email body as plain text (no HTML tags) for **EVERY step** where bodyContent score < 9. This includes follow-up steps (stepNumber 1, 2, 3...) — do NOT skip follow-ups. Write the full rewritten body, not just the changed parts.
 
-  **NON-NEGOTIABLE PRESERVATION RULES — violating these is worse than not providing suggestedBody at all:**
+  **MANDATORY EXTRACTION STEP — perform this BEFORE writing suggestedBody:**
 
-  (1) **SIGNATURE BLOCK — copy character-for-character from the original.** The signature is everything from the closing salutation ("Best,", "Regards,", "Thanks,", "Warm regards,", etc.) through the end of the body. This includes: sender name, job title, company name, phone number, website, social links, any disclaimers, any HTML tags inside the signature converted to plain text equivalents. NEVER write generic placeholders like "[Sender Name]", "[Your Name]", "[Title]", "[Company]". NEVER substitute the real signature with "Best,\n[Sender Name]" — if you do this, omit suggestedBody entirely. If the original ends with "Best,\nAyesha Ansari\nDirector, AGBA\nayesha.a@aegis.edu.in", your suggestedBody MUST end with that exact same block, identical down to punctuation and line breaks.
+  Step A — Read the original step body. Identify the signature block: it is everything from the closing salutation onwards (typical salutations: "Best,", "Regards,", "Thanks,", "Warm regards,", "Sincerely,", "Cheers,"). The signature continues to the end of the body and includes the sender's name, job title, company, contact details, social links, disclaimers — all of it.
 
-  (2) **FACTUAL DETAILS — copy verbatim.** Event names (e.g. "AGBA 17th Edition", "Bharat AI Innovation 2026"), dates, edition numbers, locations, company names, product names, deadlines, URLs, phone numbers, prices, percentages, statistics. Never paraphrase, abbreviate, or update these. If the original says "17th Edition", do not write "this edition" or "the 2026 edition".
+  Step B — Copy that exact signature block to a buffer. This buffer is now sacred — do not paraphrase, regenerate, summarize, or shorten it in any way. If the original signature has 8 lines, the buffer has 8 lines.
 
-  (3) **MERGE TAGS — keep all double-curly merge tags (firstName, company, title, lastName, etc.) exactly as they appear in the original.** Do not invent new merge tags. Do not remove existing ones. Do not change the double-curly format to square brackets or any other syntax.
+  Step C — Write your rewritten opening + value prop + CTA. Then append the buffer verbatim. Your suggestedBody = rewritten_top + "\n\n" + verbatim_signature_buffer.
 
-  Only rewrite: the opening hook sentence(s), the value proposition phrasing, and the CTA sentence. Everything else stays untouched.
+  **HARD RULES:**
 
-  If you cannot preserve the signature and facts verbatim, omit suggestedBody entirely — a missing suggestedBody is far better than a rewrite that strips the signature.
+  (1) NEVER invent or regenerate signature content from your own knowledge of the sender. Even if you "know" who Ayesha Ansari is, you must extract her signature from the actual email body provided to you, not write a fresh one. If the original signature lists a phone number, your output has the same phone number. If the original has 4 lines of contact info, your output has those same 4 lines.
+
+  (2) NEVER use generic placeholders: "[Sender Name]", "[Your Name]", "[Title]", "[Company]", "[Email]", "[Phone]" are FORBIDDEN. If you find yourself about to write any bracketed placeholder, stop and copy the actual text from the original instead.
+
+  (3) **FACTUAL DETAILS — copy verbatim.** Event names (e.g. "AGBA 17th Edition", "Bharat AI Innovation 2026"), dates, edition numbers, locations, company names, product names, deadlines, URLs, phone numbers, prices, percentages, statistics. Never paraphrase, abbreviate, or update these. If the original says "17th Edition", do not write "this edition" or "the 2026 edition".
+
+  (4) **MERGE TAGS — keep all double-curly merge tags (firstName, company, title, lastName, etc.) exactly as they appear in the original.** Do not invent new merge tags. Do not remove existing ones. Do not change the double-curly format to square brackets or any other syntax.
+
+  Only rewrite: the opening hook sentence(s), the value proposition phrasing, and the CTA sentence. Greeting line ("Dear {{firstName}},") and signature block stay 100% identical to original.
+
+  **VERIFICATION CHECK before submitting suggestedBody:** Compare the last N lines of your suggestedBody to the last N lines of the original. They must be character-for-character identical. If they differ, fix it or omit suggestedBody.
+
+  If you cannot preserve the signature and facts verbatim after this verification, omit suggestedBody entirely — a missing suggestedBody is far better than a rewrite that strips the signature.
 - bodyChangesSummary: when suggestedBody is provided, include 2-4 short bullet strings describing what changed (e.g. "Opening rewritten for stronger hook", "CTA changed from 'let me know' to a specific ask", "Shortened to 3 paragraphs"). Otherwise omit.
 
 OBJECTIVE INFERENCE RULES:
