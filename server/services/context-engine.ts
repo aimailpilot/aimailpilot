@@ -200,14 +200,29 @@ export async function getRelevantDocuments(orgId: string, query: string, docType
   }
 
   if (merged.length < limit) {
-    // Tier 4 (last resort): distinctive capitalized tokens (proper nouns, acronyms — topic anchors).
-    // ≥4 chars per token, filtered against expanded stopword list, capped at 3 tokens, requires ≥2 distinct.
-    const distinctiveTokens = Array.from(new Set(
-      (query.match(/\b[A-Z][A-Za-z0-9]{3,}\b/g) || [])
+    // Tier 4 (last resort): distinctive token query.
+    // Strategy: prefer all-caps acronyms (e.g. "AGBA", "MeitY") — they're highly distinctive,
+    // so a single one is enough for precision. Fall back to mixed-case proper nouns ANDed
+    // together (≥2 required) when no acronym is present. This avoids the failure mode where
+    // ANDing a generic word like "Call" with a true topic anchor like "AGBA" excludes
+    // docs that contain the anchor but happen to lack the generic word.
+    const allTokens = Array.from(new Set(
+      (query.match(/\b[A-Z][A-Za-z0-9]{2,}\b/g) || [])
         .filter(w => !RETRIEVAL_STOPWORDS.has(w))
-    )).slice(0, 3);
-    if (distinctiveTokens.length >= 2) {
-      const tokenQuery = distinctiveTokens.join(' ');
+    ));
+    const acronyms = allTokens.filter(t => /^[A-Z][A-Z0-9]{2,}$/.test(t)); // all-caps, ≥3 chars
+    const properNouns = allTokens.filter(t => !/^[A-Z][A-Z0-9]+$/.test(t) && t.length >= 4);
+
+    let tokenQuery = '';
+    if (acronyms.length >= 1) {
+      // Acronym(s) found — use up to 2. Single acronym is sufficient for high precision.
+      tokenQuery = acronyms.slice(0, 2).join(' ');
+    } else if (properNouns.length >= 2) {
+      // No acronym but ≥2 proper nouns — AND them (cap at 3 to keep query precise).
+      tokenQuery = properNouns.slice(0, 3).join(' ');
+    }
+
+    if (tokenQuery) {
       const t4 = await storage.searchOrgDocuments(orgId, tokenQuery, limit);
       addUnique(t4, 4, tokenQuery);
     }
