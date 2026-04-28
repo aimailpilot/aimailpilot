@@ -9,6 +9,7 @@ import { startInboxNudgeEngine } from "./services/inbox-nudge-engine";
 import { startWarmupInboxPurge } from "./services/warmup-inbox-purge";
 import { startWarmupInboxCleanup } from "./services/warmup-inbox-cleanup";
 import { startApolloSyncResumer } from "./services/apollo-sync-engine";
+import { startOutboundReplySweeper } from "./services/outbound-reply-sweeper";
 import { campaignEngine } from "./services/campaign-engine";
 import { classifyReply, classifyReplyWithAI } from "./services/reply-classifier";
 import { storage, initStorage } from "./storage";
@@ -79,6 +80,9 @@ app.use((req, res, next) => {
     startWarmupInboxPurge();
     // Remove INBOX label from already-tagged warmup messages that leaked through
     startWarmupInboxCleanup();
+    // Detect outbound replies sent from native Gmail/Outlook clients (outside AImailPilot)
+    // and mark the corresponding inbox message replied so it stops appearing in "Need Reply"
+    startOutboundReplySweeper();
     // Auto-resume Apollo sync jobs that were paused due to rate limiting
     startApolloSyncResumer();
     

@@ -1,0 +1,339 @@
+/**
+ * Outbound Reply Sweeper
+ * ----------------------
+ * Detects when a user has replied to an inbox message via their native client (Gmail.com / Outlook.com)
+ * outside AImailPilot, and marks the corresponding unified_inbox row as replied so it stops appearing
+ * in the "Need Reply" tab.
+ *
+ * WHY THIS EXISTS:
+ *   gmail-reply-tracker uses query `-in:sent` to skip the user's Sent folder, so outbound replies
+ *   never enter unified_inbox. The "Need Reply" SQL filter checks for later messages in the same
+ *   thread from org email accounts — but those rows never exist if the user replied via Gmail.com.
+ *   This sweeper closes that gap by querying the Gmail/Outlook thread API directly to detect
+ *   external replies, then setting `repliedBy` on the inbox row.
+ *
+ * SELF-CONTAINED — does NOT modify or import gmail-reply-tracker.ts / outlook-reply-tracker.ts
+ * (both protected per CLAUDE.md). Has its own token helpers, mirroring lead-intelligence-engine.ts.
+ *
+ * BEHAVIOR:
+ *   - Runs every 10 minutes
+ *   - Processes up to 50 candidate messages per cycle (oldest "need reply" first)
+ *   - Updates unified_inbox.repliedBy when an outbound reply is found in the thread
+ *   - Bounded API quota usage; safe per-org concurrency (no per-org lock needed since selects are bounded)
+ */
+
+import { storage } from "../storage";
+import { OAuth2Client } from 'google-auth-library';
+
+const SWEEP_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+const BOOT_DELAY_MS = 90 * 1000;          // 90 seconds after server boot
+const MAX_CANDIDATES_PER_CYCLE = 50;      // bounded API quota usage per cycle
+const MIN_AGE_MS = 60 * 1000;             // skip messages received in the last minute (let the tracker run first)
+
+let isProcessing = false;
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Self-contained token helpers (same pattern as lead-intelligence-engine.ts)
+// ──────────────────────────────────────────────────────────────────────────────
+
+async function getGmailAccessToken(orgId: string, senderEmail: string): Promise<string | null> {
+  const settings = await storage.getApiSettings(orgId);
+  const prefix = `gmail_sender_${senderEmail}_`;
+  let accessToken = settings[`${prefix}access_token`] || null;
+  let refreshToken = settings[`${prefix}refresh_token`] || null;
+  let tokenExpiry = settings[`${prefix}token_expiry`] || null;
+
+  if (!accessToken && !refreshToken) {
+    accessToken = settings.gmail_access_token || null;
+    refreshToken = settings.gmail_refresh_token || null;
+    tokenExpiry = settings.gmail_token_expiry || null;
+  }
+  if (!accessToken && !refreshToken) return null;
+
+  let clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID || '';
+  let clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET || '';
+  if (!clientId || !clientSecret) {
+    try {
+      const superAdminOrgId = await storage.getSuperAdminOrgId();
+      if (superAdminOrgId && superAdminOrgId !== orgId) {
+        const ss = await storage.getApiSettings(superAdminOrgId);
+        if (ss.google_oauth_client_id) { clientId = ss.google_oauth_client_id; clientSecret = ss.google_oauth_client_secret || ''; }
+      }
+    } catch { /* ignore */ }
+  }
+
+  const expiry = parseInt(tokenExpiry || '0');
+  if (!tokenExpiry || Date.now() > expiry - 300000) {
+    if (refreshToken && clientId && clientSecret) {
+      try {
+        const oauth2 = new OAuth2Client(clientId, clientSecret);
+        oauth2.setCredentials({ refresh_token: refreshToken });
+        const { credentials } = await oauth2.refreshAccessToken();
+        if (credentials.access_token) {
+          accessToken = credentials.access_token;
+          if (settings[`${prefix}refresh_token`]) {
+            await storage.setApiSetting(orgId, `${prefix}access_token`, accessToken);
+            if (credentials.expiry_date) await storage.setApiSetting(orgId, `${prefix}token_expiry`, String(credentials.expiry_date));
+          } else {
+            await storage.setApiSetting(orgId, 'gmail_access_token', accessToken);
+            if (credentials.expiry_date) await storage.setApiSetting(orgId, 'gmail_token_expiry', String(credentials.expiry_date));
+          }
+        }
+      } catch (e) {
+        console.error(`[OutboundReplySweep] Gmail token refresh failed for ${senderEmail}:`, e instanceof Error ? e.message : e);
+      }
+    }
+  }
+  return accessToken;
+}
+
+async function getOutlookAccessToken(orgId: string, senderEmail: string): Promise<string | null> {
+  const settings = await storage.getApiSettings(orgId);
+  const prefix = `outlook_sender_${senderEmail}_`;
+  let accessToken = settings[`${prefix}access_token`] || null;
+  let refreshToken = settings[`${prefix}refresh_token`] || null;
+  let tokenExpiry = settings[`${prefix}token_expiry`] || null;
+
+  if (!accessToken && !refreshToken) {
+    accessToken = settings.microsoft_access_token || null;
+    refreshToken = settings.microsoft_refresh_token || null;
+    tokenExpiry = settings.microsoft_token_expiry || null;
+  }
+  if (!accessToken && !refreshToken) return null;
+
+  const expiry = parseInt(tokenExpiry || '0');
+  if (!accessToken || Date.now() > expiry - 300000) {
+    if (refreshToken) {
+      let clientId = settings.microsoft_oauth_client_id || '';
+      let clientSecret = settings.microsoft_oauth_client_secret || '';
+      if (!clientId || !clientSecret) {
+        try {
+          const superAdminOrgId = await storage.getSuperAdminOrgId();
+          if (superAdminOrgId && superAdminOrgId !== orgId) {
+            const ss = await storage.getApiSettings(superAdminOrgId);
+            if (ss.microsoft_oauth_client_id) { clientId = ss.microsoft_oauth_client_id; clientSecret = ss.microsoft_oauth_client_secret || ''; }
+          }
+        } catch { /* ignore */ }
+      }
+      if (!clientId) clientId = process.env.MICROSOFT_CLIENT_ID || '';
+      if (!clientSecret) clientSecret = process.env.MICROSOFT_CLIENT_SECRET || '';
+
+      if (clientId && clientSecret) {
+        try {
+          const body = new URLSearchParams({
+            client_id: clientId, client_secret: clientSecret,
+            refresh_token: refreshToken, grant_type: 'refresh_token',
+            scope: 'openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/SMTP.Send',
+          });
+          const resp = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+            method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString(),
+          });
+          if (resp.ok) {
+            const tokens = await resp.json() as any;
+            if (tokens.access_token) {
+              accessToken = tokens.access_token;
+              const exp = Date.now() + (tokens.expires_in || 3600) * 1000;
+              if (settings[`${prefix}refresh_token`]) {
+                await storage.setApiSetting(orgId, `${prefix}access_token`, accessToken);
+                if (tokens.refresh_token) await storage.setApiSetting(orgId, `${prefix}refresh_token`, tokens.refresh_token);
+                await storage.setApiSetting(orgId, `${prefix}token_expiry`, String(exp));
+              } else {
+                await storage.setApiSetting(orgId, 'microsoft_access_token', accessToken);
+                if (tokens.refresh_token) await storage.setApiSetting(orgId, 'microsoft_refresh_token', tokens.refresh_token);
+                await storage.setApiSetting(orgId, 'microsoft_token_expiry', String(exp));
+              }
+            }
+          }
+        } catch (e) {
+          console.error(`[OutboundReplySweep] Outlook token refresh failed for ${senderEmail}:`, e instanceof Error ? e.message : e);
+        }
+      }
+    }
+  }
+  return accessToken;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Provider-specific thread checkers
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Check a Gmail thread for an outbound reply from the user.
+ * Returns the ISO timestamp of the outbound reply if found, else null.
+ */
+async function checkGmailThread(accessToken: string, threadId: string, ownerEmail: string, receivedAt: number): Promise<string | null> {
+  try {
+    const resp = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=metadata&metadataHeaders=From&metadataHeaders=Date`,
+      { headers: { 'Authorization': `Bearer ${accessToken}` } }
+    );
+    if (!resp.ok) return null;
+    const data = await resp.json() as any;
+    if (!data?.messages) return null;
+
+    const ownerLower = ownerEmail.toLowerCase();
+    for (const msg of data.messages) {
+      const headers = msg.payload?.headers || [];
+      const fromHeader = headers.find((h: any) => h.name.toLowerCase() === 'from')?.value || '';
+      const dateHeader = headers.find((h: any) => h.name.toLowerCase() === 'date')?.value || '';
+      const fromEmail = (fromHeader.match(/<([^>]+)>/)?.[1] || fromHeader).toLowerCase().trim();
+      // Match: outbound message from THIS owner, dated AFTER the inbox row's receivedAt
+      if (fromEmail === ownerLower) {
+        const msgTime = dateHeader ? new Date(dateHeader).getTime() : (msg.internalDate ? Number(msg.internalDate) : 0);
+        if (msgTime > receivedAt) {
+          return new Date(msgTime).toISOString();
+        }
+      }
+    }
+    return null;
+  } catch { return null; }
+}
+
+/**
+ * Check an Outlook (Microsoft Graph) conversation for an outbound reply from the user.
+ * Returns the ISO timestamp of the outbound reply if found, else null.
+ */
+async function checkOutlookConversation(accessToken: string, conversationId: string, ownerEmail: string, receivedAt: number): Promise<string | null> {
+  try {
+    // Fetch messages in the conversation, only need from + sentDateTime
+    const url = `https://graph.microsoft.com/v1.0/me/messages?$filter=conversationId eq '${encodeURIComponent(conversationId)}'&$select=from,sentDateTime,sender&$top=50`;
+    const resp = await fetch(url, { headers: { 'Authorization': `Bearer ${accessToken}` } });
+    if (!resp.ok) return null;
+    const data = await resp.json() as any;
+    const messages: any[] = data?.value || [];
+
+    const ownerLower = ownerEmail.toLowerCase();
+    for (const m of messages) {
+      const fromAddr = (m.from?.emailAddress?.address || m.sender?.emailAddress?.address || '').toLowerCase();
+      if (fromAddr !== ownerLower) continue;
+      const sentTime = m.sentDateTime ? new Date(m.sentDateTime).getTime() : 0;
+      if (sentTime > receivedAt) {
+        return new Date(sentTime).toISOString();
+      }
+    }
+    return null;
+  } catch { return null; }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Main sweep
+// ──────────────────────────────────────────────────────────────────────────────
+
+interface InboxCandidate {
+  id: string;
+  organizationId: string;
+  gmailThreadId: string | null;
+  outlookConversationId: string | null;
+  emailAccountId: string;
+  receivedAt: string;
+  ownerEmail: string;
+  ownerUserId: string | null;
+  provider: string;
+}
+
+async function selectCandidates(): Promise<InboxCandidate[]> {
+  // Pull up to N candidates: "need reply" messages with either a Gmail thread id or an Outlook
+  // conversation id (the trackers populate provider-specific thread fields, not the generic
+  // "threadId" column). Older than MIN_AGE_MS so the inbound tracker had a chance to run first.
+  // Join email_accounts to get the owner email, provider, and user id.
+  const cutoff = new Date(Date.now() - MIN_AGE_MS).toISOString();
+  const sql = `
+    SELECT ui.id, ui."organizationId",
+           ui."gmailThreadId", ui."outlookConversationId",
+           ui."emailAccountId", ui."receivedAt",
+           ea.email AS "ownerEmail", ea."userId" AS "ownerUserId", ea.provider AS "provider"
+    FROM unified_inbox ui
+    JOIN email_accounts ea ON ea.id = ui."emailAccountId"
+    WHERE ui."replyType" IN ('positive','negative','general')
+      AND (ui.status != 'replied' AND ui."repliedAt" IS NULL)
+      AND ui."repliedBy" IS NULL
+      AND (
+        (ui."gmailThreadId" IS NOT NULL AND ui."gmailThreadId" != '')
+        OR (ui."outlookConversationId" IS NOT NULL AND ui."outlookConversationId" != '')
+      )
+      AND ui."receivedAt" < ?
+      AND ea."isActive" != 0
+    ORDER BY ui."receivedAt" ASC
+    LIMIT ?
+  `;
+  return storage.rawAll(sql, cutoff, MAX_CANDIDATES_PER_CYCLE) as Promise<InboxCandidate[]>;
+}
+
+async function processCandidate(c: InboxCandidate): Promise<'replied' | 'no_reply' | 'skipped'> {
+  if (!c.ownerEmail) return 'skipped';
+  const provider = (c.provider || '').toLowerCase();
+  const receivedAt = new Date(c.receivedAt).getTime();
+  let outboundAt: string | null = null;
+
+  if (provider === 'gmail' && c.gmailThreadId) {
+    const token = await getGmailAccessToken(c.organizationId, c.ownerEmail);
+    if (!token) return 'skipped';
+    outboundAt = await checkGmailThread(token, c.gmailThreadId, c.ownerEmail, receivedAt);
+  } else if (provider === 'outlook' && c.outlookConversationId) {
+    const token = await getOutlookAccessToken(c.organizationId, c.ownerEmail);
+    if (!token) return 'skipped';
+    outboundAt = await checkOutlookConversation(token, c.outlookConversationId, c.ownerEmail, receivedAt);
+  } else {
+    return 'skipped';
+  }
+
+  if (!outboundAt) return 'no_reply';
+
+  // Mark this inbox row as replied via native client.
+  // Convention: existing in-app reply flows set repliedBy = req.user.email || req.user.id.
+  // Mirror that here using ownerUserId (the user who owns the mailbox) with the mailbox email
+  // as fallback if userId is missing (orphaned accounts). Idempotent via repliedBy IS NULL clause.
+  // Does NOT touch status or repliedAt — those are reserved for in-app reply flows.
+  await storage.rawRun(
+    `UPDATE unified_inbox SET "repliedBy" = ? WHERE id = ? AND "organizationId" = ? AND "repliedBy" IS NULL`,
+    c.ownerUserId || c.ownerEmail, c.id, c.organizationId
+  );
+  return 'replied';
+}
+
+export async function runOutboundReplySweep(): Promise<void> {
+  if (isProcessing) {
+    console.log('[OutboundReplySweep] Previous cycle still running, skipping');
+    return;
+  }
+  isProcessing = true;
+  const started = Date.now();
+  let replied = 0, noReply = 0, skipped = 0, errors = 0;
+
+  try {
+    const candidates = await selectCandidates();
+    if (candidates.length === 0) {
+      console.log('[OutboundReplySweep] No candidates this cycle');
+      return;
+    }
+    console.log(`[OutboundReplySweep] Processing ${candidates.length} candidate(s)`);
+
+    for (const c of candidates) {
+      try {
+        const result = await processCandidate(c);
+        if (result === 'replied') replied++;
+        else if (result === 'no_reply') noReply++;
+        else skipped++;
+      } catch (e) {
+        errors++;
+        console.error(`[OutboundReplySweep] candidate ${c.id} failed:`, e instanceof Error ? e.message : e);
+      }
+    }
+    const elapsed = Math.round((Date.now() - started) / 1000);
+    console.log(`[OutboundReplySweep] Done in ${elapsed}s — replied=${replied} no_reply=${noReply} skipped=${skipped} errors=${errors}`);
+  } catch (e) {
+    console.error('[OutboundReplySweep] sweep failed:', e instanceof Error ? e.message : e);
+  } finally {
+    isProcessing = false;
+  }
+}
+
+export function startOutboundReplySweeper(): void {
+  console.log(`[OutboundReplySweep] Starting — first run in ${BOOT_DELAY_MS / 1000}s, then every ${SWEEP_INTERVAL_MS / 60000}min, max ${MAX_CANDIDATES_PER_CYCLE} candidates/cycle`);
+  setTimeout(() => {
+    runOutboundReplySweep().catch(e => console.error('[OutboundReplySweep] initial run crashed:', e));
+    setInterval(() => {
+      runOutboundReplySweep().catch(e => console.error('[OutboundReplySweep] cycle crashed:', e));
+    }, SWEEP_INTERVAL_MS);
+  }, BOOT_DELAY_MS);
+}
