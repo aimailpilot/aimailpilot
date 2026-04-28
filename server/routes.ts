@@ -13979,13 +13979,18 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   });
 
   // Trigger email history scan (deep scan)
+  // Scan email history.
+  // Defaults to INCREMENTAL — uses email_accounts.leadIntelLastScanAt per account so only
+  // emails newer than the last successful scan are fetched. Pass body.force=true to rescan
+  // the full monthsBack window (e.g. after extending the lookback period).
   app.post('/api/lead-intelligence/scan', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.user.organizationId;
       const monthsBack = parseInt(req.body.monthsBack as string) || 6;
       const emailAccountIds = Array.isArray(req.body.emailAccountIds) ? req.body.emailAccountIds.map(String) : undefined;
-      console.log(`[LeadIntel] Manual scan triggered for org ${orgId} (${monthsBack} months)${emailAccountIds ? ` accounts: ${emailAccountIds.join(',')}` : ' (all accounts)'}`);
-      const result = await scanOrgEmailHistory(orgId, monthsBack, emailAccountIds);
+      const force = req.body?.force === true;
+      console.log(`[LeadIntel] Manual scan triggered for org ${orgId} (${monthsBack} months, mode=${force ? 'force-full' : 'incremental'})${emailAccountIds ? ` accounts: ${emailAccountIds.join(',')}` : ' (all accounts)'}`);
+      const result = await scanOrgEmailHistory(orgId, monthsBack, emailAccountIds, force);
       res.json({ success: true, result });
     } catch (error) {
       console.error('[LeadIntel] Scan error:', error);
@@ -14014,14 +14019,16 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     }
   });
 
-  // Full pipeline: scan + analyze
+  // Full pipeline: scan + analyze. Both steps default to incremental mode.
+  // body.force=true triggers full rescan + full reclassify (deletes existing opportunities).
   app.post('/api/lead-intelligence/run', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.user.organizationId;
       const monthsBack = parseInt(req.body.monthsBack as string) || 6;
       const emailAccountIds = Array.isArray(req.body.emailAccountIds) ? req.body.emailAccountIds.map(String) : undefined;
-      console.log(`[LeadIntel] Full pipeline triggered for org ${orgId}${emailAccountIds ? ` accounts: ${emailAccountIds.join(',')}` : ' (all accounts)'}`);
-      const result = await runFullLeadIntelligence(orgId, monthsBack, emailAccountIds);
+      const force = req.body?.force === true;
+      console.log(`[LeadIntel] Full pipeline triggered for org ${orgId} (mode=${force ? 'force-full' : 'incremental'})${emailAccountIds ? ` accounts: ${emailAccountIds.join(',')}` : ' (all accounts)'}`);
+      const result = await runFullLeadIntelligence(orgId, monthsBack, emailAccountIds, force);
       res.json({ success: true, ...result });
     } catch (error) {
       console.error('[LeadIntel] Pipeline error:', error);

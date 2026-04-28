@@ -814,6 +814,10 @@ async function initializeSchema() {
       // instead of looping on the oldest 50 forever.
       'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "outboundCheckedAt" TEXT DEFAULT NULL',
       'CREATE INDEX IF NOT EXISTS idx_inbox_outbound_check ON unified_inbox("organizationId", "outboundCheckedAt")',
+      // Lead intelligence incremental scan — per-account timestamp of last successful scan,
+      // used to fetch only emails newer than this on subsequent scans. NULL = never scanned
+      // (full monthsBack history is fetched on first scan or when force=true).
+      'ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS "leadIntelLastScanAt" TEXT DEFAULT NULL',
       // Multi-list membership junction table
       `CREATE TABLE IF NOT EXISTS contact_list_members (
         "contactId" TEXT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,

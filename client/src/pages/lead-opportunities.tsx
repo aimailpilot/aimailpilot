@@ -150,7 +150,7 @@ export default function LeadOpportunities() {
     }
   };
 
-  const runScan = async () => {
+  const runScan = async (force: boolean = false) => {
     setScanning(true);
     setLastResult(null);
     try {
@@ -161,15 +161,19 @@ export default function LeadOpportunities() {
         body: JSON.stringify({
           monthsBack: parseInt(monthsBack) || 6,
           emailAccountIds: selectedAccountIds.length > 0 ? selectedAccountIds : undefined,
+          force,
         }),
       });
       if (resp.ok) {
         const data = await resp.json();
-        setLastResult({ type: 'scan', ...data.result });
+        setLastResult({ type: 'scan', force, ...data.result });
         fetchAll();
+      } else {
+        const errBody = await resp.json().catch(() => ({}));
+        setLastResult({ type: 'error', message: errBody.message || `Scan failed (HTTP ${resp.status})`, error: errBody.error });
       }
-    } catch (e) {
-      console.error('Scan failed:', e);
+    } catch (e: any) {
+      setLastResult({ type: 'error', message: e?.message || 'Network error during scan', error: String(e) });
     } finally {
       setScanning(false);
     }
@@ -307,9 +311,15 @@ export default function LeadOpportunities() {
                 className="h-8 w-16 text-xs" title="Months to scan back" />
               <span className="text-xs text-gray-400">months</span>
             </div>
-            <Button variant="outline" size="sm" onClick={runScan} disabled={scanning || runningFull} className="gap-1.5">
+            <Button variant="outline" size="sm" onClick={() => runScan(false)} disabled={scanning || runningFull} className="gap-1.5"
+              title="Fetch only new emails since last scan (faster, fewer API calls)">
               {scanning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Mail className="h-3.5 w-3.5" />}
               {scanning ? 'Scanning...' : 'Scan Emails'}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => runScan(true)} disabled={scanning || runningFull} className="gap-1.5 text-xs text-gray-500 hover:text-gray-700"
+              title="Re-scan the full lookback window (slower, more API calls — use after extending months back)">
+              {scanning ? null : <Mail className="h-3 w-3" />}
+              Force re-scan
             </Button>
             <Button variant="outline" size="sm" onClick={() => runAnalysis(false)} disabled={analyzing || runningFull} className="gap-1.5"
               title="Analyze only contacts not yet classified (saves AI tokens)">
@@ -398,7 +408,12 @@ export default function LeadOpportunities() {
             <Brain className={`h-4 w-4 ${lastResult.type === 'error' ? 'text-red-600' : 'text-indigo-600'}`} />
             <AlertDescription className={`text-xs ${lastResult.type === 'error' ? 'text-red-800' : 'text-indigo-800'}`}>
               {lastResult.type === 'scan' && (
-                <span><strong>Scan complete:</strong> {lastResult.accountsScanned} accounts scanned, {lastResult.totalEmailsFetched} new emails fetched
+                <span>
+                  <strong>{lastResult.force ? 'Full re-scan complete' : 'Incremental scan complete'}:</strong>{' '}
+                  {lastResult.accountsScanned} accounts scanned, {lastResult.totalEmailsFetched} new emails fetched
+                  {!lastResult.force && lastResult.totalEmailsFetched === 0 && (
+                    <span className="text-gray-600"> — no new emails since last scan. Use Force re-scan to refetch the full window.</span>
+                  )}
                   {lastResult.errors?.length > 0 && <span className="text-red-600"> | Errors: {lastResult.errors.join(', ')}</span>}
                 </span>
               )}

@@ -250,13 +250,11 @@ interface HistoryScanResult {
 }
 
 async function scanGmailHistory(
-  orgId: string, emailAccountId: string, accountEmail: string, token: string, monthsBack: number = 6
+  orgId: string, emailAccountId: string, accountEmail: string, token: string, sinceDate: Date
 ): Promise<HistoryScanResult> {
   const result: HistoryScanResult = { emailAccountId, accountEmail, provider: 'gmail', emailsFetched: 0, errors: [] };
 
   try {
-    const sinceDate = new Date();
-    sinceDate.setMonth(sinceDate.getMonth() - monthsBack);
     const afterEpoch = Math.floor(sinceDate.getTime() / 1000);
 
     let pageToken: string | null = null;
@@ -382,13 +380,11 @@ async function scanGmailHistory(
 // ── Outlook History Scan ───────────────────────────────────────────────
 
 async function scanOutlookHistory(
-  orgId: string, emailAccountId: string, accountEmail: string, token: string, monthsBack: number = 6
+  orgId: string, emailAccountId: string, accountEmail: string, token: string, sinceDate: Date
 ): Promise<HistoryScanResult> {
   const result: HistoryScanResult = { emailAccountId, accountEmail, provider: 'outlook', emailsFetched: 0, errors: [] };
 
   try {
-    const sinceDate = new Date();
-    sinceDate.setMonth(sinceDate.getMonth() - monthsBack);
     const sinceISO = sinceDate.toISOString();
 
     let nextLink: string | null = null;
@@ -488,7 +484,7 @@ export interface ScanResult {
   errors: string[];
 }
 
-export async function scanOrgEmailHistory(orgId: string, monthsBack: number = 6, emailAccountIds?: string[]): Promise<ScanResult> {
+export async function scanOrgEmailHistory(orgId: string, monthsBack: number = 6, emailAccountIds?: string[], force: boolean = false): Promise<ScanResult> {
   const scanResult: ScanResult = { orgId, accountsScanned: 0, totalEmailsFetched: 0, results: [], errors: [] };
 
   try {
@@ -499,12 +495,36 @@ export async function scanOrgEmailHistory(orgId: string, monthsBack: number = 6,
       emailAccounts = emailAccounts.filter((a: any) => emailAccountIds.includes(String(a.id)));
     }
 
+    // Buffer applied to lastScanAt to handle clock skew between server and Gmail/Outlook —
+    // safe because emailHistoryExists dedup will skip any re-fetched messages by externalId.
+    const RESCAN_BUFFER_MS = 60 * 60 * 1000; // 1 hour
+
     for (const account of emailAccounts) {
       const email = (account as any).email;
       const provider = ((account as any).provider || '').toLowerCase();
       const accountId = (account as any).id;
+      const lastScanAtRaw = (account as any).leadIntelLastScanAt as string | null | undefined;
 
       if (!email) continue;
+
+      // Compute the effective since-date for this account:
+      //   - monthsBack window (e.g. 6 months ago) is the floor
+      //   - if not force AND we have a previous successful scan, use it (with buffer) when later
+      //   - this means subsequent scans only fetch emails newer than the last successful scan
+      const monthsBackDate = new Date();
+      monthsBackDate.setMonth(monthsBackDate.getMonth() - monthsBack);
+      let sinceDate = monthsBackDate;
+      let usedIncremental = false;
+      if (!force && lastScanAtRaw) {
+        const lastScan = new Date(lastScanAtRaw);
+        if (!isNaN(lastScan.getTime())) {
+          const lastScanWithBuffer = new Date(lastScan.getTime() - RESCAN_BUFFER_MS);
+          if (lastScanWithBuffer > sinceDate) {
+            sinceDate = lastScanWithBuffer;
+            usedIncremental = true;
+          }
+        }
+      }
 
       const isGmail = provider === 'gmail' || provider === 'google';
       const isOutlook = provider === 'outlook' || provider === 'microsoft';
@@ -515,22 +535,22 @@ export async function scanOrgEmailHistory(orgId: string, monthsBack: number = 6,
       if (isGmail) {
         token = await getGmailAccessToken(orgId, email);
         if (token) {
-          result = await scanGmailHistory(orgId, accountId, email, token, monthsBack);
+          result = await scanGmailHistory(orgId, accountId, email, token, sinceDate);
         }
       } else if (isOutlook) {
         token = await getOutlookAccessToken(orgId, email);
         if (token) {
-          result = await scanOutlookHistory(orgId, accountId, email, token, monthsBack);
+          result = await scanOutlookHistory(orgId, accountId, email, token, sinceDate);
         }
       } else {
         // Try Gmail first, then Outlook
         token = await getGmailAccessToken(orgId, email);
         if (token) {
-          result = await scanGmailHistory(orgId, accountId, email, token, monthsBack);
+          result = await scanGmailHistory(orgId, accountId, email, token, sinceDate);
         } else {
           token = await getOutlookAccessToken(orgId, email);
           if (token) {
-            result = await scanOutlookHistory(orgId, accountId, email, token, monthsBack);
+            result = await scanOutlookHistory(orgId, accountId, email, token, sinceDate);
           }
         }
       }
@@ -544,6 +564,20 @@ export async function scanOrgEmailHistory(orgId: string, monthsBack: number = 6,
         scanResult.accountsScanned++;
         scanResult.totalEmailsFetched += result.emailsFetched;
         scanResult.results.push(result);
+        console.log(`[LeadIntel] ${email} scan: mode=${usedIncremental ? 'incremental' : (force ? 'force-full' : 'first-full')}, since=${sinceDate.toISOString()}, fetched=${result.emailsFetched}, errors=${result.errors.length}`);
+
+        // Update lastScanAt only on a clean scan (no errors). On error we leave it
+        // alone so the next attempt re-scans the same window.
+        if (result.errors.length === 0) {
+          try {
+            await storage.rawRun(
+              `UPDATE email_accounts SET "leadIntelLastScanAt" = ? WHERE id = ?`,
+              new Date().toISOString(), accountId
+            );
+          } catch (e) {
+            console.error(`[LeadIntel] Failed to update leadIntelLastScanAt for ${email}:`, e instanceof Error ? e.message : e);
+          }
+        }
       }
     }
 
@@ -1163,11 +1197,12 @@ export async function analyzeOrgLeadsIncremental(orgId: string, emailAccountIds?
 
 // ── Full Pipeline: Scan + Analyze ──────────────────────────────────────
 
-export async function runFullLeadIntelligence(orgId: string, monthsBack: number = 6, emailAccountIds?: string[]): Promise<{ scan: ScanResult; analysis: AnalysisResult }> {
-  console.log(`[LeadIntel] Starting full pipeline for org ${orgId} (${monthsBack} months back)...`);
+export async function runFullLeadIntelligence(orgId: string, monthsBack: number = 6, emailAccountIds?: string[], force: boolean = false): Promise<{ scan: ScanResult; analysis: AnalysisResult }> {
+  console.log(`[LeadIntel] Starting full pipeline for org ${orgId} (${monthsBack} months back, mode=${force ? 'force-full' : 'incremental'})...`);
 
-  // Step 1: Scan email history
-  const scan = await scanOrgEmailHistory(orgId, monthsBack, emailAccountIds);
+  // Step 1: Scan email history (incremental by default — only fetches messages newer
+  // than each account's last successful scan. force=true rescans the full monthsBack window.)
+  const scan = await scanOrgEmailHistory(orgId, monthsBack, emailAccountIds, force);
 
   // Step 1b: Sweep historical bounce/unsubscribe signals → suppression_list + contact status
   try {
@@ -1176,8 +1211,11 @@ export async function runFullLeadIntelligence(orgId: string, monthsBack: number 
     console.error('[LeadIntel] Suppression sweep failed:', e instanceof Error ? e.message : e);
   }
 
-  // Step 2: Analyze and classify
-  const analysis = await analyzeOrgLeads(orgId, emailAccountIds);
+  // Step 2: Analyze and classify. force=true triggers delete-and-rebuild via analyzeOrgLeads;
+  // otherwise use the incremental path that skips already-classified contacts.
+  const analysis = force
+    ? await analyzeOrgLeads(orgId, emailAccountIds)
+    : await analyzeOrgLeadsIncremental(orgId, emailAccountIds);
 
   return { scan, analysis };
 }
