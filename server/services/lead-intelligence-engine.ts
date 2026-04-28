@@ -488,7 +488,11 @@ export async function scanOrgEmailHistory(orgId: string, monthsBack: number = 6,
   const scanResult: ScanResult = { orgId, accountsScanned: 0, totalEmailsFetched: 0, results: [], errors: [] };
 
   try {
-    let emailAccounts = await storage.getEmailAccounts(orgId);
+    // Lead intel sees both regular send-capable accounts AND scan-only accounts. Falls back
+    // to getEmailAccounts if the new method isn't present (older storage backend).
+    let emailAccounts = (storage as any).getEmailAccountsForLeadIntel
+      ? await (storage as any).getEmailAccountsForLeadIntel(orgId)
+      : await storage.getEmailAccounts(orgId);
 
     // Filter to selected accounts if specified
     if (emailAccountIds && emailAccountIds.length > 0) {
@@ -649,8 +653,12 @@ interface ContactConversationSummary {
 async function buildContactSummaries(orgId: string, emailAccountIds?: string[]): Promise<ContactConversationSummary[]> {
   const summaries: ContactConversationSummary[] = [];
 
-  // Get org account emails once (to skip internal emails)
-  const orgAccounts = await storage.getEmailAccounts(orgId);
+  // Get org account emails once (to skip internal emails). Includes scan-only accounts
+  // since their emails are also "us" — replies to them are still external contacts, but
+  // emails from those addresses to other people inside the org should be excluded.
+  const orgAccounts = (storage as any).getEmailAccountsForLeadIntel
+    ? await (storage as any).getEmailAccountsForLeadIntel(orgId)
+    : await storage.getEmailAccounts(orgId);
   const orgEmails = new Set((orgAccounts as any[]).map((a: any) => (a.email || '').toLowerCase()).filter(Boolean));
   console.log(`[LeadIntel] Org emails to exclude: ${Array.from(orgEmails).join(', ')}`);
 

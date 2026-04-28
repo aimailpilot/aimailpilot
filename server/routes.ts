@@ -624,11 +624,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const firstName = googleUser.given_name || name.split(' ')[0] || '';
       const lastName = googleUser.family_name || name.split(' ').slice(1).join(' ') || '';
 
-      // ===== GMAIL-CONNECT (ADD SENDER) FLOW =====
-      // If purpose is 'add_sender', this came from /api/auth/gmail-connect
-      // Handle it like the old gmail-connect/callback: store per-sender tokens, create account, redirect
-      if (purpose === 'add_sender') {
-        console.log('[Auth] Gmail-connect flow for:', email, 'stateOrgId:', stateOrgId, 'stateUserId:', stateUserId);
+      // ===== GMAIL-CONNECT (ADD SENDER OR SCAN-ONLY) FLOW =====
+      // purpose === 'add_sender': /api/auth/gmail-connect — full send-capable account
+      // purpose === 'scan_only':  /api/auth/gmail-scan-connect — read-only for Lead Intelligence
+      // Both store per-sender tokens. The only differences for scan_only:
+      //   - Account is created with scanOnly=1 (hidden from send paths and Email Accounts UI)
+      //   - We don't overwrite org-level "primary" tokens
+      //   - We don't replicate to the user's other orgs (scan-only is per-org intent)
+      if (purpose === 'add_sender' || purpose === 'scan_only') {
+        const isScanOnly = purpose === 'scan_only';
+        console.log(`[Auth] Gmail-connect flow for: ${email} (mode=${isScanOnly ? 'scan_only' : 'add_sender'}) stateOrgId: ${stateOrgId}, stateUserId: ${stateUserId}`);
         const orgId = stateOrgId || (req.session as any)?.user?.organizationId || '';
         
         // Fallback: get first org if orgId not in state
@@ -671,18 +676,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
         // ONLY update org-level tokens if this IS the primary account or no primary exists yet
         // CRITICAL FIX: Do NOT overwrite org-level tokens with a secondary account's tokens!
         // e.g., if primary is dev@aegis.edu.in, connecting bharatai5@aegis.edu.in should NOT overwrite org tokens
-        const currentSettings = await storage.getApiSettings(effectiveOrgId);
-        const primaryEmail = currentSettings.gmail_user_email;
-        const isPrimaryAccount = !primaryEmail || primaryEmail === email;
-        
-        if (isPrimaryAccount) {
-          console.log('[Auth] Updating org-level tokens (primary account or first account). email:', email);
-          await storage.setApiSetting(effectiveOrgId, 'gmail_access_token', tokens.access_token!);
-          if (tokens.refresh_token) await storage.setApiSetting(effectiveOrgId, 'gmail_refresh_token', tokens.refresh_token);
-          if (tokens.expiry_date) await storage.setApiSetting(effectiveOrgId, 'gmail_token_expiry', String(tokens.expiry_date));
-          if (!primaryEmail) await storage.setApiSetting(effectiveOrgId, 'gmail_user_email', email);
+        // Also: scan-only accounts are never the primary — they're read-only for Lead Intelligence.
+        if (!isScanOnly) {
+          const currentSettings = await storage.getApiSettings(effectiveOrgId);
+          const primaryEmail = currentSettings.gmail_user_email;
+          const isPrimaryAccount = !primaryEmail || primaryEmail === email;
+
+          if (isPrimaryAccount) {
+            console.log('[Auth] Updating org-level tokens (primary account or first account). email:', email);
+            await storage.setApiSetting(effectiveOrgId, 'gmail_access_token', tokens.access_token!);
+            if (tokens.refresh_token) await storage.setApiSetting(effectiveOrgId, 'gmail_refresh_token', tokens.refresh_token);
+            if (tokens.expiry_date) await storage.setApiSetting(effectiveOrgId, 'gmail_token_expiry', String(tokens.expiry_date));
+            if (!primaryEmail) await storage.setApiSetting(effectiveOrgId, 'gmail_user_email', email);
+          } else {
+            console.log(`[Auth] NOT overwriting org-level tokens: primary is ${primaryEmail}, this is ${email} (per-sender tokens stored above)`);
+          }
         } else {
-          console.log(`[Auth] NOT overwriting org-level tokens: primary is ${primaryEmail}, this is ${email} (per-sender tokens stored above)`);
+          console.log(`[Auth] scan-only account ${email} — skipping org-level primary token assignment`);
         }
 
         // Create or update email account
@@ -708,10 +718,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
             },
             dailyLimit: getProviderDailyLimit('gmail'),
             isActive: true,
+            scanOnly: isScanOnly,
           });
-          console.log(`[Auth] New Gmail sender added via OAuth: ${email}`);
+          console.log(`[Auth] New Gmail ${isScanOnly ? 'scan-only' : 'sender'} added via OAuth: ${email}`);
         } else {
-          // Account exists (active or soft-deleted) — update tokens and reactivate
+          // Account exists (active or soft-deleted) — update tokens and reactivate.
+          // If user reconnects an existing sender via the scan-only path (or vice versa),
+          // we keep the existing scanOnly value to avoid surprise transitions. Admin must
+          // delete and re-add to switch modes.
           const needsOAuthUpgrade = existingAccount.smtpConfig?.auth?.pass && existingAccount.smtpConfig.auth.pass !== 'OAUTH_TOKEN';
           await storage.updateEmailAccount(existingAccount.id, {
             ...(needsOAuthUpgrade ? {
@@ -725,12 +739,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
             authLastFailureAt: null,
             authLastErrorCode: null,
           });
-          console.log(`[Auth] Gmail sender ${existingAccount.isActive ? 'reconnected' : 'reactivated (was soft-deleted)'}: ${email} (id: ${existingAccount.id})`);
+          console.log(`[Auth] Gmail ${existingAccount.scanOnly ? 'scan-only ' : ''}${existingAccount.isActive ? 'reconnected' : 'reactivated (was soft-deleted)'}: ${email} (id: ${existingAccount.id})`);
         }
 
-        // Also create the email account in other orgs the user belongs to
+        // Also create the email account in other orgs the user belongs to.
+        // SKIP this for scan-only accounts — scan-only is per-org intent (admin connecting
+        // a mailbox specifically for THIS org's lead intelligence).
         const connectingUserId = stateUserId || (req.session as any)?.userId || req.cookies?.user_id || null;
-        if (connectingUserId) {
+        if (connectingUserId && !isScanOnly) {
           try {
             const userOrgs = await storage.getUserOrganizations(connectingUserId);
             for (const org of userOrgs) {
@@ -770,6 +786,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
 
         // Redirect back to the page that initiated the flow
+        if (isScanOnly) {
+          return res.redirect('/#lead-intelligence?scan_only_connected=' + encodeURIComponent(email));
+        }
         if (returnTo === 'contacts') {
           return res.redirect('/?view=contacts&gmail_connected=' + encodeURIComponent(email));
         } else {
@@ -1001,6 +1020,69 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // ===== ADD SCAN-ONLY GMAIL ACCOUNT =====
+  // Like /api/auth/gmail-connect but flags the resulting email_account as scanOnly=1.
+  // Account will be invisible to send paths, reply trackers, and the Email Accounts UI.
+  // Used by the Lead Intelligence page to connect mailboxes for read-only analysis.
+  app.get('/api/auth/gmail-scan-connect', requireAuth, async (req: any, res) => {
+    try {
+      const redirectUri = getGoogleRedirectUri(req);
+      const orgId = req.user.organizationId;
+
+      // Resolve OAuth credentials (same fallback chain as gmail-connect)
+      let clientId = '';
+      let clientSecret = '';
+      try {
+        const settings = await storage.getApiSettings(orgId);
+        if (settings.google_oauth_client_id) {
+          clientId = settings.google_oauth_client_id;
+          clientSecret = settings.google_oauth_client_secret || '';
+        }
+      } catch (e) { /* ignore */ }
+      if (!clientId || !clientSecret) {
+        try {
+          const superAdminOrgId = await storage.getSuperAdminOrgId();
+          if (superAdminOrgId && superAdminOrgId !== orgId) {
+            const superSettings = await storage.getApiSettings(superAdminOrgId);
+            if (superSettings.google_oauth_client_id) {
+              clientId = superSettings.google_oauth_client_id;
+              clientSecret = superSettings.google_oauth_client_secret || '';
+            }
+          }
+        } catch (e) { /* ignore */ }
+      }
+      if (!clientId || !clientSecret) {
+        const creds = await getStoredOAuthCredentials('google');
+        clientId = creds.clientId;
+        clientSecret = creds.clientSecret;
+      }
+      if (!clientId || !clientSecret) {
+        return res.redirect('/#lead-intelligence?error=oauth_not_configured');
+      }
+
+      const oauth2Client = createOAuth2Client({ clientId, clientSecret, redirectUri });
+      const authUrl = oauth2Client.generateAuthUrl({
+        access_type: 'offline',
+        prompt: 'consent',
+        // Scan-only intent — but request the same Gmail API scopes the existing
+        // tracker/scanner needs so a single OAuth grant covers all read paths.
+        // We deliberately also include userinfo for displayName.
+        scope: [
+          'https://www.googleapis.com/auth/gmail.readonly',
+          'https://www.googleapis.com/auth/userinfo.email',
+          'https://www.googleapis.com/auth/userinfo.profile',
+        ],
+        state: JSON.stringify({ redirectUri, purpose: 'scan_only', orgId, userId: req.user.id, returnTo: 'lead-intelligence' }),
+      });
+
+      console.log('[Auth] Gmail scan-connect redirect for org:', orgId);
+      res.redirect(authUrl);
+    } catch (error) {
+      console.error('[Auth] Gmail scan-connect init error:', error);
+      res.redirect('/#lead-intelligence?error=gmail_scan_connect_failed');
+    }
+  });
+
   // Callback for adding Gmail sender account
   // Legacy callback - kept for backward compatibility but /api/auth/google/callback now handles both flows
   app.get('/api/auth/gmail-connect/callback', async (req: any, res) => {
@@ -1156,9 +1238,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const stateUserId = parsedState.userId || '';
       console.log(`[Auth] Microsoft callback - email: ${email}, purpose: ${purpose}, stateOrgId: ${stateOrgId}, stateUserId: ${stateUserId}`);
 
-      // ===== OUTLOOK-CONNECT (ADD SENDER) FLOW =====
-      if (purpose === 'add_sender') {
-        console.log('[Auth] Outlook-connect flow for:', email, 'stateOrgId:', stateOrgId, 'stateUserId:', stateUserId);
+      // ===== OUTLOOK-CONNECT (ADD SENDER OR SCAN-ONLY) FLOW =====
+      if (purpose === 'add_sender' || purpose === 'scan_only') {
+        const isScanOnly = purpose === 'scan_only';
+        console.log(`[Auth] Outlook-connect flow for: ${email} (mode=${isScanOnly ? 'scan_only' : 'add_sender'}) stateOrgId: ${stateOrgId}, stateUserId: ${stateUserId}`);
         let effectiveOrgId = stateOrgId || (req.session as any)?.user?.organizationId || '';
         if (!effectiveOrgId) {
           const orgIds = await storage.getAllOrganizationIds();
@@ -1200,16 +1283,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const storedToken = verifySettings[`outlook_sender_${email}_access_token`];
         console.log(`[Auth] Token storage verification for ${email}: token stored = ${!!storedToken}, org = ${effectiveOrgId}`);
 
-        // Only update org-level tokens if this is the primary Outlook account or first account
-        const currentSettings = await storage.getApiSettings(effectiveOrgId);
-        const primaryMsEmail = currentSettings.microsoft_user_email;
-        const isPrimary = !primaryMsEmail || primaryMsEmail === email;
-        
-        if (isPrimary) {
-          await storage.setApiSetting(effectiveOrgId, 'microsoft_access_token', tokens.access_token);
-          if (tokens.refresh_token) await storage.setApiSetting(effectiveOrgId, 'microsoft_refresh_token', tokens.refresh_token);
-          if (tokens.expires_in) await storage.setApiSetting(effectiveOrgId, 'microsoft_token_expiry', String(Date.now() + tokens.expires_in * 1000));
-          if (!primaryMsEmail) await storage.setApiSetting(effectiveOrgId, 'microsoft_user_email', email);
+        // Only update org-level tokens if this is the primary Outlook account or first account.
+        // Scan-only accounts are never the primary — skip this block for them.
+        if (!isScanOnly) {
+          const currentSettings = await storage.getApiSettings(effectiveOrgId);
+          const primaryMsEmail = currentSettings.microsoft_user_email;
+          const isPrimary = !primaryMsEmail || primaryMsEmail === email;
+
+          if (isPrimary) {
+            await storage.setApiSetting(effectiveOrgId, 'microsoft_access_token', tokens.access_token);
+            if (tokens.refresh_token) await storage.setApiSetting(effectiveOrgId, 'microsoft_refresh_token', tokens.refresh_token);
+            if (tokens.expires_in) await storage.setApiSetting(effectiveOrgId, 'microsoft_token_expiry', String(Date.now() + tokens.expires_in * 1000));
+            if (!primaryMsEmail) await storage.setApiSetting(effectiveOrgId, 'microsoft_user_email', email);
+          }
+        } else {
+          console.log(`[Auth] scan-only Outlook account ${email} — skipping org-level primary token assignment`);
         }
 
         // Create or update email account — check including soft-deleted to preserve ID
@@ -1232,8 +1320,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
             },
             dailyLimit: getProviderDailyLimit('outlook'),
             isActive: true,
+            scanOnly: isScanOnly,
           });
-          console.log(`[Auth] New Outlook sender added via OAuth: ${email}`);
+          console.log(`[Auth] New Outlook ${isScanOnly ? 'scan-only' : 'sender'} added via OAuth: ${email}`);
         } else {
           // Account exists (active or soft-deleted) — update tokens and reactivate
           const needsOAuthUpgrade = existingAccount.smtpConfig?.auth?.pass && existingAccount.smtpConfig.auth.pass !== 'OAUTH_TOKEN';
@@ -1249,12 +1338,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
             authLastFailureAt: null,
             authLastErrorCode: null,
           });
-          console.log(`[Auth] Outlook sender ${existingAccount.isActive ? 'reconnected' : 'reactivated (was soft-deleted)'}: ${email} (id: ${existingAccount.id})`);
+          console.log(`[Auth] Outlook ${existingAccount.scanOnly ? 'scan-only ' : ''}${existingAccount.isActive ? 'reconnected' : 'reactivated (was soft-deleted)'}: ${email} (id: ${existingAccount.id})`);
         }
 
-        // Also create the email account in other orgs the user belongs to
+        // Also create the email account in other orgs the user belongs to.
+        // SKIP for scan-only — scan-only is per-org intent.
         const connectingUserId = stateUserId || (req.session as any)?.userId || req.cookies?.user_id || null;
-        if (connectingUserId) {
+        if (connectingUserId && !isScanOnly) {
           try {
             const userOrgs = await storage.getUserOrganizations(connectingUserId);
             for (const org of userOrgs) {
@@ -1293,9 +1383,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
         }
 
-        // Start Outlook reply tracking
-        outlookReplyTracker.startAutoCheck(effectiveOrgId, 5);
+        // Start Outlook reply tracking — only for send-capable accounts.
+        // Scan-only accounts are read by the lead intelligence engine, not the reply tracker.
+        if (!isScanOnly) {
+          outlookReplyTracker.startAutoCheck(effectiveOrgId, 5);
+        }
 
+        if (isScanOnly) {
+          return res.redirect('/#lead-intelligence?scan_only_connected=' + encodeURIComponent(email));
+        }
         return res.redirect('/?view=setup&outlook_connected=' + encodeURIComponent(email));
       }
 
@@ -1500,6 +1596,45 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error('[Auth] Outlook connect init error:', error);
       res.redirect('/?view=setup&error=outlook_connect_failed');
+    }
+  });
+
+  // ===== ADD SCAN-ONLY OUTLOOK ACCOUNT =====
+  // Like /api/auth/outlook-connect but flags the resulting email_account as scanOnly=1.
+  // Account will be invisible to send paths, reply trackers, and the Email Accounts UI.
+  app.get('/api/auth/outlook-scan-connect', requireAuth, async (req: any, res) => {
+    try {
+      const redirectUri = getMicrosoftRedirectUri(req);
+      const orgId = req.user.organizationId;
+      const { clientId, clientSecret } = await getStoredOAuthCredentials('microsoft');
+      if (!clientId || !clientSecret) {
+        return res.redirect('/#lead-intelligence?error=oauth_not_configured');
+      }
+      // Read-only scopes — Mail.Read for /me/messages access, User.Read for displayName.
+      // Reuses same redirect URI so registration in Azure stays unchanged.
+      const scopes = [
+        'openid', 'profile', 'email', 'offline_access',
+        'https://graph.microsoft.com/User.Read',
+        'https://graph.microsoft.com/Mail.Read',
+      ];
+      const authUrl = new URL('https://login.microsoftonline.com/common/oauth2/v2.0/authorize');
+      authUrl.searchParams.set('client_id', clientId);
+      authUrl.searchParams.set('response_type', 'code');
+      authUrl.searchParams.set('redirect_uri', redirectUri);
+      authUrl.searchParams.set('response_mode', 'query');
+      authUrl.searchParams.set('scope', scopes.join(' '));
+      authUrl.searchParams.set('prompt', 'consent');
+      authUrl.searchParams.set('state', JSON.stringify({
+        redirectUri,
+        purpose: 'scan_only',
+        orgId,
+        userId: req.user.id,
+      }));
+      console.log('[Auth] Outlook scan-connect redirect - org:', orgId);
+      res.redirect(authUrl.toString());
+    } catch (error) {
+      console.error('[Auth] Outlook scan-connect init error:', error);
+      res.redirect('/#lead-intelligence?error=outlook_scan_connect_failed');
     }
   });
 
@@ -2199,6 +2334,58 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // ========== EMAIL ACCOUNTS (SMTP) ==========
+
+  // Email accounts visible to Lead Intelligence (regular send-capable + scan-only).
+  // Separate endpoint so the main /api/email-accounts UI continues to hide scan-only.
+  app.get('/api/email-accounts/lead-intel', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const allAccounts = (storage as any).getEmailAccountsForLeadIntel
+        ? await (storage as any).getEmailAccountsForLeadIntel(orgId)
+        : await storage.getEmailAccounts(orgId);
+      const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
+      const filtered = isAdmin ? allAccounts : (allAccounts as any[]).filter((a: any) => a.userId === req.user.id);
+      // Strip smtpConfig.auth.pass like the main endpoint does
+      const safe = filtered.map((a: any) => ({
+        id: a.id,
+        organizationId: a.organizationId,
+        userId: a.userId,
+        provider: a.provider,
+        email: a.email,
+        displayName: a.displayName,
+        dailyLimit: a.dailyLimit,
+        dailySent: a.dailySent,
+        isActive: a.isActive,
+        scanOnly: a.scanOnly === 1 || a.scanOnly === true,
+        leadIntelLastScanAt: a.leadIntelLastScanAt,
+      }));
+      res.json(safe);
+    } catch (error: any) {
+      console.error('[email-accounts/lead-intel] error:', error?.message || error);
+      res.status(500).json({ message: 'Failed to load lead intel accounts' });
+    }
+  });
+
+  // Disconnect a scan-only account (admin only). Soft-deletes by isActive=0 + scanOnly=1
+  // so it's hidden from both the regular and lead-intel lists. Existing email_history rows
+  // and lead_opportunities are preserved (admin can re-add later to resume).
+  app.delete('/api/email-accounts/scan-only/:id', requireAuth, async (req: any, res) => {
+    try {
+      if (req.user.role !== 'owner' && req.user.role !== 'admin' && req.user.role !== 'superadmin') {
+        return res.status(403).json({ message: 'Admin only' });
+      }
+      const orgId = req.user.organizationId;
+      // Soft-delete via existing pattern (mirrors deleteEmailAccount which sets isActive=0)
+      await storage.rawRun(
+        `UPDATE email_accounts SET "isActive" = 0 WHERE id = ? AND "organizationId" = ? AND "scanOnly" = 1`,
+        req.params.id, orgId
+      );
+      res.json({ ok: true });
+    } catch (error: any) {
+      console.error('[email-accounts/scan-only delete] error:', error?.message || error);
+      res.status(500).json({ message: 'Failed to disconnect scan-only account' });
+    }
+  });
 
   app.get('/api/email-accounts', async (req: any, res) => {
     try {

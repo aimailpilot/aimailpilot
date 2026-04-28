@@ -818,6 +818,12 @@ async function initializeSchema() {
       // used to fetch only emails newer than this on subsequent scans. NULL = never scanned
       // (full monthsBack history is fetched on first scan or when force=true).
       'ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS "leadIntelLastScanAt" TEXT DEFAULT NULL',
+      // Scan-only flag — when 1, the account is hidden from sending paths, reply trackers,
+      // and the Email Accounts UI. Visible only to Lead Intelligence (scan + analyze).
+      // Added 2026-04-28 to let teams connect mailboxes for read-only intelligence without
+      // also exposing them as send-from addresses.
+      'ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS "scanOnly" INTEGER DEFAULT 0',
+      'CREATE INDEX IF NOT EXISTS idx_email_accounts_scan_only ON email_accounts("organizationId", "scanOnly")',
       // Multi-list membership junction table
       `CREATE TABLE IF NOT EXISTS contact_list_members (
         "contactId" TEXT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
@@ -1038,8 +1044,24 @@ export class PostgresStorage {
   }
 
   // ========== Email Accounts ==========
+  // NOTE: getEmailAccounts hides scan-only accounts (scanOnly=1). They are connected for
+  // Lead Intelligence read-only purposes and must NOT appear in: send paths, reply
+  // trackers, Email Accounts UI, daily-quota dashboards, etc. Use getEmailAccountsForLeadIntel
+  // to include them.
   async getEmailAccounts(organizationId: string) {
+    return (await queryAll('SELECT * FROM email_accounts WHERE "organizationId" = $1 AND "isActive" != 0 AND COALESCE("scanOnly", 0) = 0', [organizationId])).map(hydrateAccount);
+  }
+
+  // Lead Intelligence sees BOTH regular and scan-only accounts (scan-only is the whole point
+  // of having them — read-only mailbox access for analysis without polluting send paths).
+  async getEmailAccountsForLeadIntel(organizationId: string) {
     return (await queryAll('SELECT * FROM email_accounts WHERE "organizationId" = $1 AND "isActive" != 0', [organizationId])).map(hydrateAccount);
+  }
+
+  // Returns ONLY scan-only accounts. Used by the Lead Intelligence UI to display the
+  // separate "Scan-only mailboxes" list.
+  async getScanOnlyAccounts(organizationId: string) {
+    return (await queryAll('SELECT * FROM email_accounts WHERE "organizationId" = $1 AND "isActive" != 0 AND "scanOnly" = 1', [organizationId])).map(hydrateAccount);
   }
 
   async getEmailAccountIncludingInactive(organizationId: string, email: string) {
@@ -1047,7 +1069,7 @@ export class PostgresStorage {
   }
 
   async getEmailAccountsForUser(organizationId: string, userId: string) {
-    return (await queryAll('SELECT * FROM email_accounts WHERE "organizationId" = $1 AND "userId" = $2', [organizationId, userId])).map(hydrateAccount);
+    return (await queryAll('SELECT * FROM email_accounts WHERE "organizationId" = $1 AND "userId" = $2 AND COALESCE("scanOnly", 0) = 0', [organizationId, userId])).map(hydrateAccount);
   }
 
   async getEmailAccount(id: string) { return hydrateAccount(await queryOne('SELECT * FROM email_accounts WHERE id = $1', [id])); }
@@ -1062,9 +1084,10 @@ export class PostgresStorage {
 
   async createEmailAccount(account: any) {
     const id = genId(); const ts = now();
+    const scanOnly = account.scanOnly ? 1 : 0;
     await execute(
-      'INSERT INTO email_accounts (id, "organizationId", "userId", provider, email, "displayName", "smtpConfig", "dailyLimit", "dailySent", "isActive", "createdAt", "updatedAt") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)',
-      [id, account.organizationId, account.userId || null, account.provider || 'custom', account.email, account.displayName || account.email, toJson(account.smtpConfig), account.dailyLimit || 500, 0, 1, ts, ts]
+      'INSERT INTO email_accounts (id, "organizationId", "userId", provider, email, "displayName", "smtpConfig", "dailyLimit", "dailySent", "isActive", "scanOnly", "createdAt", "updatedAt") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)',
+      [id, account.organizationId, account.userId || null, account.provider || 'custom', account.email, account.displayName || account.email, toJson(account.smtpConfig), account.dailyLimit || 500, 0, 1, scanOnly, ts, ts]
     );
     return this.getEmailAccount(id);
   }

@@ -115,7 +115,7 @@ export default function LeadOpportunities() {
         fetch('/api/lead-intelligence/opportunities', { credentials: 'include' }),
         fetch('/api/lead-intelligence/summary', { credentials: 'include' }),
         fetch('/api/lead-intelligence/sync-status', { credentials: 'include' }),
-        fetch('/api/email-accounts', { credentials: 'include' }),
+        fetch('/api/email-accounts/lead-intel', { credentials: 'include' }),
       ]);
       if (oppsRes.ok) setOpportunities(await oppsRes.json());
       if (summaryRes.ok) {
@@ -360,6 +360,7 @@ export default function LeadOpportunities() {
             <div className="flex items-center gap-2 flex-wrap">
               {emailAccounts.map(account => {
                 const isSelected = selectedAccountIds.includes(String(account.id));
+                const isScanOnly = (account as any).scanOnly === true;
                 const providerIcon = (account.provider || '').toLowerCase().includes('gmail') || (account.provider || '').toLowerCase().includes('google')
                   ? '📧' : (account.provider || '').toLowerCase().includes('outlook') || (account.provider || '').toLowerCase().includes('microsoft')
                   ? '📨' : '✉️';
@@ -379,11 +380,37 @@ export default function LeadOpportunities() {
                   >
                     <span>{providerIcon}</span>
                     <span>{account.email}</span>
+                    {isScanOnly && (
+                      <span title="Scan-only — read-only mailbox for Lead Intelligence; not used for sending"
+                            className="text-[9px] font-semibold px-1 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-200">SCAN</span>
+                    )}
                     {isSelected && <CheckCircle2 className="h-3 w-3 text-indigo-500" />}
                   </button>
                 );
               })}
             </div>
+
+            {/* Connect scan-only mailbox — read-only access for Lead Intelligence,
+                hidden from send paths and the Email Accounts UI. */}
+            {isAdmin && (
+              <div className="mt-3 pt-3 border-t border-gray-100">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[11px] text-gray-500">
+                    <strong className="text-gray-700">Add scan-only mailbox</strong> — read-only access for analysis. Won't appear in Email Accounts and can't be used for sending.
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <Button size="sm" variant="outline" className="h-7 text-[11px] gap-1"
+                      onClick={() => { window.location.href = '/api/auth/gmail-scan-connect'; }}>
+                      📧 Connect Gmail (scan-only)
+                    </Button>
+                    <Button size="sm" variant="outline" className="h-7 text-[11px] gap-1"
+                      onClick={() => { window.location.href = '/api/auth/outlook-scan-connect'; }}>
+                      📨 Connect Outlook (scan-only)
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
