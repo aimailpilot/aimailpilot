@@ -51,6 +51,7 @@ interface InboxMessage {
   repliedAt?: string;
   replyContent?: string;
   repliedBy?: string;
+  nativeReplyContent?: string;
   forwardedAt?: string;
   forwardedTo?: string;
   forwardedFrom?: string;
@@ -1430,29 +1431,37 @@ export default function UnifiedInbox() {
                         </div>
                       )}
                       <div className="text-xs text-gray-400 truncate mt-0.5 max-w-[90%]">{msg.snippet}</div>
-                      {/* Reply preview — shown in the Replied tab. In-app replies have replyContent;
-                          native-client replies (Gmail/Outlook direct) only have repliedBy set. */}
-                      {statusFilter === 'replied' && (msg.replyContent || msg.repliedBy) && (
-                        <div className="mt-1 pl-2 border-l-2 border-green-300 max-w-[90%]">
-                          <div className="flex items-center gap-1 text-[10px] text-green-700 font-semibold">
-                            <Reply className="h-2.5 w-2.5" />
-                            {msg.replyContent ? 'Your reply' : 'Replied via native client'}
-                            {msg.repliedAt && <span className="text-gray-400 font-normal">· {fmtDate(msg.repliedAt)}</span>}
-                            {msg.repliedBy && !msg.replyContent && (
-                              <span className="text-gray-500 font-normal">· by {msg.repliedBy}</span>
+                      {/* Reply preview — shown in the Replied tab.
+                          Three sources of reply body, in order of preference:
+                            1. msg.replyContent       — sent in-app
+                            2. msg.nativeReplyContent — sent natively, body fetched by sweeper
+                            3. neither                — only repliedBy is set (older rows or sweeper miss) */}
+                      {statusFilter === 'replied' && (msg.replyContent || msg.nativeReplyContent || msg.repliedBy) && (() => {
+                        const replyBody = msg.replyContent || msg.nativeReplyContent || '';
+                        const isInApp = !!msg.replyContent;
+                        const isNative = !msg.replyContent && !!msg.nativeReplyContent;
+                        const headerLabel = isInApp ? 'Your reply' : isNative ? 'Reply (sent from native client)' : 'Replied via native client';
+                        const cleaned = replyBody.replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 240);
+                        return (
+                          <div className="mt-1 pl-2 border-l-2 border-green-300 max-w-[90%]">
+                            <div className="flex items-center gap-1 text-[10px] text-green-700 font-semibold">
+                              <Reply className="h-2.5 w-2.5" />
+                              {headerLabel}
+                              {msg.repliedAt && <span className="text-gray-400 font-normal">· {fmtDate(msg.repliedAt)}</span>}
+                              {msg.repliedBy && !isInApp && (
+                                <span className="text-gray-500 font-normal">· by {msg.repliedBy}</span>
+                              )}
+                            </div>
+                            {cleaned ? (
+                              <div className="text-[11px] text-gray-600 line-clamp-2 mt-0.5">{cleaned}</div>
+                            ) : (
+                              <div className="text-[10px] text-gray-400 italic mt-0.5">
+                                Reply content not yet captured — outbound sweeper will fetch it within ~10 min
+                              </div>
                             )}
                           </div>
-                          {msg.replyContent ? (
-                            <div className="text-[11px] text-gray-600 line-clamp-2 mt-0.5">
-                              {msg.replyContent.replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 240)}
-                            </div>
-                          ) : (
-                            <div className="text-[10px] text-gray-400 italic mt-0.5">
-                              Reply content not available (sent from outside the app — only the fact of reply was detected)
-                            </div>
-                          )}
-                        </div>
-                      )}
+                        );
+                      })()}
                     </div>
 
                     {/* Right side */}

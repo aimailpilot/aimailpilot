@@ -7952,6 +7952,20 @@ Output schema:
     }
   });
 
+  // Backfill nativeReplyContent for rows already marked repliedBy by older sweep runs
+  // (those only stored timestamps, not bodies). Body limit per call defaults to 100.
+  app.post('/api/admin/outbound-reply-sweep/backfill-content', requireAdminOrDebugToken, async (req: any, res) => {
+    try {
+      const max = Math.min(500, Math.max(1, parseInt(req.body?.maxRows as string) || 100));
+      const { backfillNativeReplyContent } = await import('./services/outbound-reply-sweeper.js');
+      const stats = await backfillNativeReplyContent(max);
+      res.json({ ok: true, stats });
+    } catch (error: any) {
+      console.error('[outbound-reply-sweep backfill-content] error:', error?.message || error);
+      res.status(500).json({ message: 'Failed to backfill native reply content' });
+    }
+  });
+
   // One-time backfill: reclassify inbox rows from system/bot senders (GitHub Actions,
   // CI, no-reply addresses) that were previously mis-flagged as 'positive' / 'general' /
   // 'negative'. Sets replyType='auto_reply' so isHumanReply() excludes them from Need Reply.

@@ -814,6 +814,11 @@ async function initializeSchema() {
       // instead of looping on the oldest 50 forever.
       'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "outboundCheckedAt" TEXT DEFAULT NULL',
       'CREATE INDEX IF NOT EXISTS idx_inbox_outbound_check ON unified_inbox("organizationId", "outboundCheckedAt")',
+      // Body of the user's native-client reply found in the Gmail/Outlook thread by the
+      // outbound-reply-sweeper. Lets the Replied tab show what was actually replied even
+      // when the reply was sent from outside AImailPilot. Plain text or stripped HTML, capped
+      // to ~5000 chars at write time to keep row sizes bounded.
+      'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "nativeReplyContent" TEXT DEFAULT NULL',
       // Lead intelligence incremental scan — per-account timestamp of last successful scan,
       // used to fetch only emails newer than this on subsequent scans. NULL = never scanned
       // (full monthsBack history is fetched on first scan or when force=true).

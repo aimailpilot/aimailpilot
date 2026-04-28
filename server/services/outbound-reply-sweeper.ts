@@ -177,14 +177,48 @@ async function getOutlookAccessToken(orgId: string, senderEmail: string): Promis
 // Provider-specific thread checkers
 // ──────────────────────────────────────────────────────────────────────────────
 
+// Extract plain-text body from a Gmail message payload (handles multipart/mixed,
+// multipart/alternative, and single-part text/plain or text/html). Falls back to snippet.
+function extractGmailBody(msg: any): string {
+  if (!msg) return '';
+  // Walk the parts tree depth-first preferring text/plain over text/html
+  const collect = (part: any, acc: { plain: string; html: string }) => {
+    if (!part) return;
+    const mime = (part.mimeType || '').toLowerCase();
+    const data = part.body?.data;
+    if (data) {
+      try {
+        const decoded = Buffer.from(data, 'base64url').toString('utf-8');
+        if (mime === 'text/plain' && !acc.plain) acc.plain = decoded;
+        else if (mime === 'text/html' && !acc.html) acc.html = decoded;
+      } catch { /* skip */ }
+    }
+    if (Array.isArray(part.parts)) for (const p of part.parts) collect(p, acc);
+  };
+  const acc = { plain: '', html: '' };
+  collect(msg.payload, acc);
+  if (acc.plain) return acc.plain;
+  if (acc.html) {
+    return acc.html.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+      .replace(/\s+/g, ' ').trim();
+  }
+  return msg.snippet || '';
+}
+
+const NATIVE_REPLY_MAX_CHARS = 5000;
+
 /**
  * Check a Gmail thread for an outbound reply from the user.
- * Returns the ISO timestamp of the outbound reply if found, else null.
+ * Returns { sentAt, content } when found, else null.
+ * Uses format=full so the matched message body is included — no extra detail fetch needed.
  */
-async function checkGmailThread(accessToken: string, threadId: string, ownerEmail: string, receivedAt: number): Promise<string | null> {
+async function checkGmailThread(accessToken: string, threadId: string, ownerEmail: string, receivedAt: number): Promise<{ sentAt: string; content: string } | null> {
   try {
     const resp = await fetch(
-      `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=metadata&metadataHeaders=From&metadataHeaders=Date`,
+      `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=full`,
       { headers: { 'Authorization': `Bearer ${accessToken}` } }
     );
     if (!resp.ok) return null;
@@ -201,7 +235,9 @@ async function checkGmailThread(accessToken: string, threadId: string, ownerEmai
       if (fromEmail === ownerLower) {
         const msgTime = dateHeader ? new Date(dateHeader).getTime() : (msg.internalDate ? Number(msg.internalDate) : 0);
         if (msgTime > receivedAt) {
-          return new Date(msgTime).toISOString();
+          const rawBody = extractGmailBody(msg);
+          const content = (rawBody || '').replace(/\s+/g, ' ').trim().slice(0, NATIVE_REPLY_MAX_CHARS);
+          return { sentAt: new Date(msgTime).toISOString(), content };
         }
       }
     }
@@ -211,12 +247,12 @@ async function checkGmailThread(accessToken: string, threadId: string, ownerEmai
 
 /**
  * Check an Outlook (Microsoft Graph) conversation for an outbound reply from the user.
- * Returns the ISO timestamp of the outbound reply if found, else null.
+ * Returns { sentAt, content } when found, else null.
+ * `body` is requested inline via $select — no extra message detail fetch needed.
  */
-async function checkOutlookConversation(accessToken: string, conversationId: string, ownerEmail: string, receivedAt: number): Promise<string | null> {
+async function checkOutlookConversation(accessToken: string, conversationId: string, ownerEmail: string, receivedAt: number): Promise<{ sentAt: string; content: string } | null> {
   try {
-    // Fetch messages in the conversation, only need from + sentDateTime
-    const url = `https://graph.microsoft.com/v1.0/me/messages?$filter=conversationId eq '${encodeURIComponent(conversationId)}'&$select=from,sentDateTime,sender&$top=50`;
+    const url = `https://graph.microsoft.com/v1.0/me/messages?$filter=conversationId eq '${encodeURIComponent(conversationId)}'&$select=from,sentDateTime,sender,body,bodyPreview&$top=50`;
     const resp = await fetch(url, { headers: { 'Authorization': `Bearer ${accessToken}` } });
     if (!resp.ok) return null;
     const data = await resp.json() as any;
@@ -228,7 +264,19 @@ async function checkOutlookConversation(accessToken: string, conversationId: str
       if (fromAddr !== ownerLower) continue;
       const sentTime = m.sentDateTime ? new Date(m.sentDateTime).getTime() : 0;
       if (sentTime > receivedAt) {
-        return new Date(sentTime).toISOString();
+        // Graph returns body as { contentType: 'html' | 'text', content: '...' }. Strip HTML if needed.
+        const bodyContentType = (m.body?.contentType || '').toLowerCase();
+        const bodyRaw: string = m.body?.content || m.bodyPreview || '';
+        let textOnly = bodyRaw;
+        if (bodyContentType === 'html') {
+          textOnly = bodyRaw
+            .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+            .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
+            .replace(/<[^>]*>/g, ' ')
+            .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
+        }
+        const content = (textOnly || '').replace(/\s+/g, ' ').trim().slice(0, NATIVE_REPLY_MAX_CHARS);
+        return { sentAt: new Date(sentTime).toISOString(), content };
       }
     }
     return null;
@@ -302,30 +350,31 @@ async function processCandidate(c: InboxCandidate): Promise<'replied' | 'no_repl
   if (!c.ownerEmail) return 'skipped';
   const provider = (c.provider || '').toLowerCase();
   const receivedAt = new Date(c.receivedAt).getTime();
-  let outboundAt: string | null = null;
+  let match: { sentAt: string; content: string } | null = null;
 
   if (provider === 'gmail' && c.gmailThreadId) {
     const token = await getGmailAccessToken(c.organizationId, c.ownerEmail);
     if (!token) return 'skipped';
-    outboundAt = await checkGmailThread(token, c.gmailThreadId, c.ownerEmail, receivedAt);
+    match = await checkGmailThread(token, c.gmailThreadId, c.ownerEmail, receivedAt);
   } else if (provider === 'outlook' && c.outlookConversationId) {
     const token = await getOutlookAccessToken(c.organizationId, c.ownerEmail);
     if (!token) return 'skipped';
-    outboundAt = await checkOutlookConversation(token, c.outlookConversationId, c.ownerEmail, receivedAt);
+    match = await checkOutlookConversation(token, c.outlookConversationId, c.ownerEmail, receivedAt);
   } else {
     return 'skipped';
   }
 
-  if (!outboundAt) return 'no_reply';
+  if (!match) return 'no_reply';
 
-  // Mark this inbox row as replied via native client.
+  // Mark this inbox row as replied via native client. Stores both:
+  //   - repliedBy: who replied (ownerUserId fallback to ownerEmail)
+  //   - nativeReplyContent: the body of their reply (extracted from Gmail/Outlook thread)
   // Convention: existing in-app reply flows set repliedBy = req.user.email || req.user.id.
-  // Mirror that here using ownerUserId (the user who owns the mailbox) with the mailbox email
-  // as fallback if userId is missing (orphaned accounts). Idempotent via repliedBy IS NULL clause.
+  // Idempotent via repliedBy IS NULL clause — won't overwrite if another flow already set it.
   // Does NOT touch status or repliedAt — those are reserved for in-app reply flows.
   await storage.rawRun(
-    `UPDATE unified_inbox SET "repliedBy" = ? WHERE id = ? AND "organizationId" = ? AND "repliedBy" IS NULL`,
-    c.ownerUserId || c.ownerEmail, c.id, c.organizationId
+    `UPDATE unified_inbox SET "repliedBy" = ?, "nativeReplyContent" = ? WHERE id = ? AND "organizationId" = ? AND "repliedBy" IS NULL`,
+    c.ownerUserId || c.ownerEmail, match.content || null, c.id, c.organizationId
   );
   return 'replied';
 }
@@ -375,6 +424,71 @@ export async function runOutboundReplySweep(): Promise<LastRunStats> {
     lastRun.durationSec = Math.round((Date.now() - started) / 1000);
   }
   return { ...lastRun };
+}
+
+// One-time backfill: fetch nativeReplyContent for rows already marked repliedBy by older
+// sweeper runs (which only stored the timestamp, not the body). Same provider API logic
+// as the regular sweep, but selects different rows and uses an UPDATE that doesn't require
+// repliedBy IS NULL (since these already have it set).
+export async function backfillNativeReplyContent(maxRows: number = 100): Promise<{ processed: number; filled: number; skipped: number; errors: number }> {
+  const stats = { processed: 0, filled: 0, skipped: 0, errors: 0 };
+  // Pull rows that have a repliedBy (sweeper marked) but no body yet, with a thread id available.
+  const sql = `
+    SELECT ui.id, ui."organizationId",
+           ui."gmailThreadId", ui."outlookConversationId",
+           ui."emailAccountId", ui."receivedAt",
+           ea.email AS "ownerEmail", ea.provider AS "provider"
+    FROM unified_inbox ui
+    JOIN email_accounts ea ON ea.id = ui."emailAccountId"
+    WHERE ui."repliedBy" IS NOT NULL
+      AND (ui."nativeReplyContent" IS NULL OR ui."nativeReplyContent" = '')
+      AND (
+        (ui."gmailThreadId" IS NOT NULL AND ui."gmailThreadId" != '')
+        OR (ui."outlookConversationId" IS NOT NULL AND ui."outlookConversationId" != '')
+      )
+      AND ea."isActive" != 0
+    ORDER BY ui."receivedAt" DESC
+    LIMIT ?
+  `;
+  const rows = await storage.rawAll(sql, maxRows) as any[];
+  if (!rows.length) return stats;
+  console.log(`[OutboundReplySweep] Backfill: ${rows.length} candidate rows`);
+
+  for (const r of rows) {
+    stats.processed++;
+    try {
+      const provider = (r.provider || '').toLowerCase();
+      const receivedAt = new Date(r.receivedAt).getTime();
+      let match: { sentAt: string; content: string } | null = null;
+
+      if (provider === 'gmail' && r.gmailThreadId) {
+        const token = await getGmailAccessToken(r.organizationId, r.ownerEmail);
+        if (!token) { stats.skipped++; continue; }
+        match = await checkGmailThread(token, r.gmailThreadId, r.ownerEmail, receivedAt);
+      } else if (provider === 'outlook' && r.outlookConversationId) {
+        const token = await getOutlookAccessToken(r.organizationId, r.ownerEmail);
+        if (!token) { stats.skipped++; continue; }
+        match = await checkOutlookConversation(token, r.outlookConversationId, r.ownerEmail, receivedAt);
+      } else {
+        stats.skipped++; continue;
+      }
+
+      if (!match || !match.content) { stats.skipped++; continue; }
+
+      // Backfill UPDATE — does NOT require repliedBy IS NULL (the row already has repliedBy set).
+      // Only writes if nativeReplyContent is still empty (idempotent against concurrent sweeps).
+      await storage.rawRun(
+        `UPDATE unified_inbox SET "nativeReplyContent" = ? WHERE id = ? AND "organizationId" = ? AND ("nativeReplyContent" IS NULL OR "nativeReplyContent" = '')`,
+        match.content, r.id, r.organizationId
+      );
+      stats.filled++;
+    } catch (e) {
+      stats.errors++;
+      console.error(`[OutboundReplySweep] backfill row ${r.id} failed:`, e instanceof Error ? e.message : e);
+    }
+  }
+  console.log(`[OutboundReplySweep] Backfill done: processed=${stats.processed} filled=${stats.filled} skipped=${stats.skipped} errors=${stats.errors}`);
+  return stats;
 }
 
 export function startOutboundReplySweeper(): void {
