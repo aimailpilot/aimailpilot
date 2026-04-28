@@ -1804,15 +1804,16 @@ export default function TemplateManager() {
           )}
 
           {/* List Header */}
-          <div className="grid grid-cols-[36px_1fr_140px_140px_100px_80px_48px] gap-3 px-4 py-2.5 bg-gray-50/80 border-b border-gray-100 text-[11px] font-semibold text-gray-500 uppercase tracking-wider items-center">
+          <div className="grid grid-cols-[36px_1fr_130px_110px_110px_80px_70px_48px] gap-3 px-4 py-2.5 bg-gray-50/80 border-b border-gray-100 text-[11px] font-semibold text-gray-500 uppercase tracking-wider items-center">
             <span></span>
             <button onClick={() => toggleSort('name')} className="flex items-center gap-1 hover:text-gray-700 text-left">
               Template {sortField === 'name' && <ArrowUpDown className="h-3 w-3" />}
             </button>
             <span>Creator</span>
-            <button onClick={() => toggleSort('score')} className="flex items-center gap-1 hover:text-gray-700">
-              Score / Quality {sortField === 'score' && <ArrowUpDown className="h-3 w-3" />}
+            <button onClick={() => toggleSort('score')} className="flex items-center gap-1 hover:text-gray-700" title="Performance from real campaign sends">
+              Performance {sortField === 'score' && <ArrowUpDown className="h-3 w-3" />}
             </button>
+            <span title="AI quality grade (deliverability + KB validation)">AI Quality</span>
             <button onClick={() => toggleSort('usageCount')} className="flex items-center gap-1 hover:text-gray-700">
               Usage {sortField === 'usageCount' && <ArrowUpDown className="h-3 w-3" />}
             </button>
@@ -1836,7 +1837,7 @@ export default function TemplateManager() {
             const qualityCheckedAt = template.qualityCheckedAt as string | undefined;
 
             return (
-              <div key={template.id} className={`grid grid-cols-[36px_1fr_140px_140px_100px_80px_48px] gap-3 px-4 py-3 border-b border-gray-50 transition-colors group items-center cursor-pointer ${isSelected ? 'bg-blue-50/60' : 'hover:bg-blue-50/30'}`}
+              <div key={template.id} className={`grid grid-cols-[36px_1fr_130px_110px_110px_80px_70px_48px] gap-3 px-4 py-3 border-b border-gray-50 transition-colors group items-center cursor-pointer ${isSelected ? 'bg-blue-50/60' : 'hover:bg-blue-50/30'}`}
                 onClick={() => openEditor(template)}>
                 {/* Checkbox — only on My Templates */}
                 <div onClick={(e) => e.stopPropagation()} className="flex items-center justify-center">
@@ -1886,51 +1887,51 @@ export default function TemplateManager() {
                   <span className="text-xs text-gray-600 truncate">{template.creator?.name || 'Unknown'}</span>
                 </div>
 
-                {/* Score / Quality */}
-                <div className="flex flex-col gap-1 min-w-0">
-                  {/* Performance score (existing — from real campaign sends) */}
-                  <div className="flex items-center gap-1.5">
-                    {score && score.grade !== 'N/A' ? (
-                      <>
-                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${getGradeColor(score.grade)}`} title="Performance grade (campaign data)">
-                          {score.grade}
-                        </span>
-                        <div className="flex items-center gap-2 text-[10px] text-gray-500">
-                          <span className="flex items-center gap-0.5"><Mail className="h-2.5 w-2.5" />{score.openRate}%</span>
-                          <span className="flex items-center gap-0.5"><MessageSquare className="h-2.5 w-2.5" />{score.replyRate}%</span>
-                        </div>
-                      </>
-                    ) : (
-                      <span className="text-[10px] text-gray-400 italic">No send data</span>
-                    )}
-                  </div>
-                  {/* Quality scores (new — from bulk analysis) */}
+                {/* Performance — from real campaign sends (existing) */}
+                <div className="flex items-center gap-1.5 min-w-0">
+                  {score && score.grade !== 'N/A' ? (
+                    <>
+                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border flex-shrink-0 ${getGradeColor(score.grade)}`} title="Performance grade from real campaign sends">
+                        {score.grade}
+                      </span>
+                      <div className="flex flex-col gap-0.5 text-[10px] text-gray-500 min-w-0">
+                        <span className="flex items-center gap-0.5"><Mail className="h-2.5 w-2.5 flex-shrink-0" />{score.openRate}%</span>
+                        <span className="flex items-center gap-0.5"><MessageSquare className="h-2.5 w-2.5 flex-shrink-0" />{score.replyRate}%</span>
+                      </div>
+                    </>
+                  ) : (
+                    <span className="text-[10px] text-gray-400 italic">No send data</span>
+                  )}
+                </div>
+
+                {/* AI Quality — from bulk analysis (new) */}
+                <div className="flex items-center gap-1.5 min-w-0">
                   {qualityCheckedAt ? (
-                    <div className="flex items-center gap-1.5 text-[10px]">
+                    <>
                       <span
                         title={`Deliverability: ${dScore}/100`}
-                        className={`font-bold px-1.5 py-0.5 rounded border ${
+                        className={`text-[10px] font-bold px-1.5 py-0.5 rounded border flex-shrink-0 ${
                           dGrade === 'A' ? 'bg-green-50 text-green-700 border-green-200' :
                           dGrade === 'B' ? 'bg-blue-50 text-blue-700 border-blue-200' :
                           dGrade === 'C' ? 'bg-yellow-50 text-yellow-700 border-yellow-200' :
                           dGrade === 'D' ? 'bg-red-50 text-red-700 border-red-200' :
                           'bg-gray-50 text-gray-500 border-gray-200'
                         }`}
-                      >Q:{dGrade || '?'}</span>
+                      >{dGrade || '?'}</span>
                       {(kbHigh ?? 0) > 0 ? (
-                        <span title={`${kbHigh} high-severity KB issue${kbHigh === 1 ? '' : 's'}`} className="text-red-600 font-semibold flex items-center gap-0.5">
+                        <span title={`${kbHigh} high-severity KB issue${kbHigh === 1 ? '' : 's'}`} className="text-[10px] text-red-600 font-semibold flex items-center gap-0.5">
                           <AlertTriangle className="h-2.5 w-2.5" />{kbHigh}
                         </span>
                       ) : (kbIssues ?? 0) > 0 ? (
-                        <span title={`${kbIssues} KB issue${kbIssues === 1 ? '' : 's'}`} className="text-yellow-600 font-medium flex items-center gap-0.5">
+                        <span title={`${kbIssues} KB issue${kbIssues === 1 ? '' : 's'}`} className="text-[10px] text-yellow-600 font-medium flex items-center gap-0.5">
                           <AlertTriangle className="h-2.5 w-2.5" />{kbIssues}
                         </span>
                       ) : (
-                        <span title="KB validated — no issues" className="text-green-600 flex items-center gap-0.5">
+                        <span title="KB validated — no issues" className="text-[10px] text-green-600 flex items-center gap-0.5">
                           <CheckCircle className="h-2.5 w-2.5" />
                         </span>
                       )}
-                    </div>
+                    </>
                   ) : (
                     <span className="text-[10px] text-gray-300 italic">Not analyzed</span>
                   )}
