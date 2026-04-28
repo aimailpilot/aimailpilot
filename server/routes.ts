@@ -7765,6 +7765,47 @@ Output schema:
     }
   });
 
+  // One-time backfill: reclassify inbox rows from system/bot senders (GitHub Actions,
+  // CI, no-reply addresses) that were previously mis-flagged as 'positive' / 'general' /
+  // 'negative'. Sets replyType='auto_reply' so isHumanReply() excludes them from Need Reply.
+  // Sender match list mirrors SYSTEM_BOT_SENDER_PATTERNS in reply-classifier.ts.
+  app.post('/api/admin/reclassify-bot-senders', requireAdminOrDebugToken, async (req: any, res) => {
+    try {
+      const orgId = req.user?.organizationId || (req.body?.organizationId as string | undefined);
+      const senderPatterns = [
+        '%noreply@%', '%no-reply@%', '%donotreply@%', '%do-not-reply@%',
+        '%notifications@github.com%', '%noreply@github.com%', '%notifications@gitlab.com%',
+        '%notifications@bitbucket.org%', '%@atlassian.com%', '%notifications@slack.com%',
+        '%notify@%', '%alerts@%', '%alert@%', '%system@%', '%automated@%',
+        '%buildmaster@%', '%jenkins@%', '%circleci%', '%azure-noreply@%',
+        '%azuredevops%', '%support-noreply@%', '%github-action%',
+      ];
+      // ? placeholders are auto-converted to $N for PG by storage.rawRun/rawAll
+      const orConds = senderPatterns.map(() => `(LOWER("fromEmail") LIKE ? OR LOWER("fromName") LIKE ?)`).join(' OR ');
+      const params: any[] = [];
+      for (const pat of senderPatterns) { params.push(pat, pat); }
+      const orgClause = orgId ? `AND "organizationId" = ?` : '';
+      if (orgId) params.push(orgId);
+      // Count before to report what was changed (safer than relying on RETURNING which is PG-only)
+      const beforeRow = await storage.rawGet(
+        `SELECT COUNT(*) as c FROM unified_inbox WHERE (${orConds}) AND "replyType" IN ('positive','negative','general') ${orgClause}`,
+        ...params
+      );
+      const matched = parseInt(beforeRow?.c || '0', 10);
+      if (matched > 0) {
+        await storage.rawRun(
+          `UPDATE unified_inbox SET "replyType" = 'auto_reply' WHERE (${orConds}) AND "replyType" IN ('positive','negative','general') ${orgClause}`,
+          ...params
+        );
+      }
+      console.log(`[reclassify-bot-senders] reclassified ${matched} rows${orgId ? ` for org ${orgId}` : ' (all orgs)'}`);
+      res.json({ ok: true, reclassified: matched });
+    } catch (error: any) {
+      console.error('[reclassify-bot-senders] error:', error?.message || error);
+      res.status(500).json({ message: 'Failed to reclassify' });
+    }
+  });
+
   // AI Auto-fix: rewrite subject + content to fix deliverability issues
   app.post('/api/templates/fix-deliverability', async (req: any, res) => {
     try {

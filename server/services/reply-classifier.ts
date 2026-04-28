@@ -157,6 +157,36 @@ const BOUNCE_SENDER_PATTERNS = [
   /MAILER-DAEMON/,
 ];
 
+// Senders that are automated systems / CI / notification bots. Reply-classifier was
+// flagging these as "positive" because the bodies contain words like "successful", "completed",
+// or "passed" that match positive patterns. They are not real replies and should be classified
+// as auto_reply so isHumanReply() excludes them from Need Reply.
+// Purely additive — checked AFTER bounce (which takes precedence) and BEFORE OOO/auto-reply
+// content checks. Match against `senderFull` (fromName + fromEmail).
+const SYSTEM_BOT_SENDER_PATTERNS = [
+  /\bno-?reply@/i,
+  /\bdo-?not-?reply@/i,
+  /\bdonotreply@/i,
+  /\bnotifications?@github\.com/i,
+  /\bnotifications?@gitlab\.com/i,
+  /\bnotifications?@bitbucket\.org/i,
+  /\bnoreply@.*\.atlassian\.com/i,
+  /\bnotifications?@slack\.com/i,
+  /\bnotify@/i,
+  /\bnotice@/i,
+  /\balerts?@/i,
+  /\bsystem@/i,
+  /\bautomated?@/i,
+  /\bbuildmaster@/i,
+  /\bjenkins@/i,
+  /\bcircleci/i,
+  /\bazure-noreply@/i,
+  /\bazuredevops/i,
+  /\bnoreply.*\.azure\.com/i,
+  /\bsupport-noreply@/i,
+  /\bgithub-action/i,
+];
+
 export interface ClassificationResult {
   replyType: 'positive' | 'negative' | 'ooo' | 'auto_reply' | 'general' | 'bounce' | 'unsubscribe';
   bounceType?: 'hard' | 'soft' | 'blocked' | 'mailbox_full';
@@ -193,6 +223,14 @@ export function classifyReply(subject: string, body: string, fromEmail: string, 
       else if (/temporary|try again|transient|4\d\d /i.test(fullText)) bounceType = 'soft';
       return { replyType: 'bounce', bounceType, confidence: 0.80, reason: 'Bounce message detected' };
     }
+  }
+
+  // 1.5 Check system / bot / notification senders (CI, GitHub, GitLab, alerts, etc.)
+  // These bodies often contain words like "successful" / "completed" / "passed" that would
+  // wrongly match positive patterns later. Flag as auto_reply so isHumanReply() excludes them.
+  const isSystemBotSender = SYSTEM_BOT_SENDER_PATTERNS.some(p => p.test(senderFull));
+  if (isSystemBotSender) {
+    return { replyType: 'auto_reply', confidence: 0.95, reason: 'System / bot / notification sender (CI, alerts, no-reply)' };
   }
 
   // 2. Check OOO (before auto_reply so OOO is more specific)
