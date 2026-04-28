@@ -32,6 +32,25 @@ const MIN_AGE_MS = 60 * 1000;             // skip messages received in the last 
 
 let isProcessing = false;
 
+// Last-run stats for the admin status endpoint (in-memory, resets on restart)
+interface LastRunStats {
+  startedAt: string | null;
+  finishedAt: string | null;
+  durationSec: number | null;
+  candidates: number;
+  replied: number;
+  noReply: number;
+  skipped: number;
+  errors: number;
+}
+const lastRun: LastRunStats = {
+  startedAt: null, finishedAt: null, durationSec: null,
+  candidates: 0, replied: 0, noReply: 0, skipped: 0, errors: 0,
+};
+export function getOutboundReplySweepStatus() {
+  return { isProcessing, intervalMs: SWEEP_INTERVAL_MS, maxPerCycle: MAX_CANDIDATES_PER_CYCLE, lastRun };
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Self-contained token helpers (same pattern as lead-intelligence-engine.ts)
 // ──────────────────────────────────────────────────────────────────────────────
@@ -291,41 +310,51 @@ async function processCandidate(c: InboxCandidate): Promise<'replied' | 'no_repl
   return 'replied';
 }
 
-export async function runOutboundReplySweep(): Promise<void> {
+export async function runOutboundReplySweep(): Promise<LastRunStats> {
   if (isProcessing) {
     console.log('[OutboundReplySweep] Previous cycle still running, skipping');
-    return;
+    return { ...lastRun };
   }
   isProcessing = true;
   const started = Date.now();
-  let replied = 0, noReply = 0, skipped = 0, errors = 0;
+  lastRun.startedAt = new Date(started).toISOString();
+  lastRun.finishedAt = null;
+  lastRun.durationSec = null;
+  lastRun.candidates = 0;
+  lastRun.replied = 0;
+  lastRun.noReply = 0;
+  lastRun.skipped = 0;
+  lastRun.errors = 0;
 
   try {
     const candidates = await selectCandidates();
+    lastRun.candidates = candidates.length;
     if (candidates.length === 0) {
       console.log('[OutboundReplySweep] No candidates this cycle');
-      return;
-    }
-    console.log(`[OutboundReplySweep] Processing ${candidates.length} candidate(s)`);
-
-    for (const c of candidates) {
-      try {
-        const result = await processCandidate(c);
-        if (result === 'replied') replied++;
-        else if (result === 'no_reply') noReply++;
-        else skipped++;
-      } catch (e) {
-        errors++;
-        console.error(`[OutboundReplySweep] candidate ${c.id} failed:`, e instanceof Error ? e.message : e);
+    } else {
+      console.log(`[OutboundReplySweep] Processing ${candidates.length} candidate(s)`);
+      for (const c of candidates) {
+        try {
+          const result = await processCandidate(c);
+          if (result === 'replied') lastRun.replied++;
+          else if (result === 'no_reply') lastRun.noReply++;
+          else lastRun.skipped++;
+        } catch (e) {
+          lastRun.errors++;
+          console.error(`[OutboundReplySweep] candidate ${c.id} failed:`, e instanceof Error ? e.message : e);
+        }
       }
+      const elapsed = Math.round((Date.now() - started) / 1000);
+      console.log(`[OutboundReplySweep] Done in ${elapsed}s — replied=${lastRun.replied} no_reply=${lastRun.noReply} skipped=${lastRun.skipped} errors=${lastRun.errors}`);
     }
-    const elapsed = Math.round((Date.now() - started) / 1000);
-    console.log(`[OutboundReplySweep] Done in ${elapsed}s — replied=${replied} no_reply=${noReply} skipped=${skipped} errors=${errors}`);
   } catch (e) {
     console.error('[OutboundReplySweep] sweep failed:', e instanceof Error ? e.message : e);
   } finally {
     isProcessing = false;
+    lastRun.finishedAt = new Date().toISOString();
+    lastRun.durationSec = Math.round((Date.now() - started) / 1000);
   }
+  return { ...lastRun };
 }
 
 export function startOutboundReplySweeper(): void {

@@ -7716,6 +7716,44 @@ Output schema:
     }
   });
 
+  // ===== OUTBOUND REPLY SWEEPER ADMIN =====
+  // Lets owners/admins verify the sweeper is running and trigger a manual sweep on demand.
+  // No payload mutation — only reads sweeper status and invokes the existing run function.
+
+  app.get('/api/admin/outbound-reply-sweep/status', requireAuth, async (req: any, res) => {
+    try {
+      const role = req.user?.role;
+      if (role !== 'owner' && role !== 'admin' && role !== 'superadmin') {
+        return res.status(403).json({ message: 'Admin only' });
+      }
+      const { getOutboundReplySweepStatus } = await import('./services/outbound-reply-sweeper.js');
+      res.json(getOutboundReplySweepStatus());
+    } catch (error: any) {
+      console.error('[outbound-reply-sweep status] error:', error?.message || error);
+      res.status(500).json({ message: 'Failed to get sweeper status' });
+    }
+  });
+
+  app.post('/api/admin/outbound-reply-sweep/run', requireAuth, async (req: any, res) => {
+    try {
+      const role = req.user?.role;
+      if (role !== 'owner' && role !== 'admin' && role !== 'superadmin') {
+        return res.status(403).json({ message: 'Admin only' });
+      }
+      const { runOutboundReplySweep, getOutboundReplySweepStatus } = await import('./services/outbound-reply-sweeper.js');
+      const before = getOutboundReplySweepStatus();
+      if (before.isProcessing) {
+        return res.status(409).json({ message: 'Sweeper already running. Try again in a moment.', status: before });
+      }
+      // Run synchronously and return the stats — gives the admin immediate verification
+      const stats = await runOutboundReplySweep();
+      res.json({ ok: true, stats });
+    } catch (error: any) {
+      console.error('[outbound-reply-sweep run] error:', error?.message || error);
+      res.status(500).json({ message: 'Failed to run sweeper' });
+    }
+  });
+
   // AI Auto-fix: rewrite subject + content to fix deliverability issues
   app.post('/api/templates/fix-deliverability', async (req: any, res) => {
     try {
