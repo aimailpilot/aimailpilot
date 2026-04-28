@@ -78,6 +78,40 @@ function ReauthBanner({ onReconnectClick }: { onReconnectClick: () => void }) {
   );
 }
 
+// Templates Quality Alert — shows count + names of templates with low deliverability or KB issues
+function TemplateQualityAlert({ onClickFix }: { onClickFix: () => void }) {
+  const [data, setData] = useState<{ count: number; templates: Array<{ id: string; name: string; deliverabilityGrade: string | null; kbHighSeverityCount: number | null }> }>({ count: 0, templates: [] });
+  useEffect(() => {
+    let cancelled = false;
+    const fetchAlerts = async () => {
+      try {
+        const res = await fetch('/api/templates/quality-alerts', { credentials: 'include' });
+        if (!res.ok) return;
+        const json = await res.json();
+        if (!cancelled) setData(json);
+      } catch {}
+    };
+    fetchAlerts();
+    const interval = setInterval(fetchAlerts, 120000); // Refresh every 2 minutes
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
+  if (!data.count) return null;
+  const names = data.templates.slice(0, 3).map(t => t.name).join(', ');
+  const extra = data.count > 3 ? ` and ${data.count - 3} more` : '';
+  return (
+    <div className="bg-orange-50 border-b border-orange-200 px-4 py-3 flex items-center gap-3">
+      <AlertTriangle className="h-5 w-5 text-orange-600 flex-shrink-0" />
+      <div className="flex-1 text-sm text-orange-900">
+        <span className="font-semibold">{data.count} template{data.count > 1 ? 's' : ''} need{data.count > 1 ? '' : 's'} attention:</span>{' '}
+        <span className="text-orange-800">{names}{extra}</span>
+      </div>
+      <Button size="sm" variant="outline" className="border-orange-400 text-orange-900 hover:bg-orange-100" onClick={onClickFix}>
+        Review Templates
+      </Button>
+    </div>
+  );
+}
+
 // Loading fallback for lazy-loaded pages
 function PageLoader() {
   return (
@@ -948,6 +982,7 @@ export default function MailMeteorDashboard() {
         {/* Content */}
         <main className="flex-1 overflow-auto">
          <ReauthBanner onReconnectClick={() => { setCurrentView('setup'); setViewMode('dashboard'); }} />
+         <TemplateQualityAlert onClickFix={() => { setCurrentView('templates'); setViewMode('dashboard'); }} />
          <Suspense fallback={<PageLoader />}>
           {/* Campaign Creator */}
           {viewMode === 'campaign' && (

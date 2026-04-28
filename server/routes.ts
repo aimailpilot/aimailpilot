@@ -7337,6 +7337,385 @@ Output schema:
     }
   });
 
+  // ===== BULK TEMPLATE ANALYSIS =====
+  // Background job: runs deliverability + KB validation on up to 20 selected templates,
+  // persists scores to the templates table. Frontend polls status endpoint for progress.
+  // Concurrent jobs per org are blocked. Score blend = NONE (deliverability and KB stay independent).
+
+  const BULK_MAX_BATCH = 20;
+  const BULK_JOB_TTL_MS = 60 * 60 * 1000; // 1 hour
+  const BULK_SKIP_RECENT_MS = 60 * 60 * 1000; // skip templates analyzed in last hour unless force=true
+
+  // Compute deliverability synchronously from template content (rule-based, no LLM).
+  // Mirrors the scoring rules in /api/templates/analyze-deliverability but without the
+  // Azure AI suggestions step (those are not needed for bulk score persistence).
+  function computeDeliverabilityScore(subject: string, content: string): { score: number; grade: 'A' | 'B' | 'C' | 'D' } {
+    const subjectLower = (subject || '').toLowerCase();
+    const contentLower = (content || '').toLowerCase();
+    const combined = subjectLower + ' ' + contentLower;
+    const textOnly = (content || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+    let score = 100;
+
+    const spamGroups: { words: string[]; penalty: number }[] = [
+      { words: ['free', 'act now', 'limited time', 'urgent', 'buy now', 'order now', 'click here', 'no obligation', 'risk free', 'guaranteed'], penalty: 3 },
+      { words: ['winner', 'congratulations', 'you have been selected', 'million dollars', 'earn money', 'make money', 'cash bonus', 'double your income'], penalty: 8 },
+      { words: ['100% free', 'no cost', 'no credit card', 'no purchase necessary', 'apply now', 'offer expires', 'once in a lifetime', 'special promotion'], penalty: 4 },
+      { words: ['viagra', 'pharmacy', 'weight loss', 'enlargement', 'casino'], penalty: 20 },
+    ];
+    for (const g of spamGroups) for (const w of g.words) if (combined.includes(w)) score -= g.penalty;
+
+    if (subject) {
+      if (subject.length > 60) score -= 5;
+      if (/^[A-Z\s!]+$/.test(subject) || subject === subject.toUpperCase()) score -= 10;
+      if ((subject.match(/!/g) || []).length > 1) score -= 5;
+      if (/\$\d|₹|€/.test(subject)) score -= 5;
+    }
+
+    const linkCount = (content?.match(/<a\s/gi) || []).length;
+    const imageCount = (content?.match(/<img\s/gi) || []).length;
+    const wordCount = textOnly.split(/\s+/).filter(Boolean).length;
+    if (linkCount > 0 && wordCount < linkCount * 20) score -= 8;
+    if (linkCount > 5) score -= 5;
+    if (imageCount > 0 && wordCount < 50) score -= 10;
+    if (imageCount > 3) score -= 5;
+    if (wordCount < 20 && wordCount > 0) score -= 5;
+    const capsWords = textOnly.split(/\s+/).filter(w => w.length > 3 && w === w.toUpperCase() && /[A-Z]/.test(w));
+    if (capsWords.length > 3) score -= 5;
+    const variables = combined.match(/\{\{(\w+)\}\}/g) || [];
+    if (variables.length === 0) score -= 5;
+    if (content?.includes('javascript:') || content?.includes('<script')) score -= 15;
+    if (content?.includes('display:none') || content?.includes('visibility:hidden')) score -= 10;
+
+    score = Math.max(0, Math.min(100, score));
+    const grade: 'A' | 'B' | 'C' | 'D' = score >= 80 ? 'A' : score >= 60 ? 'B' : score >= 40 ? 'C' : 'D';
+    return { score, grade };
+  }
+
+  // Run KB validation for one template. Returns issue counts. Returns null on failure (treated as "not validated").
+  async function runKBValidationForBulk(orgId: string, subject: string, content: string): Promise<{ issuesCount: number; highSeverityCount: number } | null> {
+    try {
+      const textOnly = (content || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ').trim();
+      const query = `${subject || ''} ${textOnly}`.trim();
+      if (!query) return null;
+
+      const { getRelevantDocuments } = await import('./services/context-engine.js');
+      const kbDocs = await getRelevantDocuments(orgId, query, undefined, 2);
+      if (!kbDocs || kbDocs.length === 0) {
+        return { issuesCount: 0, highSeverityCount: 0 }; // skipped (no KB match) — count as clean
+      }
+
+      const settings = await storage.getApiSettingsWithAzureFallback(orgId);
+      const endpoint = settings.azure_openai_endpoint;
+      const apiKey = settings.azure_openai_api_key;
+      const deploymentName = settings.azure_openai_deployment;
+      const apiVersion = settings.azure_openai_api_version || '2024-08-01-preview';
+      if (!endpoint || !apiKey || !deploymentName) return null;
+
+      const kbContext = kbDocs.map((d: any, i: number) => `[DOC ${i + 1}: ${d.name || 'Untitled'}]\n${(d.content || '').slice(0, 2000)}`).join('\n\n---\n\n');
+      const bodyForPrompt = textOnly.length <= 3000 ? textOnly : textOnly.slice(0, 1500) + '\n...[middle truncated]...\n' + textOnly.slice(-1500);
+      const prompt = `Validate this email against the org Knowledge Base. Output ONLY JSON: {"factualIssues":[{"claim":"...","kbReference":"...","severity":"high|medium|low"}],"missingKeyPoints":[],"suggestions":[]}\n\nKB:\n${kbContext}\n\nSUBJECT: ${subject || '(empty)'}\nBODY: ${bodyForPrompt}`;
+
+      const url = `${endpoint.replace(/\/$/, '')}/openai/deployments/${deploymentName}/chat/completions?api-version=${apiVersion}`;
+      const aiResp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'api-key': apiKey },
+        body: JSON.stringify({
+          messages: [
+            { role: 'system', content: 'You validate B2B emails against an org KB. Output ONLY valid JSON.' },
+            { role: 'user', content: prompt },
+          ],
+          temperature: 0.2,
+          max_tokens: 1000,
+        }),
+      });
+      if (!aiResp.ok) return null;
+      const aiData = await aiResp.json() as any;
+      const raw = aiData.choices?.[0]?.message?.content || '';
+      const parsed = JSON.parse(raw.replace(/```json\n?|```/g, '').trim());
+      const factualIssues = Array.isArray(parsed?.factualIssues) ? parsed.factualIssues : [];
+      const highSeverity = factualIssues.filter((i: any) => i.severity === 'high').length;
+      return { issuesCount: factualIssues.length, highSeverityCount: highSeverity };
+    } catch {
+      return null;
+    }
+  }
+
+  // Background runner — processes templates one at a time, updates job state in api_settings.
+  // Checks cancellation flag between each template. Each template gets its own try/catch so
+  // a single failure doesn't kill the whole batch.
+  async function runBulkAnalyzeJob(jobId: string, orgId: string) {
+    const jobKey = `bulk_analyze_job_${jobId}`;
+    const loadJob = async () => {
+      const settings = await storage.getApiSettings(orgId);
+      const raw = settings?.[jobKey];
+      return raw ? JSON.parse(raw) : null;
+    };
+    const saveJob = async (job: any) => storage.setApiSetting(orgId, jobKey, JSON.stringify(job));
+
+    let job = await loadJob();
+    if (!job) return;
+
+    for (let i = 0; i < job.templateIds.length; i++) {
+      // Re-load to pick up cancellation flag
+      job = await loadJob();
+      if (!job || job.cancelRequested) {
+        if (job) { job.status = 'cancelled'; job.completedAt = new Date().toISOString(); await saveJob(job); }
+        return;
+      }
+
+      const tplId = job.templateIds[i];
+      const tpl = await storage.getEmailTemplate(tplId);
+      if (!tpl || tpl.organizationId !== orgId) {
+        job.errors.push({ templateId: tplId, error: 'Template not found' });
+        job.processed = i + 1;
+        await saveJob(job);
+        continue;
+      }
+
+      job.currentTemplateId = tplId;
+      job.currentTemplateName = tpl.name;
+      job.lastHeartbeatAt = new Date().toISOString(); // refresh heartbeat before each template — keeps long KB validations from looking stale
+      await saveJob(job);
+
+      try {
+        const subject = tpl.subject || '';
+        const content = tpl.content || '';
+        const deliverability = computeDeliverabilityScore(subject, content);
+        const kb = await runKBValidationForBulk(orgId, subject, content);
+
+        await storage.rawRun(
+          `UPDATE templates SET "deliverabilityScore" = ?, "deliverabilityGrade" = ?, "kbIssuesCount" = ?, "kbHighSeverityCount" = ?, "qualityCheckedAt" = ? WHERE id = ? AND "organizationId" = ?`,
+          deliverability.score, deliverability.grade,
+          kb?.issuesCount ?? null, kb?.highSeverityCount ?? null,
+          new Date().toISOString(), tplId, orgId
+        );
+
+        job.results.push({
+          templateId: tplId,
+          deliverabilityScore: deliverability.score,
+          deliverabilityGrade: deliverability.grade,
+          kbIssuesCount: kb?.issuesCount ?? null,
+          kbHighSeverityCount: kb?.highSeverityCount ?? null,
+        });
+      } catch (e: any) {
+        job.errors.push({ templateId: tplId, error: e?.message || 'Analysis failed' });
+      }
+
+      job.processed = i + 1;
+      await saveJob(job);
+    }
+
+    job = await loadJob();
+    if (job) {
+      job.status = job.cancelRequested ? 'cancelled' : 'completed';
+      job.currentTemplateId = null;
+      job.currentTemplateName = null;
+      job.completedAt = new Date().toISOString();
+      await saveJob(job);
+    }
+  }
+
+  app.post('/api/templates/bulk-analyze', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const { templateIds, force } = req.body as { templateIds?: string[]; force?: boolean };
+
+      if (!Array.isArray(templateIds) || templateIds.length === 0) {
+        return res.status(400).json({ message: 'templateIds array required' });
+      }
+      if (templateIds.length > BULK_MAX_BATCH) {
+        return res.status(400).json({ message: `Maximum ${BULK_MAX_BATCH} templates per bulk analysis. Split into multiple batches.` });
+      }
+
+      // Block concurrent jobs per org. Pre-check + post-write double-check pattern
+      // catches the TOCTOU race where two requests arrive in the same tick. Heartbeat
+      // (set on each template) keeps long-running validations from looking stale.
+      const findActiveJob = async (excludeJobId?: string) => {
+        const allSettings = await storage.getApiSettings(orgId);
+        const now = Date.now();
+        for (const [key, val] of Object.entries(allSettings || {})) {
+          if (!key.startsWith('bulk_analyze_job_')) continue;
+          try {
+            const j = JSON.parse(val as string);
+            if (excludeJobId && j.id === excludeJobId) continue;
+            if (j.status !== 'running') continue;
+            // Use heartbeat if present, fall back to startedAt
+            const heartbeat = j.lastHeartbeatAt ? new Date(j.lastHeartbeatAt).getTime() : new Date(j.startedAt).getTime();
+            if ((now - heartbeat) < BULK_JOB_TTL_MS) return j;
+          } catch { /* ignore malformed */ }
+        }
+        return null;
+      };
+
+      const existingPre = await findActiveJob();
+      if (existingPre) {
+        return res.status(409).json({ message: 'A bulk analysis is already running for your organization. Wait for it to complete or cancel it.', existingJobId: existingPre.id });
+      }
+
+      // Optionally skip templates analyzed within the last hour
+      let toProcess = templateIds.slice();
+      let skippedRecent: string[] = [];
+      if (!force) {
+        const cutoff = now - BULK_SKIP_RECENT_MS;
+        const filtered: string[] = [];
+        for (const id of toProcess) {
+          const tpl = await storage.getEmailTemplate(id);
+          if (!tpl || tpl.organizationId !== orgId) continue;
+          const checkedAt = tpl.qualityCheckedAt ? new Date(tpl.qualityCheckedAt).getTime() : 0;
+          if (checkedAt && checkedAt > cutoff) {
+            skippedRecent.push(id);
+          } else {
+            filtered.push(id);
+          }
+        }
+        toProcess = filtered;
+      }
+
+      if (toProcess.length === 0) {
+        return res.json({
+          jobId: null,
+          total: 0,
+          skippedRecent,
+          message: skippedRecent.length > 0 ? 'All selected templates were analyzed recently. Use Force re-analyze to override.' : 'No valid templates to analyze.',
+        });
+      }
+
+      const jobId = `${orgId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const startedAt = new Date().toISOString();
+      const job = {
+        id: jobId,
+        organizationId: orgId,
+        userId: req.user.id,
+        total: toProcess.length,
+        processed: 0,
+        templateIds: toProcess,
+        currentTemplateId: null,
+        currentTemplateName: null,
+        errors: [] as any[],
+        results: [] as any[],
+        skippedRecent,
+        status: 'running' as const,
+        startedAt,
+        lastHeartbeatAt: startedAt,
+        completedAt: null as string | null,
+        cancelRequested: false,
+      };
+      await storage.setApiSetting(orgId, `bulk_analyze_job_${jobId}`, JSON.stringify(job));
+
+      // Post-write double-check: if a concurrent request also created a job, the one
+      // with the EARLIER startedAt wins. On identical-millisecond timestamps, lower jobId
+      // wins as a deterministic tie-break — without this, both jobs could see "the other
+      // wins" and both yield, leaving no job running. This closes the TOCTOU race without
+      // needing transactional locks.
+      const existingPost = await findActiveJob(jobId);
+      if (existingPost) {
+        const existingTime = new Date(existingPost.startedAt).getTime();
+        const myTime = new Date(startedAt).getTime();
+        const existingWins = existingTime < myTime || (existingTime === myTime && String(existingPost.id) < String(jobId));
+        if (existingWins) {
+          const yielded = { ...job, status: 'cancelled' as any, completedAt: new Date().toISOString(), cancelRequested: true };
+          await storage.setApiSetting(orgId, `bulk_analyze_job_${jobId}`, JSON.stringify(yielded));
+          return res.status(409).json({ message: 'Another bulk analysis was started concurrently. Wait for it to complete.', existingJobId: existingPost.id });
+        }
+        // I won — silently leave the other job in place; its post-write check will yield to me.
+        // (It was already marked 'running'; its own arbitration will mark it cancelled when it scans and sees mine.)
+      }
+
+      // Fire-and-forget background runner with explicit error handling — marks job failed on crash
+      setImmediate(async () => {
+        try {
+          await runBulkAnalyzeJob(jobId, orgId);
+        } catch (err: any) {
+          console.error('[bulk-analyze] runner crashed:', err?.message || err);
+          try {
+            const settings = await storage.getApiSettings(orgId);
+            const raw = settings?.[`bulk_analyze_job_${jobId}`];
+            if (raw) {
+              const j = JSON.parse(raw);
+              if (j.status === 'running') {
+                j.status = 'failed';
+                j.completedAt = new Date().toISOString();
+                await storage.setApiSetting(orgId, `bulk_analyze_job_${jobId}`, JSON.stringify(j));
+              }
+            }
+          } catch { /* best-effort cleanup */ }
+        }
+      });
+
+      res.json({ jobId, total: toProcess.length, skippedRecent });
+    } catch (error: any) {
+      console.error('[bulk-analyze] start error:', error?.message || error);
+      res.status(500).json({ message: 'Failed to start bulk analysis' });
+    }
+  });
+
+  app.get('/api/templates/bulk-analyze/:jobId', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const settings = await storage.getApiSettings(orgId);
+      const raw = settings?.[`bulk_analyze_job_${req.params.jobId}`];
+      if (!raw) return res.status(404).json({ message: 'Job not found' });
+      const job = JSON.parse(raw);
+      if (job.organizationId !== orgId) return res.status(403).json({ message: 'Forbidden' });
+
+      // Stale-job detection: use heartbeat (refreshed before each template) so a slow KB
+      // validation doesn't false-flag a healthy long-running job. Falls back to startedAt
+      // for jobs created before heartbeat tracking was added.
+      const lastSignal = job.lastHeartbeatAt || job.startedAt;
+      if (job.status === 'running' && lastSignal && (Date.now() - new Date(lastSignal).getTime()) > BULK_JOB_TTL_MS) {
+        job.status = 'failed';
+        job.completedAt = new Date().toISOString();
+        await storage.setApiSetting(orgId, `bulk_analyze_job_${req.params.jobId}`, JSON.stringify(job));
+      }
+
+      res.json(job);
+    } catch (error: any) {
+      console.error('[bulk-analyze] status error:', error?.message || error);
+      res.status(500).json({ message: 'Failed to get job status' });
+    }
+  });
+
+  app.post('/api/templates/bulk-analyze/:jobId/cancel', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const settings = await storage.getApiSettings(orgId);
+      const key = `bulk_analyze_job_${req.params.jobId}`;
+      const raw = settings?.[key];
+      if (!raw) return res.status(404).json({ message: 'Job not found' });
+      const job = JSON.parse(raw);
+      if (job.organizationId !== orgId) return res.status(403).json({ message: 'Forbidden' });
+      if (job.status !== 'running') return res.json({ ok: true, status: job.status });
+      job.cancelRequested = true;
+      await storage.setApiSetting(orgId, key, JSON.stringify(job));
+      res.json({ ok: true, status: 'cancelling' });
+    } catch (error: any) {
+      console.error('[bulk-analyze] cancel error:', error?.message || error);
+      res.status(500).json({ message: 'Failed to cancel job' });
+    }
+  });
+
+  // Dashboard: count + list templates that need attention (low deliverability OR high-severity KB issues)
+  app.get('/api/templates/quality-alerts', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const rows = await storage.rawAll(
+        `SELECT id, name, "deliverabilityScore", "deliverabilityGrade", "kbIssuesCount", "kbHighSeverityCount", "qualityCheckedAt"
+         FROM templates
+         WHERE "organizationId" = ?
+           AND ("deliverabilityGrade" IN ('C', 'D') OR ("kbHighSeverityCount" IS NOT NULL AND "kbHighSeverityCount" > 0))
+         ORDER BY
+           CASE "deliverabilityGrade" WHEN 'D' THEN 1 WHEN 'C' THEN 2 ELSE 3 END,
+           "kbHighSeverityCount" DESC NULLS LAST
+         LIMIT 20`,
+        orgId
+      );
+      res.json({ count: rows.length, templates: rows });
+    } catch (error: any) {
+      console.error('[quality-alerts] error:', error?.message || error);
+      res.status(500).json({ message: 'Failed to load quality alerts' });
+    }
+  });
+
   // AI Auto-fix: rewrite subject + content to fix deliverability issues
   app.post('/api/templates/fix-deliverability', async (req: any, res) => {
     try {

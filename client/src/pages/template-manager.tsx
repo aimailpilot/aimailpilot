@@ -134,6 +134,25 @@ export default function TemplateManager() {
   const [lastKbHash, setLastKbHash] = useState<string>(''); // sha256(subject|content) of last successful validation — skips API call on re-click if unchanged
   const kbAbortRef = useRef<AbortController | null>(null);
 
+  // Bulk analysis state — multi-select + background job tracking
+  const BULK_MAX = 20;
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkJobId, setBulkJobId] = useState<string | null>(() => {
+    try { return localStorage.getItem('bulkAnalyzeJobId'); } catch { return null; }
+  });
+  const [bulkJobStatus, setBulkJobStatus] = useState<{
+    id: string;
+    total: number;
+    processed: number;
+    currentTemplateName: string | null;
+    errors: { templateId: string; error: string }[];
+    results: any[];
+    skippedRecent?: string[];
+    status: 'running' | 'completed' | 'failed' | 'cancelled';
+  } | null>(null);
+  const [bulkStartError, setBulkStartError] = useState<string>('');
+  const [bulkSelectionWarning, setBulkSelectionWarning] = useState<string>('');
+
   // AI email feedback state
   const [aiFeedback, setAiFeedback] = useState<string>('');
   const [aiFeedbackLoading, setAiFeedbackLoading] = useState(false);
@@ -359,6 +378,110 @@ export default function TemplateManager() {
       }
     }
   };
+
+  // ===== Bulk analysis: selection + start + polling =====
+  const toggleSelected = (id: string, allowed: boolean) => {
+    if (!allowed) return;
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+        setBulkSelectionWarning('');
+      } else {
+        if (next.size >= BULK_MAX) {
+          setBulkSelectionWarning(`Maximum ${BULK_MAX} templates per batch. Deselect one first.`);
+          setTimeout(() => setBulkSelectionWarning(''), 4000);
+          return prev;
+        }
+        next.add(id);
+        if (next.size === BULK_MAX) {
+          setBulkSelectionWarning(`At max (${BULK_MAX}). Run analysis or deselect to add more.`);
+        } else {
+          setBulkSelectionWarning('');
+        }
+      }
+      return next;
+    });
+  };
+
+  const clearSelection = () => { setSelectedIds(new Set()); setBulkSelectionWarning(''); };
+
+  const startBulkAnalyze = async (force: boolean = false) => {
+    setBulkStartError('');
+    if (selectedIds.size === 0) return;
+    try {
+      const res = await fetch('/api/templates/bulk-analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ templateIds: Array.from(selectedIds), force }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setBulkStartError(data.message || 'Failed to start bulk analysis');
+        return;
+      }
+      if (!data.jobId) {
+        // Everything was skipped
+        setBulkStartError(data.message || 'Nothing to analyze');
+        return;
+      }
+      setBulkJobId(data.jobId);
+      try { localStorage.setItem('bulkAnalyzeJobId', data.jobId); } catch {}
+      setBulkJobStatus({ id: data.jobId, total: data.total, processed: 0, currentTemplateName: null, errors: [], results: [], skippedRecent: data.skippedRecent || [], status: 'running' });
+    } catch {
+      setBulkStartError('Network error starting bulk analysis');
+    }
+  };
+
+  const cancelBulkAnalyze = async () => {
+    if (!bulkJobId) return;
+    try {
+      await fetch(`/api/templates/bulk-analyze/${bulkJobId}/cancel`, { method: 'POST', credentials: 'include' });
+    } catch {}
+  };
+
+  const dismissBulkPanel = () => {
+    setBulkJobId(null);
+    setBulkJobStatus(null);
+    try { localStorage.removeItem('bulkAnalyzeJobId'); } catch {}
+  };
+
+  // Poll job status every 2s while a job is active. Stops on completion/cancel/fail.
+  useEffect(() => {
+    if (!bulkJobId) return;
+    let cancelled = false;
+    let handle: ReturnType<typeof setInterval> | null = null;
+
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        const res = await fetch(`/api/templates/bulk-analyze/${bulkJobId}`, { credentials: 'include' });
+        if (cancelled) return;
+        if (res.status === 404) {
+          // Job expired or cleared server-side — stop polling
+          if (handle) clearInterval(handle);
+          dismissBulkPanel();
+          return;
+        }
+        if (res.ok) {
+          const data = await res.json();
+          setBulkJobStatus(data);
+          if (data.status !== 'running') {
+            // Final state — refresh template list to show new scores; stop polling
+            try { localStorage.removeItem('bulkAnalyzeJobId'); } catch {}
+            fetchAllTemplates();
+            if (handle) clearInterval(handle);
+          }
+        }
+      } catch { /* network blip — next tick will retry */ }
+    };
+
+    tick();
+    handle = setInterval(tick, 2000);
+    return () => { cancelled = true; if (handle) clearInterval(handle); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bulkJobId]);
 
   // Highlight spam words in visual editor using CSS Custom Highlight API or fallback
   useEffect(() => {
@@ -1647,14 +1770,48 @@ export default function TemplateManager() {
         </div>
       ) : (
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          {/* Bulk action toolbar — shown only when ≥1 template selected and only on My Templates tab */}
+          {activeTab === 'mine' && selectedIds.size > 0 && (
+            <div className="flex items-center justify-between px-4 py-2.5 bg-blue-50 border-b border-blue-100">
+              <div className="flex items-center gap-3">
+                <span className="text-xs font-semibold text-blue-700">
+                  {selectedIds.size} selected · max {BULK_MAX} per batch
+                </span>
+                <button onClick={clearSelection} className="text-[11px] text-blue-600 hover:text-blue-800 underline">Clear</button>
+                {bulkSelectionWarning && <span className="text-[11px] text-orange-600">{bulkSelectionWarning}</span>}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => startBulkAnalyze(false)}
+                  disabled={!!bulkJobId}
+                  className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md bg-blue-600 hover:bg-blue-700 text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Shield className="h-3.5 w-3.5" /> Analyze {selectedIds.size}
+                </button>
+                <button
+                  onClick={() => startBulkAnalyze(true)}
+                  disabled={!!bulkJobId}
+                  title="Force re-analyze even if templates were checked recently"
+                  className="text-[11px] px-2.5 py-1.5 rounded-md text-gray-600 hover:bg-blue-100 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Force re-run
+                </button>
+              </div>
+            </div>
+          )}
+          {bulkStartError && (
+            <div className="px-4 py-2 bg-red-50 border-b border-red-100 text-xs text-red-700">{bulkStartError}</div>
+          )}
+
           {/* List Header */}
-          <div className="grid grid-cols-[1fr_140px_100px_100px_80px_48px] gap-3 px-4 py-2.5 bg-gray-50/80 border-b border-gray-100 text-[11px] font-semibold text-gray-500 uppercase tracking-wider">
+          <div className="grid grid-cols-[36px_1fr_140px_140px_100px_80px_48px] gap-3 px-4 py-2.5 bg-gray-50/80 border-b border-gray-100 text-[11px] font-semibold text-gray-500 uppercase tracking-wider items-center">
+            <span></span>
             <button onClick={() => toggleSort('name')} className="flex items-center gap-1 hover:text-gray-700 text-left">
               Template {sortField === 'name' && <ArrowUpDown className="h-3 w-3" />}
             </button>
             <span>Creator</span>
             <button onClick={() => toggleSort('score')} className="flex items-center gap-1 hover:text-gray-700">
-              Score {sortField === 'score' && <ArrowUpDown className="h-3 w-3" />}
+              Score / Quality {sortField === 'score' && <ArrowUpDown className="h-3 w-3" />}
             </button>
             <button onClick={() => toggleSort('usageCount')} className="flex items-center gap-1 hover:text-gray-700">
               Usage {sortField === 'usageCount' && <ArrowUpDown className="h-3 w-3" />}
@@ -1670,10 +1827,30 @@ export default function TemplateManager() {
             const catConfig = getCategoryConfig(template.category);
             const score = template.score;
             const isTeam = activeTab === 'team';
+            const isSelected = selectedIds.has(template.id);
+            const canSelect = !isTeam; // bulk analysis only on user's own templates
+            const dGrade = template.deliverabilityGrade as 'A' | 'B' | 'C' | 'D' | undefined;
+            const dScore = template.deliverabilityScore as number | undefined;
+            const kbHigh = template.kbHighSeverityCount as number | undefined;
+            const kbIssues = template.kbIssuesCount as number | undefined;
+            const qualityCheckedAt = template.qualityCheckedAt as string | undefined;
 
             return (
-              <div key={template.id} className="grid grid-cols-[1fr_140px_100px_100px_80px_48px] gap-3 px-4 py-3 border-b border-gray-50 hover:bg-blue-50/30 transition-colors group items-center cursor-pointer"
+              <div key={template.id} className={`grid grid-cols-[36px_1fr_140px_140px_100px_80px_48px] gap-3 px-4 py-3 border-b border-gray-50 transition-colors group items-center cursor-pointer ${isSelected ? 'bg-blue-50/60' : 'hover:bg-blue-50/30'}`}
                 onClick={() => openEditor(template)}>
+                {/* Checkbox — only on My Templates */}
+                <div onClick={(e) => e.stopPropagation()} className="flex items-center justify-center">
+                  {canSelect ? (
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => toggleSelected(template.id, true)}
+                      className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                    />
+                  ) : (
+                    <span className="text-gray-300">—</span>
+                  )}
+                </div>
                 {/* Template Info */}
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 mb-0.5">
@@ -1709,26 +1886,53 @@ export default function TemplateManager() {
                   <span className="text-xs text-gray-600 truncate">{template.creator?.name || 'Unknown'}</span>
                 </div>
 
-                {/* Score */}
-                <div className="flex items-center gap-1.5">
-                  {score && score.grade !== 'N/A' ? (
-                    <>
-                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${getGradeColor(score.grade)}`}>
-                        {score.grade}
-                      </span>
-                      <div className="flex flex-col">
-                        <div className="flex items-center gap-1">
-                          <Mail className="h-2.5 w-2.5 text-gray-400" />
-                          <span className="text-[10px] text-gray-500">{score.openRate}%</span>
+                {/* Score / Quality */}
+                <div className="flex flex-col gap-1 min-w-0">
+                  {/* Performance score (existing — from real campaign sends) */}
+                  <div className="flex items-center gap-1.5">
+                    {score && score.grade !== 'N/A' ? (
+                      <>
+                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border ${getGradeColor(score.grade)}`} title="Performance grade (campaign data)">
+                          {score.grade}
+                        </span>
+                        <div className="flex items-center gap-2 text-[10px] text-gray-500">
+                          <span className="flex items-center gap-0.5"><Mail className="h-2.5 w-2.5" />{score.openRate}%</span>
+                          <span className="flex items-center gap-0.5"><MessageSquare className="h-2.5 w-2.5" />{score.replyRate}%</span>
                         </div>
-                        <div className="flex items-center gap-1">
-                          <MessageSquare className="h-2.5 w-2.5 text-gray-400" />
-                          <span className="text-[10px] text-gray-500">{score.replyRate}%</span>
-                        </div>
-                      </div>
-                    </>
+                      </>
+                    ) : (
+                      <span className="text-[10px] text-gray-400 italic">No send data</span>
+                    )}
+                  </div>
+                  {/* Quality scores (new — from bulk analysis) */}
+                  {qualityCheckedAt ? (
+                    <div className="flex items-center gap-1.5 text-[10px]">
+                      <span
+                        title={`Deliverability: ${dScore}/100`}
+                        className={`font-bold px-1.5 py-0.5 rounded border ${
+                          dGrade === 'A' ? 'bg-green-50 text-green-700 border-green-200' :
+                          dGrade === 'B' ? 'bg-blue-50 text-blue-700 border-blue-200' :
+                          dGrade === 'C' ? 'bg-yellow-50 text-yellow-700 border-yellow-200' :
+                          dGrade === 'D' ? 'bg-red-50 text-red-700 border-red-200' :
+                          'bg-gray-50 text-gray-500 border-gray-200'
+                        }`}
+                      >Q:{dGrade || '?'}</span>
+                      {(kbHigh ?? 0) > 0 ? (
+                        <span title={`${kbHigh} high-severity KB issue${kbHigh === 1 ? '' : 's'}`} className="text-red-600 font-semibold flex items-center gap-0.5">
+                          <AlertTriangle className="h-2.5 w-2.5" />{kbHigh}
+                        </span>
+                      ) : (kbIssues ?? 0) > 0 ? (
+                        <span title={`${kbIssues} KB issue${kbIssues === 1 ? '' : 's'}`} className="text-yellow-600 font-medium flex items-center gap-0.5">
+                          <AlertTriangle className="h-2.5 w-2.5" />{kbIssues}
+                        </span>
+                      ) : (
+                        <span title="KB validated — no issues" className="text-green-600 flex items-center gap-0.5">
+                          <CheckCircle className="h-2.5 w-2.5" />
+                        </span>
+                      )}
+                    </div>
                   ) : (
-                    <span className="text-[10px] text-gray-400 italic">No data</span>
+                    <span className="text-[10px] text-gray-300 italic">Not analyzed</span>
                   )}
                 </div>
 
@@ -1926,6 +2130,70 @@ export default function TemplateManager() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Bulk analysis progress overlay — fixed bottom-right, persists across navigation */}
+      {bulkJobId && bulkJobStatus && (
+        <div className="fixed bottom-4 right-4 w-[340px] bg-white border border-gray-200 rounded-xl shadow-lg z-50 overflow-hidden">
+          <div className="px-4 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              {bulkJobStatus.status === 'running' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              {bulkJobStatus.status === 'completed' && <CheckCircle className="h-3.5 w-3.5" />}
+              {bulkJobStatus.status === 'cancelled' && <X className="h-3.5 w-3.5" />}
+              {bulkJobStatus.status === 'failed' && <AlertTriangle className="h-3.5 w-3.5" />}
+              <span className="text-xs font-bold">
+                {bulkJobStatus.status === 'running' && 'Analyzing templates...'}
+                {bulkJobStatus.status === 'completed' && 'Analysis complete'}
+                {bulkJobStatus.status === 'cancelled' && 'Analysis cancelled'}
+                {bulkJobStatus.status === 'failed' && 'Analysis failed'}
+              </span>
+            </div>
+            {bulkJobStatus.status !== 'running' && (
+              <button onClick={dismissBulkPanel} className="p-1 hover:bg-white/10 rounded">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+          <div className="p-3 space-y-2">
+            <div className="flex items-center justify-between text-[11px] text-gray-600">
+              <span>{bulkJobStatus.processed} / {bulkJobStatus.total} processed</span>
+              <span className="font-semibold">{Math.round((bulkJobStatus.processed / Math.max(1, bulkJobStatus.total)) * 100)}%</span>
+            </div>
+            <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+              <div
+                className={`h-full transition-all duration-500 ${
+                  bulkJobStatus.status === 'failed' ? 'bg-red-500' :
+                  bulkJobStatus.status === 'cancelled' ? 'bg-gray-400' :
+                  'bg-gradient-to-r from-blue-500 to-indigo-600'
+                }`}
+                style={{ width: `${(bulkJobStatus.processed / Math.max(1, bulkJobStatus.total)) * 100}%` }}
+              />
+            </div>
+            {bulkJobStatus.status === 'running' && bulkJobStatus.currentTemplateName && (
+              <div className="text-[10px] text-gray-500 truncate">
+                Current: <span className="text-gray-700 font-medium">{bulkJobStatus.currentTemplateName}</span>
+              </div>
+            )}
+            {bulkJobStatus.errors && bulkJobStatus.errors.length > 0 && (
+              <div className="text-[10px] text-orange-600 flex items-center gap-1">
+                <AlertTriangle className="h-2.5 w-2.5" /> {bulkJobStatus.errors.length} error{bulkJobStatus.errors.length === 1 ? '' : 's'}
+              </div>
+            )}
+            {bulkJobStatus.skippedRecent && bulkJobStatus.skippedRecent.length > 0 && (
+              <div className="text-[10px] text-gray-500">
+                Skipped {bulkJobStatus.skippedRecent.length} (analyzed within last hour — use Force re-run to override)
+              </div>
+            )}
+            {bulkJobStatus.status === 'running' && (
+              <button
+                onClick={cancelBulkAnalyze}
+                className="w-full text-[11px] py-1.5 rounded-md text-gray-600 bg-gray-100 hover:bg-gray-200 font-medium"
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

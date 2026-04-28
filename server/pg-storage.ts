@@ -802,6 +802,13 @@ async function initializeSchema() {
       'ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS "authLastFailureAt" TEXT',
       'ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS "authLastErrorCode" TEXT',
       'CREATE INDEX IF NOT EXISTS idx_email_accounts_auth_status ON email_accounts("organizationId", "authStatus")',
+      // Template quality scores — populated by /api/templates/bulk-analyze. Independent metrics, no blend.
+      'ALTER TABLE templates ADD COLUMN IF NOT EXISTS "deliverabilityScore" INTEGER DEFAULT NULL',
+      'ALTER TABLE templates ADD COLUMN IF NOT EXISTS "deliverabilityGrade" TEXT DEFAULT NULL',
+      'ALTER TABLE templates ADD COLUMN IF NOT EXISTS "kbIssuesCount" INTEGER DEFAULT NULL',
+      'ALTER TABLE templates ADD COLUMN IF NOT EXISTS "kbHighSeverityCount" INTEGER DEFAULT NULL',
+      'ALTER TABLE templates ADD COLUMN IF NOT EXISTS "qualityCheckedAt" TEXT DEFAULT NULL',
+      'CREATE INDEX IF NOT EXISTS idx_templates_quality ON templates("organizationId", "deliverabilityGrade")',
       // Multi-list membership junction table
       `CREATE TABLE IF NOT EXISTS contact_list_members (
         "contactId" TEXT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
