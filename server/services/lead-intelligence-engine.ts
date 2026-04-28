@@ -1054,6 +1054,113 @@ export async function analyzeOrgLeads(orgId: string, emailAccountIds?: string[])
   return result;
 }
 
+// ── Incremental Analysis ───────────────────────────────────────────────
+// Like analyzeOrgLeads but only classifies contacts that don't already have a
+// lead_opportunity row. Saves Azure OpenAI tokens by skipping previously-analyzed
+// contacts. Does NOT delete any existing lead_opportunities.
+//
+// Use this when the user clicks "Analyse" repeatedly — first run classifies everyone,
+// subsequent runs only process newly-discovered contacts (e.g. those who emailed since
+// the last scan).
+//
+// To force a full re-classification (e.g. after the AI prompt is changed), use the
+// existing analyzeOrgLeads which deletes-and-rebuilds.
+export async function analyzeOrgLeadsIncremental(orgId: string, emailAccountIds?: string[]): Promise<AnalysisResult> {
+  const result: AnalysisResult = {
+    orgId,
+    contactsAnalyzed: 0,
+    opportunitiesCreated: 0,
+    bucketCounts: {},
+    errors: [],
+    debug: { mode: 'incremental' } as any,
+  };
+
+  try {
+    console.log(`[LeadIntel] Starting INCREMENTAL lead analysis for org ${orgId}...`);
+
+    // 1. Build all summaries (same buildContactSummaries used by analyzeOrgLeads)
+    const summaries = await buildContactSummaries(orgId, emailAccountIds);
+    (result.debug as any).totalSummaries = summaries.length;
+
+    if (summaries.length === 0) {
+      result.errors.push(`No contacts found in email_history for this org (or selected accounts).`);
+      return result;
+    }
+
+    // 2. Get already-classified contact emails for this org
+    let alreadyClassified = new Set<string>();
+    try {
+      const existing = await storage.rawAll(
+        `SELECT LOWER("contactEmail") as "contactEmail" FROM lead_opportunities WHERE "organizationId" = ?`,
+        orgId
+      ) as any[];
+      alreadyClassified = new Set(existing.map((r: any) => (r.contactEmail || '').toLowerCase()).filter(Boolean));
+    } catch (e) {
+      console.error('[LeadIntel] Incremental: failed to load existing opportunities:', e instanceof Error ? e.message : e);
+      result.errors.push('Failed to read existing classifications');
+      return result;
+    }
+    (result.debug as any).alreadyClassified = alreadyClassified.size;
+
+    // 3. Filter to contacts NOT yet classified
+    const newContacts = summaries.filter(s => !alreadyClassified.has((s.contactEmail || '').toLowerCase()));
+    result.contactsAnalyzed = newContacts.length;
+    (result.debug as any).newContacts = newContacts.length;
+
+    console.log(`[LeadIntel] Incremental: ${summaries.length} total contacts, ${alreadyClassified.size} already classified, ${newContacts.length} new to classify`);
+
+    if (newContacts.length === 0) {
+      console.log('[LeadIntel] Incremental: nothing new to classify — exiting cleanly');
+      return result;
+    }
+
+    // 4. Classify only the new contacts
+    const classifications = await classifyContactsWithAI(orgId, newContacts);
+    console.log(`[LeadIntel] Incremental: classified ${classifications.length} new contacts`);
+
+    // 5. ADD new lead_opportunities — does NOT delete existing
+    for (const cls of classifications) {
+      const summary = newContacts.find(s => s.contactEmail === cls.contactEmail);
+      if (!summary) continue;
+
+      let company = '';
+      try {
+        const contact = await storage.rawGet('SELECT company FROM contacts WHERE "organizationId" = ? AND LOWER(email) = ? LIMIT 1', orgId, cls.contactEmail.toLowerCase()) as any;
+        if (contact?.company) company = contact.company;
+      } catch (e) { /* ignore */ }
+
+      await storage.addLeadOpportunity({
+        organizationId: orgId,
+        emailAccountId: summary.emailAccountId || undefined,
+        accountEmail: summary.accountEmail || undefined,
+        contactEmail: cls.contactEmail,
+        contactName: summary.contactName,
+        company,
+        bucket: cls.bucket,
+        confidence: cls.confidence,
+        aiReasoning: cls.reasoning,
+        suggestedAction: cls.suggestedAction,
+        lastEmailDate: summary.lastEmailDate,
+        totalEmails: summary.totalEmails,
+        totalSent: summary.totalSent,
+        totalReceived: summary.totalReceived,
+        sampleSubjects: summary.subjects,
+        sampleSnippets: summary.snippets,
+      });
+
+      result.opportunitiesCreated++;
+      result.bucketCounts[cls.bucket] = (result.bucketCounts[cls.bucket] || 0) + 1;
+    }
+
+    console.log(`[LeadIntel] Incremental complete: ${result.opportunitiesCreated} new opportunities added (existing preserved)`);
+  } catch (e) {
+    console.error('[LeadIntel] Incremental analysis error:', e instanceof Error ? e.message : e);
+    result.errors.push(e instanceof Error ? e.message : String(e));
+  }
+
+  return result;
+}
+
 // ── Full Pipeline: Scan + Analyze ──────────────────────────────────────
 
 export async function runFullLeadIntelligence(orgId: string, monthsBack: number = 6, emailAccountIds?: string[]): Promise<{ scan: ScanResult; analysis: AnalysisResult }> {

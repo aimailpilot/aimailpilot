@@ -13993,13 +13993,20 @@ Generate an appropriate reply to the LATEST email above, considering the full co
     }
   });
 
-  // Trigger AI analysis (classify contacts)
+  // Trigger AI analysis (classify contacts).
+  // Defaults to INCREMENTAL mode — only classifies contacts that don't already have
+  // a lead_opportunity row (saves Azure OpenAI tokens on repeat clicks).
+  // Pass body.force=true to do a full delete-and-reclassify (use after AI prompt changes).
   app.post('/api/lead-intelligence/analyze', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.user.organizationId;
       const emailAccountIds = Array.isArray(req.body.emailAccountIds) ? req.body.emailAccountIds.map(String) : undefined;
-      console.log(`[LeadIntel] Manual analysis triggered for org ${orgId}${emailAccountIds ? ` accounts: ${emailAccountIds.join(',')}` : ' (all accounts)'}`);
-      const result = await analyzeOrgLeads(orgId, emailAccountIds);
+      const force = req.body?.force === true;
+      console.log(`[LeadIntel] Manual analysis triggered for org ${orgId} (mode=${force ? 'force-full' : 'incremental'})${emailAccountIds ? ` accounts: ${emailAccountIds.join(',')}` : ' (all accounts)'}`);
+      const { analyzeOrgLeadsIncremental } = await import('./services/lead-intelligence-engine.js');
+      const result = force
+        ? await analyzeOrgLeads(orgId, emailAccountIds)
+        : await analyzeOrgLeadsIncremental(orgId, emailAccountIds);
       res.json({ success: true, result });
     } catch (error) {
       console.error('[LeadIntel] Analysis error:', error);

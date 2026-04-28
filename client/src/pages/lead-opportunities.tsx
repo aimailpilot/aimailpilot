@@ -175,7 +175,7 @@ export default function LeadOpportunities() {
     }
   };
 
-  const runAnalysis = async () => {
+  const runAnalysis = async (force: boolean = false) => {
     setAnalyzing(true);
     setLastResult(null);
     try {
@@ -185,15 +185,21 @@ export default function LeadOpportunities() {
         credentials: 'include',
         body: JSON.stringify({
           emailAccountIds: selectedAccountIds.length > 0 ? selectedAccountIds : undefined,
+          force,
         }),
       });
       if (resp.ok) {
         const data = await resp.json();
-        setLastResult({ type: 'analysis', ...data.result });
+        setLastResult({ type: 'analysis', force, ...data.result });
         fetchAll();
+      } else {
+        // Surface server errors instead of failing silently
+        const errBody = await resp.json().catch(() => ({}));
+        setLastResult({ type: 'error', message: errBody.message || `Analysis failed (HTTP ${resp.status})`, error: errBody.error });
       }
-    } catch (e) {
-      console.error('Analysis failed:', e);
+    } catch (e: any) {
+      // Surface network/exception errors so the user knows something went wrong
+      setLastResult({ type: 'error', message: e?.message || 'Network error during analysis', error: String(e) });
     } finally {
       setAnalyzing(false);
     }
@@ -305,9 +311,15 @@ export default function LeadOpportunities() {
               {scanning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Mail className="h-3.5 w-3.5" />}
               {scanning ? 'Scanning...' : 'Scan Emails'}
             </Button>
-            <Button variant="outline" size="sm" onClick={runAnalysis} disabled={analyzing || runningFull} className="gap-1.5">
+            <Button variant="outline" size="sm" onClick={() => runAnalysis(false)} disabled={analyzing || runningFull} className="gap-1.5"
+              title="Analyze only contacts not yet classified (saves AI tokens)">
               {analyzing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Brain className="h-3.5 w-3.5" />}
               {analyzing ? 'Analyzing...' : 'Analyze'}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => runAnalysis(true)} disabled={analyzing || runningFull} className="gap-1.5 text-xs text-gray-500 hover:text-gray-700"
+              title="Re-analyze ALL contacts (deletes existing classifications, uses more AI tokens)">
+              {analyzing ? null : <Brain className="h-3 w-3" />}
+              Force re-analyze
             </Button>
             <Button size="sm" onClick={runFullPipeline} disabled={runningFull || scanning || analyzing}
               className="gap-1.5 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700">
@@ -382,18 +394,25 @@ export default function LeadOpportunities() {
 
         {/* Result Banner */}
         {lastResult && (
-          <Alert className="mb-4 bg-indigo-50 border-indigo-200">
-            <Brain className="h-4 w-4 text-indigo-600" />
-            <AlertDescription className="text-xs text-indigo-800">
+          <Alert className={`mb-4 ${lastResult.type === 'error' ? 'bg-red-50 border-red-200' : 'bg-indigo-50 border-indigo-200'}`}>
+            <Brain className={`h-4 w-4 ${lastResult.type === 'error' ? 'text-red-600' : 'text-indigo-600'}`} />
+            <AlertDescription className={`text-xs ${lastResult.type === 'error' ? 'text-red-800' : 'text-indigo-800'}`}>
               {lastResult.type === 'scan' && (
                 <span><strong>Scan complete:</strong> {lastResult.accountsScanned} accounts scanned, {lastResult.totalEmailsFetched} new emails fetched
                   {lastResult.errors?.length > 0 && <span className="text-red-600"> | Errors: {lastResult.errors.join(', ')}</span>}
                 </span>
               )}
               {lastResult.type === 'analysis' && (
-                <span><strong>Analysis complete:</strong> {lastResult.contactsAnalyzed} contacts analyzed, {lastResult.opportunitiesCreated} opportunities found
+                <span>
+                  <strong>{lastResult.force ? 'Full re-analysis complete' : 'Incremental analysis complete'}:</strong>{' '}
+                  {lastResult.contactsAnalyzed} contacts analyzed, {lastResult.opportunitiesCreated} new opportunities
+                  {!lastResult.force && lastResult.debug?.alreadyClassified > 0 && (
+                    <span className="text-gray-500"> · {lastResult.debug.alreadyClassified} previously classified (skipped — use Force re-analyze to re-run)</span>
+                  )}
+                  {lastResult.contactsAnalyzed === 0 && !lastResult.errors?.length && (
+                    <span className="text-gray-600"> — nothing new to classify. Run Scan first to fetch latest emails, or click Force re-analyze.</span>
+                  )}
                   {lastResult.errors?.length > 0 && <span className="text-red-600"> | {lastResult.errors.join(', ')}</span>}
-                  {lastResult.debug && <span className="text-gray-500"> | DB rows: {lastResult.debug.emailHistoryCount}, summaries: {lastResult.debug.summariesBuilt}{lastResult.debug.dbError ? `, dbErr: ${lastResult.debug.dbError}` : ''}</span>}
                   {lastResult.bucketCounts && Object.entries(lastResult.bucketCounts).map(([k, v]) => (
                     <Badge key={k} variant="outline" className="ml-1 text-[10px]">{BUCKET_CONFIG[k]?.label || k}: {v as number}</Badge>
                   ))}
@@ -403,6 +422,12 @@ export default function LeadOpportunities() {
                 <span>
                   <strong>Full pipeline complete:</strong> {lastResult.scan?.totalEmailsFetched || 0} emails scanned,{' '}
                   {lastResult.analysis?.opportunitiesCreated || 0} opportunities classified
+                </span>
+              )}
+              {lastResult.type === 'error' && (
+                <span>
+                  <strong>Analysis failed:</strong> {lastResult.message}
+                  {lastResult.error && <span className="text-red-600"> — {lastResult.error}</span>}
                 </span>
               )}
               <button className="ml-2 underline" onClick={() => setLastResult(null)}>dismiss</button>
