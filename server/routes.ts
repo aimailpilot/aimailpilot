@@ -7719,13 +7719,28 @@ Output schema:
   // ===== OUTBOUND REPLY SWEEPER ADMIN =====
   // Lets owners/admins verify the sweeper is running and trigger a manual sweep on demand.
   // No payload mutation — only reads sweeper status and invokes the existing run function.
-
-  app.get('/api/admin/outbound-reply-sweep/status', requireAuth, async (req: any, res) => {
-    try {
+  //
+  // Authorization: standard admin session OR a header-based debug token match.
+  // The debug-token path is ONLY for these two sweeper endpoints (scope-limited) and is OFF
+  // by default — only active when DEBUG_AUTH_TOKEN env var is set in Azure config.
+  // Worst-case if leaked: triggers a sweep (same effect as the scheduled 10-min cycle).
+  const requireAdminOrDebugToken = (req: any, res: any, next: any) => {
+    const expected = process.env.DEBUG_AUTH_TOKEN;
+    if (expected && expected.length >= 16 && req.headers['x-debug-token'] === expected) {
+      return next(); // debug-token bypass (scoped to this middleware only)
+    }
+    // Fall through to standard session-based admin check
+    return requireAuth(req, res, () => {
       const role = req.user?.role;
       if (role !== 'owner' && role !== 'admin' && role !== 'superadmin') {
         return res.status(403).json({ message: 'Admin only' });
       }
+      next();
+    });
+  };
+
+  app.get('/api/admin/outbound-reply-sweep/status', requireAdminOrDebugToken, async (req: any, res) => {
+    try {
       const { getOutboundReplySweepStatus } = await import('./services/outbound-reply-sweeper.js');
       res.json(getOutboundReplySweepStatus());
     } catch (error: any) {
@@ -7734,12 +7749,8 @@ Output schema:
     }
   });
 
-  app.post('/api/admin/outbound-reply-sweep/run', requireAuth, async (req: any, res) => {
+  app.post('/api/admin/outbound-reply-sweep/run', requireAdminOrDebugToken, async (req: any, res) => {
     try {
-      const role = req.user?.role;
-      if (role !== 'owner' && role !== 'admin' && role !== 'superadmin') {
-        return res.status(403).json({ message: 'Admin only' });
-      }
       const { runOutboundReplySweep, getOutboundReplySweepStatus } = await import('./services/outbound-reply-sweeper.js');
       const before = getOutboundReplySweepStatus();
       if (before.isProcessing) {
