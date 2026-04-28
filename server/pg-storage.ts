@@ -809,6 +809,11 @@ async function initializeSchema() {
       'ALTER TABLE templates ADD COLUMN IF NOT EXISTS "kbHighSeverityCount" INTEGER DEFAULT NULL',
       'ALTER TABLE templates ADD COLUMN IF NOT EXISTS "qualityCheckedAt" TEXT DEFAULT NULL',
       'CREATE INDEX IF NOT EXISTS idx_templates_quality ON templates("organizationId", "deliverabilityGrade")',
+      // Outbound reply sweeper queue progression — tracks last time each inbox row was scanned
+      // for a native-client reply, so the sweeper can advance through the full Need Reply backlog
+      // instead of looping on the oldest 50 forever.
+      'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "outboundCheckedAt" TEXT DEFAULT NULL',
+      'CREATE INDEX IF NOT EXISTS idx_inbox_outbound_check ON unified_inbox("organizationId", "outboundCheckedAt")',
       // Multi-list membership junction table
       `CREATE TABLE IF NOT EXISTS contact_list_members (
         "contactId" TEXT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,

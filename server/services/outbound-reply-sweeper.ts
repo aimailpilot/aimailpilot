@@ -25,10 +25,11 @@
 import { storage } from "../storage";
 import { OAuth2Client } from 'google-auth-library';
 
-const SWEEP_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
-const BOOT_DELAY_MS = 90 * 1000;          // 90 seconds after server boot
-const MAX_CANDIDATES_PER_CYCLE = 50;      // bounded API quota usage per cycle
-const MIN_AGE_MS = 60 * 1000;             // skip messages received in the last minute (let the tracker run first)
+const SWEEP_INTERVAL_MS = 10 * 60 * 1000;  // 10 minutes
+const BOOT_DELAY_MS = 90 * 1000;           // 90 seconds after server boot
+const MAX_CANDIDATES_PER_CYCLE = 50;       // bounded API quota usage per cycle
+const MIN_AGE_MS = 60 * 1000;              // skip messages received in the last minute (let the tracker run first)
+const RECHECK_COOLDOWN_MS = 6 * 60 * 60 * 1000; // skip rows checked within last 6 hours — lets queue advance through full backlog
 
 let isProcessing = false;
 
@@ -253,9 +254,17 @@ interface InboxCandidate {
 async function selectCandidates(): Promise<InboxCandidate[]> {
   // Pull up to N candidates: "need reply" messages with either a Gmail thread id or an Outlook
   // conversation id (the trackers populate provider-specific thread fields, not the generic
-  // "threadId" column). Older than MIN_AGE_MS so the inbound tracker had a chance to run first.
-  // Join email_accounts to get the owner email, provider, and user id.
-  const cutoff = new Date(Date.now() - MIN_AGE_MS).toISOString();
+  // "threadId" column).
+  //
+  // Two age gates:
+  //   - receivedAt > MIN_AGE_MS old → skip (let inbound tracker run first)
+  //   - outboundCheckedAt within RECHECK_COOLDOWN_MS → skip (queue progression — without
+  //     this we'd loop on the same oldest 50 forever and never reach newer messages)
+  //
+  // Order by outboundCheckedAt NULLS FIRST so never-checked rows are processed before re-checks,
+  // then by receivedAt ASC for stable iteration order.
+  const recvCutoff = new Date(Date.now() - MIN_AGE_MS).toISOString();
+  const checkCutoff = new Date(Date.now() - RECHECK_COOLDOWN_MS).toISOString();
   const sql = `
     SELECT ui.id, ui."organizationId",
            ui."gmailThreadId", ui."outlookConversationId",
@@ -271,14 +280,25 @@ async function selectCandidates(): Promise<InboxCandidate[]> {
         OR (ui."outlookConversationId" IS NOT NULL AND ui."outlookConversationId" != '')
       )
       AND ui."receivedAt" < ?
+      AND (ui."outboundCheckedAt" IS NULL OR ui."outboundCheckedAt" < ?)
       AND ea."isActive" != 0
-    ORDER BY ui."receivedAt" ASC
+    ORDER BY ui."outboundCheckedAt" ASC NULLS FIRST, ui."receivedAt" ASC
     LIMIT ?
   `;
-  return storage.rawAll(sql, cutoff, MAX_CANDIDATES_PER_CYCLE) as Promise<InboxCandidate[]>;
+  return storage.rawAll(sql, recvCutoff, checkCutoff, MAX_CANDIDATES_PER_CYCLE) as Promise<InboxCandidate[]>;
 }
 
 async function processCandidate(c: InboxCandidate): Promise<'replied' | 'no_reply' | 'skipped'> {
+  // Mark this row as checked regardless of outcome — keeps the queue advancing through the
+  // backlog instead of looping on the same oldest 50 forever. Set BEFORE the API calls so that
+  // even on transient skips/errors we won't keep retrying the same row every cycle.
+  // Re-checks happen naturally after RECHECK_COOLDOWN_MS expires.
+  const checkedAtIso = new Date().toISOString();
+  await storage.rawRun(
+    `UPDATE unified_inbox SET "outboundCheckedAt" = ? WHERE id = ? AND "organizationId" = ?`,
+    checkedAtIso, c.id, c.organizationId
+  );
+
   if (!c.ownerEmail) return 'skipped';
   const provider = (c.provider || '').toLowerCase();
   const receivedAt = new Date(c.receivedAt).getTime();
