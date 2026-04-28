@@ -7556,7 +7556,7 @@ Output schema:
       let toProcess = templateIds.slice();
       let skippedRecent: string[] = [];
       if (!force) {
-        const cutoff = now - BULK_SKIP_RECENT_MS;
+        const cutoff = Date.now() - BULK_SKIP_RECENT_MS;
         const filtered: string[] = [];
         for (const id of toProcess) {
           const tpl = await storage.getEmailTemplate(id);
