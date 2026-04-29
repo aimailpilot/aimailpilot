@@ -4366,15 +4366,20 @@ Which account should I use and why? If I need to split across accounts, provide 
   app.get('/api/campaigns/:id/messages', async (req: any, res) => {
     try {
       const campaign = await storage.getCampaign(req.params.id);
-      if (!campaign) return res.status(404).json({ message: 'Campaign not found' });
+      if (!campaign) {
+        console.log(`[campaigns/messages] Campaign not found: ${req.params.id}`);
+        return res.status(404).json({ message: 'Campaign not found' });
+      }
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
       const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 25));
       const offset = (page - 1) * limit;
       const filter = (req.query.filter as string) || 'all';
       const search = (req.query.search as string) || '';
       const { messages, total } = await storage.getCampaignMessagesFiltered(req.params.id, limit, offset, filter, search);
+      console.log(`[campaigns/messages] id=${req.params.id} filter=${filter} search=${search ? 'yes' : 'no'} page=${page} → returned messages=${messages.length}, total=${total}`);
       res.json({ messages, total, page, limit, totalPages: Math.ceil(total / limit) });
     } catch (err: any) {
+      console.error(`[campaigns/messages] error for id=${req.params.id}:`, err?.message || err);
       res.status(500).json({ message: err.message });
     }
   });

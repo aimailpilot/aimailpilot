@@ -862,9 +862,37 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
     { label: 'Spam', value: analytics?.spam || campaign.spamCount || 0, emoji: '🛑', emojiBg: 'bg-red-50 border-red-100', rate: analytics?.spamRate ? `${analytics.spamRate}%` : null, filter: 'spam' },
   ];
 
-  // All Emails table data is now fetched server-side via tableData (see effect above).
-  // Filtering and pagination both happen at the DB level, removing the prior 500-message
-  // cache cap that hid replies in large campaigns.
+  // All Emails table data: prefer server-side tableData when available (avoids the
+  // 500-message client cap), but fall back to client-side filtering of the cached
+  // detail-endpoint messages when the server endpoint returns empty (protects against
+  // server-side regressions and ensures the table never shows "no emails" when there
+  // ARE messages cached locally from the /detail call).
+  const fallbackFiltered = (() => {
+    const lc = (s: string) => (s || '').toLowerCase();
+    const q = lc(searchQuery.trim());
+    const matchesSearch = (m: CampaignMessage) => !q ||
+      lc(m.contact?.email || '').includes(q) ||
+      lc(m.contact?.firstName || '').includes(q) ||
+      lc(m.contact?.lastName || '').includes(q);
+    return (messages || []).filter((m: CampaignMessage) => {
+      if (!matchesSearch(m)) return false;
+      if (statusFilter === 'all') return true;
+      if (statusFilter === 'opened') return !!(m.openedAt || (m.openCount && m.openCount > 0));
+      if (statusFilter === 'clicked') return !!(m.clickedAt || (m.clickCount && m.clickCount > 0));
+      if (statusFilter === 'replied') return !!(m.repliedAt || (m.replyCount && m.replyCount > 0));
+      if (statusFilter === 'bounced') return m.status === 'failed' || m.status === 'bounced';
+      if (statusFilter === 'unsubscribed') return !!(m as any).unsubscribed;
+      if (statusFilter === 'spam') return !!(m as any).spamReported;
+      return true;
+    });
+  })();
+  // Use server data when it returned messages OR when it returned a non-zero total
+  // (server total is canonical even on later pages). Else fall back to client filter.
+  const useServerData = tableData.messages.length > 0 || tableData.total > 0;
+  const visibleMessages = useServerData
+    ? tableData.messages
+    : fallbackFiltered.slice((emailsPage - 1) * emailsPerPage, emailsPage * emailsPerPage);
+  const visibleTotal = useServerData ? tableData.total : fallbackFiltered.length;
 
   // Tracking rows - show ALL contacts with their engagement status
   const contactEventMap = new Map<string, { contact: any; email: string; events: TrackingEvent[]; lastActivity: string; message: CampaignMessage }>();
@@ -1503,14 +1531,14 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
           </div>
         </div>
 
-        {tableData.loading && tableData.messages.length === 0 ? (
+        {tableData.loading && visibleMessages.length === 0 ? (
           <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm p-16 text-center">
             <div className="w-14 h-14 rounded-2xl bg-gray-50 border border-gray-100 flex items-center justify-center mx-auto mb-4">
               <Loader2 className="h-6 w-6 text-gray-300 animate-spin" />
             </div>
             <p className="text-sm font-medium text-gray-500">Loading emails…</p>
           </div>
-        ) : tableData.messages.length === 0 ? (
+        ) : visibleMessages.length === 0 ? (
           <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm p-16 text-center">
             <div className="w-14 h-14 rounded-2xl bg-gray-50 border border-gray-100 flex items-center justify-center mx-auto mb-4">
               <Mail className="h-6 w-6 text-gray-300" />
@@ -1532,7 +1560,7 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
             </div>
 
             {/* Table rows */}
-            {tableData.messages.map((msg: CampaignMessage) => {
+            {visibleMessages.map((msg: CampaignMessage) => {
                 const statusLabel = msg.repliedAt || (msg.replyCount && msg.replyCount > 0) ? 'Replied' :
                   msg.clickedAt || (msg.clickCount && msg.clickCount > 0) ? 'Clicked' :
                   msg.openedAt || (msg.openCount && msg.openCount > 0) ? 'Opened' :
@@ -1599,13 +1627,13 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
               );
             })}
           </div>
-          {tableData.total > emailsPerPage && (
+          {visibleTotal > emailsPerPage && (
             <Pagination
               currentPage={emailsPage}
-              totalPages={Math.ceil(tableData.total / emailsPerPage)}
+              totalPages={Math.ceil(visibleTotal / emailsPerPage)}
               onPageChange={setEmailsPage}
               itemsPerPage={emailsPerPage}
-              totalItems={tableData.total}
+              totalItems={visibleTotal}
               showSummary={true}
             />
           )}
