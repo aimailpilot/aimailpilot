@@ -166,6 +166,9 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
   const trackingPerPage = 15;
   const [emailsPage, setEmailsPage] = useState(1);
   const emailsPerPage = 25;
+  // Server-side filtered/paginated emails table data (replaces 500-message client-side cap)
+  const [tableData, setTableData] = useState<{ messages: CampaignMessage[]; total: number; loading: boolean }>({ messages: [], total: 0, loading: true });
+  const [debouncedSearch, setDebouncedSearch] = useState('');
 
   const fetchDetail = async (recalculate = false) => {
     setLoading(true);
@@ -234,6 +237,37 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
 
   // Reset emails page when search/filter changes
   useEffect(() => { setEmailsPage(1); }, [searchQuery, statusFilter]);
+
+  // Debounce search input (300ms) so we don't hammer the API on every keystroke
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(searchQuery.trim()), 300);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+
+  // Fetch the All Emails table from the server with filter/search/pagination applied
+  // server-side. This avoids the 500-message client cap that was causing the Replied
+  // filter to show "No emails match" for large campaigns where replies sat past row 500.
+  useEffect(() => {
+    if (!campaignId) return;
+    let cancelled = false;
+    setTableData(prev => ({ ...prev, loading: true }));
+    const params = new URLSearchParams({
+      page: String(emailsPage),
+      limit: String(emailsPerPage),
+      filter: statusFilter,
+    });
+    if (debouncedSearch) params.set('search', debouncedSearch);
+    fetch(`/api/campaigns/${campaignId}/messages?${params.toString()}`, { credentials: 'include' })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (cancelled || !data) return;
+        setTableData({ messages: data.messages || [], total: data.total || 0, loading: false });
+      })
+      .catch(() => {
+        if (!cancelled) setTableData(prev => ({ ...prev, loading: false }));
+      });
+    return () => { cancelled = true; };
+  }, [campaignId, emailsPage, emailsPerPage, statusFilter, debouncedSearch]);
 
   // Close actions menu on outside click
   useEffect(() => {
@@ -828,21 +862,9 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
     { label: 'Spam', value: analytics?.spam || campaign.spamCount || 0, emoji: '🛑', emojiBg: 'bg-red-50 border-red-100', rate: analytics?.spamRate ? `${analytics.spamRate}%` : null, filter: 'spam' },
   ];
 
-  // Filter messages for emails table (client-side)
-  const filteredMessages = messages.filter((m: CampaignMessage) => {
-    const matchesSearch =
-      (m.contact?.email || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (m.contact?.firstName || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (m.contact?.lastName || '').toLowerCase().includes(searchQuery.toLowerCase());
-    if (statusFilter === 'all') return matchesSearch;
-    if (statusFilter === 'opened') return matchesSearch && (m.openedAt || (m.openCount && m.openCount > 0));
-    if (statusFilter === 'clicked') return matchesSearch && (m.clickedAt || (m.clickCount && m.clickCount > 0));
-    if (statusFilter === 'replied') return matchesSearch && (m.repliedAt || (m.replyCount && m.replyCount > 0));
-    if (statusFilter === 'bounced') return matchesSearch && (m.status === 'failed' || m.status === 'bounced');
-    if (statusFilter === 'unsubscribed') return matchesSearch && (m as any).unsubscribed;
-    if (statusFilter === 'spam') return matchesSearch && (m as any).spamReported;
-    return matchesSearch;
-  });
+  // All Emails table data is now fetched server-side via tableData (see effect above).
+  // Filtering and pagination both happen at the DB level, removing the prior 500-message
+  // cache cap that hid replies in large campaigns.
 
   // Tracking rows - show ALL contacts with their engagement status
   const contactEventMap = new Map<string, { contact: any; email: string; events: TrackingEvent[]; lastActivity: string; message: CampaignMessage }>();
@@ -1481,17 +1503,24 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
           </div>
         </div>
 
-        {filteredMessages.length === 0 ? (
+        {tableData.loading && tableData.messages.length === 0 ? (
+          <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm p-16 text-center">
+            <div className="w-14 h-14 rounded-2xl bg-gray-50 border border-gray-100 flex items-center justify-center mx-auto mb-4">
+              <Loader2 className="h-6 w-6 text-gray-300 animate-spin" />
+            </div>
+            <p className="text-sm font-medium text-gray-500">Loading emails…</p>
+          </div>
+        ) : tableData.messages.length === 0 ? (
           <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm p-16 text-center">
             <div className="w-14 h-14 rounded-2xl bg-gray-50 border border-gray-100 flex items-center justify-center mx-auto mb-4">
               <Mail className="h-6 w-6 text-gray-300" />
             </div>
-            <p className="text-sm font-medium text-gray-500 mb-1">{messages.length === 0 ? 'No emails sent yet' : 'No emails match your filters'}</p>
+            <p className="text-sm font-medium text-gray-500 mb-1">{totalMessages === 0 ? 'No emails sent yet' : 'No emails match your filters'}</p>
             <p className="text-xs text-gray-400">Try adjusting your search or filter criteria</p>
           </div>
         ) : (
           <>
-          <div className="bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden">
+          <div className={`bg-white rounded-xl border border-gray-200/80 shadow-sm overflow-hidden ${tableData.loading ? 'opacity-60' : ''}`}>
             {/* Table header */}
             <div className="grid grid-cols-[2fr_80px_70px_70px_70px_90px] gap-1 px-5 py-2.5 border-b border-gray-100 bg-gray-50/80 text-[11px] font-semibold uppercase tracking-wider text-gray-400">
               <div>Recipient</div>
@@ -1503,7 +1532,7 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
             </div>
 
             {/* Table rows */}
-            {filteredMessages.slice((emailsPage - 1) * emailsPerPage, emailsPage * emailsPerPage).map((msg: CampaignMessage) => {
+            {tableData.messages.map((msg: CampaignMessage) => {
                 const statusLabel = msg.repliedAt || (msg.replyCount && msg.replyCount > 0) ? 'Replied' :
                   msg.clickedAt || (msg.clickCount && msg.clickCount > 0) ? 'Clicked' :
                   msg.openedAt || (msg.openCount && msg.openCount > 0) ? 'Opened' :
@@ -1570,13 +1599,13 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
               );
             })}
           </div>
-          {filteredMessages.length > emailsPerPage && (
+          {tableData.total > emailsPerPage && (
             <Pagination
               currentPage={emailsPage}
-              totalPages={Math.ceil(filteredMessages.length / emailsPerPage)}
+              totalPages={Math.ceil(tableData.total / emailsPerPage)}
               onPageChange={setEmailsPage}
               itemsPerPage={emailsPerPage}
-              totalItems={filteredMessages.length}
+              totalItems={tableData.total}
               showSummary={true}
             />
           )}
