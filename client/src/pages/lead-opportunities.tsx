@@ -150,88 +150,125 @@ export default function LeadOpportunities() {
     }
   };
 
-  const runScan = async (force: boolean = false) => {
-    setScanning(true);
+  // ===== BACKGROUND JOB HELPER =====
+  // /scan, /analyze, /run all return { jobId } immediately and run in the background.
+  // Frontend polls /jobs/:jobId every 3s until terminal status. Bypasses Azure's 230s
+  // request timeout that was causing 504 Gateway Timeout errors on large orgs.
+  const startBackgroundJob = async (
+    endpoint: '/api/lead-intelligence/scan' | '/api/lead-intelligence/analyze' | '/api/lead-intelligence/run',
+    body: any,
+    setLoadingFlag: (v: boolean) => void,
+    resultType: 'scan' | 'analysis' | 'full',
+  ) => {
+    setLoadingFlag(true);
     setLastResult(null);
     try {
-      const resp = await fetch('/api/lead-intelligence/scan', {
+      const startRes = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({
-          monthsBack: parseInt(monthsBack) || 6,
-          emailAccountIds: selectedAccountIds.length > 0 ? selectedAccountIds : undefined,
-          force,
-        }),
+        body: JSON.stringify(body),
       });
-      if (resp.ok) {
-        const data = await resp.json();
-        setLastResult({ type: 'scan', force, ...data.result });
-        fetchAll();
-      } else {
-        const errBody = await resp.json().catch(() => ({}));
-        setLastResult({ type: 'error', message: errBody.message || `Scan failed (HTTP ${resp.status})`, error: errBody.error });
+      if (!startRes.ok) {
+        const errBody = await startRes.json().catch(() => ({}));
+        // 409 = another job already running for this org. Surface activeJob info if present.
+        if (startRes.status === 409 && errBody?.activeJob?.id) {
+          setLastResult({ type: 'error', message: `${errBody.message} (existing job: ${errBody.activeJob.type})`, error: '' });
+        } else {
+          setLastResult({ type: 'error', message: errBody?.message || `Failed (HTTP ${startRes.status})`, error: errBody?.error });
+        }
+        setLoadingFlag(false);
+        return;
       }
+      const { jobId } = await startRes.json();
+      if (!jobId) {
+        setLastResult({ type: 'error', message: 'Server did not return a jobId.', error: '' });
+        setLoadingFlag(false);
+        return;
+      }
+
+      // Poll every 3s until the job reaches a terminal state. ~20-min total cap as a safety.
+      const POLL_MS = 3000;
+      const MAX_POLLS = (20 * 60 * 1000) / POLL_MS;
+      let polls = 0;
+      const tick = async (): Promise<void> => {
+        polls++;
+        try {
+          const res = await fetch(`/api/lead-intelligence/jobs/${jobId}`, { credentials: 'include' });
+          if (res.status === 404) {
+            setLastResult({ type: 'error', message: 'Job no longer exists (server may have restarted).', error: '' });
+            setLoadingFlag(false);
+            return;
+          }
+          if (!res.ok) {
+            // Transient — keep polling
+            if (polls < MAX_POLLS) { setTimeout(tick, POLL_MS); return; }
+            setLastResult({ type: 'error', message: 'Polling timed out.', error: '' });
+            setLoadingFlag(false);
+            return;
+          }
+          const job = await res.json();
+          if (job.status === 'running') {
+            if (polls < MAX_POLLS) { setTimeout(tick, POLL_MS); return; }
+            setLastResult({ type: 'error', message: 'Job is taking longer than 20 minutes — check back later, it may still complete.', error: '' });
+            setLoadingFlag(false);
+            return;
+          }
+          // Terminal state
+          if (job.status === 'failed') {
+            setLastResult({ type: 'error', message: 'Job failed: ' + (job.error || 'unknown error'), error: job.error });
+          } else if (job.status === 'cancelled') {
+            setLastResult({ type: 'error', message: 'Job was cancelled.', error: '' });
+          } else if (job.status === 'completed') {
+            // Shape the result like the old synchronous handlers expected
+            const r = job.result || {};
+            if (resultType === 'full') {
+              setLastResult({ type: 'full', scan: r.scan, analysis: r.analysis });
+            } else {
+              setLastResult({ type: resultType === 'analysis' ? 'analysis' : 'scan', force: !!body.force, ...r });
+            }
+            fetchAll();
+          }
+          setLoadingFlag(false);
+        } catch {
+          if (polls < MAX_POLLS) { setTimeout(tick, POLL_MS); return; }
+          setLastResult({ type: 'error', message: 'Network error while polling job status.', error: '' });
+          setLoadingFlag(false);
+        }
+      };
+      // First poll after 1s to give the runner a head start
+      setTimeout(tick, 1000);
     } catch (e: any) {
-      setLastResult({ type: 'error', message: e?.message || 'Network error during scan', error: String(e) });
-    } finally {
-      setScanning(false);
+      setLastResult({ type: 'error', message: e?.message || 'Network error', error: String(e) });
+      setLoadingFlag(false);
     }
+  };
+
+  const runScan = async (force: boolean = false) => {
+    await startBackgroundJob(
+      '/api/lead-intelligence/scan',
+      { monthsBack: parseInt(monthsBack) || 6, emailAccountIds: selectedAccountIds.length > 0 ? selectedAccountIds : undefined, force },
+      setScanning,
+      'scan',
+    );
   };
 
   const runAnalysis = async (force: boolean = false) => {
-    setAnalyzing(true);
-    setLastResult(null);
-    try {
-      const resp = await fetch('/api/lead-intelligence/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          emailAccountIds: selectedAccountIds.length > 0 ? selectedAccountIds : undefined,
-          force,
-        }),
-      });
-      if (resp.ok) {
-        const data = await resp.json();
-        setLastResult({ type: 'analysis', force, ...data.result });
-        fetchAll();
-      } else {
-        // Surface server errors instead of failing silently
-        const errBody = await resp.json().catch(() => ({}));
-        setLastResult({ type: 'error', message: errBody.message || `Analysis failed (HTTP ${resp.status})`, error: errBody.error });
-      }
-    } catch (e: any) {
-      // Surface network/exception errors so the user knows something went wrong
-      setLastResult({ type: 'error', message: e?.message || 'Network error during analysis', error: String(e) });
-    } finally {
-      setAnalyzing(false);
-    }
+    await startBackgroundJob(
+      '/api/lead-intelligence/analyze',
+      { emailAccountIds: selectedAccountIds.length > 0 ? selectedAccountIds : undefined, force },
+      setAnalyzing,
+      'analysis',
+    );
   };
 
   const runFullPipeline = async () => {
-    setRunningFull(true);
-    setLastResult(null);
-    try {
-      const resp = await fetch('/api/lead-intelligence/run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          monthsBack: parseInt(monthsBack) || 6,
-          emailAccountIds: selectedAccountIds.length > 0 ? selectedAccountIds : undefined,
-        }),
-      });
-      if (resp.ok) {
-        const data = await resp.json();
-        setLastResult({ type: 'full', scan: data.scan, analysis: data.analysis });
-        fetchAll();
-      }
-    } catch (e) {
-      console.error('Full pipeline failed:', e);
-    } finally {
-      setRunningFull(false);
-    }
+    await startBackgroundJob(
+      '/api/lead-intelligence/run',
+      { monthsBack: parseInt(monthsBack) || 6, emailAccountIds: selectedAccountIds.length > 0 ? selectedAccountIds : undefined },
+      setRunningFull,
+      'full',
+    );
   };
 
   const updateOpportunityStatus = async (id: string, status: string) => {

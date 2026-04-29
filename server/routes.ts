@@ -14187,60 +14187,230 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   });
 
   // Trigger email history scan (deep scan)
-  // Scan email history.
-  // Defaults to INCREMENTAL — uses email_accounts.leadIntelLastScanAt per account so only
-  // emails newer than the last successful scan are fetched. Pass body.force=true to rescan
-  // the full monthsBack window (e.g. after extending the lookback period).
+  // ===== LEAD INTELLIGENCE BACKGROUND JOBS =====
+  // The synchronous /scan and /analyze used to take 60-300+ seconds for orgs with many
+  // accounts and months of history. Azure App Service kills requests at ~230s, causing
+  // 504 Gateway Timeouts that left the user with no idea what happened. These endpoints
+  // now return a jobId immediately and run in the background. Frontend polls /jobs/:jobId.
+  // Pattern mirrors the proven bulk template analyze flow.
+
+  const LEAD_INTEL_JOB_TTL_MS = 60 * 60 * 1000; // 1 hour — stale after this if not finished
+
+  type LeadIntelJobType = 'scan' | 'analyze' | 'full';
+  interface LeadIntelJob {
+    id: string;
+    organizationId: string;
+    userId: string;
+    type: LeadIntelJobType;
+    status: 'running' | 'completed' | 'failed' | 'cancelled';
+    startedAt: string;
+    finishedAt: string | null;
+    options: { monthsBack?: number; emailAccountIds?: string[]; force?: boolean };
+    result: any | null;
+    error: string | null;
+    cancelRequested: boolean;
+  }
+
+  const leadIntelJobKey = (jobId: string) => `lead_intel_job_${jobId}`;
+
+  const findActiveLeadIntelJob = async (orgId: string, excludeJobId?: string): Promise<LeadIntelJob | null> => {
+    const allSettings = await storage.getApiSettings(orgId);
+    const now = Date.now();
+    for (const [key, val] of Object.entries(allSettings || {})) {
+      if (!key.startsWith('lead_intel_job_')) continue;
+      try {
+        const j = JSON.parse(val as string) as LeadIntelJob;
+        if (excludeJobId && j.id === excludeJobId) continue;
+        if (j.status !== 'running') continue;
+        if (j.startedAt && (now - new Date(j.startedAt).getTime()) < LEAD_INTEL_JOB_TTL_MS) return j;
+      } catch { /* ignore malformed */ }
+    }
+    return null;
+  };
+
+  const startLeadIntelJob = async (orgId: string, userId: string, type: LeadIntelJobType, options: LeadIntelJob['options']): Promise<{ jobId: string } | { conflict: LeadIntelJob }> => {
+    // Pre-check for active job in this org (prevents duplicate work)
+    const existing = await findActiveLeadIntelJob(orgId);
+    if (existing) return { conflict: existing };
+
+    const jobId = `${orgId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const startedAt = new Date().toISOString();
+    const job: LeadIntelJob = {
+      id: jobId,
+      organizationId: orgId,
+      userId,
+      type,
+      status: 'running',
+      startedAt,
+      finishedAt: null,
+      options,
+      result: null,
+      error: null,
+      cancelRequested: false,
+    };
+    await storage.setApiSetting(orgId, leadIntelJobKey(jobId), JSON.stringify(job));
+
+    // Post-write double-check (TOCTOU race) — same pattern as bulk template analyze
+    const concurrent = await findActiveLeadIntelJob(orgId, jobId);
+    if (concurrent) {
+      const earlierTime = new Date(concurrent.startedAt).getTime();
+      const myTime = new Date(startedAt).getTime();
+      const concurrentWins = earlierTime < myTime || (earlierTime === myTime && String(concurrent.id) < String(jobId));
+      if (concurrentWins) {
+        const yielded: LeadIntelJob = { ...job, status: 'cancelled', cancelRequested: true, finishedAt: new Date().toISOString() };
+        await storage.setApiSetting(orgId, leadIntelJobKey(jobId), JSON.stringify(yielded));
+        return { conflict: concurrent };
+      }
+    }
+
+    // Fire-and-forget runner with explicit error handling — marks job 'failed' on crash
+    setImmediate(async () => {
+      try {
+        await runLeadIntelJob(jobId, orgId, type, options);
+      } catch (err: any) {
+        console.error(`[LeadIntel] runner crashed for job ${jobId}:`, err?.message || err);
+        try {
+          const settings = await storage.getApiSettings(orgId);
+          const raw = settings?.[leadIntelJobKey(jobId)];
+          if (raw) {
+            const j = JSON.parse(raw) as LeadIntelJob;
+            if (j.status === 'running') {
+              j.status = 'failed';
+              j.error = err?.message || String(err);
+              j.finishedAt = new Date().toISOString();
+              await storage.setApiSetting(orgId, leadIntelJobKey(jobId), JSON.stringify(j));
+            }
+          }
+        } catch { /* best-effort cleanup */ }
+      }
+    });
+
+    return { jobId };
+  };
+
+  const runLeadIntelJob = async (jobId: string, orgId: string, type: LeadIntelJobType, options: LeadIntelJob['options']): Promise<void> => {
+    const { scanOrgEmailHistory, analyzeOrgLeads, runFullLeadIntelligence, analyzeOrgLeadsIncremental } = await import('./services/lead-intelligence-engine.js');
+
+    let result: any = null;
+    if (type === 'scan') {
+      result = await scanOrgEmailHistory(orgId, options.monthsBack || 6, options.emailAccountIds, !!options.force);
+    } else if (type === 'analyze') {
+      result = options.force
+        ? await analyzeOrgLeads(orgId, options.emailAccountIds)
+        : await analyzeOrgLeadsIncremental(orgId, options.emailAccountIds);
+    } else if (type === 'full') {
+      result = await runFullLeadIntelligence(orgId, options.monthsBack || 6, options.emailAccountIds, !!options.force);
+    }
+
+    // Persist final state
+    const settings = await storage.getApiSettings(orgId);
+    const raw = settings?.[leadIntelJobKey(jobId)];
+    if (raw) {
+      const j = JSON.parse(raw) as LeadIntelJob;
+      // Honor cancellation that was requested mid-run (work already done, just don't expose result)
+      j.status = j.cancelRequested ? 'cancelled' : 'completed';
+      j.result = result;
+      j.finishedAt = new Date().toISOString();
+      await storage.setApiSetting(orgId, leadIntelJobKey(jobId), JSON.stringify(j));
+    }
+  };
+
+  // Scan email history (background job).
+  // Returns { jobId, type:'scan' } immediately. Frontend polls /jobs/:jobId for status.
   app.post('/api/lead-intelligence/scan', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.user.organizationId;
       const monthsBack = parseInt(req.body.monthsBack as string) || 6;
       const emailAccountIds = Array.isArray(req.body.emailAccountIds) ? req.body.emailAccountIds.map(String) : undefined;
       const force = req.body?.force === true;
-      console.log(`[LeadIntel] Manual scan triggered for org ${orgId} (${monthsBack} months, mode=${force ? 'force-full' : 'incremental'})${emailAccountIds ? ` accounts: ${emailAccountIds.join(',')}` : ' (all accounts)'}`);
-      const result = await scanOrgEmailHistory(orgId, monthsBack, emailAccountIds, force);
-      res.json({ success: true, result });
+      console.log(`[LeadIntel] Scan job requested for org ${orgId} (${monthsBack} months, mode=${force ? 'force-full' : 'incremental'})`);
+      const r = await startLeadIntelJob(orgId, req.user.id, 'scan', { monthsBack, emailAccountIds, force });
+      if ('conflict' in r) {
+        return res.status(409).json({ message: 'A lead intelligence job is already running for your org. Wait for it to complete or cancel it.', activeJob: r.conflict });
+      }
+      res.json({ jobId: r.jobId, type: 'scan' });
     } catch (error) {
-      console.error('[LeadIntel] Scan error:', error);
-      res.status(500).json({ message: 'Failed to scan email history', error: error instanceof Error ? error.message : String(error) });
+      console.error('[LeadIntel] Scan job start error:', error);
+      res.status(500).json({ message: 'Failed to start scan', error: error instanceof Error ? error.message : String(error) });
     }
   });
 
-  // Trigger AI analysis (classify contacts).
-  // Defaults to INCREMENTAL mode — only classifies contacts that don't already have
-  // a lead_opportunity row (saves Azure OpenAI tokens on repeat clicks).
-  // Pass body.force=true to do a full delete-and-reclassify (use after AI prompt changes).
+  // Trigger AI analysis (background job).
   app.post('/api/lead-intelligence/analyze', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.user.organizationId;
       const emailAccountIds = Array.isArray(req.body.emailAccountIds) ? req.body.emailAccountIds.map(String) : undefined;
       const force = req.body?.force === true;
-      console.log(`[LeadIntel] Manual analysis triggered for org ${orgId} (mode=${force ? 'force-full' : 'incremental'})${emailAccountIds ? ` accounts: ${emailAccountIds.join(',')}` : ' (all accounts)'}`);
-      const { analyzeOrgLeadsIncremental } = await import('./services/lead-intelligence-engine.js');
-      const result = force
-        ? await analyzeOrgLeads(orgId, emailAccountIds)
-        : await analyzeOrgLeadsIncremental(orgId, emailAccountIds);
-      res.json({ success: true, result });
+      console.log(`[LeadIntel] Analyze job requested for org ${orgId} (mode=${force ? 'force-full' : 'incremental'})`);
+      const r = await startLeadIntelJob(orgId, req.user.id, 'analyze', { emailAccountIds, force });
+      if ('conflict' in r) {
+        return res.status(409).json({ message: 'A lead intelligence job is already running for your org. Wait for it to complete or cancel it.', activeJob: r.conflict });
+      }
+      res.json({ jobId: r.jobId, type: 'analyze' });
     } catch (error) {
-      console.error('[LeadIntel] Analysis error:', error);
-      res.status(500).json({ message: 'Failed to analyze leads', error: error instanceof Error ? error.message : String(error) });
+      console.error('[LeadIntel] Analyze job start error:', error);
+      res.status(500).json({ message: 'Failed to start analysis', error: error instanceof Error ? error.message : String(error) });
     }
   });
 
-  // Full pipeline: scan + analyze. Both steps default to incremental mode.
-  // body.force=true triggers full rescan + full reclassify (deletes existing opportunities).
+  // Full pipeline (background job): scan then analyze.
   app.post('/api/lead-intelligence/run', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.user.organizationId;
       const monthsBack = parseInt(req.body.monthsBack as string) || 6;
       const emailAccountIds = Array.isArray(req.body.emailAccountIds) ? req.body.emailAccountIds.map(String) : undefined;
       const force = req.body?.force === true;
-      console.log(`[LeadIntel] Full pipeline triggered for org ${orgId} (mode=${force ? 'force-full' : 'incremental'})${emailAccountIds ? ` accounts: ${emailAccountIds.join(',')}` : ' (all accounts)'}`);
-      const result = await runFullLeadIntelligence(orgId, monthsBack, emailAccountIds, force);
-      res.json({ success: true, ...result });
+      console.log(`[LeadIntel] Full pipeline job requested for org ${orgId} (mode=${force ? 'force-full' : 'incremental'})`);
+      const r = await startLeadIntelJob(orgId, req.user.id, 'full', { monthsBack, emailAccountIds, force });
+      if ('conflict' in r) {
+        return res.status(409).json({ message: 'A lead intelligence job is already running for your org. Wait for it to complete or cancel it.', activeJob: r.conflict });
+      }
+      res.json({ jobId: r.jobId, type: 'full' });
     } catch (error) {
-      console.error('[LeadIntel] Pipeline error:', error);
-      res.status(500).json({ message: 'Failed to run lead intelligence', error: error instanceof Error ? error.message : String(error) });
+      console.error('[LeadIntel] Full pipeline job start error:', error);
+      res.status(500).json({ message: 'Failed to start pipeline', error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  // Job status — frontend polls this every 3s while a job is running.
+  app.get('/api/lead-intelligence/jobs/:jobId', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const settings = await storage.getApiSettings(orgId);
+      const raw = settings?.[leadIntelJobKey(req.params.jobId)];
+      if (!raw) return res.status(404).json({ message: 'Job not found' });
+      const job = JSON.parse(raw) as LeadIntelJob;
+      if (job.organizationId !== orgId) return res.status(403).json({ message: 'Forbidden' });
+      // Stale-job detection — if running but TTL exceeded, mark failed
+      if (job.status === 'running' && job.startedAt && (Date.now() - new Date(job.startedAt).getTime()) > LEAD_INTEL_JOB_TTL_MS) {
+        job.status = 'failed';
+        job.error = 'Job exceeded TTL — likely the server restarted mid-run.';
+        job.finishedAt = new Date().toISOString();
+        await storage.setApiSetting(orgId, leadIntelJobKey(job.id), JSON.stringify(job));
+      }
+      res.json(job);
+    } catch (error: any) {
+      console.error('[LeadIntel] Job status error:', error?.message || error);
+      res.status(500).json({ message: 'Failed to read job status' });
+    }
+  });
+
+  // Cancel a running job (best-effort — work in progress completes; result is suppressed).
+  app.post('/api/lead-intelligence/jobs/:jobId/cancel', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const settings = await storage.getApiSettings(orgId);
+      const raw = settings?.[leadIntelJobKey(req.params.jobId)];
+      if (!raw) return res.status(404).json({ message: 'Job not found' });
+      const job = JSON.parse(raw) as LeadIntelJob;
+      if (job.organizationId !== orgId) return res.status(403).json({ message: 'Forbidden' });
+      if (job.status !== 'running') return res.json({ ok: true, status: job.status });
+      job.cancelRequested = true;
+      await storage.setApiSetting(orgId, leadIntelJobKey(req.params.jobId), JSON.stringify(job));
+      res.json({ ok: true, status: 'cancelling' });
+    } catch (error: any) {
+      console.error('[LeadIntel] Job cancel error:', error?.message || error);
+      res.status(500).json({ message: 'Failed to cancel job' });
     }
   });
 
