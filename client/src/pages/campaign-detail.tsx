@@ -2600,9 +2600,30 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
               </div>
             </div>
           </div>
-          <DialogFooter className="mt-4">
-            <Button variant="outline" onClick={() => setShowAutopilot(false)}>Cancel</Button>
-            <Button className="bg-blue-600 hover:bg-blue-700" onClick={() => setShowAutopilot(false)}>Apply</Button>
+          <DialogFooter className="mt-4 flex justify-between sm:justify-between">
+            <Button
+              variant="ghost"
+              className="text-gray-500 hover:text-gray-700"
+              onClick={() => setAutopilot({
+                enabled: true,
+                days: {
+                  Monday:    { enabled: true,  startTime: '09:00', endTime: '18:00' },
+                  Tuesday:   { enabled: true,  startTime: '09:00', endTime: '18:00' },
+                  Wednesday: { enabled: true,  startTime: '09:00', endTime: '18:00' },
+                  Thursday:  { enabled: true,  startTime: '09:00', endTime: '18:00' },
+                  Friday:    { enabled: true,  startTime: '09:00', endTime: '18:00' },
+                  Saturday:  { enabled: false, startTime: '09:00', endTime: '18:00' },
+                  Sunday:    { enabled: false, startTime: '09:00', endTime: '18:00' },
+                },
+                maxPerDay: 1000, delayBetween: 5, delayUnit: 'minutes',
+              })}
+            >
+              Reset to defaults
+            </Button>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => setShowAutopilot(false)}>Cancel</Button>
+              <Button className="bg-blue-600 hover:bg-blue-700" onClick={() => setShowAutopilot(false)}>Apply</Button>
+            </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>

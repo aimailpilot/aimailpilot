@@ -960,32 +960,32 @@ export class CampaignEngine {
 
     console.log(`[CampaignEngine] Campaign ${campaignId} entering for loop with ${contacts.length} contacts`);
 
-    // Refresh sendingConfig + status from DB periodically so dialog updates (Apply on
-    // Autopilot) AND status changes (manual pause via SQL/admin) take effect mid-send
-    // instead of being captured for the lifetime of the loop.
-    // Cache for 60s to avoid hammering the DB on rapid send cadences.
+    // Refresh sendingConfig from DB periodically so dialog updates (Apply on
+    // Autopilot) take effect mid-send instead of being captured for the lifetime of
+    // the loop. Cache for 60s to avoid hammering the DB on rapid send cadences.
+    //
+    // NOTE: an earlier version of this also tracked DB status and halted the loop
+    // when status changed externally to 'paused'. That had a sticky-flag race with
+    // the engine's own window-pause / daily-limit-pause cycles (engine sets
+    // status='paused' itself, refresh observed it, stale flag halted the loop on
+    // resume). Removed entirely — manual UI pauses already go through
+    // campaignEngine.pauseCampaign() which sets the in-memory tracker.paused flag,
+    // and emergency SQL pauses are followed by a server restart.
     let activeSendingConfig: SendingConfig | null | undefined = sendingConfig;
-    let dbStatusPaused = false; // set when a refresh sees status='paused' or 'cancelled'
     let lastConfigRefreshAt = Date.now();
     const CONFIG_REFRESH_INTERVAL_MS = 60_000;
     const refreshSendingConfigIfStale = async () => {
       if (Date.now() - lastConfigRefreshAt < CONFIG_REFRESH_INTERVAL_MS) return;
       try {
         const fresh = await storage.getCampaign(campaignId);
-        if (fresh) {
-          if ((fresh as any).sendingConfig !== undefined) {
-            const newConfig = (fresh as any).sendingConfig as SendingConfig | null;
-            const before = JSON.stringify(activeSendingConfig?.autopilot || null);
-            const after = JSON.stringify(newConfig?.autopilot || null);
-            if (before !== after) {
-              console.log(`[CampaignEngine] Campaign ${campaignId} sendingConfig refreshed from DB — autopilot ${activeSendingConfig?.autopilot?.enabled ? 'ON' : 'OFF'} → ${newConfig?.autopilot?.enabled ? 'ON' : 'OFF'}`);
-            }
-            activeSendingConfig = newConfig;
+        if (fresh && (fresh as any).sendingConfig !== undefined) {
+          const newConfig = (fresh as any).sendingConfig as SendingConfig | null;
+          const before = JSON.stringify(activeSendingConfig?.autopilot || null);
+          const after = JSON.stringify(newConfig?.autopilot || null);
+          if (before !== after) {
+            console.log(`[CampaignEngine] Campaign ${campaignId} sendingConfig refreshed from DB — autopilot ${activeSendingConfig?.autopilot?.enabled ? 'ON' : 'OFF'} → ${newConfig?.autopilot?.enabled ? 'ON' : 'OFF'}`);
           }
-          if (fresh.status === 'paused' || fresh.status === 'cancelled' || fresh.status === 'archived') {
-            console.log(`[CampaignEngine] Campaign ${campaignId} DB status is "${fresh.status}" — halting in-memory send loop`);
-            dbStatusPaused = true;
-          }
+          activeSendingConfig = newConfig;
         }
       } catch (e) {
         // Non-fatal — keep using current config
@@ -1010,25 +1010,9 @@ export class CampaignEngine {
       // Check if campaign was deleted/stopped
       if (!this.activeCampaigns.has(campaignId)) break;
 
-      // Refresh sendingConfig + status from DB if cache expired (≤1 DB read/min/campaign).
-      // If a manual/admin pause set status='paused', halt the in-memory loop here.
+      // Refresh sendingConfig from DB if cache expired (≤1 DB read/min/campaign).
+      // Picks up dialog updates (Apply on Autopilot) within 60s.
       await refreshSendingConfigIfStale();
-      if (dbStatusPaused) {
-        console.log(`[CampaignEngine] Campaign ${campaignId} halted: DB status changed externally`);
-        // Flush counts and exit cleanly
-        if (localSentCount > 0 || localBouncedCount > 0) {
-          const updatedCampaign = await storage.getCampaign(campaignId);
-          if (updatedCampaign) {
-            await storage.updateCampaign(campaignId, {
-              sentCount: (updatedCampaign.sentCount || 0) + localSentCount,
-              bouncedCount: (updatedCampaign.bouncedCount || 0) + localBouncedCount,
-            });
-          }
-          if (localSentCount > 0) await storage.incrementDailySent(emailAccount.id, localSentCount);
-        }
-        this.activeCampaigns.delete(campaignId);
-        return;
-      }
 
       // ===== TIME WINDOW ENFORCEMENT =====
       // Check if we're within the allowed sending window based on autopilot schedule

@@ -13854,27 +13854,20 @@ var CampaignEngine = class {
     }
     console.log(`[CampaignEngine] Campaign ${campaignId} entering for loop with ${contacts.length} contacts`);
     let activeSendingConfig = sendingConfig;
-    let dbStatusPaused = false;
     let lastConfigRefreshAt = Date.now();
     const CONFIG_REFRESH_INTERVAL_MS = 6e4;
     const refreshSendingConfigIfStale = async () => {
       if (Date.now() - lastConfigRefreshAt < CONFIG_REFRESH_INTERVAL_MS) return;
       try {
         const fresh = await storage.getCampaign(campaignId);
-        if (fresh) {
-          if (fresh.sendingConfig !== void 0) {
-            const newConfig = fresh.sendingConfig;
-            const before = JSON.stringify(activeSendingConfig?.autopilot || null);
-            const after = JSON.stringify(newConfig?.autopilot || null);
-            if (before !== after) {
-              console.log(`[CampaignEngine] Campaign ${campaignId} sendingConfig refreshed from DB \u2014 autopilot ${activeSendingConfig?.autopilot?.enabled ? "ON" : "OFF"} \u2192 ${newConfig?.autopilot?.enabled ? "ON" : "OFF"}`);
-            }
-            activeSendingConfig = newConfig;
+        if (fresh && fresh.sendingConfig !== void 0) {
+          const newConfig = fresh.sendingConfig;
+          const before = JSON.stringify(activeSendingConfig?.autopilot || null);
+          const after = JSON.stringify(newConfig?.autopilot || null);
+          if (before !== after) {
+            console.log(`[CampaignEngine] Campaign ${campaignId} sendingConfig refreshed from DB \u2014 autopilot ${activeSendingConfig?.autopilot?.enabled ? "ON" : "OFF"} \u2192 ${newConfig?.autopilot?.enabled ? "ON" : "OFF"}`);
           }
-          if (fresh.status === "paused" || fresh.status === "cancelled" || fresh.status === "archived") {
-            console.log(`[CampaignEngine] Campaign ${campaignId} DB status is "${fresh.status}" \u2014 halting in-memory send loop`);
-            dbStatusPaused = true;
-          }
+          activeSendingConfig = newConfig;
         }
       } catch (e) {
       }
@@ -13900,21 +13893,6 @@ var CampaignEngine = class {
       }
       if (!this.activeCampaigns.has(campaignId)) break;
       await refreshSendingConfigIfStale();
-      if (dbStatusPaused) {
-        console.log(`[CampaignEngine] Campaign ${campaignId} halted: DB status changed externally`);
-        if (localSentCount > 0 || localBouncedCount > 0) {
-          const updatedCampaign = await storage.getCampaign(campaignId);
-          if (updatedCampaign) {
-            await storage.updateCampaign(campaignId, {
-              sentCount: (updatedCampaign.sentCount || 0) + localSentCount,
-              bouncedCount: (updatedCampaign.bouncedCount || 0) + localBouncedCount
-            });
-          }
-          if (localSentCount > 0) await storage.incrementDailySent(emailAccount.id, localSentCount);
-        }
-        this.activeCampaigns.delete(campaignId);
-        return;
-      }
       const windowCheck = this.checkSendingWindow(activeSendingConfig);
       if (!windowCheck.canSend) {
         console.log(`[CampaignEngine] Campaign ${campaignId} outside sending window: ${windowCheck.reason}. Pausing for ${Math.round((windowCheck.pauseUntilMs || 0) / 6e4)} minutes.`);
