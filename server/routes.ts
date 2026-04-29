@@ -18,8 +18,37 @@ import { runBounceSyncForOrg, runBounceSyncAllOrgs } from "./services/bounce-syn
 import { scanOrgEmailHistory, analyzeOrgLeads, runFullLeadIntelligence, BUCKET_LABELS } from "./services/lead-intelligence-engine";
 
 
+// Bounded Set/Map with FIFO eviction. Prevents unbounded memory growth from
+// long-running pods. Inherits from built-ins so all existing .add/.has/.delete/
+// .keys/.get/.set call sites work unchanged. Eviction is FIFO (insertion order
+// via Map/Set built-in iteration). When a key is evicted, the next request
+// re-resolves from DB — same as the existing "auto-restore session" cache-miss
+// path, so no user-visible behavior change.
+class BoundedSet<T> extends Set<T> {
+  private readonly maxSize: number;
+  constructor(maxSize: number) { super(); this.maxSize = maxSize; }
+  add(value: T): this {
+    if (!this.has(value) && this.size >= this.maxSize) {
+      const oldest = this.values().next().value;
+      if (oldest !== undefined) this.delete(oldest);
+    }
+    return super.add(value);
+  }
+}
+class BoundedMap<K, V> extends Map<K, V> {
+  private readonly maxSize: number;
+  constructor(maxSize: number) { super(); this.maxSize = maxSize; }
+  set(key: K, value: V): this {
+    if (!this.has(key) && this.size >= this.maxSize) {
+      const oldest = this.keys().next().value;
+      if (oldest !== undefined) this.delete(oldest);
+    }
+    return super.set(key, value);
+  }
+}
+
 // In-memory user store for simplified authentication
-const loggedInUsers = new Set<string>();
+const loggedInUsers = new BoundedSet<string>(10000);
 
 // Helper to create raw email for Gmail API send
 function createRawEmail(opts: { from: string; to: string; cc?: string; bcc?: string; subject: string; body: string; inReplyTo?: string; threadId?: string }): string {
@@ -125,8 +154,11 @@ function orgHasOutlookTokens(settings: Record<string, string>): boolean {
 }
 
 // Simple auth middleware
-// In-memory auth cache: userId+orgId -> resolved user object (TTL 60s)
-const authCache = new Map<string, { user: any; ts: number }>();
+// In-memory auth cache: userId+orgId -> resolved user object (TTL 60s).
+// Bounded to 10k entries to prevent unbounded growth (e.g. attacker rotating
+// ?orgId= values, or long-lived pods with many users). Cache-miss path
+// re-resolves from DB — eviction is invisible to users.
+const authCache = new BoundedMap<string, { user: any; ts: number }>(10000);
 const AUTH_CACHE_TTL = 60000; // 60 seconds
 
 const requireAuth = async (req: any, res: any, next: any) => {
