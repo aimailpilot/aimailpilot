@@ -10041,8 +10041,25 @@ Respond with ONLY a JSON object in this format:
       const parsedLimit = parseInt(limit as string) || 50;
       const parsedOffset = parseInt(offset as string) || 0;
 
-      const filters: any = { status, emailAccountId, campaignId, replyType, bounceType, leadStatus, assignedTo, search, viewMode };
+      const filters: any = { status, emailAccountId, campaignId, replyType, bounceType, leadStatus, search, viewMode };
       if (isStarred === 'true') filters.isStarred = true;
+
+      // Member filter (admin selects a team member from dropdown): resolve userId -> that user's email account IDs.
+      // Note: assignedTo on unified_inbox is for manual reply-assignment and is rarely populated, so don't filter on it here.
+      if (isAdmin && assignedTo && assignedTo !== 'all' && assignedTo !== 'unassigned') {
+        const memberAccounts = await storage.getEmailAccountsForUser(req.user.organizationId, String(assignedTo));
+        const memberAccountIds = memberAccounts.map((a: any) => a.id);
+        if (memberAccountIds.length === 0) return res.json({ messages: [], total: 0, unread: 0, stats: {} });
+        if (!emailAccountId || emailAccountId === 'all') {
+          filters.emailAccountId = memberAccountIds.join(',');
+        } else {
+          // Intersect chosen account with member's accounts
+          const chosen = String(emailAccountId).split(',').filter(Boolean);
+          const intersect = chosen.filter(id => memberAccountIds.includes(id));
+          if (intersect.length === 0) return res.json({ messages: [], total: 0, unread: 0, stats: {} });
+          filters.emailAccountId = intersect.join(',');
+        }
+      }
 
       if (!isAdmin) {
         const userAccounts = await storage.getEmailAccountsForUser(req.user.organizationId, req.user.id);
@@ -10055,8 +10072,9 @@ Respond with ONLY a JSON object in this format:
 
       const messages = await storage.getInboxMessagesEnhanced(req.user.organizationId, filters, parsedLimit, parsedOffset);
       const total = await storage.getInboxMessageCountEnhanced(req.user.organizationId, filters);
-      // Scope stats to member's own accounts (admins see org-wide)
-      const statsAccountIds = !isAdmin && filters.emailAccountId
+      // Scope stats to member's own accounts (non-admin) or to selected member's accounts (admin with member filter)
+      const memberFilterActive = isAdmin && assignedTo && assignedTo !== 'all' && assignedTo !== 'unassigned';
+      const statsAccountIds = (!isAdmin || memberFilterActive) && filters.emailAccountId
         ? String(filters.emailAccountId).split(',').filter(Boolean)
         : undefined;
       const stats = await storage.getInboxStats(req.user.organizationId, statsAccountIds);
