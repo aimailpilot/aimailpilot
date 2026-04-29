@@ -9946,94 +9946,43 @@ Respond with ONLY a JSON object in this format:
 
       console.log('[sheets/fetch-info] Extracted spreadsheet ID:', spreadsheetId);
 
-      // Strategy 1: Try Google Sheets API v4 with user's OAuth token.
-      // Probe ALL stored Google tokens and use the first one that actually works against Sheets API.
-      const accessToken = await getGoogleAccessTokenForSheets(req.user.organizationId);
-      console.log('[sheets/fetch-info] Got sheets-capable access token:', accessToken ? 'yes (length=' + accessToken.length + ')' : 'no');
-
-      // Strategy 1.5: probe failed → try each stored Gmail token directly against the user's
-      // actual spreadsheet. The fixed probe sheet can sometimes be unreachable (Google rate
-      // limit, transient 5xx, etc.) even when the user's own sheet is fully accessible to one
-      // of their tokens. This gives logged-in users with sheets scope a working path without
-      // forcing a re-auth they don't actually need. If all tokens fail with 404, the user's
-      // sheet simply isn't in any of their connected Google accounts → clear share-publicly
-      // message rather than a misleading "permission" error.
-      if (!accessToken) {
-        const directRes = await tryDirectSheetsAccess(req.user.organizationId, spreadsheetId);
-        if (directRes.kind === 'success') {
-          console.log('[sheets/fetch-info] Strategy 1.5 succeeded via', directRes.tokenLabel);
-          return res.json({
-            id: spreadsheetId,
-            title: directRes.title,
-            sheets: directRes.sheets,
-            valid: true,
-            method: 'oauth-direct',
-          });
-        }
-        if (directRes.kind === 'sheet_not_in_account') {
-          return res.json({
-            valid: false,
-            error: 'This spreadsheet is not in any of your connected Google accounts. To import, share the sheet with "Anyone with the link" — or open it from the account that owns it.',
-          });
-        }
-        if (directRes.kind === 'no_sheets_scope') {
-          return res.json({
-            valid: false,
-            error: 'Google Sheets access not yet granted on your Gmail token. Click below to grant Sheets access — Google will show only the missing permission on the consent screen.',
-            needsReauth: true,
-          });
-        }
-        // directRes.kind === 'no_tokens' or 'unknown' → fall through to public CSV
-        console.log('[sheets/fetch-info] Strategy 1.5 outcome:', directRes.kind, '— falling through to public CSV');
+      // Strategy 1: try each stored Gmail token directly against the user's actual sheet.
+      // The previous "probe-based" strategy validated tokens against a fixed test sheet and
+      // returned the first one that worked — but a token passing the probe doesn't mean it
+      // can read the USER's sheet (different sheets, different ACL). When the probe-validated
+      // token didn't own the user's sheet, the API returned 403 PERMISSION_DENIED and the
+      // code fell through to public-CSV, which then failed with a misleading error.
+      //
+      // tryDirectSheetsAccess iterates ALL stored tokens and returns the first that gets a
+      // 200 from the user's actual sheet. This is the right primary strategy — and gives
+      // accurate error messages when no token works (sheet_not_in_account / no_sheets_scope).
+      const accessToken: string | null = null; // kept declared so the fallback messages later still typecheck
+      const directRes = await tryDirectSheetsAccess(req.user.organizationId, spreadsheetId);
+      if (directRes.kind === 'success') {
+        console.log('[sheets/fetch-info] Strategy 1 succeeded via', directRes.tokenLabel);
+        return res.json({
+          id: spreadsheetId,
+          title: directRes.title,
+          sheets: directRes.sheets,
+          valid: true,
+          method: 'oauth-direct',
+        });
       }
-      if (accessToken) {
-        try {
-          const apiUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=spreadsheetId,properties.title,sheets.properties`;
-          const apiRes = await fetch(apiUrl, {
-            headers: { 'Authorization': `Bearer ${accessToken}` },
-          });
-          
-          if (apiRes.ok) {
-            const data = await apiRes.json() as any;
-            const sheets = (data.sheets || []).map((s: any) => ({
-              id: s.properties?.sheetId ?? 0,
-              name: s.properties?.title || 'Sheet1',
-              index: s.properties?.index ?? 0,
-            }));
-            
-            console.log('[sheets/fetch-info] Google Sheets API success, found', sheets.length, 'sheets');
-            return res.json({
-              id: spreadsheetId,
-              title: data.properties?.title || 'Google Spreadsheet',
-              sheets,
-              valid: true,
-              method: 'oauth',
-            });
-          } else {
-            const errText = await apiRes.text();
-            console.log('[sheets/fetch-info] Google Sheets API returned', apiRes.status, '- falling back to public CSV. Error:', errText.slice(0, 200));
-            // If 403 with insufficient scopes or permission denied, give specific guidance
-            if (apiRes.status === 403) {
-              if (errText.includes('insufficient') || errText.includes('PERMISSION_DENIED') || errText.includes('Request had insufficient authentication scopes')) {
-                // OAuth token lacks spreadsheets scope - need re-auth
-                return res.json({ 
-                  valid: false, 
-                  error: 'Google Sheets permission not granted. Please go to Email Accounts > Connect Gmail to re-authenticate with Google (this will grant Sheets access).',
-                  needsReauth: true 
-                });
-              }
-            }
-            if (apiRes.status === 404) {
-              return res.json({
-                valid: false,
-                error: 'This spreadsheet is not in any of your connected Google accounts. To import, share the sheet with "Anyone with the link" — or open it from the account that owns it.'
-              });
-            }
-          }
-        } catch (apiErr) {
-          console.log('[sheets/fetch-info] Google Sheets API error, falling back to public CSV:', apiErr);
-        }
+      if (directRes.kind === 'sheet_not_in_account') {
+        return res.json({
+          valid: false,
+          error: 'This spreadsheet is not in any of your connected Google accounts. To import, share the sheet with "Anyone with the link" — or open it from the account that owns it.',
+        });
       }
+      if (directRes.kind === 'no_sheets_scope') {
+        return res.json({
+          valid: false,
+          error: 'Google Sheets access not yet granted on your Gmail token. Click below to grant Sheets access — Google will show only the missing permission on the consent screen.',
+          needsReauth: true,
+        });
+      }
+      // directRes.kind === 'no_tokens' or 'unknown' → fall through to public CSV
+      console.log('[sheets/fetch-info] Strategy 1 outcome:', directRes.kind, '— falling through to public CSV');
 
       // Strategy 2: Fallback to public CSV export (for publicly shared sheets)
       const sheets: { id: number; name: string; index: number }[] = [];
