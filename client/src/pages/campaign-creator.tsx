@@ -544,7 +544,13 @@ export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }
             sendOrder: sendOrder === 'engagement' ? 'engagement' : null,
           }),
         });
-        if (!updateRes.ok) throw new Error('Failed to update campaign');
+        if (!updateRes.ok) {
+          // Surface the actual server-side error (backend returns { message, error }) so
+          // the user sees the real cause instead of the generic 'Failed to update campaign'.
+          const errBody = await updateRes.json().catch(() => ({}));
+          const detail = errBody?.error || errBody?.message || `HTTP ${updateRes.status}`;
+          throw new Error(`Failed to update campaign: ${detail}`);
+        }
         campaign = await updateRes.json();
 
         // Delete old followup sequences so we can recreate fresh ones from the editor state
@@ -568,7 +574,11 @@ export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }
             sendOrder: sendOrder === 'engagement' ? 'engagement' : null,
           }),
         });
-        if (!createRes.ok) throw new Error('Failed to create campaign');
+        if (!createRes.ok) {
+          const errBody = await createRes.json().catch(() => ({}));
+          const detail = errBody?.error || errBody?.message || `HTTP ${createRes.status}`;
+          throw new Error(`Failed to create campaign: ${detail}`);
+        }
         campaign = await createRes.json();
       }
 
