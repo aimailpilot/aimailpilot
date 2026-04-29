@@ -1119,24 +1119,51 @@ export default function MailMeteorDashboard() {
                         <div className="min-w-0">
                           <div className="flex items-center gap-1.5">
                             <div className="font-semibold text-sm text-gray-900 truncate">{campaign.name}</div>
-                            <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-medium flex-shrink-0 ${
-                              campaign.status === 'active' || campaign.status === 'following_up' ? 'bg-green-50 text-green-700 border border-green-200' :
-                              campaign.status === 'paused' ? 'bg-yellow-50 text-yellow-700 border border-yellow-200' :
-                              campaign.status === 'completed' ? 'bg-blue-50 text-blue-700 border border-blue-200' :
-                              campaign.status === 'draft' ? 'bg-gray-50 text-gray-500 border border-gray-200' :
-                              campaign.status === 'scheduled' ? 'bg-purple-50 text-purple-700 border border-purple-200' :
-                              'bg-gray-50 text-gray-500 border border-gray-200'
-                            }`}>
-                              <span className={`w-1.5 h-1.5 rounded-full ${
-                                campaign.status === 'active' || campaign.status === 'following_up' ? 'bg-green-500' :
+                            {(() => {
+                              // Distinguish auto-paused (system: bounce surge, daily limit, window closed,
+                              // worker crash) from user-paused. autoPaused=true → system; will resume itself.
+                              // autoPaused=false/undefined on a paused campaign → manually paused; stays paused
+                              // until user resumes.
+                              const isPaused = campaign.status === 'paused';
+                              const isAutoPaused = isPaused && (campaign as any).autoPaused === true;
+                              const labelText = campaign.status === 'following_up'
+                                ? 'Active'
+                                : campaign.status.charAt(0).toUpperCase() + campaign.status.slice(1);
+                              const fullLabel = isAutoPaused ? `${labelText} (auto)` : labelText;
+                              const colorClass = campaign.status === 'active' || campaign.status === 'following_up' ? 'bg-green-50 text-green-700 border border-green-200' :
+                                isAutoPaused ? 'bg-orange-50 text-orange-700 border border-orange-200' :
+                                campaign.status === 'paused' ? 'bg-yellow-50 text-yellow-700 border border-yellow-200' :
+                                campaign.status === 'completed' ? 'bg-blue-50 text-blue-700 border border-blue-200' :
+                                campaign.status === 'draft' ? 'bg-gray-50 text-gray-500 border border-gray-200' :
+                                campaign.status === 'scheduled' ? 'bg-purple-50 text-purple-700 border border-purple-200' :
+                                'bg-gray-50 text-gray-500 border border-gray-200';
+                              const dotClass = campaign.status === 'active' || campaign.status === 'following_up' ? 'bg-green-500' :
+                                isAutoPaused ? 'bg-orange-500' :
                                 campaign.status === 'paused' ? 'bg-yellow-500' :
                                 campaign.status === 'completed' ? 'bg-blue-500' :
                                 campaign.status === 'draft' ? 'bg-gray-400' :
                                 campaign.status === 'scheduled' ? 'bg-purple-500' :
-                                'bg-gray-400'
-                              }`} />
-                              {campaign.status === 'following_up' ? 'Active' : campaign.status.charAt(0).toUpperCase() + campaign.status.slice(1)}
-                            </span>
+                                'bg-gray-400';
+                              const badge = (
+                                <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-medium flex-shrink-0 ${colorClass}`}>
+                                  <span className={`w-1.5 h-1.5 rounded-full ${dotClass}`} />
+                                  {fullLabel}
+                                </span>
+                              );
+                              if (isPaused) {
+                                return (
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>{badge}</TooltipTrigger>
+                                    <TooltipContent className="max-w-xs">
+                                      {isAutoPaused
+                                        ? 'Paused automatically by the system — likely bounce surge (≥20% bounces in last 50 sends), daily send limit reached, or sending window closed. Will auto-resume when the condition clears.'
+                                        : 'Manually paused. Click Resume on the campaign detail page to continue sending.'}
+                                    </TooltipContent>
+                                  </Tooltip>
+                                );
+                              }
+                              return badge;
+                            })()}
                           </div>
                           {(campaign as any).senderEmail && (
                             <div className="text-[10px] text-gray-400 truncate mt-0.5 flex items-center gap-1">
