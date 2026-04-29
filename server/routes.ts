@@ -4414,7 +4414,7 @@ Which account should I use and why? If I need to split across accounts, provide 
       if (message) {
         if (!message.repliedAt) {
           await storage.updateCampaignMessage(message.id, { repliedAt: new Date().toISOString() });
-          
+
           const campaign = await storage.getCampaign(message.campaignId);
           if (campaign) {
             await storage.updateCampaign(message.campaignId, {
@@ -4426,16 +4426,22 @@ Which account should I use and why? If I need to split across accounts, provide 
           if (message.contactId) {
             try { await storage.updateContact(message.contactId, { status: 'replied' }); } catch (e) {}
           }
-        }
 
-        await storage.createTrackingEvent({
-          type: 'reply',
-          campaignId: message.campaignId,
-          messageId: message.id,
-          contactId: message.contactId,
-          trackingId,
-          metadata: req.body || {},
-        });
+          // Create the tracking_event ONLY on first detection. Previously this was
+          // outside the !repliedAt guard, so retries/duplicate webhook calls on the
+          // same trackingId accumulated reply events on a single message — leading
+          // to message.replyCount values like 10/12/etc on the campaign detail page.
+          // The guard above ensures repliedAt + repliedCount only bump once; the
+          // tracking_event must follow the same rule for replyCount to be accurate.
+          await storage.createTrackingEvent({
+            type: 'reply',
+            campaignId: message.campaignId,
+            messageId: message.id,
+            contactId: message.contactId,
+            trackingId,
+            metadata: req.body || {},
+          });
+        }
       }
 
       res.json({ success: true });
