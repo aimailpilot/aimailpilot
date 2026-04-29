@@ -85,6 +85,27 @@ export default function AdvancedSettings() {
   const [elvAutoVerify, setElvAutoVerify] = useState(false);
   const [elvBlockInvalid, setElvBlockInvalid] = useState(true);
 
+  // Anthropic Claude state
+  const [claudeApiKey, setClaudeApiKey] = useState('');
+  const [showClaudeKey, setShowClaudeKey] = useState(false);
+  const [claudeSaving, setClaudeSaving] = useState(false);
+
+  // AI provider routing state — org default + per-feature overrides
+  const LLM_FEATURES = [
+    { key: 'lead_agent',       label: 'AI Lead Agent',         note: 'Web search → Anthropic only' },
+    { key: 'lead_intel',       label: 'Lead Intelligence',     note: '' },
+    { key: 'campaign_review',  label: 'Campaign Review',       note: '' },
+    { key: 'campaign_planner', label: 'Campaign Planner',      note: '' },
+    { key: 'reply_drafting',   label: 'Reply Drafting',        note: '' },
+    { key: 'reply_classifier', label: 'Reply Classifier',      note: '' },
+    { key: 'email_rating',     label: 'Email Rating',          note: '' },
+    { key: 'personalization',  label: 'Personalization',       note: '' },
+    { key: 'context_engine',   label: 'Context Engine',        note: '' },
+  ] as const;
+  const [aiProviderDefault, setAiProviderDefault] = useState<'auto' | 'anthropic' | 'azure_openai'>('auto');
+  const [aiProviderPerFeature, setAiProviderPerFeature] = useState<Record<string, 'inherit' | 'anthropic' | 'azure_openai'>>({});
+  const [aiRoutingSaving, setAiRoutingSaving] = useState(false);
+
   // Loading state
   const [loading, setLoading] = useState(true);
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
@@ -127,6 +148,17 @@ export default function AdvancedSettings() {
         setElvApiKey(data.emaillistverify_api_key || '');
         setElvAutoVerify(data.emaillistverify_auto_verify === 'true');
         setElvBlockInvalid(data.emaillistverify_block_invalid !== 'false');
+        // Claude / Anthropic
+        setClaudeApiKey(data.claude_api_key || '');
+        // AI provider routing
+        const orgPref = data.ai_provider;
+        setAiProviderDefault(orgPref === 'anthropic' || orgPref === 'azure_openai' ? orgPref : 'auto');
+        const perFeature: Record<string, 'inherit' | 'anthropic' | 'azure_openai'> = {};
+        for (const f of LLM_FEATURES) {
+          const v = data[`ai_provider_${f.key}`];
+          perFeature[f.key] = (v === 'anthropic' || v === 'azure_openai') ? v : 'inherit';
+        }
+        setAiProviderPerFeature(perFeature);
         // Check if OAuth is configured
         if (data.google_oauth_client_id) {
           setGoogleOAuthConfigured(true);
@@ -204,6 +236,56 @@ export default function AdvancedSettings() {
       console.error('Failed to save Azure settings:', e);
     } finally {
       setAzureSaving(false);
+    }
+  };
+
+  const saveClaudeSettings = async () => {
+    setClaudeSaving(true);
+    setSaveSuccess(null);
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ claude_api_key: claudeApiKey }),
+      });
+      if (res.ok) {
+        setSaveSuccess('claude');
+        setTimeout(() => setSaveSuccess(null), 3000);
+      }
+    } catch (e) {
+      console.error('Failed to save Claude settings:', e);
+    } finally {
+      setClaudeSaving(false);
+    }
+  };
+
+  const saveAiRouting = async () => {
+    setAiRoutingSaving(true);
+    setSaveSuccess(null);
+    try {
+      // Build the patch — empty string deletes the override on the backend (settings store
+      // accepts empty values, which we interpret as "fall back to org default" in the resolver).
+      const patch: Record<string, string> = {};
+      patch.ai_provider = aiProviderDefault === 'auto' ? '' : aiProviderDefault;
+      for (const f of LLM_FEATURES) {
+        const v = aiProviderPerFeature[f.key] || 'inherit';
+        patch[`ai_provider_${f.key}`] = v === 'inherit' ? '' : v;
+      }
+      const res = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(patch),
+      });
+      if (res.ok) {
+        setSaveSuccess('ai_routing');
+        setTimeout(() => setSaveSuccess(null), 3000);
+      }
+    } catch (e) {
+      console.error('Failed to save AI routing settings:', e);
+    } finally {
+      setAiRoutingSaving(false);
     }
   };
 
@@ -631,6 +713,137 @@ export default function AdvancedSettings() {
                 <CheckCircle2 className="h-4 w-4" /> Saved! Sign-in with Microsoft is now active.
               </span>
             )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* ==================== ANTHROPIC CLAUDE SECTION ==================== */}
+      <Card className="border-gray-200 shadow-sm overflow-hidden">
+        <CardHeader className="bg-gradient-to-r from-orange-50 to-amber-50 border-b">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-orange-500 to-amber-600 flex items-center justify-center shadow-sm">
+                <Sparkles className="h-5 w-5 text-white" />
+              </div>
+              <div>
+                <CardTitle className="text-lg">Anthropic Claude Integration</CardTitle>
+                <CardDescription>Claude Opus / Sonnet / Haiku — required for the AI Lead Agent's web search</CardDescription>
+              </div>
+            </div>
+            {claudeApiKey && !claudeApiKey.startsWith('••••') ? (
+              <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200">
+                <CheckCircle2 className="h-3 w-3 mr-1" /> Configured
+              </Badge>
+            ) : claudeApiKey ? (
+              <Badge variant="outline" className="bg-yellow-50 text-yellow-700 border-yellow-200">
+                <Info className="h-3 w-3 mr-1" /> Saved (masked)
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="bg-gray-50 text-gray-600 border-gray-200">
+                <XCircle className="h-3 w-3 mr-1" /> Not configured
+              </Badge>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent className="p-6 space-y-4">
+          <div className="bg-orange-50 border border-orange-200 rounded-lg p-4 text-sm text-orange-900">
+            Claude is the only provider in this app that supports built-in web search (used by the AI Lead Agent's funded / cxo / academics modes). Without it, those modes will fail at start time. Get a key at <a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer" className="underline font-medium">console.anthropic.com</a>.
+          </div>
+          <div>
+            <Label htmlFor="claude_api_key" className="text-sm font-medium">Anthropic API Key</Label>
+            <div className="relative mt-1">
+              <Input
+                id="claude_api_key"
+                type={showClaudeKey ? 'text' : 'password'}
+                value={claudeApiKey}
+                onChange={e => setClaudeApiKey(e.target.value)}
+                placeholder="sk-ant-..."
+                className="pr-10 font-mono"
+              />
+              <button
+                type="button"
+                onClick={() => setShowClaudeKey(!showClaudeKey)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+              >
+                {showClaudeKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 mt-1">Stored encrypted at the org level. Only re-enter to update.</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button onClick={saveClaudeSettings} disabled={claudeSaving} className="bg-orange-600 hover:bg-orange-700">
+              {claudeSaving ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Saving…</> : <>Save</>}
+            </Button>
+            {saveSuccess === 'claude' && <span className="text-sm text-green-600 flex items-center"><CheckCircle2 className="h-4 w-4 mr-1" />Saved</span>}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* ==================== AI PROVIDER ROUTING ==================== */}
+      <Card className="border-gray-200 shadow-sm overflow-hidden">
+        <CardHeader className="bg-gradient-to-r from-purple-50 to-blue-50 border-b">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-purple-500 to-blue-600 flex items-center justify-center shadow-sm">
+              <Zap className="h-5 w-5 text-white" />
+            </div>
+            <div>
+              <CardTitle className="text-lg">AI Provider Routing</CardTitle>
+              <CardDescription>Choose which provider each AI feature uses. Defaults to "Auto" — picks the configured one.</CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="p-6 space-y-4">
+          {/* Org default */}
+          <div className="flex items-center justify-between border-b pb-4">
+            <div>
+              <Label className="text-sm font-medium">Default for all features</Label>
+              <p className="text-xs text-gray-500 mt-0.5">Used unless an individual feature below overrides it.</p>
+            </div>
+            <select
+              value={aiProviderDefault}
+              onChange={e => setAiProviderDefault(e.target.value as any)}
+              className="border rounded-md px-3 py-2 text-sm w-44"
+            >
+              <option value="auto">Auto (credentials-based)</option>
+              <option value="anthropic">Anthropic Claude</option>
+              <option value="azure_openai">Azure OpenAI</option>
+            </select>
+          </div>
+
+          {/* Per-feature */}
+          <div className="space-y-2">
+            <div className="text-xs uppercase tracking-wider text-gray-500 font-semibold">Per-feature overrides</div>
+            {LLM_FEATURES.map(f => (
+              <div key={f.key} className="flex items-center justify-between py-1">
+                <div className="flex-1">
+                  <Label className="text-sm">{f.label}</Label>
+                  {f.note && <span className="text-xs text-gray-400 ml-2">— {f.note}</span>}
+                </div>
+                <select
+                  value={aiProviderPerFeature[f.key] || 'inherit'}
+                  onChange={e => setAiProviderPerFeature(prev => ({ ...prev, [f.key]: e.target.value as any }))}
+                  className="border rounded-md px-3 py-1.5 text-sm w-44"
+                >
+                  <option value="inherit">Inherit default</option>
+                  <option value="anthropic">Anthropic Claude</option>
+                  <option value="azure_openai">Azure OpenAI</option>
+                </select>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-2 pt-2">
+            <Button onClick={saveAiRouting} disabled={aiRoutingSaving} className="bg-purple-600 hover:bg-purple-700">
+              {aiRoutingSaving ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Saving…</> : <>Save routing</>}
+            </Button>
+            {saveSuccess === 'ai_routing' && <span className="text-sm text-green-600 flex items-center"><CheckCircle2 className="h-4 w-4 mr-1" />Saved</span>}
+          </div>
+
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900 flex items-start gap-2">
+            <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+            <div>
+              <strong>Note:</strong> AI Lead Agent's funded / cxo / academics modes always use Anthropic Claude regardless of this setting (web search is Anthropic-only). The override only applies to other features.
+            </div>
           </div>
         </CardContent>
       </Card>

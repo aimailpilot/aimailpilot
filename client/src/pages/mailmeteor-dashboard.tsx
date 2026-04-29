@@ -43,6 +43,7 @@ const MyDashboard = lazy(() => import("./my-dashboard"));
 const LeadOpportunities = lazy(() => import("./lead-opportunities"));
 const KnowledgeBase = lazy(() => import("./knowledge-base"));
 const ApolloSettings = lazy(() => import("./apollo-settings"));
+const LeadAgentPage = lazy(() => import("./lead-agent"));
 
 // Banner shown when one or more email accounts need OAuth reauthentication
 function ReauthBanner({ onReconnectClick }: { onReconnectClick: () => void }) {
@@ -121,7 +122,7 @@ function PageLoader() {
   );
 }
 
-type ViewType = 'campaigns' | 'templates' | 'contacts' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings' | 'team' | 'superadmin' | 'warmup' | 'scorecard' | 'my-dashboard' | 'lead-intelligence' | 'knowledge-base' | 'apollo-settings';
+type ViewType = 'campaigns' | 'templates' | 'contacts' | 'inbox' | 'setup' | 'analytics' | 'verification' | 'tracking' | 'account' | 'billing' | 'followups' | 'insights' | 'tools' | 'campaign-detail' | 'advanced-settings' | 'team' | 'superadmin' | 'warmup' | 'scorecard' | 'my-dashboard' | 'lead-intelligence' | 'knowledge-base' | 'apollo-settings' | 'lead-agent';
 
 // Live Tracking Feed component - fetches real tracking events
 function LiveTrackingFeed({ dashStats }: { dashStats: any }) {
@@ -561,6 +562,7 @@ export default function MailMeteorDashboard() {
   const insightsSubItems = [
     { key: 'my-dashboard' as ViewType, label: 'My Dashboard', icon: Lightbulb },
     { key: 'lead-intelligence' as ViewType, label: 'Lead Intelligence', icon: Brain },
+    ...(isAdminOrOwner ? [{ key: 'lead-agent' as ViewType, label: 'AI Lead Agent', icon: Sparkles }] : []),
     { key: 'analytics' as ViewType, label: 'Analytics', icon: BarChart3 },
     { key: 'tracking' as ViewType, label: 'Live Feed', icon: Activity },
     ...(isAdminOrOwner ? [{ key: 'scorecard' as ViewType, label: 'Scorecard', icon: Trophy }] : []),
@@ -595,6 +597,7 @@ export default function MailMeteorDashboard() {
       scorecard: 'Team Scorecard',
       'my-dashboard': 'My Dashboard',
       'lead-intelligence': 'AI Lead Intelligence',
+      'lead-agent': 'AI Lead Agent',
       'knowledge-base': 'Knowledge Base',
       'apollo-settings': 'Apollo',
       superadmin: 'SuperAdmin Console',
@@ -625,6 +628,7 @@ export default function MailMeteorDashboard() {
       scorecard: 'Sales performance, leaderboard, and team activity tracking',
       'my-dashboard': 'Your personal sales performance, action items, and emails to reply',
       'lead-intelligence': 'AI-powered deep analysis of email history to find missed opportunities, past customers, and hot leads',
+      'lead-agent': 'Find founders, CXOs, and academics with live web search; enrich missing emails via Apollo; save into a contact list',
       'knowledge-base': 'Upload case studies, proposals, brochures, and company docs to power AI-driven email drafts and proposals',
       'apollo-settings': 'Connect Apollo.io to sync saved lists and enrich contacts using data you already have',
       superadmin: 'Platform-wide management, monitoring, and user administration',
@@ -1560,6 +1564,10 @@ export default function MailMeteorDashboard() {
 
           {viewMode === 'dashboard' && currentView === 'apollo-settings' && (
             <ApolloSettings />
+          )}
+
+          {viewMode === 'dashboard' && currentView === 'lead-agent' && (
+            <LeadAgentPage />
           )}
          </Suspense>
         </main>
