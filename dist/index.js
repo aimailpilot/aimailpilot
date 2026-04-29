@@ -8,6 +8,25 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
+// server/lib/type-coercion.ts
+function toInt(v, def) {
+  if (v === true) return 1;
+  if (v === false) return 0;
+  if (v === null || v === void 0) return def;
+  if (typeof v === "string") {
+    if (v === "true") return 1;
+    if (v === "false") return 0;
+    const n = parseInt(v);
+    return Number.isFinite(n) ? n : def;
+  }
+  return Number(v);
+}
+var init_type_coercion = __esm({
+  "server/lib/type-coercion.ts"() {
+    "use strict";
+  }
+});
+
 // server/services/meeting-detector.ts
 var meeting_detector_exports = {};
 __export(meeting_detector_exports, {
@@ -818,6 +837,33 @@ async function initializeSchema() {
       'ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS "authLastFailureAt" TEXT',
       'ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS "authLastErrorCode" TEXT',
       'CREATE INDEX IF NOT EXISTS idx_email_accounts_auth_status ON email_accounts("organizationId", "authStatus")',
+      // Template quality scores — populated by /api/templates/bulk-analyze. Independent metrics, no blend.
+      'ALTER TABLE templates ADD COLUMN IF NOT EXISTS "deliverabilityScore" INTEGER DEFAULT NULL',
+      'ALTER TABLE templates ADD COLUMN IF NOT EXISTS "deliverabilityGrade" TEXT DEFAULT NULL',
+      'ALTER TABLE templates ADD COLUMN IF NOT EXISTS "kbIssuesCount" INTEGER DEFAULT NULL',
+      'ALTER TABLE templates ADD COLUMN IF NOT EXISTS "kbHighSeverityCount" INTEGER DEFAULT NULL',
+      'ALTER TABLE templates ADD COLUMN IF NOT EXISTS "qualityCheckedAt" TEXT DEFAULT NULL',
+      'CREATE INDEX IF NOT EXISTS idx_templates_quality ON templates("organizationId", "deliverabilityGrade")',
+      // Outbound reply sweeper queue progression — tracks last time each inbox row was scanned
+      // for a native-client reply, so the sweeper can advance through the full Need Reply backlog
+      // instead of looping on the oldest 50 forever.
+      'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "outboundCheckedAt" TEXT DEFAULT NULL',
+      'CREATE INDEX IF NOT EXISTS idx_inbox_outbound_check ON unified_inbox("organizationId", "outboundCheckedAt")',
+      // Body of the user's native-client reply found in the Gmail/Outlook thread by the
+      // outbound-reply-sweeper. Lets the Replied tab show what was actually replied even
+      // when the reply was sent from outside AImailPilot. Plain text or stripped HTML, capped
+      // to ~5000 chars at write time to keep row sizes bounded.
+      'ALTER TABLE unified_inbox ADD COLUMN IF NOT EXISTS "nativeReplyContent" TEXT DEFAULT NULL',
+      // Lead intelligence incremental scan — per-account timestamp of last successful scan,
+      // used to fetch only emails newer than this on subsequent scans. NULL = never scanned
+      // (full monthsBack history is fetched on first scan or when force=true).
+      'ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS "leadIntelLastScanAt" TEXT DEFAULT NULL',
+      // Scan-only flag — when 1, the account is hidden from sending paths, reply trackers,
+      // and the Email Accounts UI. Visible only to Lead Intelligence (scan + analyze).
+      // Added 2026-04-28 to let teams connect mailboxes for read-only intelligence without
+      // also exposing them as send-from addresses.
+      'ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS "scanOnly" INTEGER DEFAULT 0',
+      'CREATE INDEX IF NOT EXISTS idx_email_accounts_scan_only ON email_accounts("organizationId", "scanOnly")',
       // Multi-list membership junction table
       `CREATE TABLE IF NOT EXISTS contact_list_members (
         "contactId" TEXT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
@@ -983,6 +1029,7 @@ var pool, SLOW_QUERY_MS, PostgresStorage;
 var init_pg_storage = __esm({
   "server/pg-storage.ts"() {
     "use strict";
+    init_type_coercion();
     pool = new Pool({
       connectionString: process.env.DATABASE_URL,
       ssl: process.env.DATABASE_URL?.includes("azure") ? { rejectUnauthorized: false } : void 0,
@@ -1050,14 +1097,28 @@ var init_pg_storage = __esm({
         return this.getUser(id);
       }
       // ========== Email Accounts ==========
+      // NOTE: getEmailAccounts hides scan-only accounts (scanOnly=1). They are connected for
+      // Lead Intelligence read-only purposes and must NOT appear in: send paths, reply
+      // trackers, Email Accounts UI, daily-quota dashboards, etc. Use getEmailAccountsForLeadIntel
+      // to include them.
       async getEmailAccounts(organizationId) {
+        return (await queryAll('SELECT * FROM email_accounts WHERE "organizationId" = $1 AND "isActive" != 0 AND COALESCE("scanOnly", 0) = 0', [organizationId])).map(hydrateAccount);
+      }
+      // Lead Intelligence sees BOTH regular and scan-only accounts (scan-only is the whole point
+      // of having them — read-only mailbox access for analysis without polluting send paths).
+      async getEmailAccountsForLeadIntel(organizationId) {
         return (await queryAll('SELECT * FROM email_accounts WHERE "organizationId" = $1 AND "isActive" != 0', [organizationId])).map(hydrateAccount);
+      }
+      // Returns ONLY scan-only accounts. Used by the Lead Intelligence UI to display the
+      // separate "Scan-only mailboxes" list.
+      async getScanOnlyAccounts(organizationId) {
+        return (await queryAll('SELECT * FROM email_accounts WHERE "organizationId" = $1 AND "isActive" != 0 AND "scanOnly" = 1', [organizationId])).map(hydrateAccount);
       }
       async getEmailAccountIncludingInactive(organizationId, email) {
         return hydrateAccount(await queryOne('SELECT * FROM email_accounts WHERE "organizationId" = $1 AND LOWER(email) = LOWER($2)', [organizationId, email]));
       }
       async getEmailAccountsForUser(organizationId, userId) {
-        return (await queryAll('SELECT * FROM email_accounts WHERE "organizationId" = $1 AND "userId" = $2', [organizationId, userId])).map(hydrateAccount);
+        return (await queryAll('SELECT * FROM email_accounts WHERE "organizationId" = $1 AND "userId" = $2 AND COALESCE("scanOnly", 0) = 0', [organizationId, userId])).map(hydrateAccount);
       }
       async getEmailAccount(id) {
         return hydrateAccount(await queryOne("SELECT * FROM email_accounts WHERE id = $1", [id]));
@@ -1071,9 +1132,10 @@ var init_pg_storage = __esm({
       async createEmailAccount(account) {
         const id = genId();
         const ts = now();
+        const scanOnly = account.scanOnly ? 1 : 0;
         await execute(
-          'INSERT INTO email_accounts (id, "organizationId", "userId", provider, email, "displayName", "smtpConfig", "dailyLimit", "dailySent", "isActive", "createdAt", "updatedAt") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)',
-          [id, account.organizationId, account.userId || null, account.provider || "custom", account.email, account.displayName || account.email, toJson(account.smtpConfig), account.dailyLimit || 500, 0, 1, ts, ts]
+          'INSERT INTO email_accounts (id, "organizationId", "userId", provider, email, "displayName", "smtpConfig", "dailyLimit", "dailySent", "isActive", "scanOnly", "createdAt", "updatedAt") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)',
+          [id, account.organizationId, account.userId || null, account.provider || "custom", account.email, account.displayName || account.email, toJson(account.smtpConfig), account.dailyLimit || 500, 0, 1, scanOnly, ts, ts]
         );
         return this.getEmailAccount(id);
       }
@@ -1890,8 +1952,8 @@ var init_pg_storage = __esm({
             m.segmentId || null,
             toSqlDate(m.scheduledAt),
             toJson(m.sendingConfig),
-            m.trackOpens ?? 1,
-            m.includeUnsubscribe ?? 0,
+            toInt(m.trackOpens, 1),
+            toInt(m.includeUnsubscribe, 0),
             now(),
             m.autoPaused ?? false,
             m.sendOrder || null,
@@ -8660,6 +8722,10 @@ function classifyReply(subject, body, fromEmail, fromName) {
       return { replyType: "bounce", bounceType, confidence: 0.8, reason: "Bounce message detected" };
     }
   }
+  const isSystemBotSender = SYSTEM_BOT_SENDER_PATTERNS.some((p) => p.test(senderFull));
+  if (isSystemBotSender) {
+    return { replyType: "auto_reply", confidence: 0.95, reason: "System / bot / notification sender (CI, alerts, no-reply)" };
+  }
   const oooMatches = OOO_PATTERNS.filter((p) => p.test(fullText)).length;
   if (oooMatches >= 1) {
     return { replyType: "ooo", confidence: 0.9, reason: `Out of office pattern matched (${oooMatches} indicators)` };
@@ -8755,7 +8821,7 @@ Respond ONLY with: {"type": "positive|negative|ooo|auto_reply|general|unsubscrib
   }
   return { replyType: "general", confidence: 0.5, reason: "AI parse failed" };
 }
-var OOO_PATTERNS, AUTO_REPLY_PATTERNS, POSITIVE_PATTERNS, NEGATIVE_PATTERNS, BOUNCE_PATTERNS, UNSUBSCRIBE_PATTERNS, BOUNCE_SENDER_PATTERNS;
+var OOO_PATTERNS, AUTO_REPLY_PATTERNS, POSITIVE_PATTERNS, NEGATIVE_PATTERNS, BOUNCE_PATTERNS, UNSUBSCRIBE_PATTERNS, BOUNCE_SENDER_PATTERNS, SYSTEM_BOT_SENDER_PATTERNS;
 var init_reply_classifier = __esm({
   "server/services/reply-classifier.ts"() {
     "use strict";
@@ -8909,6 +8975,29 @@ var init_reply_classifier = __esm({
       /mail-daemon/i,
       /MAILER-DAEMON/
     ];
+    SYSTEM_BOT_SENDER_PATTERNS = [
+      /\bno-?reply@/i,
+      /\bdo-?not-?reply@/i,
+      /\bdonotreply@/i,
+      /\bnotifications?@github\.com/i,
+      /\bnotifications?@gitlab\.com/i,
+      /\bnotifications?@bitbucket\.org/i,
+      /\bnoreply@.*\.atlassian\.com/i,
+      /\bnotifications?@slack\.com/i,
+      /\bnotify@/i,
+      /\bnotice@/i,
+      /\balerts?@/i,
+      /\bsystem@/i,
+      /\bautomated?@/i,
+      /\bbuildmaster@/i,
+      /\bjenkins@/i,
+      /\bcircleci/i,
+      /\bazure-noreply@/i,
+      /\bazuredevops/i,
+      /\bnoreply.*\.azure\.com/i,
+      /\bsupport-noreply@/i,
+      /\bgithub-action/i
+    ];
   }
 });
 
@@ -8918,6 +9007,7 @@ __export(lead_intelligence_engine_exports, {
   BUCKET_LABELS: () => BUCKET_LABELS,
   DEFAULT_LEAD_PROMPT: () => DEFAULT_LEAD_PROMPT,
   analyzeOrgLeads: () => analyzeOrgLeads,
+  analyzeOrgLeadsIncremental: () => analyzeOrgLeadsIncremental,
   runFullLeadIntelligence: () => runFullLeadIntelligence,
   scanOrgEmailHistory: () => scanOrgEmailHistory,
   sweepSuppressionSignalsFromHistory: () => sweepSuppressionSignalsFromHistory
@@ -9125,11 +9215,9 @@ async function getOutlookAccessToken2(orgId, senderEmail) {
   }
   return accessToken;
 }
-async function scanGmailHistory(orgId, emailAccountId, accountEmail, token, monthsBack = 6) {
+async function scanGmailHistory(orgId, emailAccountId, accountEmail, token, sinceDate) {
   const result = { emailAccountId, accountEmail, provider: "gmail", emailsFetched: 0, errors: [] };
   try {
-    const sinceDate = /* @__PURE__ */ new Date();
-    sinceDate.setMonth(sinceDate.getMonth() - monthsBack);
     const afterEpoch = Math.floor(sinceDate.getTime() / 1e3);
     let pageToken = null;
     let totalFetched = 0;
@@ -9223,11 +9311,9 @@ async function scanGmailHistory(orgId, emailAccountId, accountEmail, token, mont
   }
   return result;
 }
-async function scanOutlookHistory(orgId, emailAccountId, accountEmail, token, monthsBack = 6) {
+async function scanOutlookHistory(orgId, emailAccountId, accountEmail, token, sinceDate) {
   const result = { emailAccountId, accountEmail, provider: "outlook", emailsFetched: 0, errors: [] };
   try {
-    const sinceDate = /* @__PURE__ */ new Date();
-    sinceDate.setMonth(sinceDate.getMonth() - monthsBack);
     const sinceISO = sinceDate.toISOString();
     let nextLink = null;
     let totalFetched = 0;
@@ -9299,18 +9385,34 @@ async function scanOutlookHistory(orgId, emailAccountId, accountEmail, token, mo
   }
   return result;
 }
-async function scanOrgEmailHistory(orgId, monthsBack = 6, emailAccountIds) {
+async function scanOrgEmailHistory(orgId, monthsBack = 6, emailAccountIds, force = false) {
   const scanResult = { orgId, accountsScanned: 0, totalEmailsFetched: 0, results: [], errors: [] };
   try {
-    let emailAccounts = await storage.getEmailAccounts(orgId);
+    let emailAccounts = storage.getEmailAccountsForLeadIntel ? await storage.getEmailAccountsForLeadIntel(orgId) : await storage.getEmailAccounts(orgId);
     if (emailAccountIds && emailAccountIds.length > 0) {
       emailAccounts = emailAccounts.filter((a) => emailAccountIds.includes(String(a.id)));
     }
+    const RESCAN_BUFFER_MS = 60 * 60 * 1e3;
     for (const account of emailAccounts) {
       const email = account.email;
       const provider = (account.provider || "").toLowerCase();
       const accountId = account.id;
+      const lastScanAtRaw = account.leadIntelLastScanAt;
       if (!email) continue;
+      const monthsBackDate = /* @__PURE__ */ new Date();
+      monthsBackDate.setMonth(monthsBackDate.getMonth() - monthsBack);
+      let sinceDate = monthsBackDate;
+      let usedIncremental = false;
+      if (!force && lastScanAtRaw) {
+        const lastScan = new Date(lastScanAtRaw);
+        if (!isNaN(lastScan.getTime())) {
+          const lastScanWithBuffer = new Date(lastScan.getTime() - RESCAN_BUFFER_MS);
+          if (lastScanWithBuffer > sinceDate) {
+            sinceDate = lastScanWithBuffer;
+            usedIncremental = true;
+          }
+        }
+      }
       const isGmail = provider === "gmail" || provider === "google";
       const isOutlook = provider === "outlook" || provider === "microsoft";
       let token = null;
@@ -9318,21 +9420,21 @@ async function scanOrgEmailHistory(orgId, monthsBack = 6, emailAccountIds) {
       if (isGmail) {
         token = await getGmailAccessToken2(orgId, email);
         if (token) {
-          result = await scanGmailHistory(orgId, accountId, email, token, monthsBack);
+          result = await scanGmailHistory(orgId, accountId, email, token, sinceDate);
         }
       } else if (isOutlook) {
         token = await getOutlookAccessToken2(orgId, email);
         if (token) {
-          result = await scanOutlookHistory(orgId, accountId, email, token, monthsBack);
+          result = await scanOutlookHistory(orgId, accountId, email, token, sinceDate);
         }
       } else {
         token = await getGmailAccessToken2(orgId, email);
         if (token) {
-          result = await scanGmailHistory(orgId, accountId, email, token, monthsBack);
+          result = await scanGmailHistory(orgId, accountId, email, token, sinceDate);
         } else {
           token = await getOutlookAccessToken2(orgId, email);
           if (token) {
-            result = await scanOutlookHistory(orgId, accountId, email, token, monthsBack);
+            result = await scanOutlookHistory(orgId, accountId, email, token, sinceDate);
           }
         }
       }
@@ -9344,6 +9446,18 @@ async function scanOrgEmailHistory(orgId, monthsBack = 6, emailAccountIds) {
         scanResult.accountsScanned++;
         scanResult.totalEmailsFetched += result.emailsFetched;
         scanResult.results.push(result);
+        console.log(`[LeadIntel] ${email} scan: mode=${usedIncremental ? "incremental" : force ? "force-full" : "first-full"}, since=${sinceDate.toISOString()}, fetched=${result.emailsFetched}, errors=${result.errors.length}`);
+        if (result.errors.length === 0) {
+          try {
+            await storage.rawRun(
+              `UPDATE email_accounts SET "leadIntelLastScanAt" = ? WHERE id = ?`,
+              (/* @__PURE__ */ new Date()).toISOString(),
+              accountId
+            );
+          } catch (e) {
+            console.error(`[LeadIntel] Failed to update leadIntelLastScanAt for ${email}:`, e instanceof Error ? e.message : e);
+          }
+        }
       }
     }
     console.log(`[LeadIntel] Org ${orgId} scan complete: ${scanResult.accountsScanned} accounts, ${scanResult.totalEmailsFetched} emails`);
@@ -9355,7 +9469,7 @@ async function scanOrgEmailHistory(orgId, monthsBack = 6, emailAccountIds) {
 }
 async function buildContactSummaries(orgId, emailAccountIds) {
   const summaries = [];
-  const orgAccounts = await storage.getEmailAccounts(orgId);
+  const orgAccounts = storage.getEmailAccountsForLeadIntel ? await storage.getEmailAccountsForLeadIntel(orgId) : await storage.getEmailAccounts(orgId);
   const orgEmails = new Set(orgAccounts.map((a) => (a.email || "").toLowerCase()).filter(Boolean));
   console.log(`[LeadIntel] Org emails to exclude: ${Array.from(orgEmails).join(", ")}`);
   try {
@@ -9712,15 +9826,92 @@ async function analyzeOrgLeads(orgId, emailAccountIds) {
   }
   return result;
 }
-async function runFullLeadIntelligence(orgId, monthsBack = 6, emailAccountIds) {
-  console.log(`[LeadIntel] Starting full pipeline for org ${orgId} (${monthsBack} months back)...`);
-  const scan = await scanOrgEmailHistory(orgId, monthsBack, emailAccountIds);
+async function analyzeOrgLeadsIncremental(orgId, emailAccountIds) {
+  const result = {
+    orgId,
+    contactsAnalyzed: 0,
+    opportunitiesCreated: 0,
+    bucketCounts: {},
+    errors: [],
+    debug: { mode: "incremental" }
+  };
+  try {
+    console.log(`[LeadIntel] Starting INCREMENTAL lead analysis for org ${orgId}...`);
+    const summaries = await buildContactSummaries(orgId, emailAccountIds);
+    result.debug.totalSummaries = summaries.length;
+    if (summaries.length === 0) {
+      result.errors.push(`No contacts found in email_history for this org (or selected accounts).`);
+      return result;
+    }
+    let alreadyClassified = /* @__PURE__ */ new Set();
+    try {
+      const existing = await storage.rawAll(
+        `SELECT LOWER("contactEmail") as "contactEmail" FROM lead_opportunities WHERE "organizationId" = ?`,
+        orgId
+      );
+      alreadyClassified = new Set(existing.map((r) => (r.contactEmail || "").toLowerCase()).filter(Boolean));
+    } catch (e) {
+      console.error("[LeadIntel] Incremental: failed to load existing opportunities:", e instanceof Error ? e.message : e);
+      result.errors.push("Failed to read existing classifications");
+      return result;
+    }
+    result.debug.alreadyClassified = alreadyClassified.size;
+    const newContacts = summaries.filter((s) => !alreadyClassified.has((s.contactEmail || "").toLowerCase()));
+    result.contactsAnalyzed = newContacts.length;
+    result.debug.newContacts = newContacts.length;
+    console.log(`[LeadIntel] Incremental: ${summaries.length} total contacts, ${alreadyClassified.size} already classified, ${newContacts.length} new to classify`);
+    if (newContacts.length === 0) {
+      console.log("[LeadIntel] Incremental: nothing new to classify \u2014 exiting cleanly");
+      return result;
+    }
+    const classifications = await classifyContactsWithAI(orgId, newContacts);
+    console.log(`[LeadIntel] Incremental: classified ${classifications.length} new contacts`);
+    for (const cls of classifications) {
+      const summary = newContacts.find((s) => s.contactEmail === cls.contactEmail);
+      if (!summary) continue;
+      let company = "";
+      try {
+        const contact = await storage.rawGet('SELECT company FROM contacts WHERE "organizationId" = ? AND LOWER(email) = ? LIMIT 1', orgId, cls.contactEmail.toLowerCase());
+        if (contact?.company) company = contact.company;
+      } catch (e) {
+      }
+      await storage.addLeadOpportunity({
+        organizationId: orgId,
+        emailAccountId: summary.emailAccountId || void 0,
+        accountEmail: summary.accountEmail || void 0,
+        contactEmail: cls.contactEmail,
+        contactName: summary.contactName,
+        company,
+        bucket: cls.bucket,
+        confidence: cls.confidence,
+        aiReasoning: cls.reasoning,
+        suggestedAction: cls.suggestedAction,
+        lastEmailDate: summary.lastEmailDate,
+        totalEmails: summary.totalEmails,
+        totalSent: summary.totalSent,
+        totalReceived: summary.totalReceived,
+        sampleSubjects: summary.subjects,
+        sampleSnippets: summary.snippets
+      });
+      result.opportunitiesCreated++;
+      result.bucketCounts[cls.bucket] = (result.bucketCounts[cls.bucket] || 0) + 1;
+    }
+    console.log(`[LeadIntel] Incremental complete: ${result.opportunitiesCreated} new opportunities added (existing preserved)`);
+  } catch (e) {
+    console.error("[LeadIntel] Incremental analysis error:", e instanceof Error ? e.message : e);
+    result.errors.push(e instanceof Error ? e.message : String(e));
+  }
+  return result;
+}
+async function runFullLeadIntelligence(orgId, monthsBack = 6, emailAccountIds, force = false) {
+  console.log(`[LeadIntel] Starting full pipeline for org ${orgId} (${monthsBack} months back, mode=${force ? "force-full" : "incremental"})...`);
+  const scan = await scanOrgEmailHistory(orgId, monthsBack, emailAccountIds, force);
   try {
     await sweepSuppressionSignalsFromHistory(orgId);
   } catch (e) {
     console.error("[LeadIntel] Suppression sweep failed:", e instanceof Error ? e.message : e);
   }
-  const analysis = await analyzeOrgLeads(orgId, emailAccountIds);
+  const analysis = force ? await analyzeOrgLeads(orgId, emailAccountIds) : await analyzeOrgLeadsIncremental(orgId, emailAccountIds);
   return { scan, analysis };
 }
 var SYSTEM_EMAIL_FRAGMENTS, BUCKET_LABELS, DEFAULT_LEAD_PROMPT;
@@ -9767,163 +9958,6 @@ BUCKETS (choose exactly ONE per contact):
 - converted: Deal clearly closed \u2014 active ongoing customer, regular orders, support emails, account management
 
 DO NOT classify as hot_lead or almost_closed unless there is CLEAR evidence of buying intent in the subjects/snippets. When in doubt between warm_lead and interested_stalled, prefer interested_stalled if the last email is older than 2 weeks.`;
-  }
-});
-
-// server/services/reply-quality-engine.ts
-var reply_quality_engine_exports = {};
-__export(reply_quality_engine_exports, {
-  batchScoreOrgReplies: () => batchScoreOrgReplies,
-  qualityLabelFromScore: () => qualityLabelFromScore,
-  scoreInboxMessage: () => scoreInboxMessage
-});
-function qualityLabelFromScore(score) {
-  if (score >= 8) return "Hot";
-  if (score >= 6) return "Warm";
-  if (score >= 4) return "Neutral";
-  if (score >= 2) return "Declined";
-  return "Negative";
-}
-async function getAzureSettings(organizationId) {
-  const settings = await storage.getApiSettingsWithAzureFallback(organizationId);
-  return {
-    endpoint: settings.azure_openai_endpoint,
-    apiKey: settings.azure_openai_api_key,
-    deployment: settings.azure_openai_deployment,
-    apiVersion: settings.azure_openai_api_version || "2024-08-01-preview"
-  };
-}
-async function scoreWithAzure(subject, snippet, body, azure) {
-  const { endpoint, apiKey, deployment, apiVersion } = azure;
-  if (!endpoint || !apiKey || !deployment) {
-    return ruleBased(snippet || body);
-  }
-  const text = (snippet || body || "").slice(0, 800);
-  if (!text.trim()) return { score: 5, label: "Neutral" };
-  const prompt = `You are an email sales analyst. Rate the quality of this prospect reply for a sales rep who needs to prioritize follow-ups.
-
-Subject: ${subject || "N/A"}
-Reply: ${text}
-
-Score 0-10:
-- 9-10: Strong positive intent (wants meeting, ready to buy, asks pricing/next steps)
-- 7-8: Positive interest (wants more info, open to discussion)
-- 5-6: Neutral / informational question
-- 3-4: Polite decline or lukewarm
-- 1-2: Firm no or unsubscribe
-- 0: Spam / auto-reply
-
-Respond ONLY with JSON: {"score": <integer 0-10>, "label": "<Hot|Warm|Neutral|Declined|Negative>"}`;
-  const url = `${endpoint.replace(/\/$/, "")}/openai/deployments/${deployment}/chat/completions?api-version=${apiVersion}`;
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), 1e4);
-  try {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "api-key": apiKey },
-      body: JSON.stringify({
-        messages: [
-          { role: "system", content: "You are an email engagement analyst. Respond only with valid JSON." },
-          { role: "user", content: prompt }
-        ],
-        temperature: 0.1,
-        max_tokens: 60
-      }),
-      signal: ac.signal
-    });
-    if (!resp.ok) {
-      console.error(`[ReplyQuality] Azure error ${resp.status}`);
-      return ruleBased(text);
-    }
-    const data = await resp.json();
-    const content = data.choices?.[0]?.message?.content || "";
-    const match = content.match(/\{[\s\S]*\}/);
-    if (match) {
-      const parsed = JSON.parse(match[0]);
-      const score = Math.min(10, Math.max(0, parseInt(parsed.score) || 5));
-      const label = parsed.label || qualityLabelFromScore(score);
-      return { score, label };
-    }
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.error(`[ReplyQuality] Scoring error: ${msg}`);
-  } finally {
-    clearTimeout(timer);
-  }
-  return ruleBased(snippet || body);
-}
-function ruleBased(text) {
-  const t = (text || "").toLowerCase();
-  if (/interested|meeting|call|demo|pricing|next step|sounds good|let.s connect|great|love to/i.test(t))
-    return { score: 8, label: "Hot" };
-  if (/tell me more|more info|question|could you|would like|please share/i.test(t))
-    return { score: 6, label: "Warm" };
-  if (/not interested|unsubscribe|remove me|stop|don.t contact/i.test(t))
-    return { score: 1, label: "Negative" };
-  if (/no thank|not right now|maybe later|not at this time/i.test(t))
-    return { score: 3, label: "Declined" };
-  return { score: 5, label: "Neutral" };
-}
-async function scoreInboxMessage(messageId, organizationId) {
-  try {
-    const msg = await storage.getInboxMessage(messageId);
-    if (!msg) return null;
-    if (!["positive", "negative", "general"].includes(msg.replyType || "")) return null;
-    const azure = await getAzureSettings(organizationId);
-    const result = await scoreWithAzure(msg.subject || "", msg.snippet || "", msg.body || "", azure);
-    await storage.rawRun(
-      `UPDATE unified_inbox SET "replyQualityScore"=?, "replyQualityLabel"=? WHERE id=?`,
-      result.score,
-      result.label,
-      messageId
-    );
-    return result;
-  } catch (e) {
-    console.error(`[ReplyQuality] scoreInboxMessage error for ${messageId}:`, e instanceof Error ? e.message : e);
-    return null;
-  }
-}
-async function batchScoreOrgReplies(organizationId, limit = 100) {
-  const rows = await storage.rawAll(
-    `SELECT id FROM unified_inbox
-     WHERE "organizationId" = ?
-       AND "replyType" IN ('positive','negative','general')
-       AND "replyQualityScore" IS NULL
-     ORDER BY "receivedAt" DESC
-     LIMIT ?`,
-    organizationId,
-    limit
-  );
-  let scored = 0;
-  let errors = 0;
-  const azure = await getAzureSettings(organizationId);
-  for (const row of rows) {
-    try {
-      const msg = await storage.getInboxMessage(row.id);
-      if (!msg) {
-        errors++;
-        continue;
-      }
-      const result = await scoreWithAzure(msg.subject || "", msg.snippet || "", msg.body || "", azure);
-      await storage.rawRun(
-        `UPDATE unified_inbox SET "replyQualityScore"=?, "replyQualityLabel"=? WHERE id=?`,
-        result.score,
-        result.label,
-        row.id
-      );
-      scored++;
-    } catch (e) {
-      errors++;
-      console.error(`[ReplyQuality] batch error for ${row.id}:`, e instanceof Error ? e.message : e);
-    }
-  }
-  console.log(`[ReplyQuality] Batch complete for org ${organizationId}: scored=${scored} errors=${errors}`);
-  return { scored, errors };
-}
-var init_reply_quality_engine = __esm({
-  "server/services/reply-quality-engine.ts"() {
-    "use strict";
-    init_storage();
   }
 });
 
@@ -10015,16 +10049,66 @@ async function getContactContext(orgId, contactId, contactEmail) {
   };
 }
 async function getRelevantDocuments(orgId, query, docTypes, limit = 10) {
-  let docs = await storage.searchOrgDocuments(orgId, query, limit);
-  if (docs.length === 0 && docTypes && docTypes.length > 0) {
+  if (!query || !query.trim()) return [];
+  const seen = /* @__PURE__ */ new Set();
+  const merged = [];
+  const tierHits = {};
+  const queriesUsed = [];
+  const addUnique = (newDocs, tier, qStr) => {
+    let added = 0;
+    for (const d of newDocs) {
+      if (merged.length >= limit) break;
+      if (!d?.id || seen.has(d.id)) continue;
+      merged.push(d);
+      seen.add(d.id);
+      added++;
+    }
+    if (added > 0) {
+      tierHits[String(tier)] = added;
+      queriesUsed.push(qStr.slice(0, 80));
+    }
+  };
+  const t1 = await storage.searchOrgDocuments(orgId, query, limit);
+  addUnique(t1, 1, query);
+  if (merged.length < limit) {
+    const firstSentence = (query.split(/(?<=[.!?])\s+/)[0] || "").slice(0, 150).trim();
+    if (firstSentence && firstSentence !== query.trim()) {
+      const t2 = await storage.searchOrgDocuments(orgId, firstSentence, limit);
+      addUnique(t2, 2, firstSentence);
+    }
+  }
+  if (merged.length < limit && docTypes && docTypes.length > 0) {
     const allDocs = await storage.getOrgDocuments(orgId, {}, 100, 0);
-    docs = allDocs.filter((d) => {
+    const tagFiltered = allDocs.filter((d) => {
       if (docTypes.includes(d.docType)) return true;
       const tags = typeof d.tags === "string" ? JSON.parse(d.tags) : d.tags || [];
       return tags.some((t) => query.toLowerCase().includes(t.toLowerCase()));
-    }).slice(0, limit);
+    });
+    addUnique(tagFiltered, 3, `docTypes:${docTypes.join(",")}`);
   }
-  return docs;
+  if (merged.length < limit) {
+    const allTokens = Array.from(new Set(
+      (query.match(/\b[A-Z][A-Za-z0-9]{2,}\b/g) || []).filter((w) => !RETRIEVAL_STOPWORDS.has(w))
+    ));
+    const acronyms = allTokens.filter((t) => /^[A-Z][A-Z0-9]{2,}$/.test(t));
+    const properNouns = allTokens.filter((t) => !/^[A-Z][A-Z0-9]+$/.test(t) && t.length >= 4);
+    let tokenQuery = "";
+    if (acronyms.length >= 1) {
+      tokenQuery = acronyms.slice(0, 2).join(" ");
+    } else if (properNouns.length >= 2) {
+      tokenQuery = properNouns.slice(0, 3).join(" ");
+    }
+    if (tokenQuery) {
+      const t4 = await storage.searchOrgDocuments(orgId, tokenQuery, limit);
+      addUnique(t4, 4, tokenQuery);
+    }
+  }
+  if (merged.length > 0) {
+    console.log(`[getRelevantDocuments] org=${orgId} tierHits=${JSON.stringify(tierHits)} hits=${merged.length}/${limit} qLen=${query.length} queries=${JSON.stringify(queriesUsed)}`);
+  } else {
+    console.log(`[getRelevantDocuments] org=${orgId} tierHits={} NO_MATCH qLen=${query.length}`);
+  }
+  return merged;
 }
 async function assembleContext(orgId, options) {
   const maxDocTokens = options.maxDocTokens || 8e3;
@@ -10217,8 +10301,790 @@ ${content.substring(0, 6e3)}` }
   }
   return content.substring(0, 300).replace(/\s+/g, " ").trim() + "...";
 }
+var RETRIEVAL_STOPWORDS;
 var init_context_engine = __esm({
   "server/services/context-engine.ts"() {
+    "use strict";
+    init_storage();
+    RETRIEVAL_STOPWORDS = /* @__PURE__ */ new Set([
+      "Dear",
+      "Hi",
+      "Hello",
+      "Hey",
+      "Greetings",
+      "Mr",
+      "Mrs",
+      "Ms",
+      "Dr",
+      "Prof",
+      "The",
+      "This",
+      "That",
+      "These",
+      "Those",
+      "When",
+      "Where",
+      "What",
+      "How",
+      "Why",
+      "Who",
+      "Which",
+      "For",
+      "And",
+      "But",
+      "Yet",
+      "Nor",
+      "Our",
+      "Your",
+      "Their",
+      "His",
+      "Her",
+      "Its",
+      "India",
+      "Mumbai",
+      "Delhi",
+      "Bangalore",
+      "Chennai",
+      "Kolkata",
+      "Hyderabad",
+      "Pune",
+      "Re",
+      "Fwd",
+      "Team",
+      "Company",
+      "Office",
+      "Email"
+    ]);
+  }
+});
+
+// server/services/outbound-reply-sweeper.ts
+var outbound_reply_sweeper_exports = {};
+__export(outbound_reply_sweeper_exports, {
+  backfillNativeReplyContent: () => backfillNativeReplyContent,
+  getOutboundReplySweepStatus: () => getOutboundReplySweepStatus,
+  runOutboundReplySweep: () => runOutboundReplySweep,
+  startOutboundReplySweeper: () => startOutboundReplySweeper
+});
+import { OAuth2Client as OAuth2Client5 } from "google-auth-library";
+function recordFailure(s) {
+  recentFailures.unshift(s);
+  if (recentFailures.length > MAX_RECENT_FAILURES) recentFailures.length = MAX_RECENT_FAILURES;
+}
+function getOutboundReplySweepStatus() {
+  return { isProcessing: isProcessing2, intervalMs: SWEEP_INTERVAL_MS, maxPerCycle: MAX_CANDIDATES_PER_CYCLE, lastRun, recentFailures };
+}
+async function getOrgEmails(orgId) {
+  const cached = orgEmailsCache.get(orgId);
+  if (cached) return cached;
+  try {
+    const rows = await storage.rawAll(
+      `SELECT LOWER(TRIM(email)) as email FROM email_accounts WHERE "organizationId" = ? AND email IS NOT NULL AND email != ''`,
+      orgId
+    );
+    const set = new Set(rows.map((r) => r.email).filter(Boolean));
+    orgEmailsCache.set(orgId, set);
+    return set;
+  } catch (e) {
+    console.error(`[OutboundReplySweep] Failed to load org emails for ${orgId}:`, e?.message || e);
+    return /* @__PURE__ */ new Set();
+  }
+}
+async function getGmailAccessToken3(orgId, senderEmail) {
+  const settings = await storage.getApiSettings(orgId);
+  const prefix = `gmail_sender_${senderEmail}_`;
+  let accessToken = settings[`${prefix}access_token`] || null;
+  let refreshToken = settings[`${prefix}refresh_token`] || null;
+  let tokenExpiry = settings[`${prefix}token_expiry`] || null;
+  if (!accessToken && !refreshToken) {
+    accessToken = settings.gmail_access_token || null;
+    refreshToken = settings.gmail_refresh_token || null;
+    tokenExpiry = settings.gmail_token_expiry || null;
+  }
+  if (!accessToken && !refreshToken) return null;
+  let clientId = settings.google_oauth_client_id || process.env.GOOGLE_CLIENT_ID || "";
+  let clientSecret = settings.google_oauth_client_secret || process.env.GOOGLE_CLIENT_SECRET || "";
+  if (!clientId || !clientSecret) {
+    try {
+      const superAdminOrgId = await storage.getSuperAdminOrgId();
+      if (superAdminOrgId && superAdminOrgId !== orgId) {
+        const ss = await storage.getApiSettings(superAdminOrgId);
+        if (ss.google_oauth_client_id) {
+          clientId = ss.google_oauth_client_id;
+          clientSecret = ss.google_oauth_client_secret || "";
+        }
+      }
+    } catch {
+    }
+  }
+  const expiry = parseInt(tokenExpiry || "0");
+  if (!tokenExpiry || Date.now() > expiry - 3e5) {
+    if (refreshToken && clientId && clientSecret) {
+      try {
+        const oauth2 = new OAuth2Client5(clientId, clientSecret);
+        oauth2.setCredentials({ refresh_token: refreshToken });
+        const { credentials } = await oauth2.refreshAccessToken();
+        if (credentials.access_token) {
+          accessToken = credentials.access_token;
+          if (settings[`${prefix}refresh_token`]) {
+            await storage.setApiSetting(orgId, `${prefix}access_token`, accessToken);
+            if (credentials.expiry_date) await storage.setApiSetting(orgId, `${prefix}token_expiry`, String(credentials.expiry_date));
+          } else {
+            await storage.setApiSetting(orgId, "gmail_access_token", accessToken);
+            if (credentials.expiry_date) await storage.setApiSetting(orgId, "gmail_token_expiry", String(credentials.expiry_date));
+          }
+        }
+      } catch (e) {
+        console.error(`[OutboundReplySweep] Gmail token refresh failed for ${senderEmail}:`, e instanceof Error ? e.message : e);
+      }
+    }
+  }
+  return accessToken;
+}
+async function getOutlookAccessToken3(orgId, senderEmail) {
+  const settings = await storage.getApiSettings(orgId);
+  const prefix = `outlook_sender_${senderEmail}_`;
+  let accessToken = settings[`${prefix}access_token`] || null;
+  let refreshToken = settings[`${prefix}refresh_token`] || null;
+  let tokenExpiry = settings[`${prefix}token_expiry`] || null;
+  if (!accessToken && !refreshToken) {
+    accessToken = settings.microsoft_access_token || null;
+    refreshToken = settings.microsoft_refresh_token || null;
+    tokenExpiry = settings.microsoft_token_expiry || null;
+  }
+  if (!accessToken && !refreshToken) return null;
+  const expiry = parseInt(tokenExpiry || "0");
+  if (!accessToken || Date.now() > expiry - 3e5) {
+    if (refreshToken) {
+      let clientId = settings.microsoft_oauth_client_id || "";
+      let clientSecret = settings.microsoft_oauth_client_secret || "";
+      if (!clientId || !clientSecret) {
+        try {
+          const superAdminOrgId = await storage.getSuperAdminOrgId();
+          if (superAdminOrgId && superAdminOrgId !== orgId) {
+            const ss = await storage.getApiSettings(superAdminOrgId);
+            if (ss.microsoft_oauth_client_id) {
+              clientId = ss.microsoft_oauth_client_id;
+              clientSecret = ss.microsoft_oauth_client_secret || "";
+            }
+          }
+        } catch {
+        }
+      }
+      if (!clientId) clientId = process.env.MICROSOFT_CLIENT_ID || "";
+      if (!clientSecret) clientSecret = process.env.MICROSOFT_CLIENT_SECRET || "";
+      if (clientId && clientSecret) {
+        try {
+          const body = new URLSearchParams({
+            client_id: clientId,
+            client_secret: clientSecret,
+            refresh_token: refreshToken,
+            grant_type: "refresh_token",
+            scope: "openid profile email offline_access https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/SMTP.Send"
+          });
+          const resp = await fetch("https://login.microsoftonline.com/common/oauth2/v2.0/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: body.toString()
+          });
+          if (resp.ok) {
+            const tokens = await resp.json();
+            if (tokens.access_token) {
+              accessToken = tokens.access_token;
+              const exp = Date.now() + (tokens.expires_in || 3600) * 1e3;
+              if (settings[`${prefix}refresh_token`]) {
+                await storage.setApiSetting(orgId, `${prefix}access_token`, accessToken);
+                if (tokens.refresh_token) await storage.setApiSetting(orgId, `${prefix}refresh_token`, tokens.refresh_token);
+                await storage.setApiSetting(orgId, `${prefix}token_expiry`, String(exp));
+              } else {
+                await storage.setApiSetting(orgId, "microsoft_access_token", accessToken);
+                if (tokens.refresh_token) await storage.setApiSetting(orgId, "microsoft_refresh_token", tokens.refresh_token);
+                await storage.setApiSetting(orgId, "microsoft_token_expiry", String(exp));
+              }
+            }
+          }
+        } catch (e) {
+          console.error(`[OutboundReplySweep] Outlook token refresh failed for ${senderEmail}:`, e instanceof Error ? e.message : e);
+        }
+      }
+    }
+  }
+  return accessToken;
+}
+function extractGmailBody(msg) {
+  if (!msg) return "";
+  const collect = (part, acc2) => {
+    if (!part) return;
+    const mime = (part.mimeType || "").toLowerCase();
+    const data = part.body?.data;
+    if (data) {
+      try {
+        const decoded = Buffer.from(data, "base64url").toString("utf-8");
+        if (mime === "text/plain" && !acc2.plain) acc2.plain = decoded;
+        else if (mime === "text/html" && !acc2.html) acc2.html = decoded;
+      } catch {
+      }
+    }
+    if (Array.isArray(part.parts)) for (const p of part.parts) collect(p, acc2);
+  };
+  const acc = { plain: "", html: "" };
+  collect(msg.payload, acc);
+  if (acc.plain) return acc.plain;
+  if (acc.html) {
+    return acc.html.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ").replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ").replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/\s+/g, " ").trim();
+  }
+  return msg.snippet || "";
+}
+async function checkGmailThread(accessToken, threadId, ownerEmail, orgEmails, receivedAt) {
+  try {
+    const resp = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=full`,
+      { headers: { "Authorization": `Bearer ${accessToken}` } }
+    );
+    if (!resp.ok) {
+      const sample = { ts: (/* @__PURE__ */ new Date()).toISOString(), provider: "gmail", status: resp.status, ownerEmail, threadId };
+      if (resp.status === 401 || resp.status === 403) lastRun.apiAuthFail++;
+      else if (resp.status === 404) lastRun.apiNotFound++;
+      else lastRun.apiHttpError++;
+      recordFailure(sample);
+      return null;
+    }
+    const data = await resp.json();
+    if (!data?.messages) return null;
+    for (const msg of data.messages) {
+      const headers = msg.payload?.headers || [];
+      const fromHeader = headers.find((h) => h.name.toLowerCase() === "from")?.value || "";
+      const dateHeader = headers.find((h) => h.name.toLowerCase() === "date")?.value || "";
+      const fromEmail = (fromHeader.match(/<([^>]+)>/)?.[1] || fromHeader).toLowerCase().trim();
+      if (fromEmail && orgEmails.has(fromEmail)) {
+        const msgTime = dateHeader ? new Date(dateHeader).getTime() : msg.internalDate ? Number(msg.internalDate) : 0;
+        if (msgTime > receivedAt) {
+          const rawBody = extractGmailBody(msg);
+          const content = (rawBody || "").replace(/\s+/g, " ").trim().slice(0, NATIVE_REPLY_MAX_CHARS);
+          return { sentAt: new Date(msgTime).toISOString(), content };
+        }
+      }
+    }
+    return null;
+  } catch (e) {
+    lastRun.apiException++;
+    recordFailure({ ts: (/* @__PURE__ */ new Date()).toISOString(), provider: "gmail", status: `exception: ${e?.message || "unknown"}`.slice(0, 100), ownerEmail, threadId });
+    return null;
+  }
+}
+async function checkOutlookConversation(accessToken, conversationId, ownerEmail, orgEmails, receivedAt) {
+  try {
+    const url = `https://graph.microsoft.com/v1.0/me/messages?$filter=conversationId eq '${encodeURIComponent(conversationId)}'&$select=from,sentDateTime,sender,body,bodyPreview&$top=50`;
+    const resp = await fetch(url, { headers: { "Authorization": `Bearer ${accessToken}` } });
+    if (!resp.ok) {
+      const sample = { ts: (/* @__PURE__ */ new Date()).toISOString(), provider: "outlook", status: resp.status, ownerEmail, threadId: conversationId };
+      if (resp.status === 401 || resp.status === 403) lastRun.apiAuthFail++;
+      else if (resp.status === 404) lastRun.apiNotFound++;
+      else lastRun.apiHttpError++;
+      recordFailure(sample);
+      return null;
+    }
+    const data = await resp.json();
+    const messages = data?.value || [];
+    for (const m of messages) {
+      const fromAddr = (m.from?.emailAddress?.address || m.sender?.emailAddress?.address || "").toLowerCase();
+      if (!fromAddr || !orgEmails.has(fromAddr)) continue;
+      const sentTime = m.sentDateTime ? new Date(m.sentDateTime).getTime() : 0;
+      if (sentTime > receivedAt) {
+        const bodyContentType = (m.body?.contentType || "").toLowerCase();
+        const bodyRaw = m.body?.content || m.bodyPreview || "";
+        let textOnly = bodyRaw;
+        if (bodyContentType === "html") {
+          textOnly = bodyRaw.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ").replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ").replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"');
+        }
+        const content = (textOnly || "").replace(/\s+/g, " ").trim().slice(0, NATIVE_REPLY_MAX_CHARS);
+        return { sentAt: new Date(sentTime).toISOString(), content };
+      }
+    }
+    return null;
+  } catch (e) {
+    lastRun.apiException++;
+    recordFailure({ ts: (/* @__PURE__ */ new Date()).toISOString(), provider: "outlook", status: `exception: ${e?.message || "unknown"}`.slice(0, 100), ownerEmail, threadId: conversationId });
+    return null;
+  }
+}
+async function selectCandidates() {
+  const recvCutoff = new Date(Date.now() - MIN_AGE_MS).toISOString();
+  const checkCutoff = new Date(Date.now() - RECHECK_COOLDOWN_MS).toISOString();
+  const sql = `
+    SELECT ui.id, ui."organizationId",
+           ui."gmailThreadId", ui."outlookConversationId",
+           ui."emailAccountId", ui."receivedAt",
+           ea.email AS "ownerEmail", ea."userId" AS "ownerUserId", ea.provider AS "provider"
+    FROM unified_inbox ui
+    JOIN email_accounts ea ON ea.id = ui."emailAccountId"
+    WHERE ui."replyType" IN ('positive','negative','general')
+      AND (ui.status != 'replied' AND ui."repliedAt" IS NULL)
+      AND ui."repliedBy" IS NULL
+      AND (
+        (ui."gmailThreadId" IS NOT NULL AND ui."gmailThreadId" != '')
+        OR (ui."outlookConversationId" IS NOT NULL AND ui."outlookConversationId" != '')
+      )
+      AND ui."receivedAt" < ?
+      AND (ui."outboundCheckedAt" IS NULL OR ui."outboundCheckedAt" < ?)
+      AND ea."isActive" != 0
+    ORDER BY ui."outboundCheckedAt" ASC NULLS FIRST, ui."receivedAt" DESC
+    LIMIT ?
+  `;
+  return storage.rawAll(sql, recvCutoff, checkCutoff, MAX_CANDIDATES_PER_CYCLE);
+}
+async function processCandidate(c) {
+  const checkedAtIso = (/* @__PURE__ */ new Date()).toISOString();
+  await storage.rawRun(
+    `UPDATE unified_inbox SET "outboundCheckedAt" = ? WHERE id = ? AND "organizationId" = ?`,
+    checkedAtIso,
+    c.id,
+    c.organizationId
+  );
+  if (!c.ownerEmail) return "skipped";
+  const provider = (c.provider || "").toLowerCase();
+  const receivedAt = new Date(c.receivedAt).getTime();
+  const orgEmails = await getOrgEmails(c.organizationId);
+  let match = null;
+  if (provider === "gmail" && c.gmailThreadId) {
+    const token = await getGmailAccessToken3(c.organizationId, c.ownerEmail);
+    if (!token) return "skipped";
+    match = await checkGmailThread(token, c.gmailThreadId, c.ownerEmail, orgEmails, receivedAt);
+  } else if (provider === "outlook" && c.outlookConversationId) {
+    const token = await getOutlookAccessToken3(c.organizationId, c.ownerEmail);
+    if (!token) return "skipped";
+    match = await checkOutlookConversation(token, c.outlookConversationId, c.ownerEmail, orgEmails, receivedAt);
+  } else {
+    return "skipped";
+  }
+  if (!match) return "no_reply";
+  await storage.rawRun(
+    `UPDATE unified_inbox SET "repliedBy" = ?, "repliedAt" = ?, "nativeReplyContent" = ? WHERE id = ? AND "organizationId" = ? AND "repliedBy" IS NULL`,
+    c.ownerUserId || c.ownerEmail,
+    match.sentAt,
+    match.content || null,
+    c.id,
+    c.organizationId
+  );
+  return "replied";
+}
+async function runOutboundReplySweep() {
+  if (isProcessing2) {
+    console.log("[OutboundReplySweep] Previous cycle still running, skipping");
+    return { ...lastRun };
+  }
+  isProcessing2 = true;
+  const started = Date.now();
+  lastRun.startedAt = new Date(started).toISOString();
+  lastRun.finishedAt = null;
+  lastRun.durationSec = null;
+  lastRun.candidates = 0;
+  lastRun.replied = 0;
+  lastRun.noReply = 0;
+  lastRun.skipped = 0;
+  lastRun.errors = 0;
+  lastRun.apiAuthFail = 0;
+  lastRun.apiNotFound = 0;
+  lastRun.apiHttpError = 0;
+  lastRun.apiException = 0;
+  try {
+    const candidates = await selectCandidates();
+    lastRun.candidates = candidates.length;
+    if (candidates.length === 0) {
+      console.log("[OutboundReplySweep] No candidates this cycle");
+    } else {
+      console.log(`[OutboundReplySweep] Processing ${candidates.length} candidate(s)`);
+      for (const c of candidates) {
+        try {
+          const result = await processCandidate(c);
+          if (result === "replied") lastRun.replied++;
+          else if (result === "no_reply") lastRun.noReply++;
+          else lastRun.skipped++;
+        } catch (e) {
+          lastRun.errors++;
+          console.error(`[OutboundReplySweep] candidate ${c.id} failed:`, e instanceof Error ? e.message : e);
+        }
+      }
+      const elapsed = Math.round((Date.now() - started) / 1e3);
+      console.log(`[OutboundReplySweep] Done in ${elapsed}s \u2014 replied=${lastRun.replied} no_reply=${lastRun.noReply} skipped=${lastRun.skipped} errors=${lastRun.errors}`);
+    }
+  } catch (e) {
+    console.error("[OutboundReplySweep] sweep failed:", e instanceof Error ? e.message : e);
+  } finally {
+    isProcessing2 = false;
+    lastRun.finishedAt = (/* @__PURE__ */ new Date()).toISOString();
+    lastRun.durationSec = Math.round((Date.now() - started) / 1e3);
+  }
+  return { ...lastRun };
+}
+async function backfillNativeReplyContent(maxRows = 100) {
+  const stats = { processed: 0, filled: 0, skipped: 0, errors: 0 };
+  const sql = `
+    SELECT ui.id, ui."organizationId",
+           ui."gmailThreadId", ui."outlookConversationId",
+           ui."emailAccountId", ui."receivedAt",
+           ea.email AS "ownerEmail", ea.provider AS "provider"
+    FROM unified_inbox ui
+    JOIN email_accounts ea ON ea.id = ui."emailAccountId"
+    WHERE ui."repliedBy" IS NOT NULL
+      AND (ui."nativeReplyContent" IS NULL OR ui."nativeReplyContent" = '')
+      AND (
+        (ui."gmailThreadId" IS NOT NULL AND ui."gmailThreadId" != '')
+        OR (ui."outlookConversationId" IS NOT NULL AND ui."outlookConversationId" != '')
+      )
+      AND ea."isActive" != 0
+    ORDER BY ui."receivedAt" DESC
+    LIMIT ?
+  `;
+  const rows = await storage.rawAll(sql, maxRows);
+  if (!rows.length) return stats;
+  console.log(`[OutboundReplySweep] Backfill: ${rows.length} candidate rows`);
+  for (const r of rows) {
+    stats.processed++;
+    try {
+      const provider = (r.provider || "").toLowerCase();
+      const receivedAt = new Date(r.receivedAt).getTime();
+      let match = null;
+      if (provider === "gmail" && r.gmailThreadId) {
+        const token = await getGmailAccessToken3(r.organizationId, r.ownerEmail);
+        if (!token) {
+          stats.skipped++;
+          continue;
+        }
+        match = await checkGmailThread(token, r.gmailThreadId, r.ownerEmail, receivedAt);
+      } else if (provider === "outlook" && r.outlookConversationId) {
+        const token = await getOutlookAccessToken3(r.organizationId, r.ownerEmail);
+        if (!token) {
+          stats.skipped++;
+          continue;
+        }
+        match = await checkOutlookConversation(token, r.outlookConversationId, r.ownerEmail, receivedAt);
+      } else {
+        stats.skipped++;
+        continue;
+      }
+      if (!match || !match.content) {
+        stats.skipped++;
+        continue;
+      }
+      await storage.rawRun(
+        `UPDATE unified_inbox SET "nativeReplyContent" = ? WHERE id = ? AND "organizationId" = ? AND ("nativeReplyContent" IS NULL OR "nativeReplyContent" = '')`,
+        match.content,
+        r.id,
+        r.organizationId
+      );
+      stats.filled++;
+    } catch (e) {
+      stats.errors++;
+      console.error(`[OutboundReplySweep] backfill row ${r.id} failed:`, e instanceof Error ? e.message : e);
+    }
+  }
+  console.log(`[OutboundReplySweep] Backfill done: processed=${stats.processed} filled=${stats.filled} skipped=${stats.skipped} errors=${stats.errors}`);
+  return stats;
+}
+function startOutboundReplySweeper() {
+  console.log(`[OutboundReplySweep] Starting \u2014 first run in ${BOOT_DELAY_MS / 1e3}s, then every ${SWEEP_INTERVAL_MS / 6e4}min, max ${MAX_CANDIDATES_PER_CYCLE} candidates/cycle`);
+  setTimeout(() => {
+    runOutboundReplySweep().catch((e) => console.error("[OutboundReplySweep] initial run crashed:", e));
+    setInterval(() => {
+      runOutboundReplySweep().catch((e) => console.error("[OutboundReplySweep] cycle crashed:", e));
+    }, SWEEP_INTERVAL_MS);
+  }, BOOT_DELAY_MS);
+}
+var SWEEP_INTERVAL_MS, BOOT_DELAY_MS, MAX_CANDIDATES_PER_CYCLE, MIN_AGE_MS, RECHECK_COOLDOWN_MS, isProcessing2, lastRun, recentFailures, MAX_RECENT_FAILURES, orgEmailsCache, NATIVE_REPLY_MAX_CHARS;
+var init_outbound_reply_sweeper = __esm({
+  "server/services/outbound-reply-sweeper.ts"() {
+    "use strict";
+    init_storage();
+    SWEEP_INTERVAL_MS = 10 * 60 * 1e3;
+    BOOT_DELAY_MS = 90 * 1e3;
+    MAX_CANDIDATES_PER_CYCLE = 50;
+    MIN_AGE_MS = 60 * 1e3;
+    RECHECK_COOLDOWN_MS = 6 * 60 * 60 * 1e3;
+    isProcessing2 = false;
+    lastRun = {
+      startedAt: null,
+      finishedAt: null,
+      durationSec: null,
+      candidates: 0,
+      replied: 0,
+      noReply: 0,
+      skipped: 0,
+      errors: 0,
+      apiAuthFail: 0,
+      apiNotFound: 0,
+      apiHttpError: 0,
+      apiException: 0
+    };
+    recentFailures = [];
+    MAX_RECENT_FAILURES = 20;
+    orgEmailsCache = /* @__PURE__ */ new Map();
+    NATIVE_REPLY_MAX_CHARS = 5e3;
+  }
+});
+
+// server/lib/job-aging.ts
+function isStaleJob(job, ttlMs, nowMs) {
+  if (!job || job.status !== "running") return { isStale: false, reason: "not_running" };
+  const lastSignal = job.heartbeatAt || job.startedAt;
+  if (!lastSignal) return { isStale: false, reason: "no_signal" };
+  const lastSignalMs = new Date(lastSignal).getTime();
+  if (!Number.isFinite(lastSignalMs)) return { isStale: false, reason: "invalid_signal" };
+  const ageMs = nowMs - lastSignalMs;
+  if (ageMs <= ttlMs) return { isStale: false, ageMs, reason: "within_ttl" };
+  return { isStale: true, ageMs };
+}
+var init_job_aging = __esm({
+  "server/lib/job-aging.ts"() {
+    "use strict";
+  }
+});
+
+// server/services/stale-jobs-sweeper.ts
+var stale_jobs_sweeper_exports = {};
+__export(stale_jobs_sweeper_exports, {
+  getStaleJobsSweepStatus: () => getStaleJobsSweepStatus,
+  startStaleJobsSweeper: () => startStaleJobsSweeper
+});
+function getStaleJobsSweepStatus() {
+  return { isProcessing: isProcessing3, intervalMs: SWEEP_INTERVAL_MS2, jobTypes: JOB_TYPES.map((t) => ({ label: t.label, prefix: t.keyPrefix, ttlMs: t.ttlMs })), lastRun: lastRun2 };
+}
+async function runSweep() {
+  if (isProcessing3) return;
+  isProcessing3 = true;
+  const started = Date.now();
+  lastRun2.startedAt = new Date(started).toISOString();
+  lastRun2.finishedAt = null;
+  lastRun2.scanned = 0;
+  lastRun2.aged = 0;
+  lastRun2.byType = {};
+  lastRun2.errors = 0;
+  try {
+    const likePatterns = JOB_TYPES.map(() => `"settingKey" LIKE ?`).join(" OR ");
+    const params = JOB_TYPES.map((t) => `${t.keyPrefix}%`);
+    const rows = await storage.rawAll(
+      `SELECT "organizationId", "settingKey", "settingValue" FROM api_settings WHERE ${likePatterns}`,
+      ...params
+    );
+    const now3 = Date.now();
+    for (const row of rows) {
+      lastRun2.scanned++;
+      try {
+        const raw = row.settingValue;
+        if (!raw) continue;
+        const job = JSON.parse(raw);
+        const jobType = JOB_TYPES.find((t) => row.settingKey.startsWith(t.keyPrefix));
+        if (!jobType) continue;
+        const decision = isStaleJob(job, jobType.ttlMs, now3);
+        if (!decision.isStale) continue;
+        const ageMs = decision.ageMs;
+        job.status = "failed";
+        job.error = `Stale-job sweeper: no heartbeat for ${Math.round(ageMs / 6e4)} minutes (TTL ${Math.round(jobType.ttlMs / 6e4)}m). Likely the worker crashed or the server restarted mid-run.`;
+        job.finishedAt = (/* @__PURE__ */ new Date()).toISOString();
+        await storage.setApiSetting(row.organizationId, row.settingKey, JSON.stringify(job));
+        lastRun2.aged++;
+        lastRun2.byType[jobType.label] = (lastRun2.byType[jobType.label] || 0) + 1;
+        console.log(`[StaleJobs] Aged out ${row.settingKey} (org=${row.organizationId}) \u2014 running for ${Math.round(ageMs / 6e4)}m`);
+      } catch (e) {
+        lastRun2.errors++;
+      }
+    }
+    if (lastRun2.aged > 0) {
+      console.log(`[StaleJobs] Cycle complete \u2014 scanned ${lastRun2.scanned} rows, aged ${lastRun2.aged} (${Object.entries(lastRun2.byType).map(([k, v]) => `${k}:${v}`).join(", ") || "none"})`);
+    }
+  } catch (e) {
+    console.error("[StaleJobs] Sweep failed:", e?.message || e);
+    lastRun2.errors++;
+  } finally {
+    lastRun2.finishedAt = (/* @__PURE__ */ new Date()).toISOString();
+    lastRun2.durationMs = Date.now() - started;
+    isProcessing3 = false;
+  }
+}
+function startStaleJobsSweeper() {
+  setTimeout(() => {
+    runSweep();
+    setInterval(runSweep, SWEEP_INTERVAL_MS2);
+    console.log(`[StaleJobs] Sweeper started \u2014 every ${SWEEP_INTERVAL_MS2 / 6e4}min. Job types: ${JOB_TYPES.map((t) => `${t.label}(${t.ttlMs / 6e4}m)`).join(", ")}`);
+  }, BOOT_DELAY_MS2);
+}
+var SWEEP_INTERVAL_MS2, BOOT_DELAY_MS2, JOB_TYPES, isProcessing3, lastRun2;
+var init_stale_jobs_sweeper = __esm({
+  "server/services/stale-jobs-sweeper.ts"() {
+    "use strict";
+    init_storage();
+    init_job_aging();
+    SWEEP_INTERVAL_MS2 = 5 * 60 * 1e3;
+    BOOT_DELAY_MS2 = 120 * 1e3;
+    JOB_TYPES = [
+      { keyPrefix: "lead_intel_job_", ttlMs: 60 * 60 * 1e3, label: "lead-intel" },
+      { keyPrefix: "bulk_analyze_job_", ttlMs: 60 * 60 * 1e3, label: "bulk-template-analyze" }
+    ];
+    isProcessing3 = false;
+    lastRun2 = {
+      startedAt: null,
+      finishedAt: null,
+      durationMs: null,
+      scanned: 0,
+      aged: 0,
+      byType: {},
+      errors: 0
+    };
+  }
+});
+
+// server/services/reply-quality-engine.ts
+var reply_quality_engine_exports = {};
+__export(reply_quality_engine_exports, {
+  batchScoreOrgReplies: () => batchScoreOrgReplies,
+  qualityLabelFromScore: () => qualityLabelFromScore,
+  scoreInboxMessage: () => scoreInboxMessage
+});
+function qualityLabelFromScore(score) {
+  if (score >= 8) return "Hot";
+  if (score >= 6) return "Warm";
+  if (score >= 4) return "Neutral";
+  if (score >= 2) return "Declined";
+  return "Negative";
+}
+async function getAzureSettings(organizationId) {
+  const settings = await storage.getApiSettingsWithAzureFallback(organizationId);
+  return {
+    endpoint: settings.azure_openai_endpoint,
+    apiKey: settings.azure_openai_api_key,
+    deployment: settings.azure_openai_deployment,
+    apiVersion: settings.azure_openai_api_version || "2024-08-01-preview"
+  };
+}
+async function scoreWithAzure(subject, snippet, body, azure) {
+  const { endpoint, apiKey, deployment, apiVersion } = azure;
+  if (!endpoint || !apiKey || !deployment) {
+    return ruleBased(snippet || body);
+  }
+  const text = (snippet || body || "").slice(0, 800);
+  if (!text.trim()) return { score: 5, label: "Neutral" };
+  const prompt = `You are an email sales analyst. Rate the quality of this prospect reply for a sales rep who needs to prioritize follow-ups.
+
+Subject: ${subject || "N/A"}
+Reply: ${text}
+
+Score 0-10:
+- 9-10: Strong positive intent (wants meeting, ready to buy, asks pricing/next steps)
+- 7-8: Positive interest (wants more info, open to discussion)
+- 5-6: Neutral / informational question
+- 3-4: Polite decline or lukewarm
+- 1-2: Firm no or unsubscribe
+- 0: Spam / auto-reply
+
+Respond ONLY with JSON: {"score": <integer 0-10>, "label": "<Hot|Warm|Neutral|Declined|Negative>"}`;
+  const url = `${endpoint.replace(/\/$/, "")}/openai/deployments/${deployment}/chat/completions?api-version=${apiVersion}`;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 1e4);
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "api-key": apiKey },
+      body: JSON.stringify({
+        messages: [
+          { role: "system", content: "You are an email engagement analyst. Respond only with valid JSON." },
+          { role: "user", content: prompt }
+        ],
+        temperature: 0.1,
+        max_tokens: 60
+      }),
+      signal: ac.signal
+    });
+    if (!resp.ok) {
+      console.error(`[ReplyQuality] Azure error ${resp.status}`);
+      return ruleBased(text);
+    }
+    const data = await resp.json();
+    const content = data.choices?.[0]?.message?.content || "";
+    const match = content.match(/\{[\s\S]*\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      const score = Math.min(10, Math.max(0, parseInt(parsed.score) || 5));
+      const label = parsed.label || qualityLabelFromScore(score);
+      return { score, label };
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[ReplyQuality] Scoring error: ${msg}`);
+  } finally {
+    clearTimeout(timer);
+  }
+  return ruleBased(snippet || body);
+}
+function ruleBased(text) {
+  const t = (text || "").toLowerCase();
+  if (/interested|meeting|call|demo|pricing|next step|sounds good|let.s connect|great|love to/i.test(t))
+    return { score: 8, label: "Hot" };
+  if (/tell me more|more info|question|could you|would like|please share/i.test(t))
+    return { score: 6, label: "Warm" };
+  if (/not interested|unsubscribe|remove me|stop|don.t contact/i.test(t))
+    return { score: 1, label: "Negative" };
+  if (/no thank|not right now|maybe later|not at this time/i.test(t))
+    return { score: 3, label: "Declined" };
+  return { score: 5, label: "Neutral" };
+}
+async function scoreInboxMessage(messageId, organizationId) {
+  try {
+    const msg = await storage.getInboxMessage(messageId);
+    if (!msg) return null;
+    if (!["positive", "negative", "general"].includes(msg.replyType || "")) return null;
+    const azure = await getAzureSettings(organizationId);
+    const result = await scoreWithAzure(msg.subject || "", msg.snippet || "", msg.body || "", azure);
+    await storage.rawRun(
+      `UPDATE unified_inbox SET "replyQualityScore"=?, "replyQualityLabel"=? WHERE id=?`,
+      result.score,
+      result.label,
+      messageId
+    );
+    return result;
+  } catch (e) {
+    console.error(`[ReplyQuality] scoreInboxMessage error for ${messageId}:`, e instanceof Error ? e.message : e);
+    return null;
+  }
+}
+async function batchScoreOrgReplies(organizationId, limit = 100) {
+  const rows = await storage.rawAll(
+    `SELECT id FROM unified_inbox
+     WHERE "organizationId" = ?
+       AND "replyType" IN ('positive','negative','general')
+       AND "replyQualityScore" IS NULL
+     ORDER BY "receivedAt" DESC
+     LIMIT ?`,
+    organizationId,
+    limit
+  );
+  let scored = 0;
+  let errors = 0;
+  const azure = await getAzureSettings(organizationId);
+  for (const row of rows) {
+    try {
+      const msg = await storage.getInboxMessage(row.id);
+      if (!msg) {
+        errors++;
+        continue;
+      }
+      const result = await scoreWithAzure(msg.subject || "", msg.snippet || "", msg.body || "", azure);
+      await storage.rawRun(
+        `UPDATE unified_inbox SET "replyQualityScore"=?, "replyQualityLabel"=? WHERE id=?`,
+        result.score,
+        result.label,
+        row.id
+      );
+      scored++;
+    } catch (e) {
+      errors++;
+      console.error(`[ReplyQuality] batch error for ${row.id}:`, e instanceof Error ? e.message : e);
+    }
+  }
+  console.log(`[ReplyQuality] Batch complete for org ${organizationId}: scored=${scored} errors=${errors}`);
+  return { scored, errors };
+}
+var init_reply_quality_engine = __esm({
+  "server/services/reply-quality-engine.ts"() {
     "use strict";
     init_storage();
   }
@@ -10538,6 +11404,533 @@ var init_campaign_planner_agent = __esm({
           properties: {},
           required: []
         }
+      }
+    ];
+  }
+});
+
+// server/services/campaign-review-agent.ts
+var campaign_review_agent_exports = {};
+__export(campaign_review_agent_exports, {
+  getCachedReview: () => getCachedReview,
+  runCampaignReviewAgent: () => runCampaignReviewAgent,
+  saveCachedReview: () => saveCachedReview
+});
+async function getClaudeApiKey2(organizationId) {
+  const settings = await storage.getApiSettings(organizationId);
+  const superSettings = await storage.getApiSettings("superadmin");
+  return settings?.claude_api_key || superSettings?.claude_api_key || process.env.CLAUDE_API_KEY;
+}
+async function callClaude2(apiKey, messages, tools, system) {
+  const body = {
+    model: "claude-sonnet-4-6",
+    max_tokens: 4096,
+    tools,
+    messages
+  };
+  if (system) body.system = system;
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01"
+    },
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Claude API error ${response.status}: ${err}`);
+  }
+  return response.json();
+}
+function stripHtml(html) {
+  return html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
+function truncate(text, max = 800) {
+  return text.length <= max ? text : text.slice(0, max) + "\u2026";
+}
+async function toolGetCampaignOverview(organizationId, campaignId) {
+  const campaign = await storage.rawGet(
+    `SELECT c.id, c.name, c.description, c.status, c."totalRecipients", c."sentCount",
+            c."openedCount", c."clickedCount", c."repliedCount", c."bouncedCount",
+            c.subject, c."createdAt", c."updatedAt",
+            ea.email as "senderEmail", ea."senderName", ea."dailyLimit"
+     FROM campaigns c
+     LEFT JOIN email_accounts ea ON ea.id = c."emailAccountId"
+     WHERE c.id = $1 AND c."organizationId" = $2`,
+    campaignId,
+    organizationId
+  );
+  if (!campaign) return JSON.stringify({ error: "Campaign not found" });
+  const stepsRow = await storage.rawGet(
+    `SELECT COUNT(*) as cnt
+     FROM campaign_followups cf
+     JOIN followup_steps fs ON fs."sequenceId" = cf."sequenceId"
+     WHERE cf."campaignId" = $1 AND cf."isActive" = 1`,
+    campaignId
+  );
+  return JSON.stringify({
+    id: campaign.id,
+    name: campaign.name,
+    description: campaign.description || "",
+    status: campaign.status,
+    totalRecipients: campaign.totalRecipients || 0,
+    sentCount: campaign.sentCount || 0,
+    openedCount: campaign.openedCount || 0,
+    clickedCount: campaign.clickedCount || 0,
+    repliedCount: campaign.repliedCount || 0,
+    bouncedCount: campaign.bouncedCount || 0,
+    subject: campaign.subject || "",
+    senderEmail: campaign.senderEmail || "",
+    senderName: campaign.senderName || "",
+    dailyLimit: campaign.dailyLimit || 500,
+    followupStepCount: parseInt(stepsRow?.cnt || "0"),
+    createdAt: campaign.createdAt
+  });
+}
+async function toolGetCampaignSteps(organizationId, campaignId) {
+  const campaign = await storage.rawGet(
+    `SELECT subject, content FROM campaigns WHERE id = $1 AND "organizationId" = $2`,
+    campaignId,
+    organizationId
+  );
+  const steps = [];
+  if (campaign) {
+    steps.push({
+      stepNumber: 0,
+      subject: campaign.subject || "",
+      bodyText: truncate(stripHtml(campaign.content || "")),
+      delayDays: 0,
+      trigger: "initial"
+    });
+  }
+  const followupSteps = await storage.rawAll(
+    `SELECT fs."stepNumber", fs.subject, fs.content, fs."delayDays", fs."delayHours", fs.trigger
+     FROM campaign_followups cf
+     JOIN followup_steps fs ON fs."sequenceId" = cf."sequenceId"
+     WHERE cf."campaignId" = $1 AND cf."isActive" = 1
+     ORDER BY fs."stepNumber" ASC`,
+    campaignId
+  );
+  for (const step of followupSteps) {
+    steps.push({
+      stepNumber: step.stepNumber,
+      subject: step.subject || "",
+      bodyText: truncate(stripHtml(step.content || "")),
+      delayDays: step.delayDays || 0,
+      delayHours: step.delayHours || 0,
+      trigger: step.trigger || "no_reply"
+    });
+  }
+  return JSON.stringify(steps);
+}
+async function toolGetPerformanceStats(organizationId, campaignId) {
+  const stepStats = await storage.rawAll(
+    `SELECT
+       COALESCE("stepNumber", 0) as "stepNumber",
+       COUNT(*) as total,
+       SUM(CASE WHEN status IN ('sent','sending') THEN 1 ELSE 0 END) as sent,
+       SUM(CASE WHEN status = 'bounced' THEN 1 ELSE 0 END) as bounced,
+       SUM(CASE WHEN "openedAt" IS NOT NULL THEN 1 ELSE 0 END) as opened,
+       SUM(CASE WHEN "clickedAt" IS NOT NULL THEN 1 ELSE 0 END) as clicked,
+       SUM(CASE WHEN "repliedAt" IS NOT NULL THEN 1 ELSE 0 END) as replied
+     FROM messages
+     WHERE "campaignId" = $1
+     GROUP BY COALESCE("stepNumber", 0)
+     ORDER BY "stepNumber" ASC`,
+    campaignId
+  );
+  const enriched = stepStats.map((r) => {
+    const sent = parseInt(r.sent) || 0;
+    const opened = parseInt(r.opened) || 0;
+    const clicked = parseInt(r.clicked) || 0;
+    const replied = parseInt(r.replied) || 0;
+    const bounced = parseInt(r.bounced) || 0;
+    return {
+      stepNumber: parseInt(r.stepNumber),
+      sent,
+      openRate: sent > 0 ? Math.round(opened / sent * 100) : 0,
+      clickRate: sent > 0 ? Math.round(clicked / sent * 100) : 0,
+      replyRate: sent > 0 ? Math.round(replied / sent * 100) : 0,
+      bounceRate: sent > 0 ? Math.round(bounced / sent * 100) : 0
+    };
+  });
+  return JSON.stringify(enriched);
+}
+async function toolGetOrgBenchmarks(organizationId) {
+  const completed = await storage.rawAll(
+    `SELECT name, "sentCount", "openedCount", "clickedCount", "repliedCount", "bouncedCount"
+     FROM campaigns
+     WHERE "organizationId" = $1 AND status = 'completed' AND "sentCount" > 10
+     ORDER BY "updatedAt" DESC LIMIT 15`,
+    organizationId
+  );
+  if (completed.length === 0) {
+    return JSON.stringify({
+      campaignCount: 0,
+      avgOpenRate: null,
+      avgClickRate: null,
+      avgReplyRate: null,
+      avgBounceRate: null,
+      note: "No completed campaigns yet \u2014 using cold-email industry benchmarks (open: 20-25%, click: 2-4%, reply: 2-5%)"
+    });
+  }
+  let totalSent = 0, totalOpened = 0, totalClicked = 0, totalReplied = 0, totalBounced = 0;
+  for (const c of completed) {
+    const sent = c.sentCount || 0;
+    totalSent += sent;
+    totalOpened += c.openedCount || 0;
+    totalClicked += c.clickedCount || 0;
+    totalReplied += c.repliedCount || 0;
+    totalBounced += c.bouncedCount || 0;
+  }
+  return JSON.stringify({
+    campaignCount: completed.length,
+    avgOpenRate: totalSent > 0 ? Math.round(totalOpened / totalSent * 100) : 0,
+    avgClickRate: totalSent > 0 ? Math.round(totalClicked / totalSent * 100) : 0,
+    avgReplyRate: totalSent > 0 ? Math.round(totalReplied / totalSent * 100) : 0,
+    avgBounceRate: totalSent > 0 ? Math.round(totalBounced / totalSent * 100) : 0,
+    sampleCampaigns: completed.slice(0, 3).map((c) => ({ name: c.name, sent: c.sentCount }))
+  });
+}
+function extractReview(text) {
+  if (!text.includes("{")) return null;
+  const fenceIdx = text.indexOf("```");
+  if (fenceIdx !== -1) {
+    const afterFence = text.indexOf("{", fenceIdx);
+    const closeFence = text.lastIndexOf("```");
+    if (afterFence !== -1 && closeFence > afterFence) {
+      const candidate = text.slice(afterFence, text.lastIndexOf("}", closeFence) + 1);
+      const parsed = tryParseReview(candidate);
+      if (parsed) return parsed;
+    }
+  }
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start !== -1 && end > start) {
+    const parsed = tryParseReview(text.slice(start, end + 1));
+    if (parsed) return parsed;
+  }
+  return null;
+}
+function tryParseReview(jsonStr) {
+  try {
+    const r = JSON.parse(jsonStr);
+    if (!r || typeof r !== "object") return null;
+    if (typeof r.overallScore !== "number") return null;
+    if (!Array.isArray(r.steps)) r.steps = [];
+    if (!Array.isArray(r.recommendations)) r.recommendations = [];
+    r.generatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    return r;
+  } catch {
+    return null;
+  }
+}
+function buildSystemPrompt(mode) {
+  const base = `You are a B2B email campaign intelligence analyst for AImailPilot.
+Your job is to review campaigns and provide actionable, specific feedback.
+
+MANDATORY tool call sequence:
+1. get_campaign_overview \u2014 understand the campaign basics
+2. get_campaign_steps \u2014 read all email content
+3. get_performance_stats \u2014 check actual metrics (may be empty for pre_launch)
+4. get_org_benchmarks \u2014 compare against org history
+
+EMAIL THREADING \u2014 CRITICAL:
+- Step 0 (initial email) is the ONLY step with a subject line.
+- Steps 1, 2, 3... are follow-up replies. They intentionally have NO subject \u2014 they automatically thread as "Re: {step0 subject}" in Gmail and Outlook.
+- NEVER recommend adding a subject line to follow-up steps (stepNumber >= 1). That would break threading and create separate email chains.
+- For follow-up steps, set subjectLine score to 10 (no subject = correct behavior) and do NOT include subject in issues or suggestions.
+- Only evaluate and suggest a new subject for Step 0.
+
+SCORING RULES:
+- Score each step's subjectLine, bodyContent, cta, personalization, timing on 1-10
+- subjectLine: only scored for stepNumber=0. clarity, curiosity, length (<60 chars ideal), no spam words. Follow-up steps always score 10 here.
+- bodyContent: relevance, brevity, professional tone, value proposition clarity
+- cta: single clear ask, specific action, not vague ("let me know" scores 3)
+- personalization: use of {{firstName}}/{{company}}, contextual relevance
+- timing: appropriate delay between steps (2-5 days ideal for most B2B)
+- overallScore = weighted average of all step scores + campaign-level factors
+- overallGrade: 9-10=A, 7-8=B, 5-6=C, 3-4=D, 1-2=F
+- suggestedSubject: for stepNumber=0 ONLY \u2014 if the subject scores < 8, provide a concise improved alternative (under 55 chars). Otherwise omit.
+- suggestedBody: provide a COMPLETE improved version of the email body as plain text (no HTML tags) for **EVERY step** where bodyContent score < 9. This includes follow-up steps (stepNumber 1, 2, 3...) \u2014 do NOT skip follow-ups. Write the full rewritten body, not just the changed parts.
+
+  **MANDATORY EXTRACTION STEP \u2014 perform this BEFORE writing suggestedBody:**
+
+  Step A \u2014 Read the original step body. Identify the signature block: it is everything from the closing salutation onwards (typical salutations: "Best,", "Regards,", "Thanks,", "Warm regards,", "Sincerely,", "Cheers,"). The signature continues to the end of the body and includes the sender's name, job title, company, contact details, social links, disclaimers \u2014 all of it.
+
+  Step B \u2014 Copy that exact signature block to a buffer. This buffer is now sacred \u2014 do not paraphrase, regenerate, summarize, or shorten it in any way. If the original signature has 8 lines, the buffer has 8 lines.
+
+  Step C \u2014 Write your rewritten opening + value prop + CTA. Then append the buffer verbatim. Your suggestedBody = rewritten_top + "
+
+" + verbatim_signature_buffer.
+
+  **HARD RULES:**
+
+  (1) NEVER invent or regenerate signature content from your own knowledge of the sender. Even if you "know" who Ayesha Ansari is, you must extract her signature from the actual email body provided to you, not write a fresh one. If the original signature lists a phone number, your output has the same phone number. If the original has 4 lines of contact info, your output has those same 4 lines.
+
+  (2) NEVER use generic placeholders: "[Sender Name]", "[Your Name]", "[Title]", "[Company]", "[Email]", "[Phone]" are FORBIDDEN. If you find yourself about to write any bracketed placeholder, stop and copy the actual text from the original instead.
+
+  (3) **FACTUAL DETAILS \u2014 copy verbatim.** Event names (e.g. "AGBA 17th Edition", "Bharat AI Innovation 2026"), dates, edition numbers, locations, company names, product names, deadlines, URLs, phone numbers, prices, percentages, statistics. Never paraphrase, abbreviate, or update these. If the original says "17th Edition", do not write "this edition" or "the 2026 edition".
+
+  (4) **MERGE TAGS \u2014 keep all double-curly merge tags (firstName, company, title, lastName, etc.) exactly as they appear in the original.** Do not invent new merge tags. Do not remove existing ones. Do not change the double-curly format to square brackets or any other syntax.
+
+  Only rewrite: the opening hook sentence(s), the value proposition phrasing, and the CTA sentence. Greeting line ("Dear {{firstName}},") and signature block stay 100% identical to original.
+
+  **VERIFICATION CHECK before submitting suggestedBody:** Compare the last N lines of your suggestedBody to the last N lines of the original. They must be character-for-character identical. If they differ, fix it or omit suggestedBody.
+
+  If you cannot preserve the signature and facts verbatim after this verification, omit suggestedBody entirely \u2014 a missing suggestedBody is far better than a rewrite that strips the signature.
+- bodyChangesSummary: when suggestedBody is provided, include 2-4 short bullet strings describing what changed (e.g. "Opening rewritten for stronger hook", "CTA changed from 'let me know' to a specific ask", "Shortened to 3 paragraphs"). Otherwise omit.
+
+OBJECTIVE INFERENCE RULES:
+- Look at campaign name, subject lines, body CTA, and audience description
+- Infer the most likely business goal (meetings, nominations, registrations, deals, awareness, etc.)
+- "defined" = true only if user explicitly stated objective in campaign name or description
+
+CRITICAL OUTPUT RULE:
+After all 4 tool calls, output ONLY a raw JSON object. No markdown, no explanation. Start with { end with }.`;
+  if (mode === "pre_launch") {
+    return base + `
+
+MODE: pre_launch \u2014 Campaign not yet sent (draft or scheduled).
+Focus: content quality, predictions, risks before sending.
+
+PREDICTIONS must be specific ranges based on:
+- Content quality scores
+- Org benchmarks (or industry defaults if no history)
+- Audience size and targeting
+
+JSON schema (fill every field):
+{
+  "mode": "pre_launch",
+  "generatedAt": "",
+  "overallScore": 7,
+  "overallGrade": "B",
+  "objective": { "text": "...", "defined": false, "likelihood": "High" },
+  "steps": [
+    {
+      "stepNumber": 0,
+      "subject": "...",
+      "scores": { "subjectLine": 7, "bodyContent": 6, "cta": 5, "personalization": 8, "timing": 9 },
+      "stepScore": 7,
+      "suggestedSubject": "Shorter alternative subject under 55 chars",
+      "suggestedBody": "Complete rewritten body \u2014 preserve signature and all facts verbatim (only when bodyContent < 7)",
+      "bodyChangesSummary": ["Opening rewritten for stronger hook", "CTA changed to specific ask"],
+      "issues": ["..."],
+      "suggestions": ["..."]
+    }
+  ],
+  "predictions": {
+    "openRate": "18-24%",
+    "clickRate": "1-3%",
+    "replyRate": "2-4%",
+    "confidence": "Medium",
+    "notes": "..."
+  },
+  "recommendations": ["...", "..."],
+  "degradation": null,
+  "postMortem": null
+}`;
+  }
+  if (mode === "live") {
+    return base + `
+
+MODE: live \u2014 Campaign is currently active or paused.
+Focus: compare actual vs expected, flag degradation, mid-flight recommendations.
+
+DEGRADATION detection rules:
+- Open rate < 50% of org benchmark \u2192 degradation detected
+- Reply rate = 0 after 30+ sends \u2192 degradation detected
+- Bounce rate > 8% \u2192 degradation detected
+- If degradation detected, provide specific recommendation (pause? rewrite subject? check sender reputation?)
+
+Include actualStats in each step that has performance data. Compare to benchmarks.
+performance field: "above_average" if actual > 110% of benchmark, "below_average" if < 70%, else "average"
+
+JSON schema:
+{
+  "mode": "live",
+  "generatedAt": "",
+  "overallScore": 7,
+  "overallGrade": "B",
+  "objective": { "text": "...", "defined": false, "likelihood": "High" },
+  "steps": [
+    {
+      "stepNumber": 0,
+      "subject": "...",
+      "scores": { "subjectLine": 7, "bodyContent": 6, "cta": 5, "personalization": 8, "timing": 9 },
+      "stepScore": 7,
+      "suggestedBody": "Complete rewritten body \u2014 preserve signature and all facts verbatim (only when bodyContent < 7)",
+      "bodyChangesSummary": ["Opening rewritten", "CTA strengthened"],
+      "issues": ["..."],
+      "suggestions": ["..."],
+      "actualStats": { "sent": 100, "openRate": 22, "clickRate": 2, "replyRate": 3, "bounceRate": 1 },
+      "performance": "average"
+    }
+  ],
+  "degradation": {
+    "detected": false,
+    "details": "...",
+    "recommendation": "..."
+  },
+  "recommendations": ["...", "..."],
+  "predictions": null,
+  "postMortem": null
+}`;
+  }
+  return base + `
+
+MODE: post_mortem \u2014 Campaign is completed.
+Focus: full analysis of what worked and what didn't, design-better-next recommendations.
+
+bestStepNumber = the step with the highest reply rate (or open rate if no replies).
+audienceFitAssessment: assess if the email content matched the likely audience based on subject/body tone.
+
+JSON schema:
+{
+  "mode": "post_mortem",
+  "generatedAt": "",
+  "overallScore": 7,
+  "overallGrade": "B",
+  "objective": { "text": "...", "defined": false, "likelihood": "High" },
+  "steps": [
+    {
+      "stepNumber": 0,
+      "subject": "...",
+      "scores": { "subjectLine": 7, "bodyContent": 6, "cta": 5, "personalization": 8, "timing": 9 },
+      "stepScore": 7,
+      "suggestedBody": "Complete rewritten body \u2014 preserve signature and all facts verbatim (only when bodyContent < 7)",
+      "bodyChangesSummary": ["Opening rewritten", "CTA strengthened"],
+      "issues": ["..."],
+      "suggestions": ["..."],
+      "actualStats": { "sent": 100, "openRate": 22, "clickRate": 2, "replyRate": 3, "bounceRate": 1 },
+      "performance": "average"
+    }
+  ],
+  "postMortem": {
+    "whatWorked": ["...", "..."],
+    "whatDidntWork": ["...", "..."],
+    "improvementsForNext": ["...", "..."],
+    "audienceFitAssessment": "...",
+    "bestStepNumber": 0
+  },
+  "recommendations": ["...", "..."],
+  "degradation": null,
+  "predictions": null
+}`;
+}
+async function runCampaignReviewAgent(organizationId, campaignId, mode) {
+  const apiKey = await getClaudeApiKey2(organizationId);
+  if (!apiKey) {
+    throw new Error("Claude API key not configured. Add it in Advanced Settings \u2192 Claude API Key.");
+  }
+  const systemPrompt = buildSystemPrompt(mode);
+  const messages = [
+    {
+      role: "user",
+      content: `Review campaign ID: ${campaignId}. Mode: ${mode}. Call all 4 tools in sequence then output the JSON review.`
+    }
+  ];
+  let toolCallsMade = 0;
+  for (let iteration = 0; iteration < 10; iteration++) {
+    const response = await callClaude2(apiKey, messages, TOOLS2, systemPrompt);
+    console.log(`[CampaignReviewAgent] iter=${iteration} stop=${response.stop_reason} mode=${mode}`);
+    const toolUses = (response.content || []).filter((b) => b.type === "tool_use");
+    const textBlocks = (response.content || []).filter((b) => b.type === "text");
+    if (toolUses.length === 0) {
+      const text = textBlocks.map((b) => b.text).join("").trim();
+      console.log(`[CampaignReviewAgent] Final text (first 300): ${text.slice(0, 300)}`);
+      if (!text.includes("{") && toolCallsMade > 0) {
+        messages.push({ role: "assistant", content: response.content });
+        messages.push({
+          role: "user",
+          content: "Output ONLY the JSON review object now. Start with { and end with }. No other text."
+        });
+        continue;
+      }
+      const review = extractReview(text);
+      if (review) {
+        review.mode = mode;
+        review.generatedAt = (/* @__PURE__ */ new Date()).toISOString();
+        return review;
+      }
+      console.error("[CampaignReviewAgent] Could not extract review JSON:", text.slice(0, 400));
+      throw new Error("Agent did not return a valid review. Please try again.");
+    }
+    messages.push({ role: "assistant", content: response.content });
+    const toolResults = [];
+    for (const toolUse of toolUses) {
+      let result = "";
+      console.log(`[CampaignReviewAgent] Tool: ${toolUse.name}`);
+      try {
+        if (toolUse.name === "get_campaign_overview") {
+          result = await toolGetCampaignOverview(organizationId, campaignId);
+        } else if (toolUse.name === "get_campaign_steps") {
+          result = await toolGetCampaignSteps(organizationId, campaignId);
+        } else if (toolUse.name === "get_performance_stats") {
+          result = await toolGetPerformanceStats(organizationId, campaignId);
+        } else if (toolUse.name === "get_org_benchmarks") {
+          result = await toolGetOrgBenchmarks(organizationId);
+        } else {
+          result = JSON.stringify({ error: `Unknown tool: ${toolUse.name}` });
+        }
+      } catch (err) {
+        result = JSON.stringify({ error: err.message });
+        console.error(`[CampaignReviewAgent] Tool ${toolUse.name} error:`, err.message);
+      }
+      toolResults.push({ tool_use_id: toolUse.id, content: result });
+      toolCallsMade++;
+    }
+    messages.push({
+      role: "user",
+      content: toolResults.map((r) => ({
+        type: "tool_result",
+        tool_use_id: r.tool_use_id,
+        content: r.content
+      }))
+    });
+  }
+  throw new Error("Campaign review agent did not complete. Try again.");
+}
+async function getCachedReview(organizationId, campaignId) {
+  try {
+    const settings = await storage.getApiSettings(organizationId);
+    const raw = settings?.[`campaign_review_${campaignId}`];
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+async function saveCachedReview(organizationId, campaignId, review) {
+  await storage.setApiSetting(organizationId, `campaign_review_${campaignId}`, JSON.stringify(review));
+}
+var TOOLS2;
+var init_campaign_review_agent = __esm({
+  "server/services/campaign-review-agent.ts"() {
+    "use strict";
+    init_storage();
+    TOOLS2 = [
+      {
+        name: "get_campaign_overview",
+        description: "Get high-level campaign info: name, status, audience size, sent/open/click/reply counts, sender, and follow-up step count. Call this first.",
+        input_schema: { type: "object", properties: {}, required: [] }
+      },
+      {
+        name: "get_campaign_steps",
+        description: "Get all email steps: Step 0 (initial email) and follow-up steps with subjects, body text, timing, and trigger conditions.",
+        input_schema: { type: "object", properties: {}, required: [] }
+      },
+      {
+        name: "get_performance_stats",
+        description: "Get actual per-step performance stats (open rate, click rate, reply rate, bounce rate). Returns empty if no emails sent yet.",
+        input_schema: { type: "object", properties: {}, required: [] }
+      },
+      {
+        name: "get_org_benchmarks",
+        description: "Get this organization's historical average open/click/reply rates from past completed campaigns for comparison.",
+        input_schema: { type: "object", properties: {}, required: [] }
       }
     ];
   }
@@ -12460,6 +13853,33 @@ var CampaignEngine = class {
     } catch (e) {
     }
     console.log(`[CampaignEngine] Campaign ${campaignId} entering for loop with ${contacts.length} contacts`);
+    let activeSendingConfig = sendingConfig;
+    let dbStatusPaused = false;
+    let lastConfigRefreshAt = Date.now();
+    const CONFIG_REFRESH_INTERVAL_MS = 6e4;
+    const refreshSendingConfigIfStale = async () => {
+      if (Date.now() - lastConfigRefreshAt < CONFIG_REFRESH_INTERVAL_MS) return;
+      try {
+        const fresh = await storage.getCampaign(campaignId);
+        if (fresh) {
+          if (fresh.sendingConfig !== void 0) {
+            const newConfig = fresh.sendingConfig;
+            const before = JSON.stringify(activeSendingConfig?.autopilot || null);
+            const after = JSON.stringify(newConfig?.autopilot || null);
+            if (before !== after) {
+              console.log(`[CampaignEngine] Campaign ${campaignId} sendingConfig refreshed from DB \u2014 autopilot ${activeSendingConfig?.autopilot?.enabled ? "ON" : "OFF"} \u2192 ${newConfig?.autopilot?.enabled ? "ON" : "OFF"}`);
+            }
+            activeSendingConfig = newConfig;
+          }
+          if (fresh.status === "paused" || fresh.status === "cancelled" || fresh.status === "archived") {
+            console.log(`[CampaignEngine] Campaign ${campaignId} DB status is "${fresh.status}" \u2014 halting in-memory send loop`);
+            dbStatusPaused = true;
+          }
+        }
+      } catch (e) {
+      }
+      lastConfigRefreshAt = Date.now();
+    };
     for (let i = 0; i < contacts.length; i++) {
       if (i === 0) console.log(`[CampaignEngine] Campaign ${campaignId} processing FIRST contact: ${contacts[i]?.email}`);
       if (!tracker || tracker.paused) {
@@ -12479,7 +13899,23 @@ var CampaignEngine = class {
         });
       }
       if (!this.activeCampaigns.has(campaignId)) break;
-      const windowCheck = this.checkSendingWindow(sendingConfig);
+      await refreshSendingConfigIfStale();
+      if (dbStatusPaused) {
+        console.log(`[CampaignEngine] Campaign ${campaignId} halted: DB status changed externally`);
+        if (localSentCount > 0 || localBouncedCount > 0) {
+          const updatedCampaign = await storage.getCampaign(campaignId);
+          if (updatedCampaign) {
+            await storage.updateCampaign(campaignId, {
+              sentCount: (updatedCampaign.sentCount || 0) + localSentCount,
+              bouncedCount: (updatedCampaign.bouncedCount || 0) + localBouncedCount
+            });
+          }
+          if (localSentCount > 0) await storage.incrementDailySent(emailAccount.id, localSentCount);
+        }
+        this.activeCampaigns.delete(campaignId);
+        return;
+      }
+      const windowCheck = this.checkSendingWindow(activeSendingConfig);
       if (!windowCheck.canSend) {
         console.log(`[CampaignEngine] Campaign ${campaignId} outside sending window: ${windowCheck.reason}. Pausing for ${Math.round((windowCheck.pauseUntilMs || 0) / 6e4)} minutes.`);
         if (localSentCount > 0 || localBouncedCount > 0) {
@@ -12502,7 +13938,8 @@ var CampaignEngine = class {
         const sleepUntil = Date.now() + (windowCheck.pauseUntilMs || 36e5);
         while (Date.now() < sleepUntil) {
           if (!this.activeCampaigns.has(campaignId)) return;
-          const recheck = this.checkSendingWindow(sendingConfig);
+          await refreshSendingConfigIfStale();
+          const recheck = this.checkSendingWindow(activeSendingConfig);
           if (recheck.canSend) break;
           await new Promise((resolve) => setTimeout(resolve, 6e4));
         }
@@ -12531,7 +13968,7 @@ var CampaignEngine = class {
         }
         await storage.updateCampaign(campaignId, { status: "paused", autoPaused: true });
         if (tracker) tracker.paused = true;
-        const sleepMs = this.msUntilNextSendWindow(sendingConfig?.autopilot, sendingConfig?.timezoneOffset || 0, sendingConfig?.timezone);
+        const sleepMs = this.msUntilNextSendWindow(activeSendingConfig?.autopilot, activeSendingConfig?.timezoneOffset || 0, activeSendingConfig?.timezone);
         const sleepUntil = Date.now() + sleepMs;
         while (Date.now() < sleepUntil) {
           if (!this.activeCampaigns.has(campaignId)) return;
@@ -16248,7 +17685,7 @@ async function checkCredits(apiKey) {
 }
 
 // server/routes.ts
-import { OAuth2Client as OAuth2Client5 } from "google-auth-library";
+import { OAuth2Client as OAuth2Client6 } from "google-auth-library";
 
 // server/services/warmup-engine.ts
 init_storage();
@@ -17408,7 +18845,39 @@ async function runBounceSyncAllOrgs(lookbackDays = 30) {
 
 // server/routes.ts
 init_lead_intelligence_engine();
-var loggedInUsers = /* @__PURE__ */ new Set();
+
+// server/lib/bounded-collections.ts
+var BoundedSet = class extends Set {
+  maxSize;
+  constructor(maxSize) {
+    super();
+    this.maxSize = maxSize;
+  }
+  add(value) {
+    if (!this.has(value) && this.size >= this.maxSize) {
+      const oldest = this.values().next().value;
+      if (oldest !== void 0) this.delete(oldest);
+    }
+    return super.add(value);
+  }
+};
+var BoundedMap = class extends Map {
+  maxSize;
+  constructor(maxSize) {
+    super();
+    this.maxSize = maxSize;
+  }
+  set(key, value) {
+    if (!this.has(key) && this.size >= this.maxSize) {
+      const oldest = this.keys().next().value;
+      if (oldest !== void 0) this.delete(oldest);
+    }
+    return super.set(key, value);
+  }
+};
+
+// server/routes.ts
+var loggedInUsers = new BoundedSet(1e4);
 function createRawEmail(opts) {
   let raw = "";
   raw += `From: ${opts.from}\r
@@ -17434,7 +18903,7 @@ function createRawEmail(opts) {
 }
 var PRODUCTION_DOMAIN = "aimailpilot.com";
 function createOAuth2Client(config) {
-  return new OAuth2Client5(config.clientId, config.clientSecret, config.redirectUri);
+  return new OAuth2Client6(config.clientId, config.clientSecret, config.redirectUri);
 }
 function getBaseUrlFromRequest(req) {
   let proto = req.headers["x-forwarded-proto"] || (req.secure ? "https" : "http");
@@ -17481,7 +18950,7 @@ function orgHasOutlookTokens(settings) {
   }
   return false;
 }
-var authCache = /* @__PURE__ */ new Map();
+var authCache = new BoundedMap(1e4);
 var AUTH_CACHE_TTL = 6e4;
 var requireAuth = async (req, res, next) => {
   const userId = req.cookies?.user_id || req.session?.userId;
@@ -17863,6 +19332,12 @@ async function registerRoutes(app2) {
       const oauth2Client = createOAuth2Client({ clientId, clientSecret, redirectUri });
       const { tokens } = await oauth2Client.getToken(code);
       oauth2Client.setCredentials(tokens);
+      if (tokens.scope) {
+        console.log("[Auth] Google OAuth granted scopes:", tokens.scope);
+        if (!String(tokens.scope).includes("spreadsheets")) {
+          console.warn("[Auth] WARNING: spreadsheets scope NOT in granted scopes \u2014 user likely declined that scope on the consent screen, or the OAuth client config in Google Cloud doesn't include it.");
+        }
+      }
       const userInfoResponse = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
         headers: { Authorization: `Bearer ${tokens.access_token}` }
       });
@@ -17876,8 +19351,9 @@ async function registerRoutes(app2) {
       const picture = googleUser.picture || "";
       const firstName = googleUser.given_name || name.split(" ")[0] || "";
       const lastName = googleUser.family_name || name.split(" ").slice(1).join(" ") || "";
-      if (purpose === "add_sender") {
-        console.log("[Auth] Gmail-connect flow for:", email, "stateOrgId:", stateOrgId, "stateUserId:", stateUserId);
+      if (purpose === "add_sender" || purpose === "scan_only") {
+        const isScanOnly = purpose === "scan_only";
+        console.log(`[Auth] Gmail-connect flow for: ${email} (mode=${isScanOnly ? "scan_only" : "add_sender"}) stateOrgId: ${stateOrgId}, stateUserId: ${stateUserId}`);
         const orgId = stateOrgId || req.session?.user?.organizationId || "";
         let effectiveOrgId = orgId;
         if (!effectiveOrgId) {
@@ -17907,17 +19383,27 @@ async function registerRoutes(app2) {
         }
         const expiryToStore = tokens.expiry_date || (tokens.expires_in ? Date.now() + tokens.expires_in * 1e3 : Date.now() + 36e5);
         await storage.setApiSetting(effectiveOrgId, `gmail_sender_${email}_token_expiry`, String(expiryToStore));
-        const currentSettings = await storage.getApiSettings(effectiveOrgId);
-        const primaryEmail = currentSettings.gmail_user_email;
-        const isPrimaryAccount = !primaryEmail || primaryEmail === email;
-        if (isPrimaryAccount) {
-          console.log("[Auth] Updating org-level tokens (primary account or first account). email:", email);
-          await storage.setApiSetting(effectiveOrgId, "gmail_access_token", tokens.access_token);
-          if (tokens.refresh_token) await storage.setApiSetting(effectiveOrgId, "gmail_refresh_token", tokens.refresh_token);
-          if (tokens.expiry_date) await storage.setApiSetting(effectiveOrgId, "gmail_token_expiry", String(tokens.expiry_date));
-          if (!primaryEmail) await storage.setApiSetting(effectiveOrgId, "gmail_user_email", email);
+        if (stateOrgId && stateOrgId !== effectiveOrgId) {
+          if (tokens.access_token) await storage.setApiSetting(stateOrgId, `gmail_sender_${email}_access_token`, tokens.access_token);
+          if (tokens.refresh_token) await storage.setApiSetting(stateOrgId, `gmail_sender_${email}_refresh_token`, tokens.refresh_token);
+          await storage.setApiSetting(stateOrgId, `gmail_sender_${email}_token_expiry`, String(expiryToStore));
+          console.log(`[Auth] Active-session failsafe: also stored ${email} tokens in stateOrgId ${stateOrgId} (effectiveOrgId was overridden to ${effectiveOrgId})`);
+        }
+        if (!isScanOnly) {
+          const currentSettings = await storage.getApiSettings(effectiveOrgId);
+          const primaryEmail = currentSettings.gmail_user_email;
+          const isPrimaryAccount = !primaryEmail || primaryEmail === email;
+          if (isPrimaryAccount) {
+            console.log("[Auth] Updating org-level tokens (primary account or first account). email:", email);
+            await storage.setApiSetting(effectiveOrgId, "gmail_access_token", tokens.access_token);
+            if (tokens.refresh_token) await storage.setApiSetting(effectiveOrgId, "gmail_refresh_token", tokens.refresh_token);
+            if (tokens.expiry_date) await storage.setApiSetting(effectiveOrgId, "gmail_token_expiry", String(tokens.expiry_date));
+            if (!primaryEmail) await storage.setApiSetting(effectiveOrgId, "gmail_user_email", email);
+          } else {
+            console.log(`[Auth] NOT overwriting org-level tokens: primary is ${primaryEmail}, this is ${email} (per-sender tokens stored above)`);
+          }
         } else {
-          console.log(`[Auth] NOT overwriting org-level tokens: primary is ${primaryEmail}, this is ${email} (per-sender tokens stored above)`);
+          console.log(`[Auth] scan-only account ${email} \u2014 skipping org-level primary token assignment`);
         }
         const existingAccount = await storage.getEmailAccountIncludingInactive ? await storage.getEmailAccountIncludingInactive(effectiveOrgId, email) : (await storage.getEmailAccounts(effectiveOrgId)).find((a) => a.email.toLowerCase() === email.toLowerCase());
         if (!existingAccount) {
@@ -17939,9 +19425,10 @@ async function registerRoutes(app2) {
               provider: "gmail"
             },
             dailyLimit: getProviderDailyLimit("gmail"),
-            isActive: true
+            isActive: true,
+            scanOnly: isScanOnly
           });
-          console.log(`[Auth] New Gmail sender added via OAuth: ${email}`);
+          console.log(`[Auth] New Gmail ${isScanOnly ? "scan-only" : "sender"} added via OAuth: ${email}`);
         } else {
           const needsOAuthUpgrade = existingAccount.smtpConfig?.auth?.pass && existingAccount.smtpConfig.auth.pass !== "OAUTH_TOKEN";
           await storage.updateEmailAccount(existingAccount.id, {
@@ -17956,10 +19443,10 @@ async function registerRoutes(app2) {
             authLastFailureAt: null,
             authLastErrorCode: null
           });
-          console.log(`[Auth] Gmail sender ${existingAccount.isActive ? "reconnected" : "reactivated (was soft-deleted)"}: ${email} (id: ${existingAccount.id})`);
+          console.log(`[Auth] Gmail ${existingAccount.scanOnly ? "scan-only " : ""}${existingAccount.isActive ? "reconnected" : "reactivated (was soft-deleted)"}: ${email} (id: ${existingAccount.id})`);
         }
         const connectingUserId = stateUserId || req.session?.userId || req.cookies?.user_id || null;
-        if (connectingUserId) {
+        if (connectingUserId && !isScanOnly) {
           try {
             const userOrgs = await storage.getUserOrganizations(connectingUserId);
             for (const org of userOrgs) {
@@ -17996,6 +19483,9 @@ async function registerRoutes(app2) {
           } catch (e) {
             console.warn(`[Auth] Could not replicate Gmail account to other orgs:`, e);
           }
+        }
+        if (isScanOnly) {
+          return res.redirect("/#lead-intelligence?scan_only_connected=" + encodeURIComponent(email));
         }
         if (returnTo === "contacts") {
           return res.redirect("/?view=contacts&gmail_connected=" + encodeURIComponent(email));
@@ -18187,6 +19677,62 @@ async function registerRoutes(app2) {
       res.redirect("/?view=setup&error=gmail_connect_failed");
     }
   });
+  app2.get("/api/auth/gmail-scan-connect", requireAuth, async (req, res) => {
+    try {
+      const redirectUri = getGoogleRedirectUri(req);
+      const orgId = req.user.organizationId;
+      let clientId = "";
+      let clientSecret = "";
+      try {
+        const settings = await storage.getApiSettings(orgId);
+        if (settings.google_oauth_client_id) {
+          clientId = settings.google_oauth_client_id;
+          clientSecret = settings.google_oauth_client_secret || "";
+        }
+      } catch (e) {
+      }
+      if (!clientId || !clientSecret) {
+        try {
+          const superAdminOrgId = await storage.getSuperAdminOrgId();
+          if (superAdminOrgId && superAdminOrgId !== orgId) {
+            const superSettings = await storage.getApiSettings(superAdminOrgId);
+            if (superSettings.google_oauth_client_id) {
+              clientId = superSettings.google_oauth_client_id;
+              clientSecret = superSettings.google_oauth_client_secret || "";
+            }
+          }
+        } catch (e) {
+        }
+      }
+      if (!clientId || !clientSecret) {
+        const creds = await getStoredOAuthCredentials("google");
+        clientId = creds.clientId;
+        clientSecret = creds.clientSecret;
+      }
+      if (!clientId || !clientSecret) {
+        return res.redirect("/#lead-intelligence?error=oauth_not_configured");
+      }
+      const oauth2Client = createOAuth2Client({ clientId, clientSecret, redirectUri });
+      const authUrl = oauth2Client.generateAuthUrl({
+        access_type: "offline",
+        prompt: "consent",
+        // Scan-only intent — but request the same Gmail API scopes the existing
+        // tracker/scanner needs so a single OAuth grant covers all read paths.
+        // We deliberately also include userinfo for displayName.
+        scope: [
+          "https://www.googleapis.com/auth/gmail.readonly",
+          "https://www.googleapis.com/auth/userinfo.email",
+          "https://www.googleapis.com/auth/userinfo.profile"
+        ],
+        state: JSON.stringify({ redirectUri, purpose: "scan_only", orgId, userId: req.user.id, returnTo: "lead-intelligence" })
+      });
+      console.log("[Auth] Gmail scan-connect redirect for org:", orgId);
+      res.redirect(authUrl);
+    } catch (error) {
+      console.error("[Auth] Gmail scan-connect init error:", error);
+      res.redirect("/#lead-intelligence?error=gmail_scan_connect_failed");
+    }
+  });
   app2.get("/api/auth/gmail-connect/callback", async (req, res) => {
     const queryString = Object.entries(req.query).map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`).join("&");
     res.redirect(`/api/auth/google/callback?${queryString}`);
@@ -18301,8 +19847,9 @@ async function registerRoutes(app2) {
       const stateOrgId = parsedState.orgId || "";
       const stateUserId = parsedState.userId || "";
       console.log(`[Auth] Microsoft callback - email: ${email}, purpose: ${purpose}, stateOrgId: ${stateOrgId}, stateUserId: ${stateUserId}`);
-      if (purpose === "add_sender") {
-        console.log("[Auth] Outlook-connect flow for:", email, "stateOrgId:", stateOrgId, "stateUserId:", stateUserId);
+      if (purpose === "add_sender" || purpose === "scan_only") {
+        const isScanOnly = purpose === "scan_only";
+        console.log(`[Auth] Outlook-connect flow for: ${email} (mode=${isScanOnly ? "scan_only" : "add_sender"}) stateOrgId: ${stateOrgId}, stateUserId: ${stateUserId}`);
         let effectiveOrgId = stateOrgId || req.session?.user?.organizationId || "";
         if (!effectiveOrgId) {
           const orgIds = await storage.getAllOrganizationIds();
@@ -18335,14 +19882,18 @@ async function registerRoutes(app2) {
         const verifySettings = await storage.getApiSettings(effectiveOrgId);
         const storedToken = verifySettings[`outlook_sender_${email}_access_token`];
         console.log(`[Auth] Token storage verification for ${email}: token stored = ${!!storedToken}, org = ${effectiveOrgId}`);
-        const currentSettings = await storage.getApiSettings(effectiveOrgId);
-        const primaryMsEmail = currentSettings.microsoft_user_email;
-        const isPrimary = !primaryMsEmail || primaryMsEmail === email;
-        if (isPrimary) {
-          await storage.setApiSetting(effectiveOrgId, "microsoft_access_token", tokens.access_token);
-          if (tokens.refresh_token) await storage.setApiSetting(effectiveOrgId, "microsoft_refresh_token", tokens.refresh_token);
-          if (tokens.expires_in) await storage.setApiSetting(effectiveOrgId, "microsoft_token_expiry", String(Date.now() + tokens.expires_in * 1e3));
-          if (!primaryMsEmail) await storage.setApiSetting(effectiveOrgId, "microsoft_user_email", email);
+        if (!isScanOnly) {
+          const currentSettings = await storage.getApiSettings(effectiveOrgId);
+          const primaryMsEmail = currentSettings.microsoft_user_email;
+          const isPrimary = !primaryMsEmail || primaryMsEmail === email;
+          if (isPrimary) {
+            await storage.setApiSetting(effectiveOrgId, "microsoft_access_token", tokens.access_token);
+            if (tokens.refresh_token) await storage.setApiSetting(effectiveOrgId, "microsoft_refresh_token", tokens.refresh_token);
+            if (tokens.expires_in) await storage.setApiSetting(effectiveOrgId, "microsoft_token_expiry", String(Date.now() + tokens.expires_in * 1e3));
+            if (!primaryMsEmail) await storage.setApiSetting(effectiveOrgId, "microsoft_user_email", email);
+          }
+        } else {
+          console.log(`[Auth] scan-only Outlook account ${email} \u2014 skipping org-level primary token assignment`);
         }
         const existingAccount = await storage.getEmailAccountIncludingInactive ? await storage.getEmailAccountIncludingInactive(effectiveOrgId, email) : (await storage.getEmailAccounts(effectiveOrgId)).find((a) => a.email.toLowerCase() === email.toLowerCase());
         if (!existingAccount) {
@@ -18364,9 +19915,10 @@ async function registerRoutes(app2) {
               provider: "outlook"
             },
             dailyLimit: getProviderDailyLimit("outlook"),
-            isActive: true
+            isActive: true,
+            scanOnly: isScanOnly
           });
-          console.log(`[Auth] New Outlook sender added via OAuth: ${email}`);
+          console.log(`[Auth] New Outlook ${isScanOnly ? "scan-only" : "sender"} added via OAuth: ${email}`);
         } else {
           const needsOAuthUpgrade = existingAccount.smtpConfig?.auth?.pass && existingAccount.smtpConfig.auth.pass !== "OAUTH_TOKEN";
           await storage.updateEmailAccount(existingAccount.id, {
@@ -18381,10 +19933,10 @@ async function registerRoutes(app2) {
             authLastFailureAt: null,
             authLastErrorCode: null
           });
-          console.log(`[Auth] Outlook sender ${existingAccount.isActive ? "reconnected" : "reactivated (was soft-deleted)"}: ${email} (id: ${existingAccount.id})`);
+          console.log(`[Auth] Outlook ${existingAccount.scanOnly ? "scan-only " : ""}${existingAccount.isActive ? "reconnected" : "reactivated (was soft-deleted)"}: ${email} (id: ${existingAccount.id})`);
         }
         const connectingUserId = stateUserId || req.session?.userId || req.cookies?.user_id || null;
-        if (connectingUserId) {
+        if (connectingUserId && !isScanOnly) {
           try {
             const userOrgs = await storage.getUserOrganizations(connectingUserId);
             for (const org of userOrgs) {
@@ -18422,7 +19974,12 @@ async function registerRoutes(app2) {
             console.warn(`[Auth] Could not replicate email account to other orgs:`, e);
           }
         }
-        outlookReplyTracker.startAutoCheck(effectiveOrgId, 5);
+        if (!isScanOnly) {
+          outlookReplyTracker.startAutoCheck(effectiveOrgId, 5);
+        }
+        if (isScanOnly) {
+          return res.redirect("/#lead-intelligence?scan_only_connected=" + encodeURIComponent(email));
+        }
         return res.redirect("/?view=setup&outlook_connected=" + encodeURIComponent(email));
       }
       let dbUser = await storage.getUserByEmail(email);
@@ -18595,6 +20152,42 @@ async function registerRoutes(app2) {
     } catch (error) {
       console.error("[Auth] Outlook connect init error:", error);
       res.redirect("/?view=setup&error=outlook_connect_failed");
+    }
+  });
+  app2.get("/api/auth/outlook-scan-connect", requireAuth, async (req, res) => {
+    try {
+      const redirectUri = getMicrosoftRedirectUri(req);
+      const orgId = req.user.organizationId;
+      const { clientId, clientSecret } = await getStoredOAuthCredentials("microsoft");
+      if (!clientId || !clientSecret) {
+        return res.redirect("/#lead-intelligence?error=oauth_not_configured");
+      }
+      const scopes = [
+        "openid",
+        "profile",
+        "email",
+        "offline_access",
+        "https://graph.microsoft.com/User.Read",
+        "https://graph.microsoft.com/Mail.Read"
+      ];
+      const authUrl = new URL("https://login.microsoftonline.com/common/oauth2/v2.0/authorize");
+      authUrl.searchParams.set("client_id", clientId);
+      authUrl.searchParams.set("response_type", "code");
+      authUrl.searchParams.set("redirect_uri", redirectUri);
+      authUrl.searchParams.set("response_mode", "query");
+      authUrl.searchParams.set("scope", scopes.join(" "));
+      authUrl.searchParams.set("prompt", "consent");
+      authUrl.searchParams.set("state", JSON.stringify({
+        redirectUri,
+        purpose: "scan_only",
+        orgId,
+        userId: req.user.id
+      }));
+      console.log("[Auth] Outlook scan-connect redirect - org:", orgId);
+      res.redirect(authUrl.toString());
+    } catch (error) {
+      console.error("[Auth] Outlook scan-connect init error:", error);
+      res.redirect("/#lead-intelligence?error=outlook_scan_connect_failed");
     }
   });
   app2.get("/api/auth/google/status", async (req, res) => {
@@ -19239,6 +20832,48 @@ async function registerRoutes(app2) {
       });
     } catch (error) {
       res.status(500).json({ message: "Failed to fetch dashboard stats" });
+    }
+  });
+  app2.get("/api/email-accounts/lead-intel", requireAuth, async (req, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const allAccounts = storage.getEmailAccountsForLeadIntel ? await storage.getEmailAccountsForLeadIntel(orgId) : await storage.getEmailAccounts(orgId);
+      const isAdmin = req.user.role === "owner" || req.user.role === "admin";
+      const filtered = isAdmin ? allAccounts : allAccounts.filter((a) => a.userId === req.user.id);
+      const safe = filtered.map((a) => ({
+        id: a.id,
+        organizationId: a.organizationId,
+        userId: a.userId,
+        provider: a.provider,
+        email: a.email,
+        displayName: a.displayName,
+        dailyLimit: a.dailyLimit,
+        dailySent: a.dailySent,
+        isActive: a.isActive,
+        scanOnly: a.scanOnly === 1 || a.scanOnly === true,
+        leadIntelLastScanAt: a.leadIntelLastScanAt
+      }));
+      res.json(safe);
+    } catch (error) {
+      console.error("[email-accounts/lead-intel] error:", error?.message || error);
+      res.status(500).json({ message: "Failed to load lead intel accounts" });
+    }
+  });
+  app2.delete("/api/email-accounts/scan-only/:id", requireAuth, async (req, res) => {
+    try {
+      if (req.user.role !== "owner" && req.user.role !== "admin" && req.user.role !== "superadmin") {
+        return res.status(403).json({ message: "Admin only" });
+      }
+      const orgId = req.user.organizationId;
+      await storage.rawRun(
+        `UPDATE email_accounts SET "isActive" = 0 WHERE id = ? AND "organizationId" = ? AND "scanOnly" = 1`,
+        req.params.id,
+        orgId
+      );
+      res.json({ ok: true });
+    } catch (error) {
+      console.error("[email-accounts/scan-only delete] error:", error?.message || error);
+      res.status(500).json({ message: "Failed to disconnect scan-only account" });
     }
   });
   app2.get("/api/email-accounts", async (req, res) => {
@@ -20143,6 +21778,73 @@ Which account should I use and why? If I need to split across accounts, provide 
         }
       } catch (e) {
       }
+      try {
+        const autoPausedCampaigns = campaigns.filter((c) => c.status === "paused" && c.autoPaused === true);
+        const autoPausedIds = autoPausedCampaigns.map((c) => c.id);
+        if (autoPausedIds.length > 0) {
+          const placeholders = autoPausedIds.map(() => "?").join(",");
+          const surgeRows = await storage.rawAll(
+            `SELECT DISTINCT ON ("campaignId") "campaignId", "createdAt", metadata
+               FROM tracking_events
+               WHERE type = 'bounce_surge' AND "campaignId" IN (${placeholders})
+               ORDER BY "campaignId", "createdAt" DESC`,
+            ...autoPausedIds
+          );
+          const surgeByCampaign = {};
+          for (const r of surgeRows) {
+            let meta = r.metadata;
+            if (typeof meta === "string") {
+              try {
+                meta = JSON.parse(meta);
+              } catch {
+                meta = null;
+              }
+            }
+            surgeByCampaign[r.campaignId] = { at: r.createdAt, meta };
+          }
+          const accountIds = [...new Set(autoPausedCampaigns.map((c) => c.emailAccountId).filter(Boolean))];
+          const accountState = {};
+          if (accountIds.length > 0) {
+            const acctPh = accountIds.map(() => "?").join(",");
+            const acctRows = await storage.rawAll(
+              `SELECT id, "dailySent", "dailyLimit", email FROM email_accounts WHERE id IN (${acctPh})`,
+              ...accountIds
+            );
+            for (const r of acctRows) {
+              accountState[r.id] = {
+                dailySent: parseInt(r.dailySent || "0", 10) || 0,
+                dailyLimit: parseInt(r.dailyLimit || "0", 10) || 0,
+                email: r.email || ""
+              };
+            }
+          }
+          for (const c of autoPausedCampaigns) {
+            const surge = surgeByCampaign[c.id];
+            if (surge) {
+              c.pauseReason = "bounce_surge";
+              c.pauseReasonAt = surge.at;
+              c.pauseReasonDetail = surge.meta?.reason || "Bounce surge detected";
+              continue;
+            }
+            const acct = c.emailAccountId ? accountState[c.emailAccountId] : null;
+            if (acct && acct.dailyLimit > 0 && acct.dailySent >= acct.dailyLimit) {
+              c.pauseReason = "daily_limit";
+              c.pauseReasonDetail = `Daily send limit reached on ${acct.email} (${acct.dailySent}/${acct.dailyLimit}). Resumes automatically when the daily counter resets at UTC midnight.`;
+              continue;
+            }
+            const bounceRate = c.sentCount > 0 ? (c.bouncedCount || 0) / c.sentCount : 0;
+            if ((c.bouncedCount || 0) >= 5 && bounceRate >= 0.15) {
+              c.pauseReason = "bounce_surge_inferred";
+              c.pauseReasonDetail = `${c.bouncedCount} bounces in ${c.sentCount} sends (${Math.round(bounceRate * 100)}%) \u2014 likely bounce surge`;
+              continue;
+            }
+            c.pauseReason = "unknown";
+            c.pauseReasonDetail = "Auto-paused by system \u2014 possibly sending window closed or worker restart. Will resume automatically.";
+          }
+        }
+      } catch (e) {
+        console.error("[campaigns] pause-reason enrichment failed:", e.message);
+      }
       res.json(campaigns);
     } catch (error) {
       res.status(500).json({ message: "Failed to fetch campaigns" });
@@ -20206,7 +21908,11 @@ Which account should I use and why? If I need to split across accounts, provide 
       const updated = await storage.updateCampaign(req.params.id, patch);
       res.json(updated);
     } catch (error) {
-      res.status(500).json({ message: "Failed to update campaign" });
+      const safeBody = { ...req.body || {} };
+      if (safeBody.content) safeBody.content = `[${String(safeBody.content).length} chars omitted]`;
+      console.error("[PUT /api/campaigns/:id] error for campaign", req.params.id, "-", error?.message || error);
+      console.error("[PUT /api/campaigns/:id] request keys:", Object.keys(safeBody).join(","));
+      res.status(500).json({ message: "Failed to update campaign", error: error?.message || String(error) });
     }
   });
   app2.delete("/api/campaigns/:id", async (req, res) => {
@@ -20938,15 +22644,20 @@ Which account should I use and why? If I need to split across accounts, provide 
   app2.get("/api/campaigns/:id/messages", async (req, res) => {
     try {
       const campaign = await storage.getCampaign(req.params.id);
-      if (!campaign) return res.status(404).json({ message: "Campaign not found" });
+      if (!campaign) {
+        console.log(`[campaigns/messages] Campaign not found: ${req.params.id}`);
+        return res.status(404).json({ message: "Campaign not found" });
+      }
       const page = Math.max(1, parseInt(req.query.page) || 1);
       const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 25));
       const offset = (page - 1) * limit;
       const filter = req.query.filter || "all";
       const search = req.query.search || "";
       const { messages, total } = await storage.getCampaignMessagesFiltered(req.params.id, limit, offset, filter, search);
+      console.log(`[campaigns/messages] id=${req.params.id} filter=${filter} search=${search ? "yes" : "no"} page=${page} \u2192 returned messages=${messages.length}, total=${total}`);
       res.json({ messages, total, page, limit, totalPages: Math.ceil(total / limit) });
     } catch (err) {
+      console.error(`[campaigns/messages] error for id=${req.params.id}:`, err?.message || err);
       res.status(500).json({ message: err.message });
     }
   });
@@ -20987,15 +22698,15 @@ Which account should I use and why? If I need to split across accounts, provide 
             } catch (e) {
             }
           }
+          await storage.createTrackingEvent({
+            type: "reply",
+            campaignId: message.campaignId,
+            messageId: message.id,
+            contactId: message.contactId,
+            trackingId,
+            metadata: req.body || {}
+          });
         }
-        await storage.createTrackingEvent({
-          type: "reply",
-          campaignId: message.campaignId,
-          messageId: message.id,
-          contactId: message.contactId,
-          trackingId,
-          metadata: req.body || {}
-        });
       }
       res.json({ success: true });
     } catch (error) {
@@ -23853,6 +25564,952 @@ Return ONLY a JSON array of strings, each 1-2 sentences. Example: ["Add a person
       res.status(500).json({ message: "Failed to analyze deliverability" });
     }
   });
+  app2.post("/api/templates/validate-kb", requireAuth, async (req, res) => {
+    try {
+      const { subject, content } = req.body;
+      if (!subject && !content) return res.status(400).json({ message: "Subject or content required" });
+      const orgId = req.user.organizationId;
+      const textOnly = (content || "").replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/\s+/g, " ").trim();
+      const query = `${subject || ""} ${textOnly}`.trim();
+      if (!query) return res.status(400).json({ message: "Empty query \u2014 provide subject or content" });
+      const { getRelevantDocuments: getRelevantDocuments2 } = await Promise.resolve().then(() => (init_context_engine(), context_engine_exports));
+      const kbDocs = await getRelevantDocuments2(orgId, query, void 0, 2);
+      if (!kbDocs || kbDocs.length === 0) {
+        console.log("[validate-kb]", JSON.stringify({ orgId, kbDocsCount: 0, skipped: true, bodyChars: textOnly.length, ai_called: false }));
+        return res.json({
+          factualIssues: [],
+          missingKeyPoints: [],
+          suggestions: [],
+          kbDocsUsed: [],
+          skipped: true,
+          skipReason: "No matching Knowledge Base document for this email's topic. Upload a relevant doc to enable KB validation."
+        });
+      }
+      const settings = await storage.getApiSettingsWithAzureFallback(orgId);
+      const endpoint = settings.azure_openai_endpoint;
+      const apiKey = settings.azure_openai_api_key;
+      const deploymentName = settings.azure_openai_deployment;
+      const apiVersion = settings.azure_openai_api_version || "2024-08-01-preview";
+      if (!endpoint || !apiKey || !deploymentName) {
+        return res.status(503).json({ message: "Azure OpenAI not configured. Add credentials in Settings." });
+      }
+      const kbContext = kbDocs.map((d, i) => {
+        const docContent = (d.content || "").slice(0, 2e3);
+        return `[DOC ${i + 1}: ${d.name || "Untitled"}]
+${docContent}`;
+      }).join("\n\n---\n\n");
+      const bodyForPrompt = textOnly.length <= 3e3 ? textOnly : textOnly.slice(0, 1500) + "\n...[middle truncated]...\n" + textOnly.slice(-1500);
+      const validationPrompt = `You validate a B2B email template against the organization's Knowledge Base. The KB documents below are AUTHORITATIVE \u2014 they reflect the org's verified facts. Flag any direct contradictions in the email and identify important key points from the KB that are missing.
+
+KB DOCUMENTS (authoritative source of truth):
+${kbContext}
+
+EMAIL SUBJECT: ${subject || "(empty)"}
+EMAIL BODY (plain text): ${bodyForPrompt}
+
+RULES:
+- Only flag DIRECT factual contradictions (wrong number, date, name, edition, location, price, claim) \u2014 NOT stylistic or phrasing differences.
+- "high" severity = clear factual error that will damage credibility (e.g. wrong edition number, wrong date)
+- "medium" severity = stale/ambiguous claim that may mislead
+- "low" severity = minor inconsistency
+- For missingKeyPoints, only suggest things that materially improve credibility or completeness \u2014 NOT every detail in the KB.
+- Keep all text concise. Each issue/point/suggestion should be 1-2 sentences.
+- Empty arrays if everything is consistent.
+- Return ONLY valid JSON. No markdown fences, no commentary.
+
+Output schema:
+{
+  "factualIssues": [{ "claim": "what the email says", "kbReference": "what the KB says", "severity": "high|medium|low" }],
+  "missingKeyPoints": [{ "point": "key point missing", "kbSource": "which doc supports it" }],
+  "suggestions": ["short actionable improvement"]
+}`;
+      const url = `${endpoint.replace(/\/$/, "")}/openai/deployments/${deploymentName}/chat/completions?api-version=${apiVersion}`;
+      const aiResp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "api-key": apiKey },
+        body: JSON.stringify({
+          messages: [
+            { role: "system", content: "You validate B2B emails against an organization knowledge base. Output ONLY valid JSON matching the schema given. No markdown, no commentary." },
+            { role: "user", content: validationPrompt }
+          ],
+          temperature: 0.2,
+          max_tokens: 1200
+        })
+      });
+      if (!aiResp.ok) {
+        const errText = await aiResp.text().catch(() => "");
+        console.error("[validate-kb] Azure OpenAI error:", aiResp.status, errText.slice(0, 200));
+        return res.status(502).json({ message: "KB validation service temporarily unavailable. Try again." });
+      }
+      const aiData = await aiResp.json();
+      const raw = aiData.choices?.[0]?.message?.content || "";
+      let parsed = null;
+      try {
+        parsed = JSON.parse(raw.replace(/```json\n?|```/g, "").trim());
+      } catch {
+        console.error("[validate-kb] AI returned non-JSON:", raw.slice(0, 200));
+        return res.status(502).json({ message: "KB validation returned malformed response. Try again." });
+      }
+      const factualIssues = Array.isArray(parsed?.factualIssues) ? parsed.factualIssues.slice(0, 10) : [];
+      const missingKeyPoints = Array.isArray(parsed?.missingKeyPoints) ? parsed.missingKeyPoints.slice(0, 10) : [];
+      const suggestions = Array.isArray(parsed?.suggestions) ? parsed.suggestions.slice(0, 5) : [];
+      const usage = aiData?.usage || {};
+      console.log("[validate-kb]", JSON.stringify({
+        orgId,
+        kbDocsCount: kbDocs.length,
+        kbDocNames: kbDocs.map((d) => d.name || "Untitled"),
+        skipped: false,
+        bodyChars: textOnly.length,
+        ai_called: true,
+        prompt_tokens: usage.prompt_tokens,
+        completion_tokens: usage.completion_tokens,
+        issues: factualIssues.length,
+        missing: missingKeyPoints.length
+      }));
+      res.json({
+        factualIssues,
+        missingKeyPoints,
+        suggestions,
+        kbDocsUsed: kbDocs.map((d) => ({ id: d.id, name: d.name || "Untitled" })),
+        skipped: false
+      });
+    } catch (error) {
+      console.error("[validate-kb] error:", error?.message || error);
+      res.status(500).json({ message: "Failed to validate against Knowledge Base" });
+    }
+  });
+  const BULK_MAX_BATCH = 20;
+  const BULK_JOB_TTL_MS = 60 * 60 * 1e3;
+  const BULK_SKIP_RECENT_MS = 60 * 60 * 1e3;
+  function computeDeliverabilityScore(subject, content) {
+    const subjectLower = (subject || "").toLowerCase();
+    const contentLower = (content || "").toLowerCase();
+    const combined = subjectLower + " " + contentLower;
+    const textOnly = (content || "").replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+    let score = 100;
+    const spamGroups = [
+      { words: ["free", "act now", "limited time", "urgent", "buy now", "order now", "click here", "no obligation", "risk free", "guaranteed"], penalty: 3 },
+      { words: ["winner", "congratulations", "you have been selected", "million dollars", "earn money", "make money", "cash bonus", "double your income"], penalty: 8 },
+      { words: ["100% free", "no cost", "no credit card", "no purchase necessary", "apply now", "offer expires", "once in a lifetime", "special promotion"], penalty: 4 },
+      { words: ["viagra", "pharmacy", "weight loss", "enlargement", "casino"], penalty: 20 }
+    ];
+    for (const g of spamGroups) for (const w of g.words) if (combined.includes(w)) score -= g.penalty;
+    if (subject) {
+      if (subject.length > 60) score -= 5;
+      if (/^[A-Z\s!]+$/.test(subject) || subject === subject.toUpperCase()) score -= 10;
+      if ((subject.match(/!/g) || []).length > 1) score -= 5;
+      if (/\$\d|₹|€/.test(subject)) score -= 5;
+    }
+    const linkCount = (content?.match(/<a\s/gi) || []).length;
+    const imageCount = (content?.match(/<img\s/gi) || []).length;
+    const wordCount = textOnly.split(/\s+/).filter(Boolean).length;
+    if (linkCount > 0 && wordCount < linkCount * 20) score -= 8;
+    if (linkCount > 5) score -= 5;
+    if (imageCount > 0 && wordCount < 50) score -= 10;
+    if (imageCount > 3) score -= 5;
+    if (wordCount < 20 && wordCount > 0) score -= 5;
+    const capsWords = textOnly.split(/\s+/).filter((w) => w.length > 3 && w === w.toUpperCase() && /[A-Z]/.test(w));
+    if (capsWords.length > 3) score -= 5;
+    const variables = combined.match(/\{\{(\w+)\}\}/g) || [];
+    if (variables.length === 0) score -= 5;
+    if (content?.includes("javascript:") || content?.includes("<script")) score -= 15;
+    if (content?.includes("display:none") || content?.includes("visibility:hidden")) score -= 10;
+    score = Math.max(0, Math.min(100, score));
+    const grade = score >= 80 ? "A" : score >= 60 ? "B" : score >= 40 ? "C" : "D";
+    return { score, grade };
+  }
+  async function runKBValidationForBulk(orgId, subject, content) {
+    try {
+      const textOnly = (content || "").replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/\s+/g, " ").trim();
+      const query = `${subject || ""} ${textOnly}`.trim();
+      if (!query) return null;
+      const { getRelevantDocuments: getRelevantDocuments2 } = await Promise.resolve().then(() => (init_context_engine(), context_engine_exports));
+      const kbDocs = await getRelevantDocuments2(orgId, query, void 0, 2);
+      if (!kbDocs || kbDocs.length === 0) {
+        return { issuesCount: 0, highSeverityCount: 0 };
+      }
+      const settings = await storage.getApiSettingsWithAzureFallback(orgId);
+      const endpoint = settings.azure_openai_endpoint;
+      const apiKey = settings.azure_openai_api_key;
+      const deploymentName = settings.azure_openai_deployment;
+      const apiVersion = settings.azure_openai_api_version || "2024-08-01-preview";
+      if (!endpoint || !apiKey || !deploymentName) return null;
+      const kbContext = kbDocs.map((d, i) => `[DOC ${i + 1}: ${d.name || "Untitled"}]
+${(d.content || "").slice(0, 2e3)}`).join("\n\n---\n\n");
+      const bodyForPrompt = textOnly.length <= 3e3 ? textOnly : textOnly.slice(0, 1500) + "\n...[middle truncated]...\n" + textOnly.slice(-1500);
+      const prompt = `Validate this email against the org Knowledge Base. Output ONLY JSON: {"factualIssues":[{"claim":"...","kbReference":"...","severity":"high|medium|low"}],"missingKeyPoints":[],"suggestions":[]}
+
+KB:
+${kbContext}
+
+SUBJECT: ${subject || "(empty)"}
+BODY: ${bodyForPrompt}`;
+      const url = `${endpoint.replace(/\/$/, "")}/openai/deployments/${deploymentName}/chat/completions?api-version=${apiVersion}`;
+      const aiResp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "api-key": apiKey },
+        body: JSON.stringify({
+          messages: [
+            { role: "system", content: "You validate B2B emails against an org KB. Output ONLY valid JSON." },
+            { role: "user", content: prompt }
+          ],
+          temperature: 0.2,
+          max_tokens: 1e3
+        })
+      });
+      if (!aiResp.ok) return null;
+      const aiData = await aiResp.json();
+      const raw = aiData.choices?.[0]?.message?.content || "";
+      const parsed = JSON.parse(raw.replace(/```json\n?|```/g, "").trim());
+      const factualIssues = Array.isArray(parsed?.factualIssues) ? parsed.factualIssues : [];
+      const highSeverity = factualIssues.filter((i) => i.severity === "high").length;
+      return { issuesCount: factualIssues.length, highSeverityCount: highSeverity };
+    } catch {
+      return null;
+    }
+  }
+  async function runBulkAnalyzeJob(jobId, orgId) {
+    const jobKey = `bulk_analyze_job_${jobId}`;
+    const loadJob = async () => {
+      const settings = await storage.getApiSettings(orgId);
+      const raw = settings?.[jobKey];
+      return raw ? JSON.parse(raw) : null;
+    };
+    const saveJob = async (job2) => storage.setApiSetting(orgId, jobKey, JSON.stringify(job2));
+    let job = await loadJob();
+    if (!job) return;
+    for (let i = 0; i < job.templateIds.length; i++) {
+      job = await loadJob();
+      if (!job || job.cancelRequested) {
+        if (job) {
+          job.status = "cancelled";
+          job.completedAt = (/* @__PURE__ */ new Date()).toISOString();
+          await saveJob(job);
+        }
+        return;
+      }
+      const tplId = job.templateIds[i];
+      const tpl = await storage.getEmailTemplate(tplId);
+      if (!tpl || tpl.organizationId !== orgId) {
+        job.errors.push({ templateId: tplId, error: "Template not found" });
+        job.processed = i + 1;
+        await saveJob(job);
+        continue;
+      }
+      job.currentTemplateId = tplId;
+      job.currentTemplateName = tpl.name;
+      job.lastHeartbeatAt = (/* @__PURE__ */ new Date()).toISOString();
+      await saveJob(job);
+      try {
+        const subject = tpl.subject || "";
+        const content = tpl.content || "";
+        const deliverability = computeDeliverabilityScore(subject, content);
+        const kb = await runKBValidationForBulk(orgId, subject, content);
+        await storage.rawRun(
+          `UPDATE templates SET "deliverabilityScore" = ?, "deliverabilityGrade" = ?, "kbIssuesCount" = ?, "kbHighSeverityCount" = ?, "qualityCheckedAt" = ? WHERE id = ? AND "organizationId" = ?`,
+          deliverability.score,
+          deliverability.grade,
+          kb?.issuesCount ?? null,
+          kb?.highSeverityCount ?? null,
+          (/* @__PURE__ */ new Date()).toISOString(),
+          tplId,
+          orgId
+        );
+        job.results.push({
+          templateId: tplId,
+          deliverabilityScore: deliverability.score,
+          deliverabilityGrade: deliverability.grade,
+          kbIssuesCount: kb?.issuesCount ?? null,
+          kbHighSeverityCount: kb?.highSeverityCount ?? null
+        });
+      } catch (e) {
+        job.errors.push({ templateId: tplId, error: e?.message || "Analysis failed" });
+      }
+      job.processed = i + 1;
+      await saveJob(job);
+    }
+    job = await loadJob();
+    if (job) {
+      job.status = job.cancelRequested ? "cancelled" : "completed";
+      job.currentTemplateId = null;
+      job.currentTemplateName = null;
+      job.completedAt = (/* @__PURE__ */ new Date()).toISOString();
+      await saveJob(job);
+    }
+  }
+  app2.post("/api/templates/bulk-analyze", requireAuth, async (req, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const { templateIds, force } = req.body;
+      if (!Array.isArray(templateIds) || templateIds.length === 0) {
+        return res.status(400).json({ message: "templateIds array required" });
+      }
+      if (templateIds.length > BULK_MAX_BATCH) {
+        return res.status(400).json({ message: `Maximum ${BULK_MAX_BATCH} templates per bulk analysis. Split into multiple batches.` });
+      }
+      const findActiveJob = async (excludeJobId) => {
+        const allSettings = await storage.getApiSettings(orgId);
+        const now3 = Date.now();
+        for (const [key, val] of Object.entries(allSettings || {})) {
+          if (!key.startsWith("bulk_analyze_job_")) continue;
+          try {
+            const j = JSON.parse(val);
+            if (excludeJobId && j.id === excludeJobId) continue;
+            if (j.status !== "running") continue;
+            const heartbeat = j.lastHeartbeatAt ? new Date(j.lastHeartbeatAt).getTime() : new Date(j.startedAt).getTime();
+            if (now3 - heartbeat < BULK_JOB_TTL_MS) return j;
+          } catch {
+          }
+        }
+        return null;
+      };
+      const existingPre = await findActiveJob();
+      if (existingPre) {
+        return res.status(409).json({ message: "A bulk analysis is already running for your organization. Wait for it to complete or cancel it.", existingJobId: existingPre.id });
+      }
+      let toProcess = templateIds.slice();
+      let skippedRecent = [];
+      if (!force) {
+        const cutoff = Date.now() - BULK_SKIP_RECENT_MS;
+        const filtered = [];
+        for (const id of toProcess) {
+          const tpl = await storage.getEmailTemplate(id);
+          if (!tpl || tpl.organizationId !== orgId) continue;
+          const checkedAt = tpl.qualityCheckedAt ? new Date(tpl.qualityCheckedAt).getTime() : 0;
+          if (checkedAt && checkedAt > cutoff) {
+            skippedRecent.push(id);
+          } else {
+            filtered.push(id);
+          }
+        }
+        toProcess = filtered;
+      }
+      if (toProcess.length === 0) {
+        return res.json({
+          jobId: null,
+          total: 0,
+          skippedRecent,
+          message: skippedRecent.length > 0 ? "All selected templates were analyzed recently. Use Force re-analyze to override." : "No valid templates to analyze."
+        });
+      }
+      const jobId = `${orgId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const startedAt = (/* @__PURE__ */ new Date()).toISOString();
+      const job = {
+        id: jobId,
+        organizationId: orgId,
+        userId: req.user.id,
+        total: toProcess.length,
+        processed: 0,
+        templateIds: toProcess,
+        currentTemplateId: null,
+        currentTemplateName: null,
+        errors: [],
+        results: [],
+        skippedRecent,
+        status: "running",
+        startedAt,
+        lastHeartbeatAt: startedAt,
+        completedAt: null,
+        cancelRequested: false
+      };
+      await storage.setApiSetting(orgId, `bulk_analyze_job_${jobId}`, JSON.stringify(job));
+      const existingPost = await findActiveJob(jobId);
+      if (existingPost) {
+        const existingTime = new Date(existingPost.startedAt).getTime();
+        const myTime = new Date(startedAt).getTime();
+        const existingWins = existingTime < myTime || existingTime === myTime && String(existingPost.id) < String(jobId);
+        if (existingWins) {
+          const yielded = { ...job, status: "cancelled", completedAt: (/* @__PURE__ */ new Date()).toISOString(), cancelRequested: true };
+          await storage.setApiSetting(orgId, `bulk_analyze_job_${jobId}`, JSON.stringify(yielded));
+          return res.status(409).json({ message: "Another bulk analysis was started concurrently. Wait for it to complete.", existingJobId: existingPost.id });
+        }
+      }
+      setImmediate(async () => {
+        try {
+          await runBulkAnalyzeJob(jobId, orgId);
+        } catch (err) {
+          console.error("[bulk-analyze] runner crashed:", err?.message || err);
+          try {
+            const settings = await storage.getApiSettings(orgId);
+            const raw = settings?.[`bulk_analyze_job_${jobId}`];
+            if (raw) {
+              const j = JSON.parse(raw);
+              if (j.status === "running") {
+                j.status = "failed";
+                j.completedAt = (/* @__PURE__ */ new Date()).toISOString();
+                await storage.setApiSetting(orgId, `bulk_analyze_job_${jobId}`, JSON.stringify(j));
+              }
+            }
+          } catch {
+          }
+        }
+      });
+      res.json({ jobId, total: toProcess.length, skippedRecent });
+    } catch (error) {
+      console.error("[bulk-analyze] start error:", error?.message || error);
+      res.status(500).json({ message: "Failed to start bulk analysis" });
+    }
+  });
+  app2.get("/api/templates/bulk-analyze/:jobId", requireAuth, async (req, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const settings = await storage.getApiSettings(orgId);
+      const raw = settings?.[`bulk_analyze_job_${req.params.jobId}`];
+      if (!raw) return res.status(404).json({ message: "Job not found" });
+      const job = JSON.parse(raw);
+      if (job.organizationId !== orgId) return res.status(403).json({ message: "Forbidden" });
+      const lastSignal = job.lastHeartbeatAt || job.startedAt;
+      if (job.status === "running" && lastSignal && Date.now() - new Date(lastSignal).getTime() > BULK_JOB_TTL_MS) {
+        job.status = "failed";
+        job.completedAt = (/* @__PURE__ */ new Date()).toISOString();
+        await storage.setApiSetting(orgId, `bulk_analyze_job_${req.params.jobId}`, JSON.stringify(job));
+      }
+      res.json(job);
+    } catch (error) {
+      console.error("[bulk-analyze] status error:", error?.message || error);
+      res.status(500).json({ message: "Failed to get job status" });
+    }
+  });
+  app2.post("/api/templates/bulk-analyze/:jobId/cancel", requireAuth, async (req, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const settings = await storage.getApiSettings(orgId);
+      const key = `bulk_analyze_job_${req.params.jobId}`;
+      const raw = settings?.[key];
+      if (!raw) return res.status(404).json({ message: "Job not found" });
+      const job = JSON.parse(raw);
+      if (job.organizationId !== orgId) return res.status(403).json({ message: "Forbidden" });
+      if (job.status !== "running") return res.json({ ok: true, status: job.status });
+      job.cancelRequested = true;
+      await storage.setApiSetting(orgId, key, JSON.stringify(job));
+      res.json({ ok: true, status: "cancelling" });
+    } catch (error) {
+      console.error("[bulk-analyze] cancel error:", error?.message || error);
+      res.status(500).json({ message: "Failed to cancel job" });
+    }
+  });
+  app2.get("/api/templates/quality-alerts", requireAuth, async (req, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const rows = await storage.rawAll(
+        `SELECT id, name, "deliverabilityScore", "deliverabilityGrade", "kbIssuesCount", "kbHighSeverityCount", "qualityCheckedAt"
+         FROM templates
+         WHERE "organizationId" = ?
+           AND ("deliverabilityGrade" IN ('C', 'D') OR ("kbHighSeverityCount" IS NOT NULL AND "kbHighSeverityCount" > 0))
+         ORDER BY
+           CASE "deliverabilityGrade" WHEN 'D' THEN 1 WHEN 'C' THEN 2 ELSE 3 END,
+           "kbHighSeverityCount" DESC NULLS LAST
+         LIMIT 20`,
+        orgId
+      );
+      res.json({ count: rows.length, templates: rows });
+    } catch (error) {
+      console.error("[quality-alerts] error:", error?.message || error);
+      res.status(500).json({ message: "Failed to load quality alerts" });
+    }
+  });
+  const requireAdminOrDebugToken = (req, res, next) => {
+    const expected = process.env.DEBUG_AUTH_TOKEN;
+    if (expected && expected.length >= 16 && req.headers["x-debug-token"] === expected) {
+      return next();
+    }
+    return requireAuth(req, res, () => {
+      const role = req.user?.role;
+      if (role !== "owner" && role !== "admin" && role !== "superadmin") {
+        return res.status(403).json({ message: "Admin only" });
+      }
+      next();
+    });
+  };
+  app2.get("/api/admin/outbound-reply-sweep/status", requireAdminOrDebugToken, async (req, res) => {
+    try {
+      const { getOutboundReplySweepStatus: getOutboundReplySweepStatus2 } = await Promise.resolve().then(() => (init_outbound_reply_sweeper(), outbound_reply_sweeper_exports));
+      res.json(getOutboundReplySweepStatus2());
+    } catch (error) {
+      console.error("[outbound-reply-sweep status] error:", error?.message || error);
+      res.status(500).json({ message: "Failed to get sweeper status" });
+    }
+  });
+  app2.post("/api/admin/outbound-reply-sweep/run", requireAdminOrDebugToken, async (req, res) => {
+    try {
+      const { runOutboundReplySweep: runOutboundReplySweep2, getOutboundReplySweepStatus: getOutboundReplySweepStatus2 } = await Promise.resolve().then(() => (init_outbound_reply_sweeper(), outbound_reply_sweeper_exports));
+      const before = getOutboundReplySweepStatus2();
+      if (before.isProcessing) {
+        return res.status(409).json({ message: "Sweeper already running. Try again in a moment.", status: before });
+      }
+      const stats = await runOutboundReplySweep2();
+      res.json({ ok: true, stats });
+    } catch (error) {
+      console.error("[outbound-reply-sweep run] error:", error?.message || error);
+      res.status(500).json({ message: "Failed to run sweeper" });
+    }
+  });
+  app2.post("/api/admin/outbound-reply-sweep/backfill-content", requireAdminOrDebugToken, async (req, res) => {
+    try {
+      const max = Math.min(500, Math.max(1, parseInt(req.body?.maxRows) || 100));
+      const { backfillNativeReplyContent: backfillNativeReplyContent2 } = await Promise.resolve().then(() => (init_outbound_reply_sweeper(), outbound_reply_sweeper_exports));
+      const stats = await backfillNativeReplyContent2(max);
+      res.json({ ok: true, stats });
+    } catch (error) {
+      console.error("[outbound-reply-sweep backfill-content] error:", error?.message || error);
+      res.status(500).json({ message: "Failed to backfill native reply content" });
+    }
+  });
+  app2.post("/api/admin/reclassify-bot-senders", requireAdminOrDebugToken, async (req, res) => {
+    try {
+      const orgId = req.user?.organizationId || req.body?.organizationId;
+      const senderPatterns = [
+        "%noreply@%",
+        "%no-reply@%",
+        "%donotreply@%",
+        "%do-not-reply@%",
+        "%notifications@github.com%",
+        "%noreply@github.com%",
+        "%notifications@gitlab.com%",
+        "%notifications@bitbucket.org%",
+        "%@atlassian.com%",
+        "%notifications@slack.com%",
+        "%notify@%",
+        "%alerts@%",
+        "%alert@%",
+        "%system@%",
+        "%automated@%",
+        "%buildmaster@%",
+        "%jenkins@%",
+        "%circleci%",
+        "%azure-noreply@%",
+        "%azuredevops%",
+        "%support-noreply@%",
+        "%github-action%"
+      ];
+      const orConds = senderPatterns.map(() => `(LOWER("fromEmail") LIKE ? OR LOWER("fromName") LIKE ?)`).join(" OR ");
+      const params = [];
+      for (const pat of senderPatterns) {
+        params.push(pat, pat);
+      }
+      const orgClause = orgId ? `AND "organizationId" = ?` : "";
+      if (orgId) params.push(orgId);
+      const beforeRow = await storage.rawGet(
+        `SELECT COUNT(*) as c FROM unified_inbox WHERE (${orConds}) AND "replyType" IN ('positive','negative','general') ${orgClause}`,
+        ...params
+      );
+      const matched = parseInt(beforeRow?.c || "0", 10);
+      if (matched > 0) {
+        await storage.rawRun(
+          `UPDATE unified_inbox SET "replyType" = 'auto_reply' WHERE (${orConds}) AND "replyType" IN ('positive','negative','general') ${orgClause}`,
+          ...params
+        );
+      }
+      console.log(`[reclassify-bot-senders] reclassified ${matched} rows${orgId ? ` for org ${orgId}` : " (all orgs)"}`);
+      res.json({ ok: true, reclassified: matched });
+    } catch (error) {
+      console.error("[reclassify-bot-senders] error:", error?.message || error);
+      res.status(500).json({ message: "Failed to reclassify" });
+    }
+  });
+  app2.post("/api/admin/sweep-stale-jobs", requireAuth, async (req, res) => {
+    const role = req.user?.role;
+    const isSuperAdmin = !!req.user?.isSuperAdmin;
+    if (!isSuperAdmin && role !== "owner" && role !== "admin") {
+      return res.status(403).json({ error: "Admin only" });
+    }
+    try {
+      const { getStaleJobsSweepStatus: getStaleJobsSweepStatus2 } = await Promise.resolve().then(() => (init_stale_jobs_sweeper(), stale_jobs_sweeper_exports));
+      const before = getStaleJobsSweepStatus2();
+      const JOB_PREFIXES = [
+        { keyPrefix: "lead_intel_job_", ttlMs: 60 * 60 * 1e3, label: "lead-intel" },
+        { keyPrefix: "bulk_analyze_job_", ttlMs: 60 * 60 * 1e3, label: "bulk-template-analyze" }
+      ];
+      const likePatterns = JOB_PREFIXES.map(() => `"settingKey" LIKE ?`).join(" OR ");
+      const params = JOB_PREFIXES.map((t) => `${t.keyPrefix}%`);
+      const rows = await storage.rawAll(
+        `SELECT "organizationId", "settingKey", "settingValue" FROM api_settings WHERE ${likePatterns}`,
+        ...params
+      );
+      const now3 = Date.now();
+      let scanned = 0;
+      let aged = 0;
+      const byType = {};
+      for (const row of rows) {
+        scanned++;
+        try {
+          const job = JSON.parse(row.settingValue);
+          if (job?.status !== "running") continue;
+          const jobType = JOB_PREFIXES.find((t) => row.settingKey.startsWith(t.keyPrefix));
+          if (!jobType) continue;
+          const lastSignal = job.heartbeatAt || job.startedAt;
+          if (!lastSignal) continue;
+          const lastSignalMs = new Date(lastSignal).getTime();
+          if (!Number.isFinite(lastSignalMs)) continue;
+          const ageMs = now3 - lastSignalMs;
+          if (ageMs <= jobType.ttlMs) continue;
+          job.status = "failed";
+          job.error = `Stale-job sweeper (manual): no heartbeat for ${Math.round(ageMs / 6e4)} minutes (TTL ${Math.round(jobType.ttlMs / 6e4)}m).`;
+          job.finishedAt = (/* @__PURE__ */ new Date()).toISOString();
+          await storage.setApiSetting(row.organizationId, row.settingKey, JSON.stringify(job));
+          aged++;
+          byType[jobType.label] = (byType[jobType.label] || 0) + 1;
+          console.log(`[StaleJobs] Manual sweep aged out ${row.settingKey} (org=${row.organizationId})`);
+        } catch {
+        }
+      }
+      res.json({ ok: true, scanned, aged, byType, before: before.lastRun });
+    } catch (error) {
+      console.error("[Admin] Manual sweep failed:", error?.message || error);
+      res.status(500).json({ message: "Failed to run stale-jobs sweep" });
+    }
+  });
+  app2.get("/api/admin/sheets-debug", requireAuth, async (req, res) => {
+    const role = req.user?.role;
+    const isSuperAdmin = !!req.user?.isSuperAdmin;
+    if (!isSuperAdmin && role !== "owner" && role !== "admin") {
+      return res.status(403).json({ error: "Admin only" });
+    }
+    const orgId = req.user.organizationId;
+    const url = String(req.query.url || "").trim();
+    if (!url) return res.status(400).json({ error: "url query param required" });
+    let spreadsheetId = null;
+    if (/^[a-zA-Z0-9_-]{20,}$/.test(url)) spreadsheetId = url;
+    else {
+      const m = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+      if (m) spreadsheetId = m[1];
+    }
+    if (!spreadsheetId) return res.status(400).json({ error: "Invalid Google Sheets URL", input: url });
+    const settings = await storage.getApiSettings(orgId);
+    const candidates = [];
+    if (settings.gmail_access_token && settings.gmail_refresh_token) {
+      candidates.push({
+        label: "org-level",
+        accessToken: settings.gmail_access_token,
+        refreshToken: settings.gmail_refresh_token,
+        tokenExpiry: settings.gmail_token_expiry || "0"
+      });
+    }
+    for (const k of Object.keys(settings)) {
+      if (!k.startsWith("gmail_sender_") || !k.endsWith("_access_token")) continue;
+      const email = k.replace("gmail_sender_", "").replace("_access_token", "");
+      const sa = settings[k];
+      const sr = settings[`gmail_sender_${email}_refresh_token`];
+      if (sa && sr) {
+        candidates.push({
+          label: `sender:${email}`,
+          accessToken: sa,
+          refreshToken: sr,
+          tokenExpiry: settings[`gmail_sender_${email}_token_expiry`] || "0"
+        });
+      }
+    }
+    let cid = settings.google_oauth_client_id || "";
+    let csec = settings.google_oauth_client_secret || "";
+    if (!cid || !csec) {
+      try {
+        const sa = await storage.getSuperAdminOrgId();
+        if (sa && sa !== orgId) {
+          const ss = await storage.getApiSettings(sa);
+          if (ss.google_oauth_client_id) {
+            cid = ss.google_oauth_client_id;
+            csec = ss.google_oauth_client_secret || "";
+          }
+        }
+      } catch {
+      }
+    }
+    if (!cid) cid = process.env.GOOGLE_CLIENT_ID || "";
+    if (!csec) csec = process.env.GOOGLE_CLIENT_SECRET || "";
+    const apiUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=spreadsheetId,properties.title`;
+    const now3 = Date.now();
+    const results = [];
+    for (const c of candidates) {
+      const expiryMs = parseInt(c.tokenExpiry || "0");
+      const expired = !expiryMs || now3 > expiryMs - 5 * 60 * 1e3;
+      let token = c.accessToken;
+      let refreshOutcome = null;
+      if (expired && cid && csec) {
+        try {
+          const r = await fetch("https://oauth2.googleapis.com/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({ client_id: cid, client_secret: csec, refresh_token: c.refreshToken, grant_type: "refresh_token" })
+          });
+          if (r.ok) {
+            const td = await r.json();
+            if (td.access_token) {
+              token = td.access_token;
+              refreshOutcome = "refreshed_ok";
+            } else {
+              refreshOutcome = "refresh_no_access_token_in_response";
+            }
+          } else {
+            const errText = await r.text();
+            refreshOutcome = `refresh_failed_${r.status}: ${errText.slice(0, 120)}`;
+          }
+        } catch (e) {
+          refreshOutcome = `refresh_threw: ${e?.message || "unknown"}`;
+        }
+      }
+      let scopes = null;
+      if (token) {
+        try {
+          const ti = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${token}`);
+          if (ti.ok) {
+            const tid = await ti.json();
+            scopes = tid.scope || null;
+          }
+        } catch {
+        }
+      }
+      let sheetStatus = null;
+      let sheetBody = null;
+      if (token) {
+        try {
+          const apiRes = await fetch(apiUrl, { headers: { Authorization: `Bearer ${token}` } });
+          sheetStatus = apiRes.status;
+          if (!apiRes.ok) {
+            sheetBody = (await apiRes.text()).slice(0, 200);
+          } else {
+            sheetBody = "<ok>";
+          }
+        } catch (e) {
+          sheetBody = `threw: ${e?.message || "unknown"}`;
+        }
+      }
+      results.push({
+        label: c.label,
+        tokenExpiryIso: expiryMs ? new Date(expiryMs).toISOString() : null,
+        tokenExpired: expired,
+        refreshOutcome,
+        grantedScopes: scopes,
+        hasSheetsScope: scopes ? scopes.includes("spreadsheets") : null,
+        sheetFetchStatus: sheetStatus,
+        sheetFetchBody: sheetBody
+      });
+    }
+    let publicCsvStatus = null;
+    let publicCsvLooksHtml = false;
+    try {
+      const r = await fetch(`https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv&gid=0`, {
+        headers: { "User-Agent": "Mozilla/5.0" },
+        redirect: "follow"
+      });
+      publicCsvStatus = r.status;
+      if (r.ok) {
+        const t = await r.text();
+        publicCsvLooksHtml = t.trim().startsWith("<!DOCTYPE") || t.trim().startsWith("<html");
+      }
+    } catch {
+    }
+    res.json({
+      orgId,
+      spreadsheetId,
+      candidatesCount: candidates.length,
+      results,
+      publicCsv: { status: publicCsvStatus, looksHtmlLogin: publicCsvLooksHtml }
+    });
+  });
+  app2.get("/api/admin/health", requireAuth, async (req, res) => {
+    const role = req.user?.role;
+    const isSuperAdmin = !!req.user?.isSuperAdmin;
+    if (!isSuperAdmin && role !== "owner" && role !== "admin") {
+      return res.status(403).json({ error: "Admin only" });
+    }
+    const orgId = req.user.organizationId;
+    const errors = {};
+    const out = { timestamp: (/* @__PURE__ */ new Date()).toISOString(), orgId, isSuperAdmin };
+    const t0 = Date.now();
+    const num = (v) => {
+      if (v === null || v === void 0) return 0;
+      const n = typeof v === "number" ? v : parseInt(String(v), 10);
+      return Number.isFinite(n) ? n : 0;
+    };
+    try {
+      const mem = process.memoryUsage();
+      out.process = {
+        uptimeSec: Math.round(process.uptime()),
+        memoryMB: {
+          rss: Math.round(mem.rss / 1024 / 1024),
+          heapUsed: Math.round(mem.heapUsed / 1024 / 1024),
+          heapTotal: Math.round(mem.heapTotal / 1024 / 1024),
+          external: Math.round(mem.external / 1024 / 1024)
+        },
+        nodeVersion: process.version,
+        pid: process.pid,
+        env: process.env.NODE_ENV || "development"
+      };
+    } catch (e) {
+      errors.process = e?.message || String(e);
+    }
+    try {
+      const dt = Date.now();
+      await storage.rawGet("SELECT 1 as ok");
+      out.db = { latencyMs: Date.now() - dt, ok: true };
+    } catch (e) {
+      out.db = { ok: false, latencyMs: -1 };
+      errors.db = e?.message || String(e);
+    }
+    try {
+      const orgFilter = isSuperAdmin ? "" : `WHERE "organizationId" = ?`;
+      const params = isSuperAdmin ? [] : [orgId];
+      const row = await storage.rawGet(
+        `SELECT
+           SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) AS "active",
+           SUM(CASE WHEN status='paused' AND "autoPaused"=true THEN 1 ELSE 0 END) AS "pausedAuto",
+           SUM(CASE WHEN status='paused' AND ("autoPaused" IS NULL OR "autoPaused"=false) THEN 1 ELSE 0 END) AS "pausedUser",
+           SUM(CASE WHEN status='draft' THEN 1 ELSE 0 END) AS "draft",
+           SUM(CASE WHEN status='scheduled' THEN 1 ELSE 0 END) AS "scheduled",
+           SUM(CASE WHEN status='following_up' THEN 1 ELSE 0 END) AS "followingUp",
+           SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS "completed",
+           COUNT(*) AS "total"
+         FROM campaigns ${orgFilter}`,
+        ...params
+      );
+      out.campaigns = {
+        active: num(row?.active),
+        pausedAuto: num(row?.pausedAuto),
+        pausedUser: num(row?.pausedUser),
+        draft: num(row?.draft),
+        scheduled: num(row?.scheduled),
+        followingUp: num(row?.followingUp),
+        completed: num(row?.completed),
+        total: num(row?.total)
+      };
+    } catch (e) {
+      errors.campaigns = e?.message || String(e);
+    }
+    try {
+      const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1e3).toISOString();
+      const orgJoin = isSuperAdmin ? "" : `JOIN campaigns c ON c.id = fe."campaignId" WHERE c."organizationId" = ?`;
+      const params = isSuperAdmin ? [dayAgo, dayAgo] : [dayAgo, dayAgo, orgId];
+      const row = await storage.rawGet(
+        `SELECT
+           SUM(CASE WHEN fe.status='pending' THEN 1 ELSE 0 END) AS "pending",
+           SUM(CASE WHEN fe.status='processing' THEN 1 ELSE 0 END) AS "processing",
+           SUM(CASE WHEN fe.status='sent' AND fe."executedAt" >= ? THEN 1 ELSE 0 END) AS "sentLast24h",
+           SUM(CASE WHEN fe.status='failed' AND fe."executedAt" >= ? THEN 1 ELSE 0 END) AS "failedLast24h",
+           SUM(CASE WHEN fe.status='cancelled' THEN 1 ELSE 0 END) AS "cancelled",
+           COUNT(*) AS "total"
+         FROM followup_executions fe ${orgJoin}`,
+        ...params
+      );
+      out.followups = {
+        pending: num(row?.pending),
+        processing: num(row?.processing),
+        sentLast24h: num(row?.sentLast24h),
+        failedLast24h: num(row?.failedLast24h),
+        cancelled: num(row?.cancelled),
+        total: num(row?.total)
+      };
+    } catch (e) {
+      errors.followups = e?.message || String(e);
+    }
+    try {
+      const orgFilter = isSuperAdmin ? "" : `WHERE "organizationId" = ?`;
+      const params = isSuperAdmin ? [] : [orgId];
+      const row = await storage.rawGet(
+        `SELECT
+           SUM(CASE WHEN "isActive" != 0 AND COALESCE("scanOnly",0)=0 THEN 1 ELSE 0 END) AS "active",
+           SUM(CASE WHEN COALESCE("scanOnly",0)=1 THEN 1 ELSE 0 END) AS "scanOnly",
+           SUM(CASE WHEN "isActive" = 0 THEN 1 ELSE 0 END) AS "softDeleted",
+           SUM(CASE WHEN "authStatus"='reauth_required' THEN 1 ELSE 0 END) AS "reauthRequired",
+           SUM(CASE WHEN "isActive" != 0 AND COALESCE("scanOnly",0)=0 AND "dailySent" >= "dailyLimit" THEN 1 ELSE 0 END) AS "dailyLimitReached",
+           COUNT(*) AS "total"
+         FROM email_accounts ${orgFilter}`,
+        ...params
+      );
+      out.emailAccounts = {
+        active: num(row?.active),
+        scanOnly: num(row?.scanOnly),
+        softDeleted: num(row?.softDeleted),
+        reauthRequired: num(row?.reauthRequired),
+        dailyLimitReached: num(row?.dailyLimitReached),
+        total: num(row?.total)
+      };
+    } catch (e) {
+      errors.emailAccounts = e?.message || String(e);
+    }
+    try {
+      if (!isSuperAdmin) {
+        out.inbox = await storage.getInboxStats(orgId);
+      } else {
+        const row = await storage.rawGet(
+          `SELECT COUNT(*) AS "total",
+             SUM(CASE WHEN status='unread' THEN 1 ELSE 0 END) AS "unread",
+             SUM(CASE WHEN "replyType" IS NULL OR "replyType"='' THEN 1 ELSE 0 END) AS "unclassified"
+           FROM unified_inbox`
+        );
+        out.inbox = { total: num(row?.total), unread: num(row?.unread), unclassified: num(row?.unclassified) };
+      }
+    } catch (e) {
+      errors.inbox = e?.message || String(e);
+    }
+    try {
+      const eng = {};
+      try {
+        const { getOutboundReplySweepStatus: getOutboundReplySweepStatus2 } = await Promise.resolve().then(() => (init_outbound_reply_sweeper(), outbound_reply_sweeper_exports));
+        eng.outboundReplySweeper = getOutboundReplySweepStatus2();
+      } catch (e) {
+        eng.outboundReplySweeper = { error: e?.message || String(e) };
+      }
+      try {
+        const { getStaleJobsSweepStatus: getStaleJobsSweepStatus2 } = await Promise.resolve().then(() => (init_stale_jobs_sweeper(), stale_jobs_sweeper_exports));
+        eng.staleJobsSweeper = getStaleJobsSweepStatus2();
+      } catch (e) {
+        eng.staleJobsSweeper = { error: e?.message || String(e) };
+      }
+      out.engines = eng;
+    } catch (e) {
+      errors.engines = e?.message || String(e);
+    }
+    try {
+      const settings = await storage.getApiSettings(orgId);
+      const jobs = { leadIntel: [], bulkTemplateAnalyze: [] };
+      const now3 = Date.now();
+      for (const [key, val] of Object.entries(settings || {})) {
+        try {
+          if (key.startsWith("lead_intel_job_")) {
+            const j = JSON.parse(val);
+            if (j.status === "running") {
+              jobs.leadIntel.push({
+                jobId: j.id,
+                type: j.type,
+                status: j.status,
+                startedAt: j.startedAt,
+                heartbeatAt: j.heartbeatAt,
+                progress: j.progress,
+                ageMs: j.startedAt ? now3 - new Date(j.startedAt).getTime() : null
+              });
+            }
+          } else if (key.startsWith("bulk_analyze_job_")) {
+            const j = JSON.parse(val);
+            if (j.status === "running") {
+              jobs.bulkTemplateAnalyze.push({
+                jobId: j.id,
+                status: j.status,
+                startedAt: j.startedAt,
+                heartbeatAt: j.heartbeatAt,
+                progress: j.progress,
+                ageMs: j.startedAt ? now3 - new Date(j.startedAt).getTime() : null
+              });
+            }
+          }
+        } catch {
+        }
+      }
+      out.activeJobs = jobs;
+    } catch (e) {
+      errors.activeJobs = e?.message || String(e);
+    }
+    try {
+      out.caches = {
+        authCacheSize: authCache.size,
+        loggedInUsersSize: loggedInUsers.size
+      };
+    } catch (e) {
+      errors.caches = e?.message || String(e);
+    }
+    out.totalLatencyMs = Date.now() - t0;
+    if (Object.keys(errors).length > 0) out.errors = errors;
+    res.json(out);
+  });
   app2.post("/api/templates/fix-deliverability", async (req, res) => {
     try {
       const { subject, content, issues } = req.body;
@@ -24977,6 +27634,119 @@ ${content}` }
       return res.status(500).json({ error: e.message });
     }
   });
+  async function tryDirectSheetsAccess(organizationId, spreadsheetId) {
+    const settings = await storage.getApiSettings(organizationId);
+    const candidates = [];
+    const seen = /* @__PURE__ */ new Set();
+    const push = (c) => {
+      const k = c.refreshToken || c.accessToken;
+      if (!k || seen.has(k)) return;
+      seen.add(k);
+      candidates.push(c);
+    };
+    if (settings.gmail_access_token && settings.gmail_refresh_token) {
+      push({
+        accessToken: settings.gmail_access_token,
+        refreshToken: settings.gmail_refresh_token,
+        tokenExpiry: settings.gmail_token_expiry || "0",
+        label: "org-level",
+        expiryKey: "gmail_token_expiry",
+        tokenKey: "gmail_access_token"
+      });
+    }
+    for (const k of Object.keys(settings)) {
+      if (!k.startsWith("gmail_sender_") || !k.endsWith("_access_token")) continue;
+      const email = k.replace("gmail_sender_", "").replace("_access_token", "");
+      const sa = settings[k];
+      const sr = settings[`gmail_sender_${email}_refresh_token`];
+      if (sa && sr) {
+        push({
+          accessToken: sa,
+          refreshToken: sr,
+          tokenExpiry: settings[`gmail_sender_${email}_token_expiry`] || "0",
+          label: `sender:${email}`,
+          expiryKey: `gmail_sender_${email}_token_expiry`,
+          tokenKey: `gmail_sender_${email}_access_token`
+        });
+      }
+    }
+    if (candidates.length === 0) return { kind: "no_tokens" };
+    let cid = settings.google_oauth_client_id || "";
+    let csec = settings.google_oauth_client_secret || "";
+    if (!cid || !csec) {
+      try {
+        const superAdminOrgId = await storage.getSuperAdminOrgId();
+        if (superAdminOrgId && superAdminOrgId !== organizationId) {
+          const ss = await storage.getApiSettings(superAdminOrgId);
+          if (ss.google_oauth_client_id) {
+            cid = ss.google_oauth_client_id;
+            csec = ss.google_oauth_client_secret || "";
+          }
+        }
+      } catch {
+      }
+    }
+    if (!cid) cid = process.env.GOOGLE_CLIENT_ID || "";
+    if (!csec) csec = process.env.GOOGLE_CLIENT_SECRET || "";
+    candidates.sort((a, b) => parseInt(b.tokenExpiry || "0") - parseInt(a.tokenExpiry || "0"));
+    const apiUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=spreadsheetId,properties.title,sheets.properties`;
+    let saw404 = false;
+    let saw403Scope = false;
+    for (const c of candidates) {
+      let token = c.accessToken;
+      const expired = c.tokenExpiry && Date.now() > parseInt(c.tokenExpiry) - 5 * 60 * 1e3;
+      if (expired && cid && csec) {
+        try {
+          const r = await fetch("https://oauth2.googleapis.com/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({ client_id: cid, client_secret: csec, refresh_token: c.refreshToken, grant_type: "refresh_token" })
+          });
+          if (r.ok) {
+            const td = await r.json();
+            if (td.access_token) {
+              token = td.access_token;
+              await storage.setApiSetting(organizationId, c.tokenKey, token);
+              if (td.expires_in) await storage.setApiSetting(organizationId, c.expiryKey, String(Date.now() + td.expires_in * 1e3));
+            }
+          } else {
+            console.log(`[tryDirectSheetsAccess] refresh failed for ${c.label}: ${r.status}`);
+          }
+        } catch (e) {
+          console.log(`[tryDirectSheetsAccess] refresh error for ${c.label}:`, e instanceof Error ? e.message : e);
+        }
+      }
+      if (!token) continue;
+      try {
+        const apiRes = await fetch(apiUrl, { headers: { Authorization: `Bearer ${token}` } });
+        if (apiRes.ok) {
+          const data = await apiRes.json();
+          const sheets = (data.sheets || []).map((s) => ({
+            id: s.properties?.sheetId ?? 0,
+            name: s.properties?.title || "Sheet1",
+            index: s.properties?.index ?? 0
+          }));
+          return { kind: "success", tokenLabel: c.label, accessToken: token, title: data.properties?.title || "Google Spreadsheet", sheets };
+        }
+        const errText = await apiRes.text();
+        if (apiRes.status === 404) saw404 = true;
+        else if (apiRes.status === 403) {
+          if (errText.includes("insufficient") || errText.includes("ACCESS_TOKEN_SCOPE_INSUFFICIENT") || errText.includes("Request had insufficient authentication scopes")) {
+            saw403Scope = true;
+          }
+        }
+        console.log(`[tryDirectSheetsAccess] ${c.label} status=${apiRes.status} ${errText.slice(0, 120)}`);
+      } catch (e) {
+        console.log(`[tryDirectSheetsAccess] fetch error for ${c.label}:`, e instanceof Error ? e.message : e);
+      }
+    }
+    console.log(`[tryDirectSheetsAccess] outcome decision: candidates=${candidates.length}, saw404=${saw404}, saw403Scope=${saw403Scope}`);
+    if (saw403Scope && !saw404) return { kind: "no_sheets_scope" };
+    if (saw404 && !saw403Scope) return { kind: "sheet_not_in_account" };
+    if (saw404 && saw403Scope) return { kind: "no_sheets_scope" };
+    if (candidates.length > 0) return { kind: "sheet_not_in_account" };
+    return { kind: "unknown" };
+  }
   app2.post("/api/sheets/fetch-info", (req, res, next) => {
     (async () => {
       const body = req.body || {};
@@ -24990,63 +27760,32 @@ ${content}` }
         return res.status(400).json({ valid: false, error: "Invalid Google Sheets URL. Please paste a valid Google Sheets URL." });
       }
       console.log("[sheets/fetch-info] Extracted spreadsheet ID:", spreadsheetId);
-      const accessToken = await getGoogleAccessTokenForSheets(req.user.organizationId);
-      console.log("[sheets/fetch-info] Got sheets-capable access token:", accessToken ? "yes (length=" + accessToken.length + ")" : "no");
-      if (!accessToken) {
-        const anyToken = await getGoogleAccessToken(req.user.organizationId);
-        if (anyToken) {
-          console.log("[sheets/fetch-info] Have Gmail tokens but none with spreadsheets scope. Asking user to re-auth.");
-          return res.json({
-            valid: false,
-            error: 'Google Sheets permission not granted. Please click "Re-authenticate Gmail" below and approve the Sheets access scope on the Google consent screen.',
-            needsReauth: true
-          });
-        }
+      const accessToken = null;
+      const directRes = await tryDirectSheetsAccess(req.user.organizationId, spreadsheetId);
+      if (directRes.kind === "success") {
+        console.log("[sheets/fetch-info] Strategy 1 succeeded via", directRes.tokenLabel);
+        return res.json({
+          id: spreadsheetId,
+          title: directRes.title,
+          sheets: directRes.sheets,
+          valid: true,
+          method: "oauth-direct"
+        });
       }
-      if (accessToken) {
-        try {
-          const apiUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=spreadsheetId,properties.title,sheets.properties`;
-          const apiRes = await fetch(apiUrl, {
-            headers: { "Authorization": `Bearer ${accessToken}` }
-          });
-          if (apiRes.ok) {
-            const data = await apiRes.json();
-            const sheets2 = (data.sheets || []).map((s) => ({
-              id: s.properties?.sheetId ?? 0,
-              name: s.properties?.title || "Sheet1",
-              index: s.properties?.index ?? 0
-            }));
-            console.log("[sheets/fetch-info] Google Sheets API success, found", sheets2.length, "sheets");
-            return res.json({
-              id: spreadsheetId,
-              title: data.properties?.title || "Google Spreadsheet",
-              sheets: sheets2,
-              valid: true,
-              method: "oauth"
-            });
-          } else {
-            const errText = await apiRes.text();
-            console.log("[sheets/fetch-info] Google Sheets API returned", apiRes.status, "- falling back to public CSV. Error:", errText.slice(0, 200));
-            if (apiRes.status === 403) {
-              if (errText.includes("insufficient") || errText.includes("PERMISSION_DENIED") || errText.includes("Request had insufficient authentication scopes")) {
-                return res.json({
-                  valid: false,
-                  error: "Google Sheets permission not granted. Please go to Email Accounts > Connect Gmail to re-authenticate with Google (this will grant Sheets access).",
-                  needsReauth: true
-                });
-              }
-            }
-            if (apiRes.status === 404) {
-              return res.json({
-                valid: false,
-                error: "Spreadsheet not found. Please check the URL is correct and you have access to this sheet."
-              });
-            }
-          }
-        } catch (apiErr) {
-          console.log("[sheets/fetch-info] Google Sheets API error, falling back to public CSV:", apiErr);
-        }
+      if (directRes.kind === "sheet_not_in_account") {
+        return res.json({
+          valid: false,
+          error: 'This spreadsheet is not in any of your connected Google accounts. To import, share the sheet with "Anyone with the link" \u2014 or open it from the account that owns it.'
+        });
       }
+      if (directRes.kind === "no_sheets_scope") {
+        return res.json({
+          valid: false,
+          error: "Google Sheets access not yet granted on your Gmail token. Click below to grant Sheets access \u2014 Google will show only the missing permission on the consent screen.",
+          needsReauth: true
+        });
+      }
+      console.log("[sheets/fetch-info] Strategy 1 outcome:", directRes.kind, "\u2014 falling through to public CSV");
       const sheets = [];
       const testCsvUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv&gid=0`;
       console.log("[sheets/fetch-info] Trying public CSV access:", testCsvUrl);
@@ -25055,14 +27794,19 @@ ${content}` }
         redirect: "follow"
       });
       if (!testRes.ok) {
-        const hint = accessToken ? 'Cannot access this spreadsheet. Your Google account may not have permission. Try re-authenticating: go to Email Accounts and click "Connect Gmail" to refresh your Google access.' : 'Cannot access this spreadsheet. Please connect a Gmail account first (Email Accounts > Connect Gmail), or make sure the sheet is shared with "Anyone with the link".';
-        return res.status(400).json({ valid: false, error: hint, needsAuth: !accessToken });
+        console.log(`[sheets/fetch-info] FALLBACK FAILURE \u2014 public CSV returned ${testRes.status}, no OAuth match found. accessToken probe-validated: ${!!accessToken}`);
+        return res.status(400).json({
+          valid: false,
+          error: 'Could not access this spreadsheet. Either (a) share the sheet with "Anyone with the link" in Google Sheets, OR (b) sign in with the Google account that owns this sheet (Email Accounts > Connect Google Sheets).',
+          needsAuth: !accessToken
+        });
       }
       const testCsv = await testRes.text();
       if (testCsv.trim().startsWith("<!DOCTYPE") || testCsv.trim().startsWith("<html")) {
+        console.log(`[sheets/fetch-info] FALLBACK FAILURE \u2014 public CSV returned an HTML login page (sheet is private). accessToken probe-validated: ${!!accessToken}`);
         return res.status(400).json({
           valid: false,
-          error: 'Cannot access this spreadsheet. Please connect a Gmail account (Email Accounts > Connect Gmail), or share the sheet with "Anyone with the link".',
+          error: 'This spreadsheet is private. Either (a) share the sheet with "Anyone with the link" in Google Sheets, OR (b) sign in with the Google account that owns this sheet (Email Accounts > Connect Google Sheets).',
           needsAuth: !accessToken
         });
       }
@@ -25113,7 +27857,8 @@ ${content}` }
       }
       let headers = [];
       let dataRows = [];
-      const accessToken = await getGoogleAccessTokenForSheets(req.user.organizationId);
+      const directRes = await tryDirectSheetsAccess(req.user.organizationId, spreadsheetId);
+      const accessToken = directRes.kind === "success" ? directRes.accessToken : null;
       let usedOAuth = false;
       if (accessToken) {
         try {
@@ -25129,7 +27874,7 @@ ${content}` }
               headers = allRows[0];
               dataRows = allRows.slice(1);
               usedOAuth = true;
-              console.log("[sheets/fetch-data] Google Sheets API success:", headers.length, "cols,", dataRows.length, "rows");
+              console.log("[sheets/fetch-data] Google Sheets API success via", directRes.kind === "success" ? directRes.tokenLabel : "(no label)", ":", headers.length, "cols,", dataRows.length, "rows");
             }
           } else {
             const errText = await apiRes.text();
@@ -25138,6 +27883,8 @@ ${content}` }
         } catch (apiErr) {
           console.log("[sheets/fetch-data] Sheets API error, falling back to CSV:", apiErr);
         }
+      } else {
+        console.log("[sheets/fetch-data] No working OAuth token for this sheet (tryDirectSheetsAccess outcome:", directRes.kind, ")");
       }
       if (!usedOAuth) {
         const sheetGid = gid !== void 0 ? gid : 0;
@@ -25569,8 +28316,21 @@ ${content}` }
       const isAdmin = role === "owner" || role === "admin";
       const parsedLimit = parseInt(limit) || 50;
       const parsedOffset = parseInt(offset) || 0;
-      const filters = { status, emailAccountId, campaignId, replyType, bounceType, leadStatus, assignedTo, search, viewMode };
+      const filters = { status, emailAccountId, campaignId, replyType, bounceType, leadStatus, search, viewMode };
       if (isStarred === "true") filters.isStarred = true;
+      if (isAdmin && assignedTo && assignedTo !== "all" && assignedTo !== "unassigned") {
+        const memberAccounts = await storage.getEmailAccountsForUser(req.user.organizationId, String(assignedTo));
+        const memberAccountIds = memberAccounts.map((a) => a.id);
+        if (memberAccountIds.length === 0) return res.json({ messages: [], total: 0, unread: 0, stats: {} });
+        if (!emailAccountId || emailAccountId === "all") {
+          filters.emailAccountId = memberAccountIds.join(",");
+        } else {
+          const chosen = String(emailAccountId).split(",").filter(Boolean);
+          const intersect = chosen.filter((id) => memberAccountIds.includes(id));
+          if (intersect.length === 0) return res.json({ messages: [], total: 0, unread: 0, stats: {} });
+          filters.emailAccountId = intersect.join(",");
+        }
+      }
       if (!isAdmin) {
         const userAccounts = await storage.getEmailAccountsForUser(req.user.organizationId, req.user.id);
         const userAccountIds = userAccounts.map((a) => a.id);
@@ -25581,7 +28341,8 @@ ${content}` }
       }
       const messages = await storage.getInboxMessagesEnhanced(req.user.organizationId, filters, parsedLimit, parsedOffset);
       const total = await storage.getInboxMessageCountEnhanced(req.user.organizationId, filters);
-      const statsAccountIds = !isAdmin && filters.emailAccountId ? String(filters.emailAccountId).split(",").filter(Boolean) : void 0;
+      const memberFilterActive = isAdmin && assignedTo && assignedTo !== "all" && assignedTo !== "unassigned";
+      const statsAccountIds = (!isAdmin || memberFilterActive) && filters.emailAccountId ? String(filters.emailAccountId).split(",").filter(Boolean) : void 0;
       const stats = await storage.getInboxStats(req.user.organizationId, statsAccountIds);
       const unread = stats.unread;
       const enriched = await Promise.all(messages.map(async (m) => {
@@ -28925,6 +31686,127 @@ ${customInstructions || ""}` : `Generate a proposal for ${ctx.contact?.contact?.
       res.status(500).json({ message: error.message || "Failed to generate campaign plan." });
     }
   });
+  app2.post("/api/campaigns/:id/review", requireAuth, async (req, res) => {
+    try {
+      const campaignId = req.params.id;
+      const { mode } = req.body;
+      if (!mode || !["pre_launch", "live", "post_mortem"].includes(mode)) {
+        return res.status(400).json({ message: "mode must be pre_launch, live, or post_mortem" });
+      }
+      const campaign = await storage.getCampaign(campaignId);
+      if (!campaign || campaign.organizationId !== req.user.organizationId) {
+        return res.status(404).json({ message: "Campaign not found" });
+      }
+      const { runCampaignReviewAgent: runCampaignReviewAgent2, saveCachedReview: saveCachedReview2 } = await Promise.resolve().then(() => (init_campaign_review_agent(), campaign_review_agent_exports));
+      const review = await runCampaignReviewAgent2(req.user.organizationId, campaignId, mode);
+      await saveCachedReview2(req.user.organizationId, campaignId, review);
+      res.json(review);
+    } catch (error) {
+      console.error("[CampaignReviewAgent] Error:", error.message);
+      res.status(500).json({ message: error.message || "Failed to generate campaign review." });
+    }
+  });
+  app2.get("/api/campaigns/reviews/summary", requireAuth, async (req, res) => {
+    try {
+      const settings = await storage.getApiSettings(req.user.organizationId);
+      if (!settings) return res.json({});
+      const summary = {};
+      for (const [key, val] of Object.entries(settings)) {
+        if (!key.startsWith("campaign_review_") || !val) continue;
+        const campaignId = key.replace("campaign_review_", "");
+        try {
+          const review = JSON.parse(val);
+          summary[campaignId] = {
+            grade: review.overallGrade || "?",
+            score: review.overallScore || 0,
+            mode: review.mode || "pre_launch",
+            degradation: review.degradation?.detected === true
+          };
+        } catch {
+        }
+      }
+      res.json(summary);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch review summaries." });
+    }
+  });
+  const bulkReviewCancelled = /* @__PURE__ */ new Set();
+  app2.post("/api/campaigns/bulk-review/cancel", requireAuth, async (req, res) => {
+    bulkReviewCancelled.add(req.user.organizationId);
+    res.json({ success: true });
+  });
+  app2.get("/api/campaigns/bulk-review/candidates", requireAuth, async (req, res) => {
+    try {
+      const candidates = await storage.rawAll(
+        `SELECT id, name, status, "sentCount", "openedCount", "repliedCount"
+         FROM campaigns
+         WHERE "organizationId" = $1
+           AND status IN ('active','following_up','paused','completed')
+           AND "sentCount" > 0
+         ORDER BY "updatedAt" DESC`,
+        req.user.organizationId
+      );
+      res.json(candidates);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch candidates." });
+    }
+  });
+  app2.post("/api/campaigns/bulk-review", requireAuth, async (req, res) => {
+    try {
+      const { campaignIds } = req.body;
+      let campaigns;
+      if (campaignIds && campaignIds.length > 0) {
+        const placeholders = campaignIds.map((_, i) => `$${i + 2}`).join(",");
+        campaigns = await storage.rawAll(
+          `SELECT id, status FROM campaigns WHERE "organizationId" = $1 AND id IN (${placeholders}) AND "sentCount" > 0`,
+          req.user.organizationId,
+          ...campaignIds
+        );
+      } else {
+        campaigns = await storage.rawAll(
+          `SELECT id, status FROM campaigns WHERE "organizationId" = $1 AND status IN ('active','following_up','paused','completed') AND "sentCount" > 0`,
+          req.user.organizationId
+        );
+      }
+      if (campaigns.length === 0) return res.json({ queued: 0 });
+      res.json({ queued: campaigns.length });
+      const orgId = req.user.organizationId;
+      bulkReviewCancelled.delete(orgId);
+      setImmediate(async () => {
+        const { runCampaignReviewAgent: runCampaignReviewAgent2, saveCachedReview: saveCachedReview2 } = await Promise.resolve().then(() => (init_campaign_review_agent(), campaign_review_agent_exports));
+        for (const c of campaigns) {
+          if (bulkReviewCancelled.has(orgId)) {
+            bulkReviewCancelled.delete(orgId);
+            console.log(`[BulkReview] Cancelled for org ${orgId}`);
+            break;
+          }
+          try {
+            const mode = c.status === "completed" ? "post_mortem" : "live";
+            const review = await runCampaignReviewAgent2(orgId, c.id, mode);
+            await saveCachedReview2(orgId, c.id, review);
+          } catch {
+          }
+        }
+      });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to start bulk review." });
+    }
+  });
+  app2.get("/api/campaigns/:id/review/latest", requireAuth, async (req, res) => {
+    try {
+      const campaignId = req.params.id;
+      const campaign = await storage.getCampaign(campaignId);
+      if (!campaign || campaign.organizationId !== req.user.organizationId) {
+        return res.status(404).json({ message: "Campaign not found" });
+      }
+      const { getCachedReview: getCachedReview2 } = await Promise.resolve().then(() => (init_campaign_review_agent(), campaign_review_agent_exports));
+      const review = await getCachedReview2(req.user.organizationId, campaignId);
+      if (!review) return res.json(null);
+      res.json(review);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to fetch campaign review." });
+    }
+  });
   app2.post("/api/agent/settings", requireAuth, async (req, res) => {
     try {
       const { role } = req.user;
@@ -29081,29 +31963,127 @@ ${customInstructions || ""}` : `Generate a proposal for ${ctx.contact?.contact?.
       res.status(500).json({ message: "Failed to save prompt" });
     }
   });
+  const LEAD_INTEL_JOB_TTL_MS = 60 * 60 * 1e3;
+  const leadIntelJobKey = (jobId) => `lead_intel_job_${jobId}`;
+  const findActiveLeadIntelJob = async (orgId, excludeJobId) => {
+    const allSettings = await storage.getApiSettings(orgId);
+    const now3 = Date.now();
+    for (const [key, val] of Object.entries(allSettings || {})) {
+      if (!key.startsWith("lead_intel_job_")) continue;
+      try {
+        const j = JSON.parse(val);
+        if (excludeJobId && j.id === excludeJobId) continue;
+        if (j.status !== "running") continue;
+        if (j.startedAt && now3 - new Date(j.startedAt).getTime() < LEAD_INTEL_JOB_TTL_MS) return j;
+      } catch {
+      }
+    }
+    return null;
+  };
+  const startLeadIntelJob = async (orgId, userId, type, options) => {
+    const existing = await findActiveLeadIntelJob(orgId);
+    if (existing) return { conflict: existing };
+    const jobId = `${orgId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const startedAt = (/* @__PURE__ */ new Date()).toISOString();
+    const job = {
+      id: jobId,
+      organizationId: orgId,
+      userId,
+      type,
+      status: "running",
+      startedAt,
+      finishedAt: null,
+      options,
+      result: null,
+      error: null,
+      cancelRequested: false
+    };
+    await storage.setApiSetting(orgId, leadIntelJobKey(jobId), JSON.stringify(job));
+    const concurrent = await findActiveLeadIntelJob(orgId, jobId);
+    if (concurrent) {
+      const earlierTime = new Date(concurrent.startedAt).getTime();
+      const myTime = new Date(startedAt).getTime();
+      const concurrentWins = earlierTime < myTime || earlierTime === myTime && String(concurrent.id) < String(jobId);
+      if (concurrentWins) {
+        const yielded = { ...job, status: "cancelled", cancelRequested: true, finishedAt: (/* @__PURE__ */ new Date()).toISOString() };
+        await storage.setApiSetting(orgId, leadIntelJobKey(jobId), JSON.stringify(yielded));
+        return { conflict: concurrent };
+      }
+    }
+    setImmediate(async () => {
+      try {
+        await runLeadIntelJob(jobId, orgId, type, options);
+      } catch (err) {
+        console.error(`[LeadIntel] runner crashed for job ${jobId}:`, err?.message || err);
+        try {
+          const settings = await storage.getApiSettings(orgId);
+          const raw = settings?.[leadIntelJobKey(jobId)];
+          if (raw) {
+            const j = JSON.parse(raw);
+            if (j.status === "running") {
+              j.status = "failed";
+              j.error = err?.message || String(err);
+              j.finishedAt = (/* @__PURE__ */ new Date()).toISOString();
+              await storage.setApiSetting(orgId, leadIntelJobKey(jobId), JSON.stringify(j));
+            }
+          }
+        } catch {
+        }
+      }
+    });
+    return { jobId };
+  };
+  const runLeadIntelJob = async (jobId, orgId, type, options) => {
+    const { scanOrgEmailHistory: scanOrgEmailHistory3, analyzeOrgLeads: analyzeOrgLeads3, runFullLeadIntelligence: runFullLeadIntelligence3, analyzeOrgLeadsIncremental: analyzeOrgLeadsIncremental2 } = await Promise.resolve().then(() => (init_lead_intelligence_engine(), lead_intelligence_engine_exports));
+    let result = null;
+    if (type === "scan") {
+      result = await scanOrgEmailHistory3(orgId, options.monthsBack || 6, options.emailAccountIds, !!options.force);
+    } else if (type === "analyze") {
+      result = options.force ? await analyzeOrgLeads3(orgId, options.emailAccountIds) : await analyzeOrgLeadsIncremental2(orgId, options.emailAccountIds);
+    } else if (type === "full") {
+      result = await runFullLeadIntelligence3(orgId, options.monthsBack || 6, options.emailAccountIds, !!options.force);
+    }
+    const settings = await storage.getApiSettings(orgId);
+    const raw = settings?.[leadIntelJobKey(jobId)];
+    if (raw) {
+      const j = JSON.parse(raw);
+      j.status = j.cancelRequested ? "cancelled" : "completed";
+      j.result = result;
+      j.finishedAt = (/* @__PURE__ */ new Date()).toISOString();
+      await storage.setApiSetting(orgId, leadIntelJobKey(jobId), JSON.stringify(j));
+    }
+  };
   app2.post("/api/lead-intelligence/scan", requireAuth, async (req, res) => {
     try {
       const orgId = req.user.organizationId;
       const monthsBack = parseInt(req.body.monthsBack) || 6;
       const emailAccountIds = Array.isArray(req.body.emailAccountIds) ? req.body.emailAccountIds.map(String) : void 0;
-      console.log(`[LeadIntel] Manual scan triggered for org ${orgId} (${monthsBack} months)${emailAccountIds ? ` accounts: ${emailAccountIds.join(",")}` : " (all accounts)"}`);
-      const result = await scanOrgEmailHistory(orgId, monthsBack, emailAccountIds);
-      res.json({ success: true, result });
+      const force = req.body?.force === true;
+      console.log(`[LeadIntel] Scan job requested for org ${orgId} (${monthsBack} months, mode=${force ? "force-full" : "incremental"})`);
+      const r = await startLeadIntelJob(orgId, req.user.id, "scan", { monthsBack, emailAccountIds, force });
+      if ("conflict" in r) {
+        return res.status(409).json({ message: "A lead intelligence job is already running for your org. Wait for it to complete or cancel it.", activeJob: r.conflict });
+      }
+      res.json({ jobId: r.jobId, type: "scan" });
     } catch (error) {
-      console.error("[LeadIntel] Scan error:", error);
-      res.status(500).json({ message: "Failed to scan email history", error: error instanceof Error ? error.message : String(error) });
+      console.error("[LeadIntel] Scan job start error:", error);
+      res.status(500).json({ message: "Failed to start scan", error: error instanceof Error ? error.message : String(error) });
     }
   });
   app2.post("/api/lead-intelligence/analyze", requireAuth, async (req, res) => {
     try {
       const orgId = req.user.organizationId;
       const emailAccountIds = Array.isArray(req.body.emailAccountIds) ? req.body.emailAccountIds.map(String) : void 0;
-      console.log(`[LeadIntel] Manual analysis triggered for org ${orgId}${emailAccountIds ? ` accounts: ${emailAccountIds.join(",")}` : " (all accounts)"}`);
-      const result = await analyzeOrgLeads(orgId, emailAccountIds);
-      res.json({ success: true, result });
+      const force = req.body?.force === true;
+      console.log(`[LeadIntel] Analyze job requested for org ${orgId} (mode=${force ? "force-full" : "incremental"})`);
+      const r = await startLeadIntelJob(orgId, req.user.id, "analyze", { emailAccountIds, force });
+      if ("conflict" in r) {
+        return res.status(409).json({ message: "A lead intelligence job is already running for your org. Wait for it to complete or cancel it.", activeJob: r.conflict });
+      }
+      res.json({ jobId: r.jobId, type: "analyze" });
     } catch (error) {
-      console.error("[LeadIntel] Analysis error:", error);
-      res.status(500).json({ message: "Failed to analyze leads", error: error instanceof Error ? error.message : String(error) });
+      console.error("[LeadIntel] Analyze job start error:", error);
+      res.status(500).json({ message: "Failed to start analysis", error: error instanceof Error ? error.message : String(error) });
     }
   });
   app2.post("/api/lead-intelligence/run", requireAuth, async (req, res) => {
@@ -29111,12 +32091,53 @@ ${customInstructions || ""}` : `Generate a proposal for ${ctx.contact?.contact?.
       const orgId = req.user.organizationId;
       const monthsBack = parseInt(req.body.monthsBack) || 6;
       const emailAccountIds = Array.isArray(req.body.emailAccountIds) ? req.body.emailAccountIds.map(String) : void 0;
-      console.log(`[LeadIntel] Full pipeline triggered for org ${orgId}${emailAccountIds ? ` accounts: ${emailAccountIds.join(",")}` : " (all accounts)"}`);
-      const result = await runFullLeadIntelligence(orgId, monthsBack, emailAccountIds);
-      res.json({ success: true, ...result });
+      const force = req.body?.force === true;
+      console.log(`[LeadIntel] Full pipeline job requested for org ${orgId} (mode=${force ? "force-full" : "incremental"})`);
+      const r = await startLeadIntelJob(orgId, req.user.id, "full", { monthsBack, emailAccountIds, force });
+      if ("conflict" in r) {
+        return res.status(409).json({ message: "A lead intelligence job is already running for your org. Wait for it to complete or cancel it.", activeJob: r.conflict });
+      }
+      res.json({ jobId: r.jobId, type: "full" });
     } catch (error) {
-      console.error("[LeadIntel] Pipeline error:", error);
-      res.status(500).json({ message: "Failed to run lead intelligence", error: error instanceof Error ? error.message : String(error) });
+      console.error("[LeadIntel] Full pipeline job start error:", error);
+      res.status(500).json({ message: "Failed to start pipeline", error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+  app2.get("/api/lead-intelligence/jobs/:jobId", requireAuth, async (req, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const settings = await storage.getApiSettings(orgId);
+      const raw = settings?.[leadIntelJobKey(req.params.jobId)];
+      if (!raw) return res.status(404).json({ message: "Job not found" });
+      const job = JSON.parse(raw);
+      if (job.organizationId !== orgId) return res.status(403).json({ message: "Forbidden" });
+      if (job.status === "running" && job.startedAt && Date.now() - new Date(job.startedAt).getTime() > LEAD_INTEL_JOB_TTL_MS) {
+        job.status = "failed";
+        job.error = "Job exceeded TTL \u2014 likely the server restarted mid-run.";
+        job.finishedAt = (/* @__PURE__ */ new Date()).toISOString();
+        await storage.setApiSetting(orgId, leadIntelJobKey(job.id), JSON.stringify(job));
+      }
+      res.json(job);
+    } catch (error) {
+      console.error("[LeadIntel] Job status error:", error?.message || error);
+      res.status(500).json({ message: "Failed to read job status" });
+    }
+  });
+  app2.post("/api/lead-intelligence/jobs/:jobId/cancel", requireAuth, async (req, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const settings = await storage.getApiSettings(orgId);
+      const raw = settings?.[leadIntelJobKey(req.params.jobId)];
+      if (!raw) return res.status(404).json({ message: "Job not found" });
+      const job = JSON.parse(raw);
+      if (job.organizationId !== orgId) return res.status(403).json({ message: "Forbidden" });
+      if (job.status !== "running") return res.json({ ok: true, status: job.status });
+      job.cancelRequested = true;
+      await storage.setApiSetting(orgId, leadIntelJobKey(req.params.jobId), JSON.stringify(job));
+      res.json({ ok: true, status: "cancelling" });
+    } catch (error) {
+      console.error("[LeadIntel] Job cancel error:", error?.message || error);
+      res.status(500).json({ message: "Failed to cancel job" });
     }
   });
   app2.patch("/api/lead-intelligence/opportunities/:id", requireAuth, async (req, res) => {
@@ -29903,6 +32924,8 @@ function startWarmupInboxCleanup() {
 
 // server/index.ts
 init_apollo_sync_engine();
+init_outbound_reply_sweeper();
+init_stale_jobs_sweeper();
 init_reply_classifier();
 init_storage();
 process.on("uncaughtException", (err) => {
@@ -29950,6 +32973,8 @@ app.use((req, res, next) => {
     startInboxNudgeEngine();
     startWarmupInboxPurge();
     startWarmupInboxCleanup();
+    startOutboundReplySweeper();
+    startStaleJobsSweeper();
     startApolloSyncResumer();
     setTimeout(async () => {
       try {
@@ -30295,6 +33320,30 @@ app.use((req, res, next) => {
     setInterval(async () => {
       await resumeDailyLimitPausedCampaigns("poll");
     }, 15 * 60 * 1e3);
+    setInterval(async () => {
+      try {
+        const activeCampaigns = await storage.rawAll(
+          `SELECT DISTINCT c.id, c.name, c."organizationId"
+           FROM campaigns c
+           WHERE c.status = 'active' AND c."sentCount" >= 10`
+        );
+        if (activeCampaigns.length === 0) return;
+        log(`[CampaignIntelligence] Live monitor: checking ${activeCampaigns.length} active campaign(s)`);
+        const { runCampaignReviewAgent: runCampaignReviewAgent2, saveCachedReview: saveCachedReview2 } = await Promise.resolve().then(() => (init_campaign_review_agent(), campaign_review_agent_exports));
+        for (const c of activeCampaigns) {
+          try {
+            const review = await runCampaignReviewAgent2(c.organizationId, c.id, "live");
+            await saveCachedReview2(c.organizationId, c.id, review);
+            if (review.degradation?.detected) {
+              log(`[CampaignIntelligence] Degradation detected in "${c.name}" \u2014 ${review.degradation.details}`);
+            }
+          } catch (err) {
+          }
+        }
+      } catch (e) {
+        console.error("[CampaignIntelligence] Live monitor error:", e);
+      }
+    }, 5 * 60 * 60 * 1e3);
     async function resumeDailyLimitPausedCampaigns(trigger) {
       try {
         const candidates = await storage.rawAll(`

@@ -960,6 +960,39 @@ export class CampaignEngine {
 
     console.log(`[CampaignEngine] Campaign ${campaignId} entering for loop with ${contacts.length} contacts`);
 
+    // Refresh sendingConfig + status from DB periodically so dialog updates (Apply on
+    // Autopilot) AND status changes (manual pause via SQL/admin) take effect mid-send
+    // instead of being captured for the lifetime of the loop.
+    // Cache for 60s to avoid hammering the DB on rapid send cadences.
+    let activeSendingConfig: SendingConfig | null | undefined = sendingConfig;
+    let dbStatusPaused = false; // set when a refresh sees status='paused' or 'cancelled'
+    let lastConfigRefreshAt = Date.now();
+    const CONFIG_REFRESH_INTERVAL_MS = 60_000;
+    const refreshSendingConfigIfStale = async () => {
+      if (Date.now() - lastConfigRefreshAt < CONFIG_REFRESH_INTERVAL_MS) return;
+      try {
+        const fresh = await storage.getCampaign(campaignId);
+        if (fresh) {
+          if ((fresh as any).sendingConfig !== undefined) {
+            const newConfig = (fresh as any).sendingConfig as SendingConfig | null;
+            const before = JSON.stringify(activeSendingConfig?.autopilot || null);
+            const after = JSON.stringify(newConfig?.autopilot || null);
+            if (before !== after) {
+              console.log(`[CampaignEngine] Campaign ${campaignId} sendingConfig refreshed from DB — autopilot ${activeSendingConfig?.autopilot?.enabled ? 'ON' : 'OFF'} → ${newConfig?.autopilot?.enabled ? 'ON' : 'OFF'}`);
+            }
+            activeSendingConfig = newConfig;
+          }
+          if (fresh.status === 'paused' || fresh.status === 'cancelled' || fresh.status === 'archived') {
+            console.log(`[CampaignEngine] Campaign ${campaignId} DB status is "${fresh.status}" — halting in-memory send loop`);
+            dbStatusPaused = true;
+          }
+        }
+      } catch (e) {
+        // Non-fatal — keep using current config
+      }
+      lastConfigRefreshAt = Date.now();
+    };
+
     for (let i = 0; i < contacts.length; i++) {
       if (i === 0) console.log(`[CampaignEngine] Campaign ${campaignId} processing FIRST contact: ${contacts[i]?.email}`);
       // Check if paused or stopped
@@ -977,9 +1010,29 @@ export class CampaignEngine {
       // Check if campaign was deleted/stopped
       if (!this.activeCampaigns.has(campaignId)) break;
 
+      // Refresh sendingConfig + status from DB if cache expired (≤1 DB read/min/campaign).
+      // If a manual/admin pause set status='paused', halt the in-memory loop here.
+      await refreshSendingConfigIfStale();
+      if (dbStatusPaused) {
+        console.log(`[CampaignEngine] Campaign ${campaignId} halted: DB status changed externally`);
+        // Flush counts and exit cleanly
+        if (localSentCount > 0 || localBouncedCount > 0) {
+          const updatedCampaign = await storage.getCampaign(campaignId);
+          if (updatedCampaign) {
+            await storage.updateCampaign(campaignId, {
+              sentCount: (updatedCampaign.sentCount || 0) + localSentCount,
+              bouncedCount: (updatedCampaign.bouncedCount || 0) + localBouncedCount,
+            });
+          }
+          if (localSentCount > 0) await storage.incrementDailySent(emailAccount.id, localSentCount);
+        }
+        this.activeCampaigns.delete(campaignId);
+        return;
+      }
+
       // ===== TIME WINDOW ENFORCEMENT =====
       // Check if we're within the allowed sending window based on autopilot schedule
-      const windowCheck = this.checkSendingWindow(sendingConfig);
+      const windowCheck = this.checkSendingWindow(activeSendingConfig);
       if (!windowCheck.canSend) {
         console.log(`[CampaignEngine] Campaign ${campaignId} outside sending window: ${windowCheck.reason}. Pausing for ${Math.round((windowCheck.pauseUntilMs || 0) / 60000)} minutes.`);
         
@@ -1011,7 +1064,8 @@ export class CampaignEngine {
           if (!this.activeCampaigns.has(campaignId)) return;
           
           // Re-check sending window periodically (in case timezone/schedule changed)
-          const recheck = this.checkSendingWindow(sendingConfig);
+          await refreshSendingConfigIfStale();
+          const recheck = this.checkSendingWindow(activeSendingConfig);
           if (recheck.canSend) break;
           
           await new Promise(resolve => setTimeout(resolve, 60000)); // Check every 60 seconds
@@ -1054,7 +1108,7 @@ export class CampaignEngine {
         await storage.updateCampaign(campaignId, { status: 'paused', autoPaused: true });
         if (tracker) tracker.paused = true;
         
-        const sleepMs = this.msUntilNextSendWindow(sendingConfig?.autopilot!, sendingConfig?.timezoneOffset || 0, sendingConfig?.timezone);
+        const sleepMs = this.msUntilNextSendWindow(activeSendingConfig?.autopilot!, activeSendingConfig?.timezoneOffset || 0, activeSendingConfig?.timezone);
         const sleepUntil = Date.now() + sleepMs;
         while (Date.now() < sleepUntil) {
           if (!this.activeCampaigns.has(campaignId)) return;
