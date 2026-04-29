@@ -8108,6 +8108,173 @@ Output schema:
     }
   });
 
+  // ===== ADMIN: SHEETS-IMPORT DEBUG =====
+  // Read-only diagnostic — given a Google Sheets URL, lists every Google token stored
+  // for the org and reports what each one returns when asked to read THIS specific
+  // spreadsheet. No secrets exposed (token values masked). Use when the import dialog
+  // shows a confusing error to see exactly which path is failing.
+  //
+  // Usage: /api/admin/sheets-debug?url=<google-sheets-url>
+  app.get('/api/admin/sheets-debug', requireAuth, async (req: any, res) => {
+    const role = req.user?.role;
+    const isSuperAdmin = !!req.user?.isSuperAdmin;
+    if (!isSuperAdmin && role !== 'owner' && role !== 'admin') {
+      return res.status(403).json({ error: 'Admin only' });
+    }
+    const orgId = req.user.organizationId;
+    const url = String(req.query.url || '').trim();
+    if (!url) return res.status(400).json({ error: 'url query param required' });
+
+    // Same regex as extractSpreadsheetId
+    let spreadsheetId: string | null = null;
+    if (/^[a-zA-Z0-9_-]{20,}$/.test(url)) spreadsheetId = url;
+    else {
+      const m = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+      if (m) spreadsheetId = m[1];
+    }
+    if (!spreadsheetId) return res.status(400).json({ error: 'Invalid Google Sheets URL', input: url });
+
+    const settings = await storage.getApiSettings(orgId);
+
+    // Collect candidates exactly the way Strategy 1.5 does
+    type Cand = { label: string; accessToken: string; refreshToken: string; tokenExpiry: string };
+    const candidates: Cand[] = [];
+    if (settings.gmail_access_token && settings.gmail_refresh_token) {
+      candidates.push({
+        label: 'org-level',
+        accessToken: settings.gmail_access_token,
+        refreshToken: settings.gmail_refresh_token,
+        tokenExpiry: settings.gmail_token_expiry || '0',
+      });
+    }
+    for (const k of Object.keys(settings)) {
+      if (!k.startsWith('gmail_sender_') || !k.endsWith('_access_token')) continue;
+      const email = k.replace('gmail_sender_', '').replace('_access_token', '');
+      const sa = settings[k];
+      const sr = settings[`gmail_sender_${email}_refresh_token`];
+      if (sa && sr) {
+        candidates.push({
+          label: `sender:${email}`,
+          accessToken: sa,
+          refreshToken: sr,
+          tokenExpiry: settings[`gmail_sender_${email}_token_expiry`] || '0',
+        });
+      }
+    }
+
+    let cid = settings.google_oauth_client_id || '';
+    let csec = settings.google_oauth_client_secret || '';
+    if (!cid || !csec) {
+      try {
+        const sa = await storage.getSuperAdminOrgId();
+        if (sa && sa !== orgId) {
+          const ss = await storage.getApiSettings(sa);
+          if (ss.google_oauth_client_id) { cid = ss.google_oauth_client_id; csec = ss.google_oauth_client_secret || ''; }
+        }
+      } catch {}
+    }
+    if (!cid) cid = process.env.GOOGLE_CLIENT_ID || '';
+    if (!csec) csec = process.env.GOOGLE_CLIENT_SECRET || '';
+
+    const apiUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=spreadsheetId,properties.title`;
+    const now = Date.now();
+
+    const results = [] as any[];
+    for (const c of candidates) {
+      const expiryMs = parseInt(c.tokenExpiry || '0');
+      const expired = !expiryMs || now > expiryMs - 5 * 60 * 1000;
+      let token: string | null = c.accessToken;
+      let refreshOutcome: string | null = null;
+
+      if (expired && cid && csec) {
+        try {
+          const r = await fetch('https://oauth2.googleapis.com/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({ client_id: cid, client_secret: csec, refresh_token: c.refreshToken, grant_type: 'refresh_token' }),
+          });
+          if (r.ok) {
+            const td = await r.json() as any;
+            if (td.access_token) {
+              token = td.access_token;
+              refreshOutcome = 'refreshed_ok';
+            } else {
+              refreshOutcome = 'refresh_no_access_token_in_response';
+            }
+          } else {
+            const errText = await r.text();
+            refreshOutcome = `refresh_failed_${r.status}: ${errText.slice(0, 120)}`;
+          }
+        } catch (e: any) {
+          refreshOutcome = `refresh_threw: ${e?.message || 'unknown'}`;
+        }
+      }
+
+      // Probe Google's tokeninfo to see actual granted scopes
+      let scopes: string | null = null;
+      if (token) {
+        try {
+          const ti = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${token}`);
+          if (ti.ok) {
+            const tid = await ti.json() as any;
+            scopes = tid.scope || null;
+          }
+        } catch {}
+      }
+
+      // Try the actual sheet
+      let sheetStatus: number | null = null;
+      let sheetBody: string | null = null;
+      if (token) {
+        try {
+          const apiRes = await fetch(apiUrl, { headers: { Authorization: `Bearer ${token}` } });
+          sheetStatus = apiRes.status;
+          if (!apiRes.ok) {
+            sheetBody = (await apiRes.text()).slice(0, 200);
+          } else {
+            sheetBody = '<ok>';
+          }
+        } catch (e: any) {
+          sheetBody = `threw: ${e?.message || 'unknown'}`;
+        }
+      }
+
+      results.push({
+        label: c.label,
+        tokenExpiryIso: expiryMs ? new Date(expiryMs).toISOString() : null,
+        tokenExpired: expired,
+        refreshOutcome,
+        grantedScopes: scopes,
+        hasSheetsScope: scopes ? scopes.includes('spreadsheets') : null,
+        sheetFetchStatus: sheetStatus,
+        sheetFetchBody: sheetBody,
+      });
+    }
+
+    // Public CSV check
+    let publicCsvStatus: number | null = null;
+    let publicCsvLooksHtml = false;
+    try {
+      const r = await fetch(`https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv&gid=0`, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        redirect: 'follow',
+      });
+      publicCsvStatus = r.status;
+      if (r.ok) {
+        const t = await r.text();
+        publicCsvLooksHtml = t.trim().startsWith('<!DOCTYPE') || t.trim().startsWith('<html');
+      }
+    } catch {}
+
+    res.json({
+      orgId,
+      spreadsheetId,
+      candidatesCount: candidates.length,
+      results,
+      publicCsv: { status: publicCsvStatus, looksHtmlLogin: publicCsvLooksHtml },
+    });
+  });
+
   // ===== ADMIN HEALTH =====
   // Read-only system health: process metrics, DB latency, queue depths, engine status,
   // active background jobs. Org-scoped for admins; superadmin sees all-orgs aggregate.
