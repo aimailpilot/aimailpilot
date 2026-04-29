@@ -366,15 +366,20 @@ async function processCandidate(c: InboxCandidate): Promise<'replied' | 'no_repl
 
   if (!match) return 'no_reply';
 
-  // Mark this inbox row as replied via native client. Stores both:
+  // Mark this inbox row as replied via native client. Stores:
   //   - repliedBy: who replied (ownerUserId fallback to ownerEmail)
-  //   - nativeReplyContent: the body of their reply (extracted from Gmail/Outlook thread)
-  // Convention: existing in-app reply flows set repliedBy = req.user.email || req.user.id.
-  // Idempotent via repliedBy IS NULL clause — won't overwrite if another flow already set it.
-  // Does NOT touch status or repliedAt — those are reserved for in-app reply flows.
+  //   - repliedAt: the timestamp of the native reply (from the Gmail/Outlook thread)
+  //   - nativeReplyContent: the body of their reply (extracted from the thread)
+  // Setting repliedAt aligns native replies with in-app reply UX so the unified inbox
+  // shows them consistently in the Replied tab and the message detail can surface a
+  // "Replied at X" label. The "(status='replied' AND repliedAt IS NOT NULL)" branch in
+  // the Replied filter and the "repliedAt IS NULL" guard in the not_replied filter both
+  // benefit from the timestamp being populated. Idempotent via repliedBy IS NULL — won't
+  // overwrite if another flow already claimed the row.
+  // Does NOT set status='replied' (kept for explicit in-app actions like archive/dismiss).
   await storage.rawRun(
-    `UPDATE unified_inbox SET "repliedBy" = ?, "nativeReplyContent" = ? WHERE id = ? AND "organizationId" = ? AND "repliedBy" IS NULL`,
-    c.ownerUserId || c.ownerEmail, match.content || null, c.id, c.organizationId
+    `UPDATE unified_inbox SET "repliedBy" = ?, "repliedAt" = ?, "nativeReplyContent" = ? WHERE id = ? AND "organizationId" = ? AND "repliedBy" IS NULL`,
+    c.ownerUserId || c.ownerEmail, match.sentAt, match.content || null, c.id, c.organizationId
   );
   return 'replied';
 }
