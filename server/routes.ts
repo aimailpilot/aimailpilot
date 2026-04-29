@@ -3459,16 +3459,17 @@ Which account should I use and why? If I need to split across accounts, provide 
       } catch (e) { /* enrichment failure is non-fatal */ }
 
       // Enrich auto-paused campaigns with the specific reason (bounce_surge,
-      // daily_limit, window_closed, or unknown). For bounce_surge we have an
-      // explicit tracking_event with rich metadata; for the others we infer
-      // from campaign + account state because the engine doesn't currently
-      // record them as events. Single batched SQL query keeps this cheap even
-      // when many campaigns are auto-paused.
+      // daily_limit, bounce_surge_inferred, or unknown). For bounce_surge we
+      // have an explicit tracking_event with rich metadata. For daily_limit we
+      // infer from the sending account's current dailySent vs dailyLimit. The
+      // remaining cases (sending window closed, worker restart) collapse into
+      // 'unknown' because the engine doesn't record them as events. Single
+      // batched SQL query per data source keeps this cheap.
       try {
-        const autoPausedIds = (campaigns as any[])
-          .filter(c => c.status === 'paused' && c.autoPaused === true)
-          .map(c => c.id);
+        const autoPausedCampaigns = (campaigns as any[]).filter(c => c.status === 'paused' && c.autoPaused === true);
+        const autoPausedIds = autoPausedCampaigns.map(c => c.id);
         if (autoPausedIds.length > 0) {
+          // 1) Latest bounce_surge event per campaign
           const placeholders = autoPausedIds.map(() => '?').join(',');
           const surgeRows = await storage.rawAll(
             `SELECT DISTINCT ON ("campaignId") "campaignId", "createdAt", metadata
@@ -3483,8 +3484,29 @@ Which account should I use and why? If I need to split across accounts, provide 
             if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
             surgeByCampaign[r.campaignId] = { at: r.createdAt, meta };
           }
-          for (const c of campaigns as any[]) {
-            if (c.status !== 'paused' || c.autoPaused !== true) continue;
+
+          // 2) Account daily-sent state for the sending account of each campaign
+          // — used to detect daily_limit pauses (no event is currently recorded
+          // for these in campaign-engine.ts, so we infer from the account row).
+          const accountIds = [...new Set(autoPausedCampaigns.map(c => c.emailAccountId).filter(Boolean))];
+          const accountState: Record<string, { dailySent: number; dailyLimit: number; email: string }> = {};
+          if (accountIds.length > 0) {
+            const acctPh = accountIds.map(() => '?').join(',');
+            const acctRows = await storage.rawAll(
+              `SELECT id, "dailySent", "dailyLimit", email FROM email_accounts WHERE id IN (${acctPh})`,
+              ...accountIds
+            ) as any[];
+            for (const r of acctRows) {
+              accountState[r.id] = {
+                dailySent: parseInt(r.dailySent || '0', 10) || 0,
+                dailyLimit: parseInt(r.dailyLimit || '0', 10) || 0,
+                email: r.email || '',
+              };
+            }
+          }
+
+          for (const c of autoPausedCampaigns) {
+            // Bounce surge wins — it's the explicit recorded reason.
             const surge = surgeByCampaign[c.id];
             if (surge) {
               c.pauseReason = 'bounce_surge';
@@ -3492,15 +3514,24 @@ Which account should I use and why? If I need to split across accounts, provide 
               c.pauseReasonDetail = surge.meta?.reason || 'Bounce surge detected';
               continue;
             }
-            // Infer when no explicit event was recorded.
+            // Daily limit — inferred when account has hit its cap right now.
+            // Note: daily counters reset at UTC midnight, so this check is
+            // accurate while the limit is actually constraining sending.
+            const acct = c.emailAccountId ? accountState[c.emailAccountId] : null;
+            if (acct && acct.dailyLimit > 0 && acct.dailySent >= acct.dailyLimit) {
+              c.pauseReason = 'daily_limit';
+              c.pauseReasonDetail = `Daily send limit reached on ${acct.email} (${acct.dailySent}/${acct.dailyLimit}). Resumes automatically when the daily counter resets at UTC midnight.`;
+              continue;
+            }
+            // High-bounce inference when no explicit event is recorded.
             const bounceRate = c.sentCount > 0 ? (c.bouncedCount || 0) / c.sentCount : 0;
             if ((c.bouncedCount || 0) >= 5 && bounceRate >= 0.15) {
               c.pauseReason = 'bounce_surge_inferred';
               c.pauseReasonDetail = `${c.bouncedCount} bounces in ${c.sentCount} sends (${Math.round(bounceRate * 100)}%) — likely bounce surge`;
-            } else {
-              c.pauseReason = 'unknown';
-              c.pauseReasonDetail = 'Auto-paused by system — possibly daily limit reached, sending window closed, or worker restart. Will resume automatically.';
+              continue;
             }
+            c.pauseReason = 'unknown';
+            c.pauseReasonDetail = 'Auto-paused by system — possibly sending window closed or worker restart. Will resume automatically.';
           }
         }
       } catch (e) {

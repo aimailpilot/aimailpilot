@@ -1134,9 +1134,18 @@ export default function MailMeteorDashboard() {
                                 ? ''
                                 : pauseReason === 'bounce_surge' || pauseReason === 'bounce_surge_inferred'
                                   ? ' (bounce surge)'
-                                  : ' (auto)';
+                                  : pauseReason === 'daily_limit'
+                                    ? ' (daily limit)'
+                                    : ' (auto)';
                               const fullLabel = `${labelText}${autoSuffix}`;
+                              // Color hint: red-tinted orange for bounce surge (needs attention),
+                              // amber for daily limit (will self-resume at UTC midnight),
+                              // orange for other auto reasons.
+                              const isBounceSurge = isAutoPaused && (pauseReason === 'bounce_surge' || pauseReason === 'bounce_surge_inferred');
+                              const isDailyLimit = isAutoPaused && pauseReason === 'daily_limit';
                               const colorClass = campaign.status === 'active' || campaign.status === 'following_up' ? 'bg-green-50 text-green-700 border border-green-200' :
+                                isBounceSurge ? 'bg-red-50 text-red-700 border border-red-200' :
+                                isDailyLimit ? 'bg-amber-50 text-amber-700 border border-amber-200' :
                                 isAutoPaused ? 'bg-orange-50 text-orange-700 border border-orange-200' :
                                 campaign.status === 'paused' ? 'bg-yellow-50 text-yellow-700 border border-yellow-200' :
                                 campaign.status === 'completed' ? 'bg-blue-50 text-blue-700 border border-blue-200' :
@@ -1144,6 +1153,8 @@ export default function MailMeteorDashboard() {
                                 campaign.status === 'scheduled' ? 'bg-purple-50 text-purple-700 border border-purple-200' :
                                 'bg-gray-50 text-gray-500 border border-gray-200';
                               const dotClass = campaign.status === 'active' || campaign.status === 'following_up' ? 'bg-green-500' :
+                                isBounceSurge ? 'bg-red-500' :
+                                isDailyLimit ? 'bg-amber-500' :
                                 isAutoPaused ? 'bg-orange-500' :
                                 campaign.status === 'paused' ? 'bg-yellow-500' :
                                 campaign.status === 'completed' ? 'bg-blue-500' :
@@ -1166,8 +1177,10 @@ export default function MailMeteorDashboard() {
                                   tooltipText = `Auto-paused: bounce surge. ${detail || 'High bounce rate detected.'} Click Resume after fixing the underlying issue.`;
                                 } else if (reason === 'bounce_surge_inferred') {
                                   tooltipText = `Auto-paused (likely bounce surge). ${detail || ''}`;
+                                } else if (reason === 'daily_limit') {
+                                  tooltipText = detail || 'Auto-paused: daily send limit reached on the sending account. Resumes automatically at UTC midnight when the counter resets.';
                                 } else {
-                                  tooltipText = detail || 'Auto-paused by the system. Will resume automatically when the condition clears (daily limit reset, sending window opens, etc.).';
+                                  tooltipText = detail || 'Auto-paused by the system. Will resume automatically when the condition clears (sending window opens, worker restarts, etc.).';
                                 }
                                 return (
                                   <Tooltip>
