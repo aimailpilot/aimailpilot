@@ -631,7 +631,11 @@ export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }
         setSendResult({ scheduled: true, campaignId: campaign.id });
         queryClient.invalidateQueries({ queryKey: ['/api/campaigns'] });
       } else {
-        await fetch(`/api/campaigns/${campaign.id}/send`, {
+        // Check the engine's response. /send returns {success, error} — when the engine
+        // rejects the campaign (e.g. zero valid contacts after filtering), success=false
+        // and the campaign stays in draft. Previously this was ignored and the UI showed
+        // the success page anyway, leaving users confused why nothing was sending.
+        const sendRes = await fetch(`/api/campaigns/${campaign.id}/send`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
@@ -642,6 +646,11 @@ export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }
             timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           }),
         });
+        const sendBody = await sendRes.json().catch(() => ({}));
+        if (!sendRes.ok || sendBody?.success === false) {
+          const detail = sendBody?.error || sendBody?.message || `HTTP ${sendRes.status}`;
+          throw new Error(`Campaign could not start: ${detail}`);
+        }
         setSendResult({ campaignId: campaign.id });
         queryClient.invalidateQueries({ queryKey: ['/api/campaigns'] });
       }
