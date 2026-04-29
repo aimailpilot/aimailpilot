@@ -8046,6 +8046,207 @@ Output schema:
     }
   });
 
+  // ===== ADMIN HEALTH =====
+  // Read-only system health: process metrics, DB latency, queue depths, engine status,
+  // active background jobs. Org-scoped for admins; superadmin sees all-orgs aggregate.
+  // Each section in its own try/catch so a partial failure still returns useful data.
+  // No external API calls — fully in-process + simple counts on indexed columns.
+  app.get('/api/admin/health', requireAuth, async (req: any, res) => {
+    const role = req.user?.role;
+    const isSuperAdmin = !!req.user?.isSuperAdmin;
+    if (!isSuperAdmin && role !== 'owner' && role !== 'admin') {
+      return res.status(403).json({ error: 'Admin only' });
+    }
+
+    const orgId: string = req.user.organizationId;
+    const errors: Record<string, string> = {};
+    const out: any = { timestamp: new Date().toISOString(), orgId, isSuperAdmin };
+    const t0 = Date.now();
+
+    // Helper: safely parse counts from PG/SQLite (PG returns bigint as string)
+    const num = (v: any): number => {
+      if (v === null || v === undefined) return 0;
+      const n = typeof v === 'number' ? v : parseInt(String(v), 10);
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    // === Process metrics ===
+    try {
+      const mem = process.memoryUsage();
+      out.process = {
+        uptimeSec: Math.round(process.uptime()),
+        memoryMB: {
+          rss: Math.round(mem.rss / 1024 / 1024),
+          heapUsed: Math.round(mem.heapUsed / 1024 / 1024),
+          heapTotal: Math.round(mem.heapTotal / 1024 / 1024),
+          external: Math.round(mem.external / 1024 / 1024),
+        },
+        nodeVersion: process.version,
+        pid: process.pid,
+        env: process.env.NODE_ENV || 'development',
+      };
+    } catch (e: any) { errors.process = e?.message || String(e); }
+
+    // === DB latency ===
+    try {
+      const dt = Date.now();
+      await storage.rawGet('SELECT 1 as ok');
+      out.db = { latencyMs: Date.now() - dt, ok: true };
+    } catch (e: any) {
+      out.db = { ok: false, latencyMs: -1 };
+      errors.db = e?.message || String(e);
+    }
+
+    // === Campaigns by status ===
+    try {
+      const orgFilter = isSuperAdmin ? '' : `WHERE "organizationId" = ?`;
+      const params = isSuperAdmin ? [] : [orgId];
+      const row = await storage.rawGet(
+        `SELECT
+           SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) AS "active",
+           SUM(CASE WHEN status='paused' AND "autoPaused"=true THEN 1 ELSE 0 END) AS "pausedAuto",
+           SUM(CASE WHEN status='paused' AND ("autoPaused" IS NULL OR "autoPaused"=false) THEN 1 ELSE 0 END) AS "pausedUser",
+           SUM(CASE WHEN status='draft' THEN 1 ELSE 0 END) AS "draft",
+           SUM(CASE WHEN status='scheduled' THEN 1 ELSE 0 END) AS "scheduled",
+           SUM(CASE WHEN status='following_up' THEN 1 ELSE 0 END) AS "followingUp",
+           SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS "completed",
+           COUNT(*) AS "total"
+         FROM campaigns ${orgFilter}`,
+        ...params
+      ) as any;
+      out.campaigns = {
+        active: num(row?.active),
+        pausedAuto: num(row?.pausedAuto),
+        pausedUser: num(row?.pausedUser),
+        draft: num(row?.draft),
+        scheduled: num(row?.scheduled),
+        followingUp: num(row?.followingUp),
+        completed: num(row?.completed),
+        total: num(row?.total),
+      };
+    } catch (e: any) { errors.campaigns = e?.message || String(e); }
+
+    // === Follow-up executions (joined via campaigns for org scope) ===
+    try {
+      const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const orgJoin = isSuperAdmin ? '' : `JOIN campaigns c ON c.id = fe."campaignId" WHERE c."organizationId" = ?`;
+      const params = isSuperAdmin ? [dayAgo, dayAgo] : [dayAgo, dayAgo, orgId];
+      const row = await storage.rawGet(
+        `SELECT
+           SUM(CASE WHEN fe.status='pending' THEN 1 ELSE 0 END) AS "pending",
+           SUM(CASE WHEN fe.status='processing' THEN 1 ELSE 0 END) AS "processing",
+           SUM(CASE WHEN fe.status='sent' AND fe."executedAt" >= ? THEN 1 ELSE 0 END) AS "sentLast24h",
+           SUM(CASE WHEN fe.status='failed' AND fe."executedAt" >= ? THEN 1 ELSE 0 END) AS "failedLast24h",
+           SUM(CASE WHEN fe.status='cancelled' THEN 1 ELSE 0 END) AS "cancelled",
+           COUNT(*) AS "total"
+         FROM followup_executions fe ${orgJoin}`,
+        ...params
+      ) as any;
+      out.followups = {
+        pending: num(row?.pending),
+        processing: num(row?.processing),
+        sentLast24h: num(row?.sentLast24h),
+        failedLast24h: num(row?.failedLast24h),
+        cancelled: num(row?.cancelled),
+        total: num(row?.total),
+      };
+    } catch (e: any) { errors.followups = e?.message || String(e); }
+
+    // === Email accounts ===
+    try {
+      const orgFilter = isSuperAdmin ? '' : `WHERE "organizationId" = ?`;
+      const params = isSuperAdmin ? [] : [orgId];
+      const row = await storage.rawGet(
+        `SELECT
+           SUM(CASE WHEN "isActive" != 0 AND COALESCE("scanOnly",0)=0 THEN 1 ELSE 0 END) AS "active",
+           SUM(CASE WHEN COALESCE("scanOnly",0)=1 THEN 1 ELSE 0 END) AS "scanOnly",
+           SUM(CASE WHEN "isActive" = 0 THEN 1 ELSE 0 END) AS "softDeleted",
+           SUM(CASE WHEN "authStatus"='reauth_required' THEN 1 ELSE 0 END) AS "reauthRequired",
+           SUM(CASE WHEN "isActive" != 0 AND COALESCE("scanOnly",0)=0 AND "dailySent" >= "dailyLimit" THEN 1 ELSE 0 END) AS "dailyLimitReached",
+           COUNT(*) AS "total"
+         FROM email_accounts ${orgFilter}`,
+        ...params
+      ) as any;
+      out.emailAccounts = {
+        active: num(row?.active),
+        scanOnly: num(row?.scanOnly),
+        softDeleted: num(row?.softDeleted),
+        reauthRequired: num(row?.reauthRequired),
+        dailyLimitReached: num(row?.dailyLimitReached),
+        total: num(row?.total),
+      };
+    } catch (e: any) { errors.emailAccounts = e?.message || String(e); }
+
+    // === Inbox (use canonical storage.getInboxStats — already excludes warmup) ===
+    try {
+      if (!isSuperAdmin) {
+        out.inbox = await storage.getInboxStats(orgId);
+      } else {
+        // Superadmin: skip per-org call, just count rows
+        const row = await storage.rawGet(
+          `SELECT COUNT(*) AS "total",
+             SUM(CASE WHEN status='unread' THEN 1 ELSE 0 END) AS "unread",
+             SUM(CASE WHEN "replyType" IS NULL OR "replyType"='' THEN 1 ELSE 0 END) AS "unclassified"
+           FROM unified_inbox`
+        ) as any;
+        out.inbox = { total: num(row?.total), unread: num(row?.unread), unclassified: num(row?.unclassified) };
+      }
+    } catch (e: any) { errors.inbox = e?.message || String(e); }
+
+    // === Engine status (in-process state) ===
+    try {
+      const eng: any = {};
+      try {
+        const { getOutboundReplySweepStatus } = await import('./services/outbound-reply-sweeper.js');
+        eng.outboundReplySweeper = getOutboundReplySweepStatus();
+      } catch (e: any) { eng.outboundReplySweeper = { error: e?.message || String(e) }; }
+      out.engines = eng;
+    } catch (e: any) { errors.engines = e?.message || String(e); }
+
+    // === Active background jobs (from api_settings — only this org's jobs) ===
+    try {
+      const settings = await storage.getApiSettings(orgId);
+      const jobs: any = { leadIntel: [], bulkTemplateAnalyze: [] };
+      const now = Date.now();
+      for (const [key, val] of Object.entries(settings || {})) {
+        try {
+          if (key.startsWith('lead_intel_job_')) {
+            const j = JSON.parse(val as string);
+            if (j.status === 'running') {
+              jobs.leadIntel.push({
+                jobId: j.id, type: j.type, status: j.status,
+                startedAt: j.startedAt, heartbeatAt: j.heartbeatAt,
+                progress: j.progress, ageMs: j.startedAt ? now - new Date(j.startedAt).getTime() : null,
+              });
+            }
+          } else if (key.startsWith('bulk_analyze_job_')) {
+            const j = JSON.parse(val as string);
+            if (j.status === 'running') {
+              jobs.bulkTemplateAnalyze.push({
+                jobId: j.id, status: j.status,
+                startedAt: j.startedAt, heartbeatAt: j.heartbeatAt,
+                progress: j.progress, ageMs: j.startedAt ? now - new Date(j.startedAt).getTime() : null,
+              });
+            }
+          }
+        } catch { /* skip malformed */ }
+      }
+      out.activeJobs = jobs;
+    } catch (e: any) { errors.activeJobs = e?.message || String(e); }
+
+    // === In-process caches ===
+    try {
+      out.caches = {
+        authCacheSize: authCache.size,
+        loggedInUsersSize: loggedInUsers.size,
+      };
+    } catch (e: any) { errors.caches = e?.message || String(e); }
+
+    out.totalLatencyMs = Date.now() - t0;
+    if (Object.keys(errors).length > 0) out.errors = errors;
+    res.json(out);
+  });
+
   // AI Auto-fix: rewrite subject + content to fix deliverability issues
   app.post('/api/templates/fix-deliverability', async (req: any, res) => {
     try {
