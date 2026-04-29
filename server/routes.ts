@@ -18,34 +18,9 @@ import { runBounceSyncForOrg, runBounceSyncAllOrgs } from "./services/bounce-syn
 import { scanOrgEmailHistory, analyzeOrgLeads, runFullLeadIntelligence, BUCKET_LABELS } from "./services/lead-intelligence-engine";
 
 
-// Bounded Set/Map with FIFO eviction. Prevents unbounded memory growth from
-// long-running pods. Inherits from built-ins so all existing .add/.has/.delete/
-// .keys/.get/.set call sites work unchanged. Eviction is FIFO (insertion order
-// via Map/Set built-in iteration). When a key is evicted, the next request
-// re-resolves from DB — same as the existing "auto-restore session" cache-miss
-// path, so no user-visible behavior change.
-class BoundedSet<T> extends Set<T> {
-  private readonly maxSize: number;
-  constructor(maxSize: number) { super(); this.maxSize = maxSize; }
-  add(value: T): this {
-    if (!this.has(value) && this.size >= this.maxSize) {
-      const oldest = this.values().next().value;
-      if (oldest !== undefined) this.delete(oldest);
-    }
-    return super.add(value);
-  }
-}
-class BoundedMap<K, V> extends Map<K, V> {
-  private readonly maxSize: number;
-  constructor(maxSize: number) { super(); this.maxSize = maxSize; }
-  set(key: K, value: V): this {
-    if (!this.has(key) && this.size >= this.maxSize) {
-      const oldest = this.keys().next().value;
-      if (oldest !== undefined) this.delete(oldest);
-    }
-    return super.set(key, value);
-  }
-}
+// Bounded Set/Map with FIFO eviction — extracted to server/lib/bounded-collections.ts
+// so the eviction logic can be unit-tested independently of route handlers.
+import { BoundedSet, BoundedMap } from "./lib/bounded-collections";
 
 // In-memory user store for simplified authentication
 const loggedInUsers = new BoundedSet<string>(10000);

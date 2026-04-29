@@ -4,6 +4,7 @@
 
 import { Pool, PoolClient } from 'pg';
 import crypto from 'crypto';
+import { toInt } from './lib/type-coercion';
 
 // ========== Connection Pool ==========
 const pool = new Pool({
@@ -1739,8 +1740,7 @@ export class PostgresStorage {
     // Frontend sends trackOpens/includeUnsubscribe as JS booleans, but those columns are
     // INTEGER in Postgres — passing `true`/`false` directly fails with
     // "invalid input syntax for type integer: 'true'". Coerce to 1/0 here.
-    const toInt = (v: any, def: number): number =>
-      v === true ? 1 : v === false ? 0 : (v === null || v === undefined ? def : (typeof v === 'string' ? (v === 'true' ? 1 : v === 'false' ? 0 : (parseInt(v) || def)) : Number(v)));
+    // Coercion logic extracted to server/lib/type-coercion.ts for unit-testing.
     await execute(
       `UPDATE campaigns SET name=$1, description=$2, status=$3, "totalRecipients"=$4, "sentCount"=$5, "openedCount"=$6, "clickedCount"=$7, "repliedCount"=$8, "bouncedCount"=$9, "unsubscribedCount"=$10, subject=$11, content=$12, "emailAccountId"=$13, "templateId"=$14, "contactIds"=$15, "segmentId"=$16, "scheduledAt"=$17, "sendingConfig"=$18, "trackOpens"=$19, "includeUnsubscribe"=$20, "updatedAt"=$21, "autoPaused"=$22, "sendOrder"=$23 WHERE id=$24`,
       [m.name, m.description, m.status, m.totalRecipients, m.sentCount, m.openedCount, m.clickedCount, m.repliedCount, m.bouncedCount, m.unsubscribedCount,

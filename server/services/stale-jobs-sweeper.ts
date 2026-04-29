@@ -21,6 +21,7 @@
  */
 
 import { storage } from "../storage";
+import { isStaleJob } from "../lib/job-aging";
 
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;     // 5 minutes
 const BOOT_DELAY_MS = 120 * 1000;            // 2 minutes after server boot
@@ -87,20 +88,15 @@ async function runSweep() {
         const raw = row.settingValue;
         if (!raw) continue;
         const job = JSON.parse(raw);
-        if (job?.status !== 'running') continue;
 
         // Determine TTL based on which prefix this row's key matches
         const jobType = JOB_TYPES.find(t => row.settingKey.startsWith(t.keyPrefix));
         if (!jobType) continue;
 
-        // Use heartbeatAt if the job emits one; otherwise fall back to startedAt
-        const lastSignal = job.heartbeatAt || job.startedAt;
-        if (!lastSignal) continue;
-        const lastSignalMs = new Date(lastSignal).getTime();
-        if (!Number.isFinite(lastSignalMs)) continue;
-
-        const ageMs = now - lastSignalMs;
-        if (ageMs <= jobType.ttlMs) continue;
+        // Pure aging decision — see server/lib/job-aging.ts for the decision tree.
+        const decision = isStaleJob(job, jobType.ttlMs, now);
+        if (!decision.isStale) continue;
+        const ageMs = decision.ageMs!;
 
         // Stale — flip to failed. Idempotent UPDATE not required since we just
         // overwrote the value; if a worker happens to update concurrently, the
