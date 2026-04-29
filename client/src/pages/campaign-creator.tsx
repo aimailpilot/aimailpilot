@@ -15,8 +15,9 @@ import {
   AlignCenter, AlignRight, Type, Paperclip, Strikethrough, X,
   MoreVertical, ChevronDown, ChevronLeft, ChevronRight, Upload,
   Copy, Table, Trash2, ArrowLeft, Settings2, Rocket, Pencil,
-  SpellCheck, Palette, Brain, Wand2, Play, Monitor, BarChart3
+  SpellCheck, Palette, Brain, Wand2, Play, Monitor, BarChart3, Search
 } from "lucide-react";
+import { useAuth } from "@/hooks/use-auth";
 
 // ==================== TYPES ====================
 interface CampaignFormProps {
@@ -169,7 +170,9 @@ export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }
   const [sheetImportResult, setSheetImportResult] = useState<{ message: string; listName: string } | null>(null);
 
   // Template dialog
-  const [templateTab, setTemplateTab] = useState<'recent' | 'all'>('recent');
+  const [templateTab, setTemplateTab] = useState<'my' | 'team' | 'all'>('my');
+  const [templateSearch, setTemplateSearch] = useState('');
+  const { user: currentUser } = useAuth();
 
   // Quota & AI recommendation for account
   const [accountQuotas, setAccountQuotas] = useState<Record<string, { dailyLimit: number; dailySent: number; remaining: number; usagePercent: number; provider: string }>>({});
@@ -2463,29 +2466,75 @@ export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }
       </Dialog>
 
       {/* INSERT TEMPLATE DIALOG */}
-      <Dialog open={showTemplates} onOpenChange={setShowTemplates}>
+      <Dialog open={showTemplates} onOpenChange={(open) => { setShowTemplates(open); if (!open) setTemplateSearch(''); }}>
         <DialogContent className="max-w-lg">
           <DialogHeader><DialogTitle>Insert a template</DialogTitle></DialogHeader>
-          <div className="flex gap-4 border-b border-gray-100 mb-3">
-            <button onClick={() => setTemplateTab('recent')}
-              className={`pb-2 text-sm font-medium border-b-2 transition-colors ${templateTab === 'recent' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-400 hover:text-gray-600'}`}>
-              Recent
-            </button>
-            <button onClick={() => setTemplateTab('all')}
-              className={`pb-2 text-sm font-medium border-b-2 transition-colors ${templateTab === 'all' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-400 hover:text-gray-600'}`}>
-              All
-            </button>
-          </div>
-          <div className="space-y-0.5 max-h-80 overflow-y-auto">
-            {templates.length === 0 ? (
-              <div className="py-8 text-center text-gray-400 text-sm">No templates yet. Create one in the Templates section.</div>
-            ) : templates.map((t: any) => (
-              <button key={t.id} onClick={() => insertTemplate(t)}
-                className="w-full text-left px-3 py-3 text-sm text-gray-700 hover:bg-blue-50 rounded-lg transition-colors truncate">
-                {t.name}
-              </button>
-            ))}
-          </div>
+          {(() => {
+            const myCount = templates.filter((t: any) => currentUser?.id && t.createdBy === currentUser.id).length;
+            const teamCount = templates.filter((t: any) => currentUser?.id && t.createdBy && t.createdBy !== currentUser.id).length;
+            const tabFiltered = templateTab === 'my'
+              ? templates.filter((t: any) => currentUser?.id && t.createdBy === currentUser.id)
+              : templateTab === 'team'
+                ? templates.filter((t: any) => currentUser?.id && t.createdBy && t.createdBy !== currentUser.id)
+                : templates;
+            const q = templateSearch.trim().toLowerCase();
+            const filtered = q
+              ? tabFiltered.filter((t: any) =>
+                  (t.name || '').toLowerCase().includes(q) ||
+                  (t.subject || '').toLowerCase().includes(q))
+              : tabFiltered;
+            return (
+              <>
+                <div className="relative mb-3">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 pointer-events-none" />
+                  <Input
+                    type="text"
+                    autoFocus
+                    placeholder="Search templates by name or subject…"
+                    value={templateSearch}
+                    onChange={(e) => setTemplateSearch(e.target.value)}
+                    className="pl-9 pr-8 h-9 text-sm"
+                  />
+                  {templateSearch && (
+                    <button onClick={() => setTemplateSearch('')}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-gray-100"
+                      aria-label="Clear search">
+                      <X className="h-3.5 w-3.5 text-gray-400" />
+                    </button>
+                  )}
+                </div>
+                <div className="flex gap-4 border-b border-gray-100 mb-3">
+                  <button onClick={() => setTemplateTab('my')}
+                    className={`pb-2 text-sm font-medium border-b-2 transition-colors ${templateTab === 'my' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-400 hover:text-gray-600'}`}>
+                    My templates <span className="text-xs text-gray-400">({myCount})</span>
+                  </button>
+                  <button onClick={() => setTemplateTab('team')}
+                    className={`pb-2 text-sm font-medium border-b-2 transition-colors ${templateTab === 'team' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-400 hover:text-gray-600'}`}>
+                    Team templates <span className="text-xs text-gray-400">({teamCount})</span>
+                  </button>
+                  <button onClick={() => setTemplateTab('all')}
+                    className={`pb-2 text-sm font-medium border-b-2 transition-colors ${templateTab === 'all' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-400 hover:text-gray-600'}`}>
+                    All <span className="text-xs text-gray-400">({templates.length})</span>
+                  </button>
+                </div>
+                <div className="space-y-0.5 max-h-80 overflow-y-auto">
+                  {templates.length === 0 ? (
+                    <div className="py-8 text-center text-gray-400 text-sm">No templates yet. Create one in the Templates section.</div>
+                  ) : filtered.length === 0 ? (
+                    <div className="py-8 text-center text-gray-400 text-sm">
+                      {q ? `No templates match "${templateSearch}"` : 'No templates in this tab.'}
+                    </div>
+                  ) : filtered.map((t: any) => (
+                    <button key={t.id} onClick={() => insertTemplate(t)}
+                      className="w-full text-left px-3 py-2.5 text-sm text-gray-700 hover:bg-blue-50 rounded-lg transition-colors">
+                      <div className="font-medium truncate">{t.name}</div>
+                      {t.subject && <div className="text-xs text-gray-400 truncate mt-0.5">{t.subject}</div>}
+                    </button>
+                  ))}
+                </div>
+              </>
+            );
+          })()}
         </DialogContent>
       </Dialog>
 
