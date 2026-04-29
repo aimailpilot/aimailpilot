@@ -9745,9 +9745,18 @@ Respond with ONLY a JSON object in this format:
 
     // Pick the most actionable outcome. Scope-missing wins over 404 because the user
     // can fix scope themselves; 404-everywhere means we know they need to share publicly.
+    console.log(`[tryDirectSheetsAccess] outcome decision: candidates=${candidates.length}, saw404=${saw404}, saw403Scope=${saw403Scope}`);
     if (saw403Scope && !saw404) return { kind: 'no_sheets_scope' };
     if (saw404 && !saw403Scope) return { kind: 'sheet_not_in_account' };
     if (saw404 && saw403Scope) return { kind: 'no_sheets_scope' }; // prefer the actionable one
+    // No candidate produced a clear 404 or scope error. This usually means tokens
+    // failed in some other way (refresh failure, generic 403, network error, etc.).
+    // The most likely real-world cause is still that the sheet is not in the user's
+    // account — return that outcome by default so the user gets a clear actionable
+    // message instead of a vague "connect Gmail" loop. Worst case if we're wrong:
+    // they share publicly and the public-CSV strategy succeeds; or they connect the
+    // right account and Strategy 1/1.5 succeeds next time.
+    if (candidates.length > 0) return { kind: 'sheet_not_in_account' };
     return { kind: 'unknown' };
   }
 
@@ -9871,18 +9880,27 @@ Respond with ONLY a JSON object in this format:
       });
 
       if (!testRes.ok) {
-        const hint = accessToken 
-          ? 'Cannot access this spreadsheet. Your Google account may not have permission. Try re-authenticating: go to Email Accounts and click "Connect Gmail" to refresh your Google access.'
-          : 'Cannot access this spreadsheet. Please connect a Gmail account first (Email Accounts > Connect Gmail), or make sure the sheet is shared with "Anyone with the link".';
-        return res.status(400).json({ valid: false, error: hint, needsAuth: !accessToken });
+        // The user may already have connected Gmail (Strategy 1 / 1.5 above) but
+        // the sheet isn't owned by any of those accounts AND isn't publicly shared.
+        // Asking them to "connect Gmail" here is misleading — what they actually need
+        // to do is either share the sheet publicly or connect the owning account.
+        // (Strategy 1.5 already returns the explicit "sheet_not_in_account" message
+        // when it can prove this; this branch fires when the diagnosis is ambiguous.)
+        console.log(`[sheets/fetch-info] FALLBACK FAILURE — public CSV returned ${testRes.status}, no OAuth match found. accessToken probe-validated: ${!!accessToken}`);
+        return res.status(400).json({
+          valid: false,
+          error: 'Could not access this spreadsheet. Either (a) share the sheet with "Anyone with the link" in Google Sheets, OR (b) sign in with the Google account that owns this sheet (Email Accounts > Connect Google Sheets).',
+          needsAuth: !accessToken,
+        });
       }
 
       const testCsv = await testRes.text();
       if (testCsv.trim().startsWith('<!DOCTYPE') || testCsv.trim().startsWith('<html')) {
-        return res.status(400).json({ 
-          valid: false, 
-          error: 'Cannot access this spreadsheet. Please connect a Gmail account (Email Accounts > Connect Gmail), or share the sheet with "Anyone with the link".', 
-          needsAuth: !accessToken 
+        console.log(`[sheets/fetch-info] FALLBACK FAILURE — public CSV returned an HTML login page (sheet is private). accessToken probe-validated: ${!!accessToken}`);
+        return res.status(400).json({
+          valid: false,
+          error: 'This spreadsheet is private. Either (a) share the sheet with "Anyone with the link" in Google Sheets, OR (b) sign in with the Google account that owns this sheet (Email Accounts > Connect Google Sheets).',
+          needsAuth: !accessToken,
         });
       }
 
