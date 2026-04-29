@@ -7,6 +7,7 @@ import MemoryStore from "memorystore";
 import { smtpEmailService, SMTP_PRESETS, type SmtpConfig, getProviderDailyLimit } from "./services/smtp-email-service";
 import { campaignEngine } from "./services/campaign-engine";
 import { followupEngine } from "./services/followup-engine";
+import { resolveAutopilotConfig } from "./lib/autopilot-defaults";
 import { gmailReplyTracker } from "./services/gmail-reply-tracker";
 import { outlookReplyTracker } from "./services/outlook-reply-tracker";
 import { calculateContactRating, batchRecalculateRatings } from "./services/email-rating-engine";
@@ -3679,16 +3680,25 @@ Which account should I use and why? If I need to split across accounts, provide 
 
       const delayBetweenEmails = req.body.delayBetweenEmails || 2000;
 
+      // Resolve autopilot — if the caller didn't provide a usable one, apply the
+      // safe default (Mon-Fri 09:00-18:00) so every campaign has window enforcement.
+      // Prevents the "no autopilot = no window = sending 24/7" failure mode.
+      const autopilot = resolveAutopilotConfig(req.body.autopilot);
+      const usedDefault = req.body.autopilot !== autopilot;
+
       // Persist the sending config so it survives pause/resume/restart
       const sendingConfig = {
         delayBetweenEmails,
         batchSize: req.body.batchSize || 10,
-        autopilot: req.body.autopilot || null,
+        autopilot,
         // Store the user's timezone offset so we can calculate their local time
         timezoneOffset: req.body.timezoneOffset ?? null,
         // IANA timezone name (DST-aware, preferred over timezoneOffset)
         timezone: req.body.timezone || null,
       };
+      if (usedDefault) {
+        console.log(`[Campaign] SEND ${req.params.id}: applied default autopilot (Mon-Fri 09:00-18:00) — caller did not provide a usable one`);
+      }
 
       console.log(`[Campaign] SEND ${req.params.id}: delay=${delayBetweenEmails}ms, autopilot=${sendingConfig.autopilot?.enabled ? 'ON' : 'OFF'}, maxPerDay=${sendingConfig.autopilot?.maxPerDay || 'N/A'}, tz=${sendingConfig.timezone || sendingConfig.timezoneOffset}`);
       console.log(`[Campaign] Full sendingConfig: ${JSON.stringify(sendingConfig).slice(0, 500)}`);
@@ -4089,11 +4099,14 @@ Which account should I use and why? If I need to split across accounts, provide 
     try {
       const { scheduledAt, delayBetweenEmails, autopilot, timezoneOffset } = req.body;
       if (!scheduledAt) return res.status(400).json({ message: 'scheduledAt is required' });
-      
+
+      // Apply default Mon-Fri 09:00-18:00 autopilot if caller didn't provide a usable one.
+      const resolvedAutopilot = resolveAutopilotConfig(autopilot);
+
       // Persist sending config for scheduled campaigns too
       const sendingConfig = {
         delayBetweenEmails: delayBetweenEmails || 2000,
-        autopilot: autopilot || null,
+        autopilot: resolvedAutopilot,
         timezoneOffset: timezoneOffset || null,
         timezone: req.body.timezone || null,
       };

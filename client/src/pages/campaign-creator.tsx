@@ -630,7 +630,7 @@ export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }
           body: JSON.stringify({
             scheduledAt: dt.toISOString(),
             delayBetweenEmails: autopilot.delayBetween * (autopilot.delayUnit === 'minutes' ? 60000 : 1000),
-            autopilot: autopilot.enabled ? autopilot : null,
+            autopilot,
             timezoneOffset: new Date().getTimezoneOffset(),
             timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           }),
@@ -648,7 +648,7 @@ export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }
           credentials: 'include',
           body: JSON.stringify({
             delayBetweenEmails: autopilot.delayBetween * (autopilot.delayUnit === 'minutes' ? 60000 : 1000),
-            autopilot: autopilot.enabled ? autopilot : null,
+            autopilot,
             timezoneOffset: new Date().getTimezoneOffset(),
             timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           }),
@@ -2426,6 +2426,23 @@ export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }
             <DialogTitle>Autopilot</DialogTitle>
             <DialogDescription>Improve your deliverability with these sending options.</DialogDescription>
           </DialogHeader>
+          {/* Master toggle — must be ON for the day/time window enforcement to engage. */}
+          <div className={`flex items-center justify-between rounded-lg px-4 py-3 mt-2 border ${autopilot.enabled ? 'bg-blue-50 border-blue-200' : 'bg-amber-50 border-amber-200'}`}>
+            <div>
+              <div className="text-sm font-semibold text-gray-900">
+                {autopilot.enabled ? 'Autopilot is ON' : 'Autopilot is OFF'}
+              </div>
+              <div className="text-xs text-gray-600 mt-0.5">
+                {autopilot.enabled
+                  ? 'Emails will only send during the days/hours configured below.'
+                  : 'Emails will send any time, ignoring the day/hour settings below.'}
+              </div>
+            </div>
+            <Switch
+              checked={autopilot.enabled}
+              onCheckedChange={(v) => setAutopilot(prev => ({ ...prev, enabled: v }))}
+            />
+          </div>
           <div className="flex gap-8 mt-2">
             <div className="flex-1">
               <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Send only on</div>
@@ -2494,7 +2511,7 @@ export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }
           </div>
           <DialogFooter className="mt-4">
             <Button variant="outline" onClick={() => setShowAutopilot(false)}>Cancel</Button>
-            <Button className="bg-blue-600 hover:bg-blue-700" onClick={() => { setAutopilot(prev => ({ ...prev, enabled: true })); setShowAutopilot(false); }}>Apply</Button>
+            <Button className="bg-blue-600 hover:bg-blue-700" onClick={() => setShowAutopilot(false)}>Apply</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -338,9 +338,11 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
     setDiffViewMode({});
     setTrackEmails(c.trackOpens !== 0 && c.trackOpens !== false);
     setUnsubscribeLink(c.includeUnsubscribe === 1 || c.includeUnsubscribe === true);
-    // Load autopilot from sendingConfig if it exists
+    // Load autopilot from sendingConfig if it exists. Respect the saved `enabled`
+    // value instead of forcing true — users explicitly choose via the master toggle.
     if (c.sendingConfig?.autopilot) {
-      setAutopilot({ ...c.sendingConfig.autopilot, enabled: true });
+      const saved = c.sendingConfig.autopilot;
+      setAutopilot({ ...saved, enabled: saved.enabled !== false });
     } else {
       setAutopilot(prev => ({ ...prev, enabled: false }));
     }
@@ -433,12 +435,16 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
         }
       }
 
-      const sendingConfig = autopilot.enabled ? {
+      // Always persist the dialog's autopilot state (with whatever `enabled` toggle says).
+      // Previously this fell back to the existing config when enabled=false, which silently
+      // discarded user edits when they didn't click "Apply" — that was the root cause of
+      // campaigns sending outside their configured windows.
+      const sendingConfig = {
         delayBetweenEmails: autopilot.delayBetween * (autopilot.delayUnit === 'minutes' ? 60000 : 1000),
         autopilot,
         timezoneOffset: new Date().getTimezoneOffset(),
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      } : (detail?.campaign?.sendingConfig || null);
+      };
 
       // Save Step 1
       const res = await fetch(`/api/campaigns/${campaignId}`, {
@@ -2511,6 +2517,24 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
             <DialogTitle>Autopilot</DialogTitle>
             <DialogDescription>Improve your deliverability with these sending options.</DialogDescription>
           </DialogHeader>
+          {/* Master toggle — must be ON for the sending-window enforcement to engage.
+              Without this, the engine sends 24/7 regardless of the day/time settings below. */}
+          <div className={`flex items-center justify-between rounded-lg px-4 py-3 mt-2 border ${autopilot.enabled ? 'bg-blue-50 border-blue-200' : 'bg-amber-50 border-amber-200'}`}>
+            <div>
+              <div className="text-sm font-semibold text-gray-900">
+                {autopilot.enabled ? 'Autopilot is ON' : 'Autopilot is OFF'}
+              </div>
+              <div className="text-xs text-gray-600 mt-0.5">
+                {autopilot.enabled
+                  ? 'Emails will only send during the days/hours configured below.'
+                  : 'Emails will send any time, ignoring the day/hour settings below.'}
+              </div>
+            </div>
+            <Switch
+              checked={autopilot.enabled}
+              onCheckedChange={(v) => setAutopilot(prev => ({ ...prev, enabled: v }))}
+            />
+          </div>
           <div className="flex gap-8 mt-2">
             <div className="flex-1">
               <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Send only on</div>
@@ -2578,7 +2602,7 @@ export default function CampaignDetailPage({ campaignId, onBack, onNavigateToCam
           </div>
           <DialogFooter className="mt-4">
             <Button variant="outline" onClick={() => setShowAutopilot(false)}>Cancel</Button>
-            <Button className="bg-blue-600 hover:bg-blue-700" onClick={() => { setAutopilot(prev => ({ ...prev, enabled: true })); setShowAutopilot(false); }}>Apply</Button>
+            <Button className="bg-blue-600 hover:bg-blue-700" onClick={() => setShowAutopilot(false)}>Apply</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

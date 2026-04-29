@@ -15822,6 +15822,34 @@ function startFollowupEngine() {
   }, 30 * 1e3);
 }
 
+// server/lib/autopilot-defaults.ts
+function defaultAutopilotConfig() {
+  return {
+    enabled: true,
+    days: {
+      Monday: { enabled: true, startTime: "09:00", endTime: "18:00" },
+      Tuesday: { enabled: true, startTime: "09:00", endTime: "18:00" },
+      Wednesday: { enabled: true, startTime: "09:00", endTime: "18:00" },
+      Thursday: { enabled: true, startTime: "09:00", endTime: "18:00" },
+      Friday: { enabled: true, startTime: "09:00", endTime: "18:00" },
+      Saturday: { enabled: false, startTime: "09:00", endTime: "18:00" },
+      Sunday: { enabled: false, startTime: "09:00", endTime: "18:00" }
+    },
+    maxPerDay: 1e3,
+    delayBetween: 5,
+    delayUnit: "minutes"
+  };
+}
+function resolveAutopilotConfig(input) {
+  if (!input || typeof input !== "object") return defaultAutopilotConfig();
+  if (input.enabled !== true) return defaultAutopilotConfig();
+  const days = input.days;
+  if (!days || typeof days !== "object") return defaultAutopilotConfig();
+  const anyEnabled = Object.values(days).some((d) => d?.enabled === true);
+  if (!anyEnabled) return defaultAutopilotConfig();
+  return input;
+}
+
 // server/services/gmail-reply-tracker.ts
 init_storage();
 import { OAuth2Client as OAuth2Client2 } from "google-auth-library";
@@ -21967,15 +21995,20 @@ Which account should I use and why? If I need to split across accounts, provide 
         followupEngine.setPublicBaseUrl(url);
       }
       const delayBetweenEmails = req.body.delayBetweenEmails || 2e3;
+      const autopilot = resolveAutopilotConfig(req.body.autopilot);
+      const usedDefault = req.body.autopilot !== autopilot;
       const sendingConfig = {
         delayBetweenEmails,
         batchSize: req.body.batchSize || 10,
-        autopilot: req.body.autopilot || null,
+        autopilot,
         // Store the user's timezone offset so we can calculate their local time
         timezoneOffset: req.body.timezoneOffset ?? null,
         // IANA timezone name (DST-aware, preferred over timezoneOffset)
         timezone: req.body.timezone || null
       };
+      if (usedDefault) {
+        console.log(`[Campaign] SEND ${req.params.id}: applied default autopilot (Mon-Fri 09:00-18:00) \u2014 caller did not provide a usable one`);
+      }
       console.log(`[Campaign] SEND ${req.params.id}: delay=${delayBetweenEmails}ms, autopilot=${sendingConfig.autopilot?.enabled ? "ON" : "OFF"}, maxPerDay=${sendingConfig.autopilot?.maxPerDay || "N/A"}, tz=${sendingConfig.timezone || sendingConfig.timezoneOffset}`);
       console.log(`[Campaign] Full sendingConfig: ${JSON.stringify(sendingConfig).slice(0, 500)}`);
       await storage.updateCampaign(req.params.id, { sendingConfig });
@@ -22320,9 +22353,10 @@ Which account should I use and why? If I need to split across accounts, provide 
     try {
       const { scheduledAt, delayBetweenEmails, autopilot, timezoneOffset } = req.body;
       if (!scheduledAt) return res.status(400).json({ message: "scheduledAt is required" });
+      const resolvedAutopilot = resolveAutopilotConfig(autopilot);
       const sendingConfig = {
         delayBetweenEmails: delayBetweenEmails || 2e3,
-        autopilot: autopilot || null,
+        autopilot: resolvedAutopilot,
         timezoneOffset: timezoneOffset || null,
         timezone: req.body.timezone || null
       };
