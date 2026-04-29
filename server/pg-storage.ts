@@ -1736,10 +1736,15 @@ export class PostgresStorage {
       if (value !== undefined) cleanData[key] = value;
     }
     const m = { ...existing, ...cleanData };
+    // Frontend sends trackOpens/includeUnsubscribe as JS booleans, but those columns are
+    // INTEGER in Postgres — passing `true`/`false` directly fails with
+    // "invalid input syntax for type integer: 'true'". Coerce to 1/0 here.
+    const toInt = (v: any, def: number): number =>
+      v === true ? 1 : v === false ? 0 : (v === null || v === undefined ? def : (typeof v === 'string' ? (v === 'true' ? 1 : v === 'false' ? 0 : (parseInt(v) || def)) : Number(v)));
     await execute(
       `UPDATE campaigns SET name=$1, description=$2, status=$3, "totalRecipients"=$4, "sentCount"=$5, "openedCount"=$6, "clickedCount"=$7, "repliedCount"=$8, "bouncedCount"=$9, "unsubscribedCount"=$10, subject=$11, content=$12, "emailAccountId"=$13, "templateId"=$14, "contactIds"=$15, "segmentId"=$16, "scheduledAt"=$17, "sendingConfig"=$18, "trackOpens"=$19, "includeUnsubscribe"=$20, "updatedAt"=$21, "autoPaused"=$22, "sendOrder"=$23 WHERE id=$24`,
       [m.name, m.description, m.status, m.totalRecipients, m.sentCount, m.openedCount, m.clickedCount, m.repliedCount, m.bouncedCount, m.unsubscribedCount,
-      m.subject, m.content, m.emailAccountId || null, m.templateId || null, toJson(m.contactIds), m.segmentId || null, toSqlDate(m.scheduledAt), toJson(m.sendingConfig), m.trackOpens ?? 1, m.includeUnsubscribe ?? 0, now(), m.autoPaused ?? false, m.sendOrder || null, id]
+      m.subject, m.content, m.emailAccountId || null, m.templateId || null, toJson(m.contactIds), m.segmentId || null, toSqlDate(m.scheduledAt), toJson(m.sendingConfig), toInt(m.trackOpens, 1), toInt(m.includeUnsubscribe, 0), now(), m.autoPaused ?? false, m.sendOrder || null, id]
     );
     return this.getCampaign(id);
   }
