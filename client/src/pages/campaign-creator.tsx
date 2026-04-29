@@ -161,6 +161,10 @@ export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }
   const [sheetContacts, setSheetContacts] = useState<any[]>([]);
   const [sheetLoading, setSheetLoading] = useState(false);
   const [sheetPreview, setSheetPreview] = useState<{ headers: string[]; values: string[][]; totalRows: number; validContacts: number } | null>(null);
+  // Spreadsheet title (e.g. "Ministry Data Officials AGBA") — used to compose
+  // the auto-list-name as "Title - SheetName" so multiple tabs from the same
+  // spreadsheet don't collide on a single list name.
+  const [sheetSpreadsheetTitle, setSheetSpreadsheetTitle] = useState('');
 
   // Save sheet contacts as a contact list
   const [saveAsContactList, setSaveAsContactList] = useState(true);
@@ -681,17 +685,21 @@ export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }
   // Google Sheets: validate URL and fetch sheet names
   const validateSheetUrl = useCallback(async (url: string) => {
     if (!url || !url.includes('docs.google.com/spreadsheets')) {
-      setSheetValid(null); setAvailableSheets([]); setSheetError(''); return;
+      setSheetValid(null); setAvailableSheets([]); setSheetError(''); setSheetSpreadsheetTitle(''); return;
     }
     setSheetValidating(true); setSheetValid(null); setSheetError('');
-    setAvailableSheets([]); setSheetContacts([]); setSheetPreview(null); setSheetName('');
+    setAvailableSheets([]); setSheetContacts([]); setSheetPreview(null); setSheetName(''); setSheetSpreadsheetTitle('');
     try {
       const res = await fetch('/api/sheets/fetch-info', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
         body: JSON.stringify({ url }),
       });
       const data = await res.json();
-      if (res.ok && data.valid) { setSheetValid(true); setAvailableSheets(data.sheets || []); }
+      if (res.ok && data.valid) {
+        setSheetValid(true);
+        setAvailableSheets(data.sheets || []);
+        setSheetSpreadsheetTitle(data.title || '');
+      }
       else { setSheetValid(false); setSheetError(data.error || 'Cannot access spreadsheet'); }
     } catch (e) { setSheetValid(false); setSheetError('Failed to validate URL'); }
     setSheetValidating(false);
@@ -715,12 +723,29 @@ export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }
       if (res.ok) {
         setSheetPreview({ headers: data.headers || [], values: data.values || [], totalRows: data.totalRows || 0, validContacts: data.validContacts || 0 });
         setSheetContacts(data.contacts || []);
-        // Default list name from sheet name
-        if (!sheetListName.trim()) setSheetListName(selectedSheet || 'Google Sheets Import');
+        // Auto-list-name pattern: combine spreadsheet title + selected tab name
+        // (e.g. "Ministry Data Officials AGBA - IB"). Falls back gracefully when
+        // either piece is missing. Same logic used in contacts-manager.tsx so
+        // imports feel consistent regardless of where they originate.
+        const tabName = selectedSheet && selectedSheet !== 'Sheet1' ? selectedSheet : '';
+        const autoName = sheetSpreadsheetTitle && tabName
+          ? `${sheetSpreadsheetTitle} - ${tabName}`
+          : (sheetSpreadsheetTitle || tabName || 'Google Sheets Import');
+        // Update the list name when blank, default, or still equal to a previous
+        // auto-derived value (so switching tabs updates "AGBA - IB" → "AGBA - PA").
+        const previousAutoPrefix = sheetSpreadsheetTitle || '';
+        if (
+          !sheetListName.trim() ||
+          sheetListName === 'Google Sheets Import' ||
+          sheetListName === sheetSpreadsheetTitle ||
+          (previousAutoPrefix && sheetListName.startsWith(previousAutoPrefix))
+        ) {
+          setSheetListName(autoName);
+        }
       } else { setSheetError(data.error || 'Failed to fetch sheet data'); }
     } catch (e) { setSheetError('Failed to load sheet data'); }
     setSheetLoading(false);
-  }, [sheetUrl, availableSheets, sheetListName]);
+  }, [sheetUrl, availableSheets, sheetListName, sheetSpreadsheetTitle]);
 
   const importSheetContacts = async () => {
     if (sheetContacts.length === 0) return;
@@ -2127,23 +2152,45 @@ export default function CampaignCreator({ onSuccess, onBack, initialCampaignId }
                         {sheetValid === false && <AlertCircle className="h-4 w-4 text-red-400" />}
                       </div>
                     </div>
-                    {sheetValid === true && <p className="text-xs text-green-600 mt-1 flex items-center gap-1"><CheckCircle className="h-3 w-3" /> Spreadsheet connected</p>}
+                    {sheetValid === true && (
+                      <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+                        <p className="text-xs text-green-600 flex items-center gap-1"><CheckCircle className="h-3 w-3" /> Spreadsheet connected</p>
+                        {sheetSpreadsheetTitle && (
+                          <span className="text-xs text-gray-500 truncate max-w-[260px]" title={sheetSpreadsheetTitle}>· {sheetSpreadsheetTitle}</span>
+                        )}
+                      </div>
+                    )}
                     {sheetError && <p className="text-xs text-red-500 mt-1">{sheetError}</p>}
                     {!sheetUrl && <p className="text-xs text-gray-400 mt-1.5">Paste the URL of a Google Sheets spreadsheet.</p>}
                   </div>
-                  <div>
-                    <Label className="text-sm text-gray-600 mb-1.5 block">Sheet</Label>
-                    <select className={`w-full h-10 border rounded-md px-3 text-sm ${availableSheets.length === 0 ? 'border-gray-200 bg-gray-50 text-gray-400 cursor-not-allowed' : 'border-gray-200 bg-white'}`}
-                      value={sheetName} onChange={e => { setSheetName(e.target.value); setSheetError(''); setSheetImportResult(null); if (e.target.value) fetchSheetData(e.target.value); }}
-                      disabled={availableSheets.length === 0}>
-                      <option value="">Select a sheet</option>
-                      {availableSheets.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
-                    </select>
-                  </div>
+                  {availableSheets.length > 0 && (
+                    <div>
+                      <Label className="text-sm text-gray-600 mb-1.5 block">Sheet ({availableSheets.length})</Label>
+                      <div className="flex flex-wrap gap-1.5">
+                        {availableSheets.map(s => (
+                          <button
+                            key={s.id}
+                            type="button"
+                            onClick={() => { setSheetName(s.name); setSheetError(''); setSheetImportResult(null); fetchSheetData(s.name); }}
+                            className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-all border ${sheetName === s.name
+                              ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                              : 'bg-white text-gray-600 border-gray-200 hover:border-blue-300 hover:bg-blue-50'}`}
+                          >
+                            {s.name}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   {sheetLoading && <div className="flex items-center justify-center py-6"><Loader2 className="h-5 w-5 text-blue-500 animate-spin mr-2" /><span className="text-sm text-gray-500">Loading contacts...</span></div>}
                   {sheetPreview && !sheetLoading && (
                     <div className="space-y-3">
-                      <Badge className="bg-green-50 text-green-700 border-green-200">{sheetPreview.validContacts} contacts found</Badge>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Badge className="bg-green-50 text-green-700 border-green-200">{sheetPreview.validContacts} contacts found</Badge>
+                        {sheetPreview.totalRows > sheetPreview.validContacts && (
+                          <span className="text-xs text-gray-500">{sheetPreview.totalRows} total rows · {sheetPreview.totalRows - sheetPreview.validContacts} missing email</span>
+                        )}
+                      </div>
                       {sheetContacts.length > 0 && (
                         <>
                           <div className="border border-gray-200 rounded-lg overflow-hidden">
