@@ -10,6 +10,7 @@ import { startWarmupInboxPurge } from "./services/warmup-inbox-purge";
 import { startWarmupInboxCleanup } from "./services/warmup-inbox-cleanup";
 import { startApolloSyncResumer } from "./services/apollo-sync-engine";
 import { startOutboundReplySweeper } from "./services/outbound-reply-sweeper";
+import { startStaleJobsSweeper } from "./services/stale-jobs-sweeper";
 import { campaignEngine } from "./services/campaign-engine";
 import { classifyReply, classifyReplyWithAI } from "./services/reply-classifier";
 import { storage, initStorage } from "./storage";
@@ -83,6 +84,10 @@ app.use((req, res, next) => {
     // Detect outbound replies sent from native Gmail/Outlook clients (outside AImailPilot)
     // and mark the corresponding inbox message replied so it stops appearing in "Need Reply"
     startOutboundReplySweeper();
+    // Auto-fail stale background jobs (lead-intel, bulk-template-analyze) whose
+    // workers crashed or were interrupted. Without this, "running" rows hang in
+    // api_settings forever and block new jobs of the same type from starting.
+    startStaleJobsSweeper();
     // Auto-resume Apollo sync jobs that were paused due to rate limiting
     startApolloSyncResumer();
     

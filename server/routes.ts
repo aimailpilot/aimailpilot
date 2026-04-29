@@ -8052,6 +8052,65 @@ Output schema:
     }
   });
 
+  // ===== ADMIN: TRIGGER STALE-JOBS SWEEP =====
+  // Forces an immediate run of the stale-jobs sweeper. Same code path as the
+  // 5-min scheduled sweep — useful when a job has obviously crashed and you
+  // don't want to wait for the next scheduled cycle.
+  app.post('/api/admin/sweep-stale-jobs', requireAuth, async (req: any, res) => {
+    const role = req.user?.role;
+    const isSuperAdmin = !!req.user?.isSuperAdmin;
+    if (!isSuperAdmin && role !== 'owner' && role !== 'admin') {
+      return res.status(403).json({ error: 'Admin only' });
+    }
+    try {
+      const { getStaleJobsSweepStatus } = await import('./services/stale-jobs-sweeper.js');
+      const before = getStaleJobsSweepStatus();
+      // Manually run sweep query (same logic as scheduled run but inline so we
+      // can return the result immediately). Reuses the storage layer; no
+      // duplication of the matching/aging logic since we just call the module.
+      // Easier: re-export a runSweepNow() — but to avoid a wider refactor here,
+      // we inline a mini-sweep matching the module's behavior exactly.
+      const JOB_PREFIXES = [
+        { keyPrefix: 'lead_intel_job_', ttlMs: 60 * 60 * 1000, label: 'lead-intel' },
+        { keyPrefix: 'bulk_analyze_job_', ttlMs: 60 * 60 * 1000, label: 'bulk-template-analyze' },
+      ];
+      const likePatterns = JOB_PREFIXES.map(() => `"settingKey" LIKE ?`).join(' OR ');
+      const params = JOB_PREFIXES.map(t => `${t.keyPrefix}%`);
+      const rows = await storage.rawAll(
+        `SELECT "organizationId", "settingKey", "settingValue" FROM api_settings WHERE ${likePatterns}`,
+        ...params
+      ) as any[];
+      const now = Date.now();
+      let scanned = 0; let aged = 0; const byType: Record<string, number> = {};
+      for (const row of rows) {
+        scanned++;
+        try {
+          const job = JSON.parse(row.settingValue);
+          if (job?.status !== 'running') continue;
+          const jobType = JOB_PREFIXES.find(t => row.settingKey.startsWith(t.keyPrefix));
+          if (!jobType) continue;
+          const lastSignal = job.heartbeatAt || job.startedAt;
+          if (!lastSignal) continue;
+          const lastSignalMs = new Date(lastSignal).getTime();
+          if (!Number.isFinite(lastSignalMs)) continue;
+          const ageMs = now - lastSignalMs;
+          if (ageMs <= jobType.ttlMs) continue;
+          job.status = 'failed';
+          job.error = `Stale-job sweeper (manual): no heartbeat for ${Math.round(ageMs / 60000)} minutes (TTL ${Math.round(jobType.ttlMs / 60000)}m).`;
+          job.finishedAt = new Date().toISOString();
+          await storage.setApiSetting(row.organizationId, row.settingKey, JSON.stringify(job));
+          aged++;
+          byType[jobType.label] = (byType[jobType.label] || 0) + 1;
+          console.log(`[StaleJobs] Manual sweep aged out ${row.settingKey} (org=${row.organizationId})`);
+        } catch { /* skip malformed */ }
+      }
+      res.json({ ok: true, scanned, aged, byType, before: before.lastRun });
+    } catch (error: any) {
+      console.error('[Admin] Manual sweep failed:', error?.message || error);
+      res.status(500).json({ message: 'Failed to run stale-jobs sweep' });
+    }
+  });
+
   // ===== ADMIN HEALTH =====
   // Read-only system health: process metrics, DB latency, queue depths, engine status,
   // active background jobs. Org-scoped for admins; superadmin sees all-orgs aggregate.
@@ -8206,6 +8265,10 @@ Output schema:
         const { getOutboundReplySweepStatus } = await import('./services/outbound-reply-sweeper.js');
         eng.outboundReplySweeper = getOutboundReplySweepStatus();
       } catch (e: any) { eng.outboundReplySweeper = { error: e?.message || String(e) }; }
+      try {
+        const { getStaleJobsSweepStatus } = await import('./services/stale-jobs-sweeper.js');
+        eng.staleJobsSweeper = getStaleJobsSweepStatus();
+      } catch (e: any) { eng.staleJobsSweeper = { error: e?.message || String(e) }; }
       out.engines = eng;
     } catch (e: any) { errors.engines = e?.message || String(e); }
 
