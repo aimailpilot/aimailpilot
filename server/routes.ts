@@ -639,6 +639,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const { tokens } = await oauth2Client.getToken(code as string);
       oauth2Client.setCredentials(tokens);
 
+      // Log granted scopes so we can diagnose missing-scope cases (e.g. user
+      // declined sheets access). tokens.scope is a space-separated string when
+      // present; absence usually means the IDP didn't echo scopes (treat as best-effort).
+      if ((tokens as any).scope) {
+        console.log('[Auth] Google OAuth granted scopes:', (tokens as any).scope);
+        if (!String((tokens as any).scope).includes('spreadsheets')) {
+          console.warn('[Auth] WARNING: spreadsheets scope NOT in granted scopes — user likely declined that scope on the consent screen, or the OAuth client config in Google Cloud doesn\'t include it.');
+        }
+      }
+
       // Get user info from Google
       const userInfoResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
         headers: { Authorization: `Bearer ${tokens.access_token}` },
@@ -704,6 +714,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
         // Google omits expiry_date on re-auth reconnects, which left stale expired values in DB causing refresh hangs.
         const expiryToStore = tokens.expiry_date || (tokens.expires_in ? Date.now() + (tokens.expires_in * 1000) : Date.now() + 3600000);
         await storage.setApiSetting(effectiveOrgId, `gmail_sender_${email}_token_expiry`, String(expiryToStore));
+
+        // Active-session failsafe: if effectiveOrgId got overridden to the existing-account's
+        // org (line 681-687), the user's currently-active session might be in a different org
+        // and won't see the fresh tokens — leading to the "Re-authenticate Gmail" loop on
+        // /api/sheets/fetch-info. Always also write tokens to stateOrgId (the org the flow
+        // was initiated from) so the active session can find a sheets-capable token.
+        if (stateOrgId && stateOrgId !== effectiveOrgId) {
+          if (tokens.access_token) await storage.setApiSetting(stateOrgId, `gmail_sender_${email}_access_token`, tokens.access_token);
+          if (tokens.refresh_token) await storage.setApiSetting(stateOrgId, `gmail_sender_${email}_refresh_token`, tokens.refresh_token);
+          await storage.setApiSetting(stateOrgId, `gmail_sender_${email}_token_expiry`, String(expiryToStore));
+          console.log(`[Auth] Active-session failsafe: also stored ${email} tokens in stateOrgId ${stateOrgId} (effectiveOrgId was overridden to ${effectiveOrgId})`);
+        }
 
         // ONLY update org-level tokens if this IS the primary account or no primary exists yet
         // CRITICAL FIX: Do NOT overwrite org-level tokens with a secondary account's tokens!
@@ -9655,7 +9677,7 @@ Respond with ONLY a JSON object in this format:
           console.log('[sheets/fetch-info] Have Gmail tokens but none with spreadsheets scope. Asking user to re-auth.');
           return res.json({
             valid: false,
-            error: 'Google Sheets permission not granted. Please click "Re-authenticate Gmail" below and approve the Sheets access scope on the Google consent screen.',
+            error: 'Google Sheets access not yet granted on your Gmail token. Click below to grant Sheets access — Google will show only the missing permission on the consent screen.',
             needsReauth: true,
           });
         }

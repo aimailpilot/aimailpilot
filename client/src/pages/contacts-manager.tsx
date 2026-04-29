@@ -666,10 +666,19 @@ export default function ContactsManager() {
     const params = new URLSearchParams(window.location.search);
     const gmailConnected = params.get('gmail_connected');
     if (gmailConnected) {
-      setGmailConnectMsg(`Gmail account ${gmailConnected} connected! You can now import Google Sheets.`);
+      setGmailConnectMsg(`Google Sheets access granted for ${gmailConnected}. You can now import.`);
       setShowGoogleSheetsDialog(true);
-      // Clear the message after a while
+      // Clear any prior "Sheets permission not granted" error so the success state shows cleanly.
+      setGsError('');
+      // Clear the success message after a while
       setTimeout(() => setGmailConnectMsg(''), 10000);
+      // Strip the query param from the URL so a refresh doesn't re-trigger this flow.
+      try {
+        const u = new URL(window.location.href);
+        u.searchParams.delete('gmail_connected');
+        u.searchParams.delete('view');
+        window.history.replaceState({}, '', u.pathname + (u.search ? u.search : '') + u.hash);
+      } catch {}
     }
   }, []);
 
@@ -3601,6 +3610,14 @@ export default function ContactsManager() {
               </div>
             </div>
 
+            {gmailConnectMsg && (
+              <Alert className="py-2 border-green-200 bg-green-50">
+                <CheckCircle className="h-4 w-4 text-green-600" />
+                <AlertDescription className="text-sm text-green-800">
+                  {gmailConnectMsg}
+                </AlertDescription>
+              </Alert>
+            )}
             {gsError && (
               <Alert variant="destructive" className="py-2">
                 <XCircle className="h-4 w-4" />
@@ -3613,7 +3630,7 @@ export default function ContactsManager() {
                       className="ml-2 h-7 text-xs bg-white text-red-700 border-red-200 hover:bg-red-50"
                       onClick={() => window.location.href = '/api/auth/gmail-connect?returnTo=contacts'}
                     >
-                      <RefreshCw className="h-3 w-3 mr-1" /> Re-authenticate Gmail
+                      <RefreshCw className="h-3 w-3 mr-1" /> Connect Google Sheets
                     </Button>
                   )}
                 </AlertDescription>
