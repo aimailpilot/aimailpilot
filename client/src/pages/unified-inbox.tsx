@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -123,6 +123,41 @@ export default function UnifiedInbox() {
   const [accountFilter, setAccountFilter] = useState<string>('all');
   const [campaignFilter, setCampaignFilter] = useState<string>('all');
   const [memberFilter, setMemberFilter] = useState<string>('all');
+
+  // Disambiguated team-member labels. Multiple users can share the same firstName
+  // (we have 3 Bhupesh in production), so the dropdown needs to differentiate
+  // them. Strategy:
+  //   1. unique firstName → just firstName
+  //   2. duplicate firstName, unique lastName initial → "Firstname L."
+  //   3. still ambiguous → "Firstname (email)"
+  const teamMemberLabels = useMemo(() => {
+    const labels = new Map<string, string>();
+    const firstNameCounts = new Map<string, number>();
+    for (const m of teamMembers) {
+      const fn = (m.firstName || m.email?.split('@')[0] || '').trim();
+      firstNameCounts.set(fn, (firstNameCounts.get(fn) || 0) + 1);
+    }
+    const initialKeyCounts = new Map<string, number>();
+    for (const m of teamMembers) {
+      const fn = (m.firstName || m.email?.split('@')[0] || '').trim();
+      const li = (m.lastName || '').trim().slice(0, 1).toUpperCase();
+      const key = `${fn}|${li}`;
+      initialKeyCounts.set(key, (initialKeyCounts.get(key) || 0) + 1);
+    }
+    for (const m of teamMembers) {
+      const fn = (m.firstName || m.email?.split('@')[0] || '').trim();
+      const ln = (m.lastName || '').trim();
+      const li = ln.slice(0, 1).toUpperCase();
+      if ((firstNameCounts.get(fn) || 0) <= 1) {
+        labels.set(m.userId, fn);
+      } else if (li && (initialKeyCounts.get(`${fn}|${li}`) || 0) <= 1) {
+        labels.set(m.userId, `${fn} ${li}.`);
+      } else {
+        labels.set(m.userId, `${fn} (${m.email || ''})`);
+      }
+    }
+    return labels;
+  }, [teamMembers]);
 
   // Filters
   const [statusFilter, setStatusFilter] = useState('all');
@@ -756,7 +791,7 @@ export default function UnifiedInbox() {
                 <SelectContent>
                   {teamMembers.map((m: any) => (
                     <SelectItem key={m.userId} value={m.userId}>
-                      {m.firstName || m.email?.split('@')[0]}
+                      {teamMemberLabels.get(m.userId) || m.firstName || m.email?.split('@')[0]}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -1300,7 +1335,7 @@ export default function UnifiedInbox() {
               <SelectContent>
                 <SelectItem value="all">All Members</SelectItem>
                 {teamMembers.map((m: any) => (
-                  <SelectItem key={m.userId} value={m.userId}>{m.firstName || m.email?.split('@')[0]}</SelectItem>
+                  <SelectItem key={m.userId} value={m.userId}>{teamMemberLabels.get(m.userId) || m.firstName || m.email?.split('@')[0]}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
