@@ -43,13 +43,39 @@ interface LastRunStats {
   noReply: number;
   skipped: number;
   errors: number;
+  // Granular outcomes from provider API checks. Previously all non-200 responses
+  // were silently treated as "no reply" — making it impossible to tell genuine
+  // empty threads from auth/404/server errors. These break that down so the admin
+  // health endpoint can show the real reason detection rate is at zero.
+  apiAuthFail: number;     // 401/403 from Gmail/Graph
+  apiNotFound: number;     // 404 (thread/conversation gone or no permission)
+  apiHttpError: number;    // other non-OK
+  apiException: number;    // network error / parse error / throw
 }
 const lastRun: LastRunStats = {
   startedAt: null, finishedAt: null, durationSec: null,
   candidates: 0, replied: 0, noReply: 0, skipped: 0, errors: 0,
+  apiAuthFail: 0, apiNotFound: 0, apiHttpError: 0, apiException: 0,
 };
+
+// Rolling buffer of recent API failures (in-memory, capped). Surfaced via
+// the admin health endpoint to point at which accounts/threads are failing.
+interface ApiFailureSample {
+  ts: string;
+  provider: 'gmail' | 'outlook';
+  status: number | string;
+  ownerEmail: string;
+  threadId: string;
+}
+const recentFailures: ApiFailureSample[] = [];
+const MAX_RECENT_FAILURES = 20;
+function recordFailure(s: ApiFailureSample) {
+  recentFailures.unshift(s);
+  if (recentFailures.length > MAX_RECENT_FAILURES) recentFailures.length = MAX_RECENT_FAILURES;
+}
+
 export function getOutboundReplySweepStatus() {
-  return { isProcessing, intervalMs: SWEEP_INTERVAL_MS, maxPerCycle: MAX_CANDIDATES_PER_CYCLE, lastRun };
+  return { isProcessing, intervalMs: SWEEP_INTERVAL_MS, maxPerCycle: MAX_CANDIDATES_PER_CYCLE, lastRun, recentFailures };
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -221,7 +247,14 @@ async function checkGmailThread(accessToken: string, threadId: string, ownerEmai
       `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=full`,
       { headers: { 'Authorization': `Bearer ${accessToken}` } }
     );
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      const sample: ApiFailureSample = { ts: new Date().toISOString(), provider: 'gmail', status: resp.status, ownerEmail, threadId };
+      if (resp.status === 401 || resp.status === 403) lastRun.apiAuthFail++;
+      else if (resp.status === 404) lastRun.apiNotFound++;
+      else lastRun.apiHttpError++;
+      recordFailure(sample);
+      return null;
+    }
     const data = await resp.json() as any;
     if (!data?.messages) return null;
 
@@ -242,7 +275,11 @@ async function checkGmailThread(accessToken: string, threadId: string, ownerEmai
       }
     }
     return null;
-  } catch { return null; }
+  } catch (e: any) {
+    lastRun.apiException++;
+    recordFailure({ ts: new Date().toISOString(), provider: 'gmail', status: `exception: ${e?.message || 'unknown'}`.slice(0, 100), ownerEmail, threadId });
+    return null;
+  }
 }
 
 /**
@@ -254,7 +291,14 @@ async function checkOutlookConversation(accessToken: string, conversationId: str
   try {
     const url = `https://graph.microsoft.com/v1.0/me/messages?$filter=conversationId eq '${encodeURIComponent(conversationId)}'&$select=from,sentDateTime,sender,body,bodyPreview&$top=50`;
     const resp = await fetch(url, { headers: { 'Authorization': `Bearer ${accessToken}` } });
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      const sample: ApiFailureSample = { ts: new Date().toISOString(), provider: 'outlook', status: resp.status, ownerEmail, threadId: conversationId };
+      if (resp.status === 401 || resp.status === 403) lastRun.apiAuthFail++;
+      else if (resp.status === 404) lastRun.apiNotFound++;
+      else lastRun.apiHttpError++;
+      recordFailure(sample);
+      return null;
+    }
     const data = await resp.json() as any;
     const messages: any[] = data?.value || [];
 
@@ -280,7 +324,11 @@ async function checkOutlookConversation(accessToken: string, conversationId: str
       }
     }
     return null;
-  } catch { return null; }
+  } catch (e: any) {
+    lastRun.apiException++;
+    recordFailure({ ts: new Date().toISOString(), provider: 'outlook', status: `exception: ${e?.message || 'unknown'}`.slice(0, 100), ownerEmail, threadId: conversationId });
+    return null;
+  }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -399,6 +447,10 @@ export async function runOutboundReplySweep(): Promise<LastRunStats> {
   lastRun.noReply = 0;
   lastRun.skipped = 0;
   lastRun.errors = 0;
+  lastRun.apiAuthFail = 0;
+  lastRun.apiNotFound = 0;
+  lastRun.apiHttpError = 0;
+  lastRun.apiException = 0;
 
   try {
     const candidates = await selectCandidates();
