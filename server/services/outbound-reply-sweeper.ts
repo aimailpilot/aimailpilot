@@ -391,7 +391,10 @@ async function selectCandidates(): Promise<InboxCandidate[]> {
   //     this we'd loop on the same oldest 50 forever and never reach newer messages)
   //
   // Order by outboundCheckedAt NULLS FIRST so never-checked rows are processed before re-checks,
-  // then by receivedAt ASC for stable iteration order.
+  // then by receivedAt DESC so newer messages (where native replies are far more likely) get
+  // checked first. The previous ASC ordering caused the queue to chew through ancient backlog
+  // every recheck wave — those rows have been checked many times with zero matches and won't
+  // suddenly grow a reply, while genuinely-replied recent messages waited at the back of the line.
   const recvCutoff = new Date(Date.now() - MIN_AGE_MS).toISOString();
   const checkCutoff = new Date(Date.now() - RECHECK_COOLDOWN_MS).toISOString();
   const sql = `
@@ -411,7 +414,7 @@ async function selectCandidates(): Promise<InboxCandidate[]> {
       AND ui."receivedAt" < ?
       AND (ui."outboundCheckedAt" IS NULL OR ui."outboundCheckedAt" < ?)
       AND ea."isActive" != 0
-    ORDER BY ui."outboundCheckedAt" ASC NULLS FIRST, ui."receivedAt" ASC
+    ORDER BY ui."outboundCheckedAt" ASC NULLS FIRST, ui."receivedAt" DESC
     LIMIT ?
   `;
   return storage.rawAll(sql, recvCutoff, checkCutoff, MAX_CANDIDATES_PER_CYCLE) as Promise<InboxCandidate[]>;
