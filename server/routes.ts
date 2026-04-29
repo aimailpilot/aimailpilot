@@ -9795,7 +9795,7 @@ Respond with ONLY a JSON object in this format:
   // sheet is fully accessible. Returns a structured outcome so the caller can give an
   // accurate user-facing error instead of a generic "permission denied" loop.
   type DirectSheetsOutcome =
-    | { kind: 'success'; tokenLabel: string; title: string; sheets: Array<{ id: number; name: string; index: number }> }
+    | { kind: 'success'; tokenLabel: string; accessToken: string; title: string; sheets: Array<{ id: number; name: string; index: number }> }
     | { kind: 'sheet_not_in_account' }     // every token returned 404 — sheet not owned/shared with any of them
     | { kind: 'no_sheets_scope' }          // every token returned 403 with insufficient_scope
     | { kind: 'no_tokens' }                // org has zero Google tokens stored
@@ -9895,7 +9895,7 @@ Respond with ONLY a JSON object in this format:
             name: s.properties?.title || 'Sheet1',
             index: s.properties?.index ?? 0,
           }));
-          return { kind: 'success', tokenLabel: c.label, title: data.properties?.title || 'Google Spreadsheet', sheets };
+          return { kind: 'success', tokenLabel: c.label, accessToken: token!, title: data.properties?.title || 'Google Spreadsheet', sheets };
         }
         const errText = await apiRes.text();
         if (apiRes.status === 404) saw404 = true;
@@ -10076,8 +10076,12 @@ Respond with ONLY a JSON object in this format:
       let headers: string[] = [];
       let dataRows: string[][] = [];
 
-      // Strategy 1: Try Google Sheets API v4 with OAuth — probe-based token lookup
-      const accessToken = await getGoogleAccessTokenForSheets(req.user.organizationId);
+      // Strategy 1: find the Google token that actually owns/can-read THIS spreadsheet
+      // (via tryDirectSheetsAccess — iterates all stored tokens, first 200 wins). This is
+      // the same fix applied to /api/sheets/fetch-info — the previous probe-based approach
+      // picked a token that could read a public test sheet but not necessarily this one.
+      const directRes = await tryDirectSheetsAccess(req.user.organizationId, spreadsheetId);
+      const accessToken = directRes.kind === 'success' ? directRes.accessToken : null;
       let usedOAuth = false;
 
       if (accessToken) {
@@ -10088,7 +10092,7 @@ Respond with ONLY a JSON object in this format:
           const apiRes = await fetch(apiUrl, {
             headers: { 'Authorization': `Bearer ${accessToken}` },
           });
-          
+
           if (apiRes.ok) {
             const data = await apiRes.json() as any;
             const allRows: string[][] = (data.values || []).map((row: any[]) => row.map(String));
@@ -10096,7 +10100,7 @@ Respond with ONLY a JSON object in this format:
               headers = allRows[0];
               dataRows = allRows.slice(1);
               usedOAuth = true;
-              console.log('[sheets/fetch-data] Google Sheets API success:', headers.length, 'cols,', dataRows.length, 'rows');
+              console.log('[sheets/fetch-data] Google Sheets API success via', directRes.kind === 'success' ? directRes.tokenLabel : '(no label)', ':', headers.length, 'cols,', dataRows.length, 'rows');
             }
           } else {
             const errText = await apiRes.text();
@@ -10105,6 +10109,8 @@ Respond with ONLY a JSON object in this format:
         } catch (apiErr) {
           console.log('[sheets/fetch-data] Sheets API error, falling back to CSV:', apiErr);
         }
+      } else {
+        console.log('[sheets/fetch-data] No working OAuth token for this sheet (tryDirectSheetsAccess outcome:', directRes.kind, ')');
       }
 
       // Strategy 2: Fallback to public CSV export

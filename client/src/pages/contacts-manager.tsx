@@ -1593,10 +1593,25 @@ export default function ContactsManager() {
           });
           setGsMapping(mapping);
 
-          // Auto-set list name: prefer sheet title, then sheet tab name
+          // Auto-set list name: combine spreadsheet title + selected sheet tab name
+          // (e.g. "Ministry Data Officials AGBA - Telecom"). Falls back gracefully when
+          // either piece is missing.
           const title = sheetTitle || gsSheetTitle;
-          const autoName = title || sheet.name || 'Google Sheet Import';
-          if (!gsListName || gsListName === 'Google Sheet Import') setGsListName(autoName);
+          const tabName = sheet?.name && sheet.name !== 'Sheet1' ? sheet.name : '';
+          const autoName = title && tabName ? `${title} - ${tabName}` : (title || tabName || 'Google Sheet Import');
+          // Always update the list name when the user switches sheet tabs — previously it
+          // only set on first load, so picking "Telecom" after defaulting to "Combined"
+          // would keep "Combined" as the list name. Prefix-match makes the auto-update
+          // safe: if the user typed a custom name, leave it alone.
+          const previousAutoPrefix = title || '';
+          if (
+            !gsListName ||
+            gsListName === 'Google Sheet Import' ||
+            gsListName === title ||
+            (previousAutoPrefix && gsListName.startsWith(previousAutoPrefix))
+          ) {
+            setGsListName(autoName);
+          }
         } else if (hdrs.length > 0) {
           // Headers found but no data rows
           setGsHeaders(hdrs);
