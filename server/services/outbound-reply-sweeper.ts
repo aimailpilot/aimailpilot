@@ -79,6 +79,37 @@ export function getOutboundReplySweepStatus() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Org email cache — populated per sweep cycle. Keys are organizationId, values
+// are Set<lowercase email> of every email_accounts.email row for that org.
+// Used to widen the from-match: a thread reply is treated as "the team replied"
+// if its From: header email is ANY of the org's connected accounts (not just
+// the specific account that received the original inbox row). This catches
+// the cross-account-reply case (inbox arrives at sales@; a teammate replies
+// from rajiv@; thread is still visible to sales' API call because rajiv was
+// CC'd or used Send Mail As). Cache is rebuilt each cycle so newly-added
+// accounts are picked up within one cycle (10 min).
+// ──────────────────────────────────────────────────────────────────────────────
+
+const orgEmailsCache = new Map<string, Set<string>>();
+
+async function getOrgEmails(orgId: string): Promise<Set<string>> {
+  const cached = orgEmailsCache.get(orgId);
+  if (cached) return cached;
+  try {
+    const rows = await storage.rawAll(
+      `SELECT LOWER(TRIM(email)) as email FROM email_accounts WHERE "organizationId" = ? AND email IS NOT NULL AND email != ''`,
+      orgId
+    ) as any[];
+    const set = new Set<string>(rows.map((r: any) => r.email).filter(Boolean));
+    orgEmailsCache.set(orgId, set);
+    return set;
+  } catch (e: any) {
+    console.error(`[OutboundReplySweep] Failed to load org emails for ${orgId}:`, e?.message || e);
+    return new Set<string>();
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Self-contained token helpers (same pattern as lead-intelligence-engine.ts)
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -241,7 +272,7 @@ const NATIVE_REPLY_MAX_CHARS = 5000;
  * Returns { sentAt, content } when found, else null.
  * Uses format=full so the matched message body is included — no extra detail fetch needed.
  */
-async function checkGmailThread(accessToken: string, threadId: string, ownerEmail: string, receivedAt: number): Promise<{ sentAt: string; content: string } | null> {
+async function checkGmailThread(accessToken: string, threadId: string, ownerEmail: string, orgEmails: Set<string>, receivedAt: number): Promise<{ sentAt: string; content: string } | null> {
   try {
     const resp = await fetch(
       `https://gmail.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=full`,
@@ -258,14 +289,16 @@ async function checkGmailThread(accessToken: string, threadId: string, ownerEmai
     const data = await resp.json() as any;
     if (!data?.messages) return null;
 
-    const ownerLower = ownerEmail.toLowerCase();
     for (const msg of data.messages) {
       const headers = msg.payload?.headers || [];
       const fromHeader = headers.find((h: any) => h.name.toLowerCase() === 'from')?.value || '';
       const dateHeader = headers.find((h: any) => h.name.toLowerCase() === 'date')?.value || '';
       const fromEmail = (fromHeader.match(/<([^>]+)>/)?.[1] || fromHeader).toLowerCase().trim();
-      // Match: outbound message from THIS owner, dated AFTER the inbox row's receivedAt
-      if (fromEmail === ownerLower) {
+      // Match: any org-connected email (not just the receiving account). Catches the
+      // common Send-Mail-As / cross-account-reply case where a teammate replies from
+      // their own connected account but the thread is visible via the receiving
+      // account's API call.
+      if (fromEmail && orgEmails.has(fromEmail)) {
         const msgTime = dateHeader ? new Date(dateHeader).getTime() : (msg.internalDate ? Number(msg.internalDate) : 0);
         if (msgTime > receivedAt) {
           const rawBody = extractGmailBody(msg);
@@ -287,7 +320,7 @@ async function checkGmailThread(accessToken: string, threadId: string, ownerEmai
  * Returns { sentAt, content } when found, else null.
  * `body` is requested inline via $select — no extra message detail fetch needed.
  */
-async function checkOutlookConversation(accessToken: string, conversationId: string, ownerEmail: string, receivedAt: number): Promise<{ sentAt: string; content: string } | null> {
+async function checkOutlookConversation(accessToken: string, conversationId: string, ownerEmail: string, orgEmails: Set<string>, receivedAt: number): Promise<{ sentAt: string; content: string } | null> {
   try {
     const url = `https://graph.microsoft.com/v1.0/me/messages?$filter=conversationId eq '${encodeURIComponent(conversationId)}'&$select=from,sentDateTime,sender,body,bodyPreview&$top=50`;
     const resp = await fetch(url, { headers: { 'Authorization': `Bearer ${accessToken}` } });
@@ -302,10 +335,10 @@ async function checkOutlookConversation(accessToken: string, conversationId: str
     const data = await resp.json() as any;
     const messages: any[] = data?.value || [];
 
-    const ownerLower = ownerEmail.toLowerCase();
     for (const m of messages) {
       const fromAddr = (m.from?.emailAddress?.address || m.sender?.emailAddress?.address || '').toLowerCase();
-      if (fromAddr !== ownerLower) continue;
+      // Match: any org-connected email, not just the receiving account.
+      if (!fromAddr || !orgEmails.has(fromAddr)) continue;
       const sentTime = m.sentDateTime ? new Date(m.sentDateTime).getTime() : 0;
       if (sentTime > receivedAt) {
         // Graph returns body as { contentType: 'html' | 'text', content: '...' }. Strip HTML if needed.
@@ -398,16 +431,20 @@ async function processCandidate(c: InboxCandidate): Promise<'replied' | 'no_repl
   if (!c.ownerEmail) return 'skipped';
   const provider = (c.provider || '').toLowerCase();
   const receivedAt = new Date(c.receivedAt).getTime();
+  // Each member has 5-10 connected emails. A reply may come from ANY of the org's
+  // accounts, not just the one that received the inbox row. Pre-fetch the full set
+  // (cached per cycle) and pass to the matcher so we catch cross-account replies.
+  const orgEmails = await getOrgEmails(c.organizationId);
   let match: { sentAt: string; content: string } | null = null;
 
   if (provider === 'gmail' && c.gmailThreadId) {
     const token = await getGmailAccessToken(c.organizationId, c.ownerEmail);
     if (!token) return 'skipped';
-    match = await checkGmailThread(token, c.gmailThreadId, c.ownerEmail, receivedAt);
+    match = await checkGmailThread(token, c.gmailThreadId, c.ownerEmail, orgEmails, receivedAt);
   } else if (provider === 'outlook' && c.outlookConversationId) {
     const token = await getOutlookAccessToken(c.organizationId, c.ownerEmail);
     if (!token) return 'skipped';
-    match = await checkOutlookConversation(token, c.outlookConversationId, c.ownerEmail, receivedAt);
+    match = await checkOutlookConversation(token, c.outlookConversationId, c.ownerEmail, orgEmails, receivedAt);
   } else {
     return 'skipped';
   }
