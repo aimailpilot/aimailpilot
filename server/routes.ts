@@ -9647,6 +9647,135 @@ Respond with ONLY a JSON object in this format:
     }
   });
 
+  // Helper: try each stored Gmail token directly against a specific spreadsheet ID.
+  // Used as a fallback when the fixed-probe approach in getGoogleAccessTokenForSheets
+  // fails — sometimes the public probe sheet is unreachable even when the user's own
+  // sheet is fully accessible. Returns a structured outcome so the caller can give an
+  // accurate user-facing error instead of a generic "permission denied" loop.
+  type DirectSheetsOutcome =
+    | { kind: 'success'; tokenLabel: string; title: string; sheets: Array<{ id: number; name: string; index: number }> }
+    | { kind: 'sheet_not_in_account' }     // every token returned 404 — sheet not owned/shared with any of them
+    | { kind: 'no_sheets_scope' }          // every token returned 403 with insufficient_scope
+    | { kind: 'no_tokens' }                // org has zero Google tokens stored
+    | { kind: 'unknown' };                 // mixed/other failures — caller should fall through to public CSV
+  async function tryDirectSheetsAccess(organizationId: string, spreadsheetId: string): Promise<DirectSheetsOutcome> {
+    const settings = await storage.getApiSettings(organizationId);
+
+    type Cand = { accessToken: string; refreshToken: string; tokenExpiry: string; label: string; expiryKey: string; tokenKey: string };
+    const candidates: Cand[] = [];
+    const seen = new Set<string>();
+    const push = (c: Cand) => {
+      const k = c.refreshToken || c.accessToken;
+      if (!k || seen.has(k)) return;
+      seen.add(k);
+      candidates.push(c);
+    };
+    if (settings.gmail_access_token && settings.gmail_refresh_token) {
+      push({
+        accessToken: settings.gmail_access_token,
+        refreshToken: settings.gmail_refresh_token,
+        tokenExpiry: settings.gmail_token_expiry || '0',
+        label: 'org-level',
+        expiryKey: 'gmail_token_expiry',
+        tokenKey: 'gmail_access_token',
+      });
+    }
+    for (const k of Object.keys(settings)) {
+      if (!k.startsWith('gmail_sender_') || !k.endsWith('_access_token')) continue;
+      const email = k.replace('gmail_sender_', '').replace('_access_token', '');
+      const sa = settings[k];
+      const sr = settings[`gmail_sender_${email}_refresh_token`];
+      if (sa && sr) {
+        push({
+          accessToken: sa,
+          refreshToken: sr,
+          tokenExpiry: settings[`gmail_sender_${email}_token_expiry`] || '0',
+          label: `sender:${email}`,
+          expiryKey: `gmail_sender_${email}_token_expiry`,
+          tokenKey: `gmail_sender_${email}_access_token`,
+        });
+      }
+    }
+    if (candidates.length === 0) return { kind: 'no_tokens' };
+
+    let cid = settings.google_oauth_client_id || '';
+    let csec = settings.google_oauth_client_secret || '';
+    if (!cid || !csec) {
+      try {
+        const superAdminOrgId = await storage.getSuperAdminOrgId();
+        if (superAdminOrgId && superAdminOrgId !== organizationId) {
+          const ss = await storage.getApiSettings(superAdminOrgId);
+          if (ss.google_oauth_client_id) { cid = ss.google_oauth_client_id; csec = ss.google_oauth_client_secret || ''; }
+        }
+      } catch {}
+    }
+    if (!cid) cid = process.env.GOOGLE_CLIENT_ID || '';
+    if (!csec) csec = process.env.GOOGLE_CLIENT_SECRET || '';
+
+    candidates.sort((a, b) => parseInt(b.tokenExpiry || '0') - parseInt(a.tokenExpiry || '0'));
+
+    const apiUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=spreadsheetId,properties.title,sheets.properties`;
+    let saw404 = false;
+    let saw403Scope = false;
+
+    for (const c of candidates) {
+      let token: string | null = c.accessToken;
+      const expired = c.tokenExpiry && Date.now() > parseInt(c.tokenExpiry) - 5 * 60 * 1000;
+      if (expired && cid && csec) {
+        try {
+          const r = await fetch('https://oauth2.googleapis.com/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({ client_id: cid, client_secret: csec, refresh_token: c.refreshToken, grant_type: 'refresh_token' }),
+          });
+          if (r.ok) {
+            const td = await r.json() as any;
+            if (td.access_token) {
+              token = td.access_token;
+              await storage.setApiSetting(organizationId, c.tokenKey, token!);
+              if (td.expires_in) await storage.setApiSetting(organizationId, c.expiryKey, String(Date.now() + td.expires_in * 1000));
+            }
+          } else {
+            console.log(`[tryDirectSheetsAccess] refresh failed for ${c.label}: ${r.status}`);
+          }
+        } catch (e) {
+          console.log(`[tryDirectSheetsAccess] refresh error for ${c.label}:`, e instanceof Error ? e.message : e);
+        }
+      }
+      if (!token) continue;
+
+      try {
+        const apiRes = await fetch(apiUrl, { headers: { Authorization: `Bearer ${token}` } });
+        if (apiRes.ok) {
+          const data = await apiRes.json() as any;
+          const sheets = (data.sheets || []).map((s: any) => ({
+            id: s.properties?.sheetId ?? 0,
+            name: s.properties?.title || 'Sheet1',
+            index: s.properties?.index ?? 0,
+          }));
+          return { kind: 'success', tokenLabel: c.label, title: data.properties?.title || 'Google Spreadsheet', sheets };
+        }
+        const errText = await apiRes.text();
+        if (apiRes.status === 404) saw404 = true;
+        else if (apiRes.status === 403) {
+          if (errText.includes('insufficient') || errText.includes('ACCESS_TOKEN_SCOPE_INSUFFICIENT') || errText.includes('Request had insufficient authentication scopes')) {
+            saw403Scope = true;
+          }
+        }
+        console.log(`[tryDirectSheetsAccess] ${c.label} status=${apiRes.status} ${errText.slice(0, 120)}`);
+      } catch (e) {
+        console.log(`[tryDirectSheetsAccess] fetch error for ${c.label}:`, e instanceof Error ? e.message : e);
+      }
+    }
+
+    // Pick the most actionable outcome. Scope-missing wins over 404 because the user
+    // can fix scope themselves; 404-everywhere means we know they need to share publicly.
+    if (saw403Scope && !saw404) return { kind: 'no_sheets_scope' };
+    if (saw404 && !saw403Scope) return { kind: 'sheet_not_in_account' };
+    if (saw404 && saw403Scope) return { kind: 'no_sheets_scope' }; // prefer the actionable one
+    return { kind: 'unknown' };
+  }
+
   // Fetch spreadsheet info (sheet names) using Google Sheets API v4 with OAuth, fallback to public CSV export
   // NOTE: Wrapped with .then().catch() for Express 4 async safety
   app.post('/api/sheets/fetch-info', (req: any, res, next) => {
@@ -9670,18 +9799,41 @@ Respond with ONLY a JSON object in this format:
       // Probe ALL stored Google tokens and use the first one that actually works against Sheets API.
       const accessToken = await getGoogleAccessTokenForSheets(req.user.organizationId);
       console.log('[sheets/fetch-info] Got sheets-capable access token:', accessToken ? 'yes (length=' + accessToken.length + ')' : 'no');
+
+      // Strategy 1.5: probe failed → try each stored Gmail token directly against the user's
+      // actual spreadsheet. The fixed probe sheet can sometimes be unreachable (Google rate
+      // limit, transient 5xx, etc.) even when the user's own sheet is fully accessible to one
+      // of their tokens. This gives logged-in users with sheets scope a working path without
+      // forcing a re-auth they don't actually need. If all tokens fail with 404, the user's
+      // sheet simply isn't in any of their connected Google accounts → clear share-publicly
+      // message rather than a misleading "permission" error.
       if (!accessToken) {
-        // No Google token has spreadsheets scope. Check if we have ANY Google tokens at all.
-        const anyToken = await getGoogleAccessToken(req.user.organizationId);
-        if (anyToken) {
-          console.log('[sheets/fetch-info] Have Gmail tokens but none with spreadsheets scope. Asking user to re-auth.');
+        const directRes = await tryDirectSheetsAccess(req.user.organizationId, spreadsheetId);
+        if (directRes.kind === 'success') {
+          console.log('[sheets/fetch-info] Strategy 1.5 succeeded via', directRes.tokenLabel);
+          return res.json({
+            id: spreadsheetId,
+            title: directRes.title,
+            sheets: directRes.sheets,
+            valid: true,
+            method: 'oauth-direct',
+          });
+        }
+        if (directRes.kind === 'sheet_not_in_account') {
+          return res.json({
+            valid: false,
+            error: 'This spreadsheet is not in any of your connected Google accounts. To import, share the sheet with "Anyone with the link" — or open it from the account that owns it.',
+          });
+        }
+        if (directRes.kind === 'no_sheets_scope') {
           return res.json({
             valid: false,
             error: 'Google Sheets access not yet granted on your Gmail token. Click below to grant Sheets access — Google will show only the missing permission on the consent screen.',
             needsReauth: true,
           });
         }
-        // No Google auth at all — fall through to public CSV strategy below.
+        // directRes.kind === 'no_tokens' or 'unknown' → fall through to public CSV
+        console.log('[sheets/fetch-info] Strategy 1.5 outcome:', directRes.kind, '— falling through to public CSV');
       }
       if (accessToken) {
         try {
@@ -9723,7 +9875,7 @@ Respond with ONLY a JSON object in this format:
             if (apiRes.status === 404) {
               return res.json({
                 valid: false,
-                error: 'Spreadsheet not found. Please check the URL is correct and you have access to this sheet.'
+                error: 'This spreadsheet is not in any of your connected Google accounts. To import, share the sheet with "Anyone with the link" — or open it from the account that owns it.'
               });
             }
           }
