@@ -3498,8 +3498,15 @@ Which account should I use and why? If I need to split across accounts, provide 
       }
       const updated = await storage.updateCampaign(req.params.id, patch);
       res.json(updated);
-    } catch (error) {
-      res.status(500).json({ message: 'Failed to update campaign' });
+    } catch (error: any) {
+      // Log the actual error so we can diagnose 500s. Include sanitized request body
+      // (without HTML content) and the error message for the response so the UI shows
+      // the real cause instead of a generic "Failed to update campaign".
+      const safeBody = { ...(req.body || {}) };
+      if (safeBody.content) safeBody.content = `[${String(safeBody.content).length} chars omitted]`;
+      console.error('[PUT /api/campaigns/:id] error for campaign', req.params.id, '-', error?.message || error);
+      console.error('[PUT /api/campaigns/:id] request keys:', Object.keys(safeBody).join(','));
+      res.status(500).json({ message: 'Failed to update campaign', error: error?.message || String(error) });
     }
   });
 
