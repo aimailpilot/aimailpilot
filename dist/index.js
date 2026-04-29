@@ -10918,7 +10918,8 @@ var init_stale_jobs_sweeper = __esm({
     BOOT_DELAY_MS2 = 120 * 1e3;
     JOB_TYPES = [
       { keyPrefix: "lead_intel_job_", ttlMs: 60 * 60 * 1e3, label: "lead-intel" },
-      { keyPrefix: "bulk_analyze_job_", ttlMs: 60 * 60 * 1e3, label: "bulk-template-analyze" }
+      { keyPrefix: "bulk_analyze_job_", ttlMs: 60 * 60 * 1e3, label: "bulk-template-analyze" },
+      { keyPrefix: "lead_agent_job_", ttlMs: 30 * 60 * 1e3, label: "lead-agent" }
     ];
     isProcessing3 = false;
     lastRun2 = {
@@ -11936,6 +11937,514 @@ var init_campaign_review_agent = __esm({
   }
 });
 
+// server/lib/llm/types.ts
+var LlmConfigError, LlmCapabilityError, LlmProviderError;
+var init_types = __esm({
+  "server/lib/llm/types.ts"() {
+    "use strict";
+    LlmConfigError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "LlmConfigError";
+      }
+    };
+    LlmCapabilityError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "LlmCapabilityError";
+      }
+    };
+    LlmProviderError = class extends Error {
+      status;
+      constructor(message, status) {
+        super(message);
+        this.name = "LlmProviderError";
+        this.status = status;
+      }
+    };
+  }
+});
+
+// server/lib/llm/config.ts
+function resolveProvider(feature, settings, forceProvider) {
+  if (forceProvider) {
+    return finalize(forceProvider, feature, settings);
+  }
+  const featureKey = `ai_provider_${feature}`;
+  const featurePref = settings[featureKey];
+  if (featurePref === "anthropic" || featurePref === "azure_openai") {
+    return finalize(featurePref, feature, settings);
+  }
+  const orgPref = settings.ai_provider;
+  if (orgPref === "anthropic" || orgPref === "azure_openai") {
+    return finalize(orgPref, feature, settings);
+  }
+  const hasAzure = !!(settings.azure_openai_endpoint && settings.azure_openai_api_key && settings.azure_openai_deployment);
+  const hasAnthropic = !!settings.claude_api_key;
+  if (hasAzure) return finalize("azure_openai", feature, settings);
+  if (hasAnthropic) return finalize("anthropic", feature, settings);
+  throw new LlmConfigError(
+    "No AI provider configured. Set either Azure OpenAI (azure_openai_endpoint + azure_openai_api_key + azure_openai_deployment) or Anthropic (claude_api_key) in Advanced Settings."
+  );
+}
+function finalize(provider, feature, settings) {
+  if (provider === "anthropic") {
+    const featureModel = settings[`ai_model_anthropic_${feature}`];
+    const orgModel = settings.ai_model_anthropic;
+    const model = featureModel || orgModel || DEFAULT_ANTHROPIC_MODEL;
+    if (!KNOWN_ANTHROPIC_MODELS.has(model)) {
+      throw new LlmConfigError(`Unknown Anthropic model "${model}". Valid: ${[...KNOWN_ANTHROPIC_MODELS].join(", ")}`);
+    }
+    if (!settings.claude_api_key) {
+      throw new LlmConfigError("Anthropic provider selected but claude_api_key is not configured.");
+    }
+    return { provider: "anthropic", anthropicModel: model };
+  }
+  if (!settings.azure_openai_endpoint || !settings.azure_openai_api_key || !settings.azure_openai_deployment) {
+    throw new LlmConfigError(
+      "Azure OpenAI provider selected but credentials incomplete. Need azure_openai_endpoint, azure_openai_api_key, and azure_openai_deployment."
+    );
+  }
+  return { provider: "azure_openai", azureDeployment: settings.azure_openai_deployment };
+}
+var DEFAULT_ANTHROPIC_MODEL, KNOWN_ANTHROPIC_MODELS;
+var init_config = __esm({
+  "server/lib/llm/config.ts"() {
+    "use strict";
+    init_types();
+    DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-7";
+    KNOWN_ANTHROPIC_MODELS = /* @__PURE__ */ new Set([
+      "claude-opus-4-7",
+      "claude-opus-4-6",
+      "claude-sonnet-4-6",
+      "claude-haiku-4-5"
+    ]);
+  }
+});
+
+// server/lib/llm/providers/anthropic.ts
+import Anthropic from "@anthropic-ai/sdk";
+async function callAnthropic(request, apiKey, model) {
+  const client = new Anthropic({ apiKey });
+  const maxTokens = request.maxTokens ?? 16e3;
+  const tools = [];
+  if (request.webSearch) {
+    tools.push({ type: "web_search_20260209", name: "web_search" });
+  }
+  const outputConfig = {};
+  if (request.jsonSchema) {
+    outputConfig.format = { type: "json_schema", schema: request.jsonSchema };
+  }
+  const params = {
+    model,
+    max_tokens: maxTokens,
+    messages: request.messages.map((m) => ({ role: m.role, content: m.content }))
+  };
+  if (request.systemPrompt) params.system = request.systemPrompt;
+  if (request.thinking) params.thinking = { type: "adaptive" };
+  if (tools.length > 0) params.tools = tools;
+  if (Object.keys(outputConfig).length > 0) params.output_config = outputConfig;
+  let response;
+  try {
+    if (maxTokens > 16e3) {
+      const stream = client.messages.stream(params);
+      response = await stream.finalMessage();
+    } else {
+      response = await client.messages.create(params);
+    }
+  } catch (e) {
+    const status = e?.status || 500;
+    throw new LlmProviderError(`Anthropic API error: ${e?.message || String(e)}`, status);
+  }
+  const textBlocks = (response.content || []).filter((b) => b.type === "text");
+  const content = textBlocks.map((b) => b.text).join("\n");
+  let parsed;
+  if (request.jsonSchema) {
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+    }
+  }
+  const promptTokens = response.usage?.input_tokens || 0;
+  const completionTokens = response.usage?.output_tokens || 0;
+  const rate = PRICING[model] || { input: 0, output: 0 };
+  const estCostUsd = (promptTokens * rate.input + completionTokens * rate.output) / 1e6;
+  return {
+    content,
+    parsed,
+    usage: { promptTokens, completionTokens, estCostUsd },
+    provider: "anthropic",
+    model
+  };
+}
+var PRICING;
+var init_anthropic = __esm({
+  "server/lib/llm/providers/anthropic.ts"() {
+    "use strict";
+    init_types();
+    PRICING = {
+      "claude-opus-4-7": { input: 5, output: 25 },
+      "claude-opus-4-6": { input: 5, output: 25 },
+      "claude-sonnet-4-6": { input: 3, output: 15 },
+      "claude-haiku-4-5": { input: 1, output: 5 }
+    };
+  }
+});
+
+// server/lib/llm/providers/azure-openai.ts
+async function callAzureOpenAI(request, endpoint, apiKey, deployment, apiVersion = "2024-08-01-preview") {
+  const messages = [];
+  if (request.systemPrompt) {
+    messages.push({ role: "system", content: request.systemPrompt });
+  }
+  for (const m of request.messages) {
+    messages.push({ role: m.role, content: m.content });
+  }
+  const body = {
+    messages,
+    max_tokens: request.maxTokens ?? 16e3
+  };
+  if (request.jsonSchema) {
+    body.response_format = {
+      type: "json_schema",
+      json_schema: {
+        name: "response",
+        strict: true,
+        schema: request.jsonSchema
+      }
+    };
+  }
+  const url = `${endpoint.replace(/\/$/, "")}/openai/deployments/${deployment}/chat/completions?api-version=${apiVersion}`;
+  let resp;
+  try {
+    resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "api-key": apiKey
+      },
+      body: JSON.stringify(body)
+    });
+  } catch (e) {
+    throw new LlmProviderError(`Azure OpenAI network error: ${e?.message || String(e)}`, 0);
+  }
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => "");
+    throw new LlmProviderError(`Azure OpenAI ${resp.status}: ${errText.slice(0, 300)}`, resp.status);
+  }
+  const data = await resp.json();
+  const content = data.choices?.[0]?.message?.content || "";
+  let parsed;
+  if (request.jsonSchema) {
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+    }
+  }
+  const promptTokens = data.usage?.prompt_tokens || 0;
+  const completionTokens = data.usage?.completion_tokens || 0;
+  const estCostUsd = (promptTokens * PRICING_FALLBACK.input + completionTokens * PRICING_FALLBACK.output) / 1e6;
+  return {
+    content,
+    parsed,
+    usage: { promptTokens, completionTokens, estCostUsd },
+    provider: "azure_openai",
+    model: deployment
+  };
+}
+var PRICING_FALLBACK;
+var init_azure_openai = __esm({
+  "server/lib/llm/providers/azure-openai.ts"() {
+    "use strict";
+    init_types();
+    PRICING_FALLBACK = { input: 5, output: 15 };
+  }
+});
+
+// server/lib/llm/index.ts
+async function runLlm(request) {
+  const settings = await storage.getApiSettings(request.orgId);
+  const config = resolveProvider(request.feature, settings, request.forceProvider);
+  if (request.webSearch && config.provider !== "anthropic") {
+    throw new LlmCapabilityError(
+      `Feature "${request.feature}" requested webSearch=true but provider resolved to "${config.provider}". Web search requires Anthropic. Set forceProvider:"anthropic" or change ai_provider_${request.feature} to anthropic.`
+    );
+  }
+  if (config.provider === "anthropic") {
+    return callAnthropic(request, settings.claude_api_key, config.anthropicModel);
+  }
+  return callAzureOpenAI(
+    request,
+    settings.azure_openai_endpoint,
+    settings.azure_openai_api_key,
+    config.azureDeployment,
+    settings.azure_openai_api_version || "2024-08-01-preview"
+  );
+}
+var init_llm = __esm({
+  "server/lib/llm/index.ts"() {
+    "use strict";
+    init_storage();
+    init_types();
+    init_config();
+    init_anthropic();
+    init_azure_openai();
+    init_types();
+    init_config();
+  }
+});
+
+// server/lib/lead-agent-prompts.ts
+function resolveSearchParams(params = {}) {
+  return {
+    region: (params.region || "India").trim(),
+    daysBack: clampInt(params.daysBack, 7, 365, 30),
+    industry: (params.industry || "").trim(),
+    titles: (params.titles || []).map((t) => String(t).trim()).filter(Boolean).slice(0, 20),
+    maxResults: clampInt(params.maxResults, 1, 100, 25),
+    customPrompt: (params.customPrompt || "").trim(),
+    customWebSearch: params.customWebSearch !== false
+    // default true
+  };
+}
+function clampInt(v, min, max, def) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return def;
+  const i = Math.round(n);
+  if (i < min) return min;
+  if (i > max) return max;
+  return i;
+}
+function buildPromptForMode(mode, params) {
+  switch (mode) {
+    case "funded":
+      return buildFundedPrompt(params);
+    case "cxo_changes":
+      return buildCxoChangesPrompt(params);
+    case "academics":
+      return buildAcademicsPrompt(params);
+    case "custom":
+      return buildCustomPrompt(params);
+    default: {
+      const _exhaustive = mode;
+      throw new Error(`Unknown lead-agent mode: ${_exhaustive}`);
+    }
+  }
+}
+function buildFundedPrompt(p) {
+  const industryClause = p.industry ? ` in the ${p.industry} sector` : "";
+  return {
+    systemPrompt: `You are a B2B sales intelligence agent. You find founders and senior executives at companies that recently raised funding so a salesperson can reach out with relevant timing-based outreach. Each result is a PERSON (not a company), with their name, title, and the funding signal that triggered surfacing them. ${COMMON_RULES}`,
+    userMessage: `Find up to ${p.maxResults} founders and key executives (Founder, Co-Founder, CEO, CFO, COO, CTO, VP Engineering, Head of Sales/Marketing/Growth) at companies${industryClause} based in ${p.region} that announced a funding round in the last ${p.daysBack} days. Return ONE LEAD PER PERSON \u2014 if a company has 3 founders, return 3 separate leads. For each lead include: their full name, title, company name, company website (companyUrl), LinkedIn URL if findable, business email if publicly disclosed, the funding signal (round size + date + lead investor if known), a citation URL (TechCrunch, YourStory, Inc42, Crunchbase News, official press release, etc.), and a 1-sentence outreachHook tied to what they likely need post-funding (hiring, scaling, GTM, infra). Skip companies that only got "in talks" rumors \u2014 must be confirmed announcements. If you cannot find a public business email for a person, leave email empty (we'll enrich via Apollo afterwards).`,
+    needsWebSearch: true
+  };
+}
+function buildCxoChangesPrompt(p) {
+  const titlesClause = p.titles.length ? p.titles.join(", ") : "CEO, CFO, COO, CTO, CMO, CHRO, Chief Revenue Officer, VP Sales, VP Marketing, VP Engineering";
+  const industryClause = p.industry ? ` in the ${p.industry} industry` : "";
+  return {
+    systemPrompt: `You are a B2B sales intelligence agent. You surface executives who recently joined or moved to a new company so salespeople can engage them in their first 90 days when they are actively evaluating new vendors. ${COMMON_RULES}`,
+    userMessage: `Find up to ${p.maxResults} executives who recently took a new role (${titlesClause}) at companies${industryClause} based in ${p.region}, within the last ${p.daysBack} days. Sources: LinkedIn announcements, company press releases, BusinessLine / Economic Times / Mint / TechCrunch / Forbes appointment news. For each lead include: their name, new title, company, signal (what they did, when, and where they came from), citation URL, and a 1-sentence outreachHook tied to common 90-day priorities for that role.`,
+    needsWebSearch: true
+  };
+}
+function buildAcademicsPrompt(p) {
+  const fieldClause = p.industry ? ` Focus on faculty in ${p.industry}.` : ` Any department is fine \u2014 prefer business, engineering, computer science, and applied sciences.`;
+  return {
+    systemPrompt: `You are an academic outreach intelligence agent. You find professors, lecturers, deans, department heads, and program directors at universities and colleges whose contact details are PUBLICLY LISTED on the institution's own website (faculty pages, department directories, "people" pages). You DO NOT scrape, you DO NOT guess emails \u2014 you only return names + emails + phones that you can cite from a public university page. ${COMMON_RULES}`,
+    userMessage: `Find up to ${p.maxResults} academics at universities or colleges in ${p.region}.${fieldClause} For each lead, the email and (when listed) phone MUST come from a publicly visible university/college page \u2014 typically a faculty profile page (e.g. iitb.ac.in/staff/...), a department "Our Faculty" listing, or a public directory. For each lead include: their full name, current title (Professor, Associate Professor, Dean, etc.), department, university/college (in the company field), university website (companyUrl), email AS LISTED on the public page, phone AS LISTED on the public page (leave empty if not listed), location/city, and the citation URL (the exact university page where you read the email \u2014 not a Google Scholar page). Set the outreachHook to a 1-sentence reference to one of their visible interests, courses taught, or recent papers shown on their faculty page. Skip if no public email is shown \u2014 DO NOT GUESS firstname@uni.edu patterns.`,
+    needsWebSearch: true
+  };
+}
+function buildCustomPrompt(p) {
+  if (!p.customPrompt) {
+    throw new Error("customPrompt is required for mode=custom");
+  }
+  return {
+    systemPrompt: `You are a B2B sales intelligence agent. The user has supplied custom criteria. Follow them exactly. ${COMMON_RULES}`,
+    userMessage: `Find up to ${p.maxResults} leads matching these criteria. Region preference: ${p.region}.
+
+Criteria:
+${p.customPrompt}
+
+Return each as a structured lead with name, company, title, signal, citation URL, and outreachHook.`,
+    needsWebSearch: p.customWebSearch
+  };
+}
+var LEAD_RESULT_SCHEMA, COMMON_RULES;
+var init_lead_agent_prompts = __esm({
+  "server/lib/lead-agent-prompts.ts"() {
+    "use strict";
+    LEAD_RESULT_SCHEMA = {
+      type: "object",
+      required: ["leads"],
+      additionalProperties: false,
+      properties: {
+        summary: { type: "string" },
+        leads: {
+          type: "array",
+          items: {
+            type: "object",
+            required: ["name", "company"],
+            additionalProperties: false,
+            properties: {
+              /** Full name — split into firstName/lastName at save time. */
+              name: { type: "string" },
+              firstName: { type: "string" },
+              lastName: { type: "string" },
+              /** Job title — maps to contacts.jobTitle. */
+              title: { type: "string" },
+              /** Company / institution name — maps to contacts.company. */
+              company: { type: "string" },
+              /** Company website — maps to contacts.website. */
+              companyUrl: { type: "string" },
+              linkedinUrl: { type: "string" },
+              email: { type: "string" },
+              phone: { type: "string" },
+              mobilePhone: { type: "string" },
+              /** Free-form location — maps to contacts.city/state/country at save time. */
+              location: { type: "string" },
+              city: { type: "string" },
+              state: { type: "string" },
+              country: { type: "string" },
+              industry: { type: "string" },
+              department: { type: "string" },
+              seniority: { type: "string" },
+              /** What triggered surfacing this lead (e.g. "raised $5M Series A on 2026-04-12"). */
+              signal: { type: "string" },
+              /** Source URL the agent cited (web-search-backed). */
+              sourceUrl: { type: "string" },
+              /** Recommended first-touch angle. */
+              outreachHook: { type: "string" }
+            }
+          }
+        }
+      }
+    };
+    COMMON_RULES = `
+Return STRICTLY structured JSON matching the provided schema. Do not include any prose outside the JSON. Do not invent leads \u2014 only include people you can verify with a citation. If you cannot find any leads matching the criteria, return an empty leads array and say so in summary. Each lead MUST include a sourceUrl (URL of the article, press release, university page, LinkedIn post, etc. that supports the signal). Prefer leads with explicit business email or LinkedIn profile when possible \u2014 never fabricate emails.`.trim();
+  }
+});
+
+// server/lib/lead-agent-merge.ts
+var lead_agent_merge_exports = {};
+__export(lead_agent_merge_exports, {
+  applyApolloEnrichment: () => applyApolloEnrichment,
+  leadToContactInsert: () => leadToContactInsert,
+  leadsNeedingEnrichment: () => leadsNeedingEnrichment,
+  normalizeLeads: () => normalizeLeads
+});
+function normalizeLeads(raw) {
+  if (!raw || typeof raw !== "object") return [];
+  const arr = raw.leads;
+  if (!Array.isArray(arr)) return [];
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const item of arr) {
+    if (!item || typeof item !== "object") continue;
+    const name = strOrEmpty(item.name).trim();
+    const company = strOrEmpty(item.company).trim();
+    if (!name || !company) continue;
+    const dedupKey = `${name.toLowerCase()}__${company.toLowerCase()}`;
+    if (seen.has(dedupKey)) continue;
+    seen.add(dedupKey);
+    const email = emailOrUndef(item.email);
+    out.push({
+      name,
+      company,
+      firstName: strOrUndef(item.firstName),
+      lastName: strOrUndef(item.lastName),
+      title: strOrUndef(item.title),
+      companyUrl: strOrUndef(item.companyUrl),
+      linkedinUrl: strOrUndef(item.linkedinUrl),
+      email,
+      phone: strOrUndef(item.phone),
+      mobilePhone: strOrUndef(item.mobilePhone),
+      location: strOrUndef(item.location),
+      city: strOrUndef(item.city),
+      state: strOrUndef(item.state),
+      country: strOrUndef(item.country),
+      industry: strOrUndef(item.industry),
+      department: strOrUndef(item.department),
+      seniority: strOrUndef(item.seniority),
+      signal: strOrUndef(item.signal),
+      sourceUrl: strOrUndef(item.sourceUrl),
+      outreachHook: strOrUndef(item.outreachHook),
+      emailSource: email ? "agent" : void 0
+    });
+  }
+  return out;
+}
+function applyApolloEnrichment(lead, enrichment) {
+  const out = { ...lead };
+  if (!lead.email && enrichment.email) {
+    out.email = enrichment.email;
+    out.emailSource = "apollo";
+  }
+  if (!lead.title && enrichment.title) out.title = enrichment.title;
+  if (!lead.linkedinUrl && enrichment.linkedinUrl) out.linkedinUrl = enrichment.linkedinUrl;
+  if (!lead.location && enrichment.location) out.location = enrichment.location;
+  if (enrichment.apolloId) out.apolloId = enrichment.apolloId;
+  return out;
+}
+function leadsNeedingEnrichment(leads) {
+  return leads.filter((l) => !l.email && (l.name && l.company));
+}
+function leadToContactInsert(lead, agentMode) {
+  let firstName = lead.firstName?.trim() || "";
+  let lastName = lead.lastName?.trim() || "";
+  if (!firstName && !lastName && lead.name) {
+    const parts = lead.name.trim().split(/\s+/);
+    firstName = parts[0] || "";
+    lastName = parts.slice(1).join(" ") || "";
+  }
+  const customFields = {};
+  if (lead.signal) customFields.lead_agent_signal = lead.signal;
+  if (lead.outreachHook) customFields.lead_agent_hook = lead.outreachHook;
+  if (lead.sourceUrl) customFields.lead_agent_source = lead.sourceUrl;
+  if (lead.emailSource) customFields.lead_agent_email_source = lead.emailSource;
+  if (agentMode) customFields.lead_agent_mode = agentMode;
+  return {
+    firstName: firstName || "(unknown)",
+    lastName: lastName || "",
+    email: lead.email || null,
+    phone: lead.phone || null,
+    mobilePhone: lead.mobilePhone || null,
+    jobTitle: lead.title || null,
+    company: lead.company || null,
+    website: lead.companyUrl || null,
+    linkedinUrl: lead.linkedinUrl || null,
+    city: lead.city || null,
+    state: lead.state || null,
+    country: lead.country || null,
+    industry: lead.industry || null,
+    department: lead.department || null,
+    seniority: lead.seniority || null,
+    source: "lead_agent",
+    customFields
+  };
+}
+function strOrEmpty(v) {
+  if (v == null) return "";
+  if (typeof v === "string") return v;
+  return String(v);
+}
+function strOrUndef(v) {
+  const s = strOrEmpty(v).trim();
+  return s ? s : void 0;
+}
+function emailOrUndef(v) {
+  const s = strOrEmpty(v).trim().toLowerCase();
+  if (!s) return void 0;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s)) return void 0;
+  return s;
+}
+var init_lead_agent_merge = __esm({
+  "server/lib/lead-agent-merge.ts"() {
+    "use strict";
+  }
+});
+
 // server/services/apollo-sync-engine.ts
 var apollo_sync_engine_exports = {};
 __export(apollo_sync_engine_exports, {
@@ -12548,6 +13057,155 @@ var init_apollo_sync_engine = __esm({
     HOURLY_COOLDOWN_MS = 65 * 60 * 1e3;
     DAILY_SEARCH_CAP = 550;
     resumerStarted = false;
+  }
+});
+
+// server/services/lead-agent.ts
+var lead_agent_exports = {};
+__export(lead_agent_exports, {
+  runOneSearch: () => runOneSearch
+});
+async function runOneSearch(opts) {
+  const params = resolveSearchParams(opts.params);
+  const { systemPrompt, userMessage, needsWebSearch } = buildPromptForMode(opts.mode, params);
+  const forceProvider = needsWebSearch ? "anthropic" : void 0;
+  const llmResp = await runLlm({
+    orgId: opts.orgId,
+    feature: "lead_agent",
+    forceProvider,
+    systemPrompt,
+    messages: [{ role: "user", content: userMessage }],
+    jsonSchema: LEAD_RESULT_SCHEMA,
+    webSearch: needsWebSearch,
+    thinking: true,
+    maxTokens: 16e3
+  });
+  let parsed = llmResp.parsed;
+  let parseFailed = false;
+  if (parsed === void 0) {
+    try {
+      parsed = JSON.parse(llmResp.content);
+    } catch {
+      parseFailed = true;
+    }
+  }
+  let leads = normalizeLeads(parsed);
+  const summary = parsed?.summary;
+  const apolloStats = { matchesAttempted: 0, matchesSucceeded: 0, creditsSpent: 0 };
+  if (opts.enrichWithApollo !== false) {
+    const cap = Math.max(0, Math.min(opts.maxApolloMatches ?? 10, 100));
+    const need = leadsNeedingEnrichment(leads);
+    if (cap > 0 && need.length > 0) {
+      const enriched = await enrichLeadsWithApollo(opts.orgId, need.slice(0, cap), apolloStats);
+      const enrichedByKey = /* @__PURE__ */ new Map();
+      for (const e of enriched) enrichedByKey.set(`${e.name}__${e.company}`.toLowerCase(), e);
+      leads = leads.map((l) => {
+        const key = `${l.name}__${l.company}`.toLowerCase();
+        return enrichedByKey.get(key) || l;
+      });
+    }
+  }
+  return {
+    mode: opts.mode,
+    llmUsage: {
+      provider: llmResp.provider,
+      model: llmResp.model,
+      promptTokens: llmResp.usage.promptTokens,
+      completionTokens: llmResp.usage.completionTokens,
+      estCostUsd: llmResp.usage.estCostUsd
+    },
+    apollo: apolloStats,
+    summary: typeof summary === "string" ? summary : void 0,
+    leads,
+    parseFailed,
+    rawResponse: parseFailed ? llmResp.content.slice(0, 4e3) : void 0
+  };
+}
+async function enrichLeadsWithApollo(orgId, leads, stats) {
+  let apolloRequest2, getApolloApiKey2;
+  try {
+    const mod = await Promise.resolve().then(() => (init_apollo_sync_engine(), apollo_sync_engine_exports));
+    apolloRequest2 = mod.apolloRequest;
+    getApolloApiKey2 = mod.getApolloApiKey;
+  } catch (e) {
+    console.warn("[LeadAgent] Apollo module not available, skipping enrichment:", e?.message || e);
+    return leads;
+  }
+  let apiKey;
+  try {
+    apiKey = await getApolloApiKey2(orgId);
+  } catch {
+  }
+  if (!apiKey) {
+    console.log(`[LeadAgent] No Apollo API key configured for org ${orgId} \u2014 skipping enrichment`);
+    return leads;
+  }
+  const out = [];
+  for (const lead of leads) {
+    stats.matchesAttempted++;
+    try {
+      const matchBody = {
+        name: lead.name,
+        organization_name: lead.company,
+        reveal_personal_emails: false,
+        reveal_phone_number: false
+      };
+      if (lead.companyUrl) {
+        try {
+          const u = new URL(lead.companyUrl);
+          matchBody.domain = u.hostname.replace(/^www\./, "");
+        } catch {
+        }
+      }
+      const res = await apolloRequest2(apiKey, "/v1/people/match", "POST", matchBody);
+      const person = res?.person || res;
+      if (!person) {
+        out.push(lead);
+        continue;
+      }
+      stats.creditsSpent++;
+      const apolloEmail = pickEmail(person);
+      const enrichment = {
+        email: apolloEmail,
+        apolloId: String(person.id || ""),
+        title: person.title || void 0,
+        linkedinUrl: person.linkedin_url || void 0,
+        location: composeLocation(person)
+      };
+      if (apolloEmail) stats.matchesSucceeded++;
+      out.push(applyApolloEnrichment(lead, enrichment));
+    } catch (e) {
+      console.warn(`[LeadAgent] Apollo match failed for ${lead.name} @ ${lead.company}:`, e?.message || e);
+      out.push(lead);
+    }
+  }
+  return out;
+}
+function pickEmail(person) {
+  if (!person) return void 0;
+  const candidates = [];
+  if (person.email) candidates.push(person.email);
+  if (Array.isArray(person.contact_emails)) candidates.push(...person.contact_emails.map((c) => c?.email));
+  if (Array.isArray(person.personal_emails)) candidates.push(...person.personal_emails);
+  for (const c of candidates) {
+    if (typeof c === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(c) && !/email_not_unlocked/i.test(c)) {
+      return c.toLowerCase();
+    }
+  }
+  return void 0;
+}
+function composeLocation(person) {
+  if (!person) return void 0;
+  const parts = [person.city, person.state, person.country].filter(Boolean);
+  return parts.length ? parts.join(", ") : void 0;
+}
+var init_lead_agent = __esm({
+  "server/services/lead-agent.ts"() {
+    "use strict";
+    init_llm();
+    init_lead_agent_prompts();
+    init_lead_agent_merge();
+    init_storage();
   }
 });
 
@@ -32173,6 +32831,201 @@ ${customInstructions || ""}` : `Generate a proposal for ${ctx.contact?.contact?.
       res.json(opp);
     } catch (error) {
       res.status(500).json({ message: "Failed to fetch opportunity" });
+    }
+  });
+  const LEAD_AGENT_JOB_TTL_MS = 30 * 60 * 1e3;
+  const leadAgentJobKey = (jobId) => `lead_agent_job_${jobId}`;
+  const findActiveLeadAgentJob = async (orgId, excludeJobId) => {
+    const allSettings = await storage.getApiSettings(orgId);
+    const now3 = Date.now();
+    for (const [key, val] of Object.entries(allSettings || {})) {
+      if (!key.startsWith("lead_agent_job_")) continue;
+      try {
+        const j = JSON.parse(val);
+        if (excludeJobId && j.id === excludeJobId) continue;
+        if (j.status !== "running") continue;
+        const lastSignal = j.heartbeatAt || j.startedAt;
+        if (lastSignal && now3 - new Date(lastSignal).getTime() < LEAD_AGENT_JOB_TTL_MS) return j;
+      } catch {
+      }
+    }
+    return null;
+  };
+  const runLeadAgentJob = async (jobId, orgId, job) => {
+    const { runOneSearch: runOneSearch2 } = await Promise.resolve().then(() => (init_lead_agent(), lead_agent_exports));
+    const result = await runOneSearch2({
+      orgId,
+      mode: job.mode,
+      params: job.params || {},
+      enrichWithApollo: job.enrichWithApollo,
+      maxApolloMatches: job.maxApolloMatches
+    });
+    const settings = await storage.getApiSettings(orgId);
+    const raw = settings?.[leadAgentJobKey(jobId)];
+    if (raw) {
+      const j = JSON.parse(raw);
+      j.status = j.cancelRequested ? "cancelled" : "completed";
+      j.result = result;
+      j.finishedAt = (/* @__PURE__ */ new Date()).toISOString();
+      j.heartbeatAt = j.finishedAt;
+      await storage.setApiSetting(orgId, leadAgentJobKey(jobId), JSON.stringify(j));
+    }
+  };
+  app2.post("/api/lead-agent/search", requireAuth, async (req, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const mode = String(req.body?.mode || "");
+      if (!["funded", "cxo_changes", "academics", "custom"].includes(mode)) {
+        return res.status(400).json({ message: "mode must be one of: funded, cxo_changes, academics, custom" });
+      }
+      if (mode === "custom" && !String(req.body?.params?.customPrompt || "").trim()) {
+        return res.status(400).json({ message: "params.customPrompt is required for mode=custom" });
+      }
+      const existing = await findActiveLeadAgentJob(orgId);
+      if (existing) {
+        return res.status(409).json({ message: "A lead-agent job is already running for your org. Wait for it to complete or cancel it.", activeJob: existing });
+      }
+      const jobId = `${orgId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const startedAt = (/* @__PURE__ */ new Date()).toISOString();
+      const job = {
+        id: jobId,
+        organizationId: orgId,
+        userId: req.user.id,
+        mode,
+        status: "running",
+        startedAt,
+        finishedAt: null,
+        heartbeatAt: startedAt,
+        params: req.body?.params || {},
+        enrichWithApollo: req.body?.enrichWithApollo !== false,
+        maxApolloMatches: Number(req.body?.maxApolloMatches) || 10,
+        result: null,
+        error: null,
+        cancelRequested: false
+      };
+      await storage.setApiSetting(orgId, leadAgentJobKey(jobId), JSON.stringify(job));
+      const concurrent = await findActiveLeadAgentJob(orgId, jobId);
+      if (concurrent) {
+        const earlierTime = new Date(concurrent.startedAt).getTime();
+        const myTime = new Date(startedAt).getTime();
+        const concurrentWins = earlierTime < myTime || earlierTime === myTime && String(concurrent.id) < String(jobId);
+        if (concurrentWins) {
+          const yielded = { ...job, status: "cancelled", cancelRequested: true, finishedAt: (/* @__PURE__ */ new Date()).toISOString() };
+          await storage.setApiSetting(orgId, leadAgentJobKey(jobId), JSON.stringify(yielded));
+          return res.status(409).json({ message: "A concurrent job won the race", activeJob: concurrent });
+        }
+      }
+      setImmediate(async () => {
+        try {
+          await runLeadAgentJob(jobId, orgId, job);
+        } catch (err) {
+          console.error(`[LeadAgent] runner crashed for job ${jobId}:`, err?.message || err);
+          try {
+            const settings = await storage.getApiSettings(orgId);
+            const raw = settings?.[leadAgentJobKey(jobId)];
+            if (raw) {
+              const j = JSON.parse(raw);
+              if (j.status === "running") {
+                j.status = "failed";
+                j.error = err?.message || String(err);
+                j.finishedAt = (/* @__PURE__ */ new Date()).toISOString();
+                j.heartbeatAt = j.finishedAt;
+                await storage.setApiSetting(orgId, leadAgentJobKey(jobId), JSON.stringify(j));
+              }
+            }
+          } catch {
+          }
+        }
+      });
+      res.json({ jobId, mode });
+    } catch (error) {
+      console.error("[LeadAgent] /search error:", error?.message || error);
+      res.status(500).json({ message: "Failed to start lead-agent search", error: error?.message || String(error) });
+    }
+  });
+  app2.get("/api/lead-agent/jobs/:jobId", requireAuth, async (req, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const settings = await storage.getApiSettings(orgId);
+      const raw = settings?.[leadAgentJobKey(req.params.jobId)];
+      if (!raw) return res.status(404).json({ message: "Job not found" });
+      const job = JSON.parse(raw);
+      if (job.organizationId !== orgId) return res.status(403).json({ message: "Forbidden" });
+      const lastSignal = job.heartbeatAt || job.startedAt;
+      if (job.status === "running" && lastSignal && Date.now() - new Date(lastSignal).getTime() > LEAD_AGENT_JOB_TTL_MS) {
+        job.status = "failed";
+        job.error = "Job exceeded TTL \u2014 likely the server restarted mid-run.";
+        job.finishedAt = (/* @__PURE__ */ new Date()).toISOString();
+        await storage.setApiSetting(orgId, leadAgentJobKey(job.id), JSON.stringify(job));
+      }
+      res.json(job);
+    } catch (error) {
+      console.error("[LeadAgent] Job status error:", error?.message || error);
+      res.status(500).json({ message: "Failed to read job status" });
+    }
+  });
+  app2.post("/api/lead-agent/jobs/:jobId/cancel", requireAuth, async (req, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const settings = await storage.getApiSettings(orgId);
+      const raw = settings?.[leadAgentJobKey(req.params.jobId)];
+      if (!raw) return res.status(404).json({ message: "Job not found" });
+      const job = JSON.parse(raw);
+      if (job.organizationId !== orgId) return res.status(403).json({ message: "Forbidden" });
+      if (job.status !== "running") return res.json({ ok: true, status: job.status });
+      job.cancelRequested = true;
+      await storage.setApiSetting(orgId, leadAgentJobKey(req.params.jobId), JSON.stringify(job));
+      res.json({ ok: true, status: "cancelling" });
+    } catch (error) {
+      console.error("[LeadAgent] Job cancel error:", error?.message || error);
+      res.status(500).json({ message: "Failed to cancel job" });
+    }
+  });
+  app2.post("/api/lead-agent/save", requireAuth, async (req, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const leads = Array.isArray(req.body?.leads) ? req.body.leads : null;
+      if (!leads || leads.length === 0) {
+        return res.status(400).json({ message: "leads array is required and must be non-empty" });
+      }
+      const listId = typeof req.body?.listId === "string" ? req.body.listId : null;
+      const agentMode = typeof req.body?.agentMode === "string" ? req.body.agentMode : void 0;
+      const { leadToContactInsert: leadToContactInsert2 } = await Promise.resolve().then(() => (init_lead_agent_merge(), lead_agent_merge_exports));
+      const existingRows = await storage.rawAll(
+        `SELECT LOWER(email) AS "lcEmail" FROM contacts WHERE "organizationId" = ? AND email IS NOT NULL AND email <> ''`,
+        orgId
+      );
+      const existingEmails = new Set(existingRows.map((r) => r.lcEmail));
+      let inserted = 0, skipped = 0, duplicate = 0;
+      for (const rawLead of leads) {
+        try {
+          const insert = leadToContactInsert2(rawLead, agentMode);
+          if (insert.firstName === "(unknown)" && !insert.email) {
+            skipped++;
+            continue;
+          }
+          if (insert.email && existingEmails.has(insert.email.toLowerCase())) {
+            duplicate++;
+            continue;
+          }
+          await storage.createContact({
+            organizationId: orgId,
+            ...insert,
+            listId: listId || null,
+            assignedTo: req.user.id,
+            status: "new"
+          });
+          if (insert.email) existingEmails.add(insert.email.toLowerCase());
+          inserted++;
+        } catch (e) {
+          console.warn("[LeadAgent] save: skipped one lead due to insert error:", e?.message || e);
+          skipped++;
+        }
+      }
+      res.json({ inserted, duplicate, skipped, total: leads.length });
+    } catch (error) {
+      console.error("[LeadAgent] /save error:", error?.message || error);
+      res.status(500).json({ message: "Failed to save leads", error: error?.message || String(error) });
     }
   });
   const isOrgAdmin = (u) => u?.role === "owner" || u?.role === "admin";

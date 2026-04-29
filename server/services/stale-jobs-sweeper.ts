@@ -38,6 +38,7 @@ interface JobTypeConfig {
 const JOB_TYPES: JobTypeConfig[] = [
   { keyPrefix: 'lead_intel_job_', ttlMs: 60 * 60 * 1000, label: 'lead-intel' },
   { keyPrefix: 'bulk_analyze_job_', ttlMs: 60 * 60 * 1000, label: 'bulk-template-analyze' },
+  { keyPrefix: 'lead_agent_job_', ttlMs: 30 * 60 * 1000, label: 'lead-agent' },
 ];
 
 let isProcessing = false;

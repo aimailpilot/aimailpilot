@@ -15149,6 +15149,250 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   });
 
   // ============================================================
+  // AI Lead Agent — Phase 2
+  // 4 search modes: funded, cxo_changes, academics, custom
+  // Mirrors the lead_intel_job pattern: api_settings row keyed lead_agent_job_<id>
+  // POST  /api/lead-agent/search           → start background job, returns jobId
+  // GET   /api/lead-agent/jobs/:jobId      → status + result
+  // POST  /api/lead-agent/jobs/:jobId/cancel → request cancellation
+  // POST  /api/lead-agent/save             → save selected leads as contacts
+  // ============================================================
+
+  const LEAD_AGENT_JOB_TTL_MS = 30 * 60 * 1000; // 30 min — web-search calls take a while
+  const leadAgentJobKey = (jobId: string) => `lead_agent_job_${jobId}`;
+
+  type LeadAgentJobMode = 'funded' | 'cxo_changes' | 'academics' | 'custom';
+  interface LeadAgentJob {
+    id: string;
+    organizationId: string;
+    userId: string;
+    mode: LeadAgentJobMode;
+    status: 'running' | 'completed' | 'failed' | 'cancelled';
+    startedAt: string;
+    finishedAt: string | null;
+    heartbeatAt: string;
+    params: any;
+    enrichWithApollo: boolean;
+    maxApolloMatches: number;
+    result: any | null;
+    error: string | null;
+    cancelRequested: boolean;
+  }
+
+  const findActiveLeadAgentJob = async (orgId: string, excludeJobId?: string): Promise<LeadAgentJob | null> => {
+    const allSettings = await storage.getApiSettings(orgId);
+    const now = Date.now();
+    for (const [key, val] of Object.entries(allSettings || {})) {
+      if (!key.startsWith('lead_agent_job_')) continue;
+      try {
+        const j = JSON.parse(val as string) as LeadAgentJob;
+        if (excludeJobId && j.id === excludeJobId) continue;
+        if (j.status !== 'running') continue;
+        const lastSignal = j.heartbeatAt || j.startedAt;
+        if (lastSignal && (now - new Date(lastSignal).getTime()) < LEAD_AGENT_JOB_TTL_MS) return j;
+      } catch { /* ignore malformed */ }
+    }
+    return null;
+  };
+
+  const runLeadAgentJob = async (jobId: string, orgId: string, job: LeadAgentJob): Promise<void> => {
+    const { runOneSearch } = await import('./services/lead-agent.js');
+    const result = await runOneSearch({
+      orgId,
+      mode: job.mode,
+      params: job.params || {},
+      enrichWithApollo: job.enrichWithApollo,
+      maxApolloMatches: job.maxApolloMatches,
+    });
+    // Persist final state
+    const settings = await storage.getApiSettings(orgId);
+    const raw = settings?.[leadAgentJobKey(jobId)];
+    if (raw) {
+      const j = JSON.parse(raw) as LeadAgentJob;
+      j.status = j.cancelRequested ? 'cancelled' : 'completed';
+      j.result = result;
+      j.finishedAt = new Date().toISOString();
+      j.heartbeatAt = j.finishedAt;
+      await storage.setApiSetting(orgId, leadAgentJobKey(jobId), JSON.stringify(j));
+    }
+  };
+
+  // POST /api/lead-agent/search
+  app.post('/api/lead-agent/search', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const mode = String(req.body?.mode || '') as LeadAgentJobMode;
+      if (!['funded', 'cxo_changes', 'academics', 'custom'].includes(mode)) {
+        return res.status(400).json({ message: 'mode must be one of: funded, cxo_changes, academics, custom' });
+      }
+      if (mode === 'custom' && !String(req.body?.params?.customPrompt || '').trim()) {
+        return res.status(400).json({ message: 'params.customPrompt is required for mode=custom' });
+      }
+
+      const existing = await findActiveLeadAgentJob(orgId);
+      if (existing) {
+        return res.status(409).json({ message: 'A lead-agent job is already running for your org. Wait for it to complete or cancel it.', activeJob: existing });
+      }
+
+      const jobId = `${orgId}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const startedAt = new Date().toISOString();
+      const job: LeadAgentJob = {
+        id: jobId,
+        organizationId: orgId,
+        userId: req.user.id,
+        mode,
+        status: 'running',
+        startedAt,
+        finishedAt: null,
+        heartbeatAt: startedAt,
+        params: req.body?.params || {},
+        enrichWithApollo: req.body?.enrichWithApollo !== false,
+        maxApolloMatches: Number(req.body?.maxApolloMatches) || 10,
+        result: null,
+        error: null,
+        cancelRequested: false,
+      };
+      await storage.setApiSetting(orgId, leadAgentJobKey(jobId), JSON.stringify(job));
+
+      // TOCTOU guard — same pattern as lead-intel
+      const concurrent = await findActiveLeadAgentJob(orgId, jobId);
+      if (concurrent) {
+        const earlierTime = new Date(concurrent.startedAt).getTime();
+        const myTime = new Date(startedAt).getTime();
+        const concurrentWins = earlierTime < myTime || (earlierTime === myTime && String(concurrent.id) < String(jobId));
+        if (concurrentWins) {
+          const yielded: LeadAgentJob = { ...job, status: 'cancelled', cancelRequested: true, finishedAt: new Date().toISOString() };
+          await storage.setApiSetting(orgId, leadAgentJobKey(jobId), JSON.stringify(yielded));
+          return res.status(409).json({ message: 'A concurrent job won the race', activeJob: concurrent });
+        }
+      }
+
+      // Fire-and-forget runner
+      setImmediate(async () => {
+        try {
+          await runLeadAgentJob(jobId, orgId, job);
+        } catch (err: any) {
+          console.error(`[LeadAgent] runner crashed for job ${jobId}:`, err?.message || err);
+          try {
+            const settings = await storage.getApiSettings(orgId);
+            const raw = settings?.[leadAgentJobKey(jobId)];
+            if (raw) {
+              const j = JSON.parse(raw) as LeadAgentJob;
+              if (j.status === 'running') {
+                j.status = 'failed';
+                j.error = err?.message || String(err);
+                j.finishedAt = new Date().toISOString();
+                j.heartbeatAt = j.finishedAt;
+                await storage.setApiSetting(orgId, leadAgentJobKey(jobId), JSON.stringify(j));
+              }
+            }
+          } catch { /* best-effort */ }
+        }
+      });
+
+      res.json({ jobId, mode });
+    } catch (error: any) {
+      console.error('[LeadAgent] /search error:', error?.message || error);
+      res.status(500).json({ message: 'Failed to start lead-agent search', error: error?.message || String(error) });
+    }
+  });
+
+  // GET /api/lead-agent/jobs/:jobId
+  app.get('/api/lead-agent/jobs/:jobId', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const settings = await storage.getApiSettings(orgId);
+      const raw = settings?.[leadAgentJobKey(req.params.jobId)];
+      if (!raw) return res.status(404).json({ message: 'Job not found' });
+      const job = JSON.parse(raw) as LeadAgentJob;
+      if (job.organizationId !== orgId) return res.status(403).json({ message: 'Forbidden' });
+      // Stale-job detection
+      const lastSignal = job.heartbeatAt || job.startedAt;
+      if (job.status === 'running' && lastSignal && (Date.now() - new Date(lastSignal).getTime()) > LEAD_AGENT_JOB_TTL_MS) {
+        job.status = 'failed';
+        job.error = 'Job exceeded TTL — likely the server restarted mid-run.';
+        job.finishedAt = new Date().toISOString();
+        await storage.setApiSetting(orgId, leadAgentJobKey(job.id), JSON.stringify(job));
+      }
+      res.json(job);
+    } catch (error: any) {
+      console.error('[LeadAgent] Job status error:', error?.message || error);
+      res.status(500).json({ message: 'Failed to read job status' });
+    }
+  });
+
+  // POST /api/lead-agent/jobs/:jobId/cancel
+  app.post('/api/lead-agent/jobs/:jobId/cancel', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const settings = await storage.getApiSettings(orgId);
+      const raw = settings?.[leadAgentJobKey(req.params.jobId)];
+      if (!raw) return res.status(404).json({ message: 'Job not found' });
+      const job = JSON.parse(raw) as LeadAgentJob;
+      if (job.organizationId !== orgId) return res.status(403).json({ message: 'Forbidden' });
+      if (job.status !== 'running') return res.json({ ok: true, status: job.status });
+      job.cancelRequested = true;
+      await storage.setApiSetting(orgId, leadAgentJobKey(req.params.jobId), JSON.stringify(job));
+      res.json({ ok: true, status: 'cancelling' });
+    } catch (error: any) {
+      console.error('[LeadAgent] Job cancel error:', error?.message || error);
+      res.status(500).json({ message: 'Failed to cancel job' });
+    }
+  });
+
+  // POST /api/lead-agent/save  body: { leads: Lead[], listId?, agentMode? }
+  // Inserts each lead as a contact. Returns counts of inserted/skipped/duplicate.
+  app.post('/api/lead-agent/save', requireAuth, async (req: any, res) => {
+    try {
+      const orgId = req.user.organizationId;
+      const leads = Array.isArray(req.body?.leads) ? req.body.leads : null;
+      if (!leads || leads.length === 0) {
+        return res.status(400).json({ message: 'leads array is required and must be non-empty' });
+      }
+      const listId = typeof req.body?.listId === 'string' ? req.body.listId : null;
+      const agentMode = typeof req.body?.agentMode === 'string' ? req.body.agentMode : undefined;
+
+      const { leadToContactInsert } = await import('./lib/lead-agent-merge.js');
+
+      // Pre-load existing emails in this org so we don't duplicate
+      const existingRows = await storage.rawAll(
+        `SELECT LOWER(email) AS "lcEmail" FROM contacts WHERE "organizationId" = ? AND email IS NOT NULL AND email <> ''`,
+        orgId,
+      ) as any[];
+      const existingEmails = new Set(existingRows.map((r: any) => r.lcEmail));
+
+      let inserted = 0, skipped = 0, duplicate = 0;
+      for (const rawLead of leads) {
+        try {
+          const insert = leadToContactInsert(rawLead, agentMode);
+          // Skip leads with no name + no email — not enough to dedupe or use
+          if (insert.firstName === '(unknown)' && !insert.email) { skipped++; continue; }
+          if (insert.email && existingEmails.has(insert.email.toLowerCase())) {
+            duplicate++; continue;
+          }
+          await storage.createContact({
+            organizationId: orgId,
+            ...insert,
+            listId: listId || null,
+            assignedTo: req.user.id,
+            status: 'new',
+          });
+          if (insert.email) existingEmails.add(insert.email.toLowerCase());
+          inserted++;
+        } catch (e: any) {
+          console.warn('[LeadAgent] save: skipped one lead due to insert error:', e?.message || e);
+          skipped++;
+        }
+      }
+
+      res.json({ inserted, duplicate, skipped, total: leads.length });
+    } catch (error: any) {
+      console.error('[LeadAgent] /save error:', error?.message || error);
+      res.status(500).json({ message: 'Failed to save leads', error: error?.message || String(error) });
+    }
+  });
+
+  // ============================================================
   // Apollo.io integration — per-org API key, saved-data sync, no credit spend in Phase 1
   // ============================================================
 
