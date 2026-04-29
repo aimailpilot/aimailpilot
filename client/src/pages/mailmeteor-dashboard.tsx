@@ -1126,10 +1126,16 @@ export default function MailMeteorDashboard() {
                               // until user resumes.
                               const isPaused = campaign.status === 'paused';
                               const isAutoPaused = isPaused && (campaign as any).autoPaused === true;
+                              const pauseReason = (campaign as any).pauseReason as string | undefined;
                               const labelText = campaign.status === 'following_up'
                                 ? 'Active'
                                 : campaign.status.charAt(0).toUpperCase() + campaign.status.slice(1);
-                              const fullLabel = isAutoPaused ? `${labelText} (auto)` : labelText;
+                              const autoSuffix = !isAutoPaused
+                                ? ''
+                                : pauseReason === 'bounce_surge' || pauseReason === 'bounce_surge_inferred'
+                                  ? ' (bounce surge)'
+                                  : ' (auto)';
+                              const fullLabel = `${labelText}${autoSuffix}`;
                               const colorClass = campaign.status === 'active' || campaign.status === 'following_up' ? 'bg-green-50 text-green-700 border border-green-200' :
                                 isAutoPaused ? 'bg-orange-50 text-orange-700 border border-orange-200' :
                                 campaign.status === 'paused' ? 'bg-yellow-50 text-yellow-700 border border-yellow-200' :
@@ -1151,14 +1157,22 @@ export default function MailMeteorDashboard() {
                                 </span>
                               );
                               if (isPaused) {
+                                const reason = (campaign as any).pauseReason as string | undefined;
+                                const detail = (campaign as any).pauseReasonDetail as string | undefined;
+                                let tooltipText: string;
+                                if (!isAutoPaused) {
+                                  tooltipText = 'Manually paused. Click Resume on the campaign detail page to continue sending.';
+                                } else if (reason === 'bounce_surge') {
+                                  tooltipText = `Auto-paused: bounce surge. ${detail || 'High bounce rate detected.'} Click Resume after fixing the underlying issue.`;
+                                } else if (reason === 'bounce_surge_inferred') {
+                                  tooltipText = `Auto-paused (likely bounce surge). ${detail || ''}`;
+                                } else {
+                                  tooltipText = detail || 'Auto-paused by the system. Will resume automatically when the condition clears (daily limit reset, sending window opens, etc.).';
+                                }
                                 return (
                                   <Tooltip>
                                     <TooltipTrigger asChild>{badge}</TooltipTrigger>
-                                    <TooltipContent className="max-w-xs">
-                                      {isAutoPaused
-                                        ? 'Paused automatically by the system — likely bounce surge (≥20% bounces in last 50 sends), daily send limit reached, or sending window closed. Will auto-resume when the condition clears.'
-                                        : 'Manually paused. Click Resume on the campaign detail page to continue sending.'}
-                                    </TooltipContent>
+                                    <TooltipContent className="max-w-xs">{tooltipText}</TooltipContent>
                                   </Tooltip>
                                 );
                               }

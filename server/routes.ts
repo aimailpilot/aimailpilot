@@ -3458,6 +3458,55 @@ Which account should I use and why? If I need to split across accounts, provide 
         }
       } catch (e) { /* enrichment failure is non-fatal */ }
 
+      // Enrich auto-paused campaigns with the specific reason (bounce_surge,
+      // daily_limit, window_closed, or unknown). For bounce_surge we have an
+      // explicit tracking_event with rich metadata; for the others we infer
+      // from campaign + account state because the engine doesn't currently
+      // record them as events. Single batched SQL query keeps this cheap even
+      // when many campaigns are auto-paused.
+      try {
+        const autoPausedIds = (campaigns as any[])
+          .filter(c => c.status === 'paused' && c.autoPaused === true)
+          .map(c => c.id);
+        if (autoPausedIds.length > 0) {
+          const placeholders = autoPausedIds.map(() => '?').join(',');
+          const surgeRows = await storage.rawAll(
+            `SELECT DISTINCT ON ("campaignId") "campaignId", "createdAt", metadata
+               FROM tracking_events
+               WHERE type = 'bounce_surge' AND "campaignId" IN (${placeholders})
+               ORDER BY "campaignId", "createdAt" DESC`,
+            ...autoPausedIds
+          ) as any[];
+          const surgeByCampaign: Record<string, any> = {};
+          for (const r of surgeRows) {
+            let meta: any = r.metadata;
+            if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+            surgeByCampaign[r.campaignId] = { at: r.createdAt, meta };
+          }
+          for (const c of campaigns as any[]) {
+            if (c.status !== 'paused' || c.autoPaused !== true) continue;
+            const surge = surgeByCampaign[c.id];
+            if (surge) {
+              c.pauseReason = 'bounce_surge';
+              c.pauseReasonAt = surge.at;
+              c.pauseReasonDetail = surge.meta?.reason || 'Bounce surge detected';
+              continue;
+            }
+            // Infer when no explicit event was recorded.
+            const bounceRate = c.sentCount > 0 ? (c.bouncedCount || 0) / c.sentCount : 0;
+            if ((c.bouncedCount || 0) >= 5 && bounceRate >= 0.15) {
+              c.pauseReason = 'bounce_surge_inferred';
+              c.pauseReasonDetail = `${c.bouncedCount} bounces in ${c.sentCount} sends (${Math.round(bounceRate * 100)}%) — likely bounce surge`;
+            } else {
+              c.pauseReason = 'unknown';
+              c.pauseReasonDetail = 'Auto-paused by system — possibly daily limit reached, sending window closed, or worker restart. Will resume automatically.';
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[campaigns] pause-reason enrichment failed:', (e as Error).message);
+      }
+
       res.json(campaigns);
     } catch (error) {
       res.status(500).json({ message: 'Failed to fetch campaigns' });
