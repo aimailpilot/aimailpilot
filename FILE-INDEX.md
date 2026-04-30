@@ -36,6 +36,16 @@
 | `server/services/auth-health.ts` | OAuth reauth flagging — records `invalid_grant` / AADSTS failures, flips `authStatus='reauth_required'` at 3 consecutive failures. Fail-open (never throws). Wired into gmail-reply-tracker, outlook-reply-tracker, warmup-engine |
 | `server/services/spreadsheet-importer.ts` | Excel/CSV/Google Sheets parsing for contact import |
 | `server/google-sheets-service.ts` | Google Sheets API — read rows for contact import |
+| `server/services/lead-agent.ts` | AI Lead Agent service — `runOneSearch()` wraps the LLM abstraction with mode-specific prompts (funded/cxo/academics/custom) + Apollo `/v1/people/match` enrichment for missing emails. Currently parked pending Anthropic credits — see status.md. |
+| `server/lib/llm/index.ts` | `runLlm()` public entry point — provider-neutral. Loads settings with org → superadmin org → env-var fallback. |
+| `server/lib/llm/config.ts` | Pure `resolveProvider(feature, settings, forceProvider?)` — chooses Anthropic vs Azure OpenAI per feature. Tested in `tests/unit/llm-config.test.ts` (27 tests). |
+| `server/lib/llm/types.ts` | `LlmRequest`/`LlmResponse` types, `LlmConfigError`/`LlmCapabilityError`/`LlmProviderError` classes. `abortSignal` field plumbed through to providers. |
+| `server/lib/llm/retry.ts` | Pure `classifyAnthropicError()` — decides retry-same vs retry-without-schema vs fatal. Recognizes `AbortError`, `Grammar compilation`, `overloaded_error`, `rate_limit_error`. Tested in `tests/unit/llm-retry.test.ts` (21 tests). |
+| `server/lib/llm/providers/anthropic.ts` | Anthropic SDK wrapper — adaptive thinking, web_search_20260209 tool, JSON-schema enforcement, retry+schema-strip fallback, 6-min hard timeout, AbortSignal support, streams when webSearch=true OR maxTokens>16K. |
+| `server/lib/llm/providers/azure-openai.ts` | Azure OpenAI raw-fetch wrapper — `response_format.json_schema` for structured output. No web search capability. |
+| `server/lib/lead-agent-prompts.ts` | Pure mode prompt builders + `LEAD_RESULT_SCHEMA` (mirrors contacts table fields). Tested in `tests/unit/lead-agent-prompts.test.ts` (20 tests). |
+| `server/lib/lead-agent-merge.ts` | Pure `normalizeLeads()` / `applyApolloEnrichment()` / `leadToContactInsert()`. Tested in `tests/unit/lead-agent-merge.test.ts` (29 tests). |
+| `server/lib/autopilot-defaults.ts` | Pure `resolveAutopilotConfig()` — applies safe Mon-Fri 09:00-18:00 default if caller passes null/disabled/empty config. Used in `/api/campaigns/:id/send` and `/schedule`. Tested in `tests/unit/autopilot-defaults.test.ts` (10 tests). |
 
 ## Client Pages
 
@@ -51,6 +61,7 @@
 | `client/src/pages/unified-inbox.tsx` | Inbox — filters, warmup tab, reply/bounce views, sync |
 | `client/src/pages/template-manager.tsx` | Templates — rich text editor, deliverability, AI, preview |
 | `client/src/pages/email-account-setup.tsx` | Email account connection — OAuth + SMTP config |
+| `client/src/pages/lead-agent.tsx` | AI Lead Agent UI — mode tabs (funded/cxo/academics/custom), search form, background-job polling every 4s, results table with select-all, save-to-list dialog. Parked pending Anthropic credits — see status.md. |
 | `client/src/pages/warmup-monitoring.tsx` | Warmup dashboard — accounts, logs, reputation, Run Now |
 | `client/src/pages/lead-opportunities.tsx` | AI Leads — scan, classify, bucket filter, account filter |
 | `client/src/pages/knowledge-base.tsx` | Knowledge Base — org documents, AI summaries |
@@ -92,6 +103,8 @@
 | **Pipeline / activity log** | `server/routes.ts` (~lines 4838-4930) | `contacts-manager.tsx` |
 | **Templates** | `server/routes.ts` (`/api/templates`), `personalization-engine.ts` | `template-manager.tsx` |
 | **AI Lead Intelligence** | `server/services/lead-intelligence-engine.ts` | `lead-opportunities.tsx` |
+| **AI Lead Agent** (parked) | `server/services/lead-agent.ts`, `server/lib/lead-agent-prompts.ts`, `server/lib/lead-agent-merge.ts`, `server/lib/llm/*`, routes `/api/lead-agent/*` in `routes.ts` (search/jobs/cancel/save) | `lead-agent.tsx` |
+| **LLM Provider Abstraction** | `server/lib/llm/` — config, types, retry, providers/anthropic, providers/azure-openai. Used by lead-agent. | `advanced-settings.tsx` (Anthropic key card + AI Provider Routing matrix) |
 | **Contact enrichment** | `server/routes.ts` (`hot-leads`), `pg-storage.ts` | `contacts-manager.tsx` (AI Leads tab) |
 | **Knowledge Base / AI drafts** | `server/services/context-engine.ts` | `knowledge-base.tsx` |
 | **Email verification** | `server/services/email-verifier.ts` | `contacts-manager.tsx` |
@@ -134,6 +147,8 @@
 |--------|-------------|
 | `scripts/diag-active-campaigns.ts` | Lists all active campaigns with ✅ SENDING / ⚠️ SLOW / ❌ STRANDED flags based on last 10/60 min activity |
 | `scripts/diag-followup.ts` | Inspects follow-up executions for a campaign by name — step/status breakdown, pending overdue, sample rows |
+| `scripts/diag-lead-agent-jobs.ts` | Lists all `lead_agent_job_*` rows from `api_settings` with status/heartbeat/error one-liners. Used to diagnose stuck Lead Agent jobs (timeouts, credit failures, abort state). |
+| `scripts/emergency-pause-out-of-window.ts` | DRY_RUN/FORCE script that pauses active campaigns currently sending outside their configured autopilot window. Used 2026-04-30 to halt 3 campaigns sending at 23:57 IST. |
 | `scripts/unstick-stranded-campaigns.ts` | One-time script: marks stranded campaigns `autoPaused=true` so boot recovery adopts them. `--apply` flag required to write. |
 | `scripts/fix-bellaward-bounced.ts` | Restores bounced contacts whose email matches any email_account row (removes false-positive bounces) |
 
