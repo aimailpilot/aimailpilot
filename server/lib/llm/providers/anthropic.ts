@@ -76,12 +76,37 @@ export async function callAnthropic(
     return p;
   };
 
+  // Stream when web search is enabled OR max_tokens >= 16K — both classes of
+  // requests can run long enough to hit the SDK's HTTP timeout otherwise.
+  // Web search in particular: Claude may make several searches sequentially
+  // (each adds 5-30s) and the connection sits idle while it does so.
+  const useStreaming = !!request.webSearch || maxTokens > 16000;
+
+  // Hard ceiling on a single call (one attempt). 4 minutes is generous for
+  // a complex web-search call (typical: 30-90s) and prevents a single hung
+  // socket from holding the request thread for 10+ minutes.
+  const HARD_TIMEOUT_MS = 4 * 60 * 1000;
+
   const callOnce = async (params: any): Promise<any> => {
-    if (maxTokens > 16000) {
-      const stream = client.messages.stream(params);
-      return stream.finalMessage();
+    let timeout: any;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => {
+        const err: any = new Error(`Anthropic call exceeded ${HARD_TIMEOUT_MS / 1000}s timeout`);
+        err.status = 504;
+        reject(err);
+      }, HARD_TIMEOUT_MS);
+    });
+    const work = useStreaming
+      ? (async () => {
+          const stream = client.messages.stream(params);
+          return stream.finalMessage();
+        })()
+      : client.messages.create(params);
+    try {
+      return await Promise.race([work, timeoutPromise]);
+    } finally {
+      clearTimeout(timeout);
     }
-    return client.messages.create(params);
   };
 
   // Retry / fallback loop. classifyAnthropicError is the only place the policy

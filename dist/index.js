@@ -12104,12 +12104,26 @@ async function callAnthropic(request, apiKey, model) {
     if (includeSchema && Object.keys(outputConfig).length > 0) p.output_config = outputConfig;
     return p;
   };
+  const useStreaming = !!request.webSearch || maxTokens > 16e3;
+  const HARD_TIMEOUT_MS = 4 * 60 * 1e3;
   const callOnce = async (params) => {
-    if (maxTokens > 16e3) {
+    let timeout;
+    const timeoutPromise = new Promise((_, reject) => {
+      timeout = setTimeout(() => {
+        const err = new Error(`Anthropic call exceeded ${HARD_TIMEOUT_MS / 1e3}s timeout`);
+        err.status = 504;
+        reject(err);
+      }, HARD_TIMEOUT_MS);
+    });
+    const work = useStreaming ? (async () => {
       const stream = client.messages.stream(params);
       return stream.finalMessage();
+    })() : client.messages.create(params);
+    try {
+      return await Promise.race([work, timeoutPromise]);
+    } finally {
+      clearTimeout(timeout);
     }
-    return client.messages.create(params);
   };
   let response;
   let useSchema = !!request.jsonSchema;
@@ -32960,14 +32974,31 @@ ${customInstructions || ""}` : `Generate a proposal for ${ctx.contact?.contact?.
     return null;
   };
   const runLeadAgentJob = async (jobId, orgId, job) => {
-    const { runOneSearch: runOneSearch2 } = await Promise.resolve().then(() => (init_lead_agent(), lead_agent_exports));
-    const result = await runOneSearch2({
-      orgId,
-      mode: job.mode,
-      params: job.params || {},
-      enrichWithApollo: job.enrichWithApollo,
-      maxApolloMatches: job.maxApolloMatches
-    });
+    const heartbeat = setInterval(async () => {
+      try {
+        const settings2 = await storage.getApiSettings(orgId);
+        const raw2 = settings2?.[leadAgentJobKey(jobId)];
+        if (!raw2) return;
+        const j = JSON.parse(raw2);
+        if (j.status !== "running") return;
+        j.heartbeatAt = (/* @__PURE__ */ new Date()).toISOString();
+        await storage.setApiSetting(orgId, leadAgentJobKey(jobId), JSON.stringify(j));
+      } catch {
+      }
+    }, 2e4);
+    let result;
+    try {
+      const { runOneSearch: runOneSearch2 } = await Promise.resolve().then(() => (init_lead_agent(), lead_agent_exports));
+      result = await runOneSearch2({
+        orgId,
+        mode: job.mode,
+        params: job.params || {},
+        enrichWithApollo: job.enrichWithApollo,
+        maxApolloMatches: job.maxApolloMatches
+      });
+    } finally {
+      clearInterval(heartbeat);
+    }
     const settings = await storage.getApiSettings(orgId);
     const raw = settings?.[leadAgentJobKey(jobId)];
     if (raw) {

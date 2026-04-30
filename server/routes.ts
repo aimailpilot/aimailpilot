@@ -15196,14 +15196,37 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   };
 
   const runLeadAgentJob = async (jobId: string, orgId: string, job: LeadAgentJob): Promise<void> => {
-    const { runOneSearch } = await import('./services/lead-agent.js');
-    const result = await runOneSearch({
-      orgId,
-      mode: job.mode,
-      params: job.params || {},
-      enrichWithApollo: job.enrichWithApollo,
-      maxApolloMatches: job.maxApolloMatches,
-    });
+    // Heartbeat every 20s while the long Anthropic call is in flight. Lets the
+    // stale-jobs sweeper see "alive" so it doesn't age the row out, and lets
+    // the frontend show the user the job is still progressing rather than
+    // hung. setInterval, not setTimeout, so it fires regardless of how long
+    // the await blocks.
+    const heartbeat = setInterval(async () => {
+      try {
+        const settings = await storage.getApiSettings(orgId);
+        const raw = settings?.[leadAgentJobKey(jobId)];
+        if (!raw) return;
+        const j = JSON.parse(raw) as LeadAgentJob;
+        if (j.status !== 'running') return; // already finished elsewhere
+        j.heartbeatAt = new Date().toISOString();
+        await storage.setApiSetting(orgId, leadAgentJobKey(jobId), JSON.stringify(j));
+      } catch { /* heartbeat is best-effort */ }
+    }, 20_000);
+
+    let result: any;
+    try {
+      const { runOneSearch } = await import('./services/lead-agent.js');
+      result = await runOneSearch({
+        orgId,
+        mode: job.mode,
+        params: job.params || {},
+        enrichWithApollo: job.enrichWithApollo,
+        maxApolloMatches: job.maxApolloMatches,
+      });
+    } finally {
+      clearInterval(heartbeat);
+    }
+
     // Persist final state
     const settings = await storage.getApiSettings(orgId);
     const raw = settings?.[leadAgentJobKey(jobId)];
