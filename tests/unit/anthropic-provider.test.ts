@@ -17,8 +17,10 @@ const state = {
     | 'two_grammar_then_ok_no_schema'
     | 'two_then_ok'
     | 'hang_forever'
+    | 'wait_for_abort'
     | 'ok',
   sentParams: [] as any[],
+  sdkOpts: [] as any[],
   createCalls: 0,
   streamCalls: 0,
 };
@@ -26,6 +28,7 @@ const state = {
 const reset = () => {
   state.scenario = 'two_grammar_then_ok_no_schema';
   state.sentParams = [];
+  state.sdkOpts = [];
   state.createCalls = 0;
   state.streamCalls = 0;
 };
@@ -49,8 +52,9 @@ const overload503 = () => {
   return err;
 };
 
-async function dispatch(params: any): Promise<any> {
+async function dispatch(params: any, opts?: any): Promise<any> {
   state.sentParams.push(JSON.parse(JSON.stringify(params)));
+  state.sdkOpts.push(opts);
   switch (state.scenario) {
     case 'always_grammar': throw grammar503();
     case 'always_overload': throw overload503();
@@ -62,6 +66,22 @@ async function dispatch(params: any): Promise<any> {
       return fakeOk('{"summary":"ok","leads":[]}');
     case 'hang_forever':
       return new Promise(() => {}); // never resolves
+    case 'wait_for_abort':
+      // Reject with AbortError when the caller's signal fires.
+      return new Promise((_, reject) => {
+        const sig: AbortSignal | undefined = opts?.signal;
+        if (sig?.aborted) {
+          const err: any = new Error('aborted');
+          err.name = 'AbortError';
+          reject(err);
+          return;
+        }
+        sig?.addEventListener('abort', () => {
+          const err: any = new Error('aborted');
+          err.name = 'AbortError';
+          reject(err);
+        });
+      });
     case 'ok':
     default:
       return fakeOk('{}');
@@ -71,10 +91,10 @@ async function dispatch(params: any): Promise<any> {
 vi.mock('@anthropic-ai/sdk', () => ({
   default: class {
     messages = {
-      create: (params: any) => { state.createCalls++; return dispatch(params); },
-      stream: (params: any) => {
+      create: (params: any, opts?: any) => { state.createCalls++; return dispatch(params, opts); },
+      stream: (params: any, opts?: any) => {
         state.streamCalls++;
-        return { finalMessage: () => dispatch(params) };
+        return { finalMessage: () => dispatch(params, opts) };
       },
     };
   },
@@ -189,6 +209,50 @@ describe('Anthropic provider — streaming + timeout', () => {
 
     expect(state.createCalls).toBe(1);
     expect(state.streamCalls).toBe(0);
+  });
+
+  it('passes abort signal to SDK and surfaces AbortError as fatal (no retry)', async () => {
+    state.scenario = 'wait_for_abort';
+    const callAnthropic = await importProvider();
+    const LlmProviderError = await importErrorClass();
+
+    const controller = new AbortController();
+    const promise = callAnthropic(
+      { orgId: 'o', feature: 'lead_agent', messages: [{ role: 'user', content: 'x' }], abortSignal: controller.signal },
+      'k',
+      'claude-opus-4-7',
+    ).catch(e => e);
+
+    // Fire abort on the next tick — dispatch is already awaiting the signal
+    setTimeout(() => controller.abort(), 5);
+    const err = await promise;
+
+    // SDK was called with { signal: ... }
+    expect(state.sdkOpts[0]?.signal).toBeDefined();
+    // Only ONE call attempted — abort was classified as fatal
+    expect(state.sentParams.length).toBe(1);
+    // Result is a fatal LlmProviderError (no retry storm)
+    expect(err).toBeInstanceOf(LlmProviderError);
+    expect(String(err.message).toLowerCase()).toMatch(/abort/);
+  });
+
+  it('short-circuits before SDK call when abortSignal is already aborted', async () => {
+    state.scenario = 'ok';
+    const callAnthropic = await importProvider();
+    const LlmProviderError = await importErrorClass();
+
+    const controller = new AbortController();
+    controller.abort(); // already aborted before the call
+
+    const err = await callAnthropic(
+      { orgId: 'o', feature: 'lead_agent', messages: [{ role: 'user', content: 'x' }], abortSignal: controller.signal },
+      'k',
+      'claude-opus-4-7',
+    ).catch(e => e);
+
+    // SDK should never have been called
+    expect(state.sentParams.length).toBe(0);
+    expect(err).toBeInstanceOf(LlmProviderError);
   });
 
   it('hard timeout fires when a single attempt hangs longer than 4 minutes', async () => {

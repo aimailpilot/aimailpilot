@@ -88,6 +88,12 @@ export async function callAnthropic(
   const HARD_TIMEOUT_MS = 4 * 60 * 1000;
 
   const callOnce = async (params: any): Promise<any> => {
+    // External abort short-circuits before we even hit the SDK.
+    if (request.abortSignal?.aborted) {
+      const err: any = new Error('Anthropic call aborted by caller');
+      err.name = 'AbortError';
+      throw err;
+    }
     let timeout: any;
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeout = setTimeout(() => {
@@ -96,12 +102,15 @@ export async function callAnthropic(
         reject(err);
       }, HARD_TIMEOUT_MS);
     });
+    // SDK accepts a request-options bag as the second argument; passing the signal
+    // there lets the SDK abort the underlying fetch when controller.abort() fires.
+    const sdkOpts: any = request.abortSignal ? { signal: request.abortSignal } : undefined;
     const work = useStreaming
       ? (async () => {
-          const stream = client.messages.stream(params);
+          const stream = client.messages.stream(params, sdkOpts);
           return stream.finalMessage();
         })()
-      : client.messages.create(params);
+      : client.messages.create(params, sdkOpts);
     try {
       return await Promise.race([work, timeoutPromise]);
     } finally {

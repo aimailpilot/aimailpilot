@@ -70,6 +70,12 @@ export function normalizeAnthropicError(err: any): NormalizedError {
 }
 
 export function classifyAnthropicError(err: any, ctx: ErrorContext): RetryAction {
+  // Abort triggered by caller (user-cancelled job, request timeout etc.) —
+  // never retry, surface immediately.
+  if (err?.name === 'AbortError' || /aborted/i.test(err?.message || '')) {
+    return { kind: 'fatal' };
+  }
+
   const e = normalizeAnthropicError(err);
   const maxRetries = ctx.maxRetries ?? DEFAULT_MAX_RETRIES;
   const isGrammarCompilation = /grammar compilation/i.test(e.message);

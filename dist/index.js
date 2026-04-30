@@ -12042,6 +12042,9 @@ function normalizeAnthropicError(err) {
   return { status, message, errorType: innerMatch ? innerMatch[1] : errorType };
 }
 function classifyAnthropicError(err, ctx) {
+  if (err?.name === "AbortError" || /aborted/i.test(err?.message || "")) {
+    return { kind: "fatal" };
+  }
   const e = normalizeAnthropicError(err);
   const maxRetries = ctx.maxRetries ?? DEFAULT_MAX_RETRIES;
   const isGrammarCompilation = /grammar compilation/i.test(e.message);
@@ -12107,6 +12110,11 @@ async function callAnthropic(request, apiKey, model) {
   const useStreaming = !!request.webSearch || maxTokens > 16e3;
   const HARD_TIMEOUT_MS = 4 * 60 * 1e3;
   const callOnce = async (params) => {
+    if (request.abortSignal?.aborted) {
+      const err = new Error("Anthropic call aborted by caller");
+      err.name = "AbortError";
+      throw err;
+    }
     let timeout;
     const timeoutPromise = new Promise((_, reject) => {
       timeout = setTimeout(() => {
@@ -12115,10 +12123,11 @@ async function callAnthropic(request, apiKey, model) {
         reject(err);
       }, HARD_TIMEOUT_MS);
     });
+    const sdkOpts = request.abortSignal ? { signal: request.abortSignal } : void 0;
     const work = useStreaming ? (async () => {
-      const stream = client.messages.stream(params);
+      const stream = client.messages.stream(params, sdkOpts);
       return stream.finalMessage();
-    })() : client.messages.create(params);
+    })() : client.messages.create(params, sdkOpts);
     try {
       return await Promise.race([work, timeoutPromise]);
     } finally {
@@ -13200,7 +13209,8 @@ async function runOneSearch(opts) {
     jsonSchema: LEAD_RESULT_SCHEMA,
     webSearch: needsWebSearch,
     thinking: true,
-    maxTokens: 16e3
+    maxTokens: 16e3,
+    abortSignal: opts.abortSignal
   });
   let parsed = llmResp.parsed;
   let parseFailed = false;
@@ -32957,6 +32967,7 @@ ${customInstructions || ""}` : `Generate a proposal for ${ctx.contact?.contact?.
   });
   const LEAD_AGENT_JOB_TTL_MS = 30 * 60 * 1e3;
   const leadAgentJobKey = (jobId) => `lead_agent_job_${jobId}`;
+  const leadAgentAbortControllers = /* @__PURE__ */ new Map();
   const findActiveLeadAgentJob = async (orgId, excludeJobId) => {
     const allSettings = await storage.getApiSettings(orgId);
     const now3 = Date.now();
@@ -32986,6 +32997,8 @@ ${customInstructions || ""}` : `Generate a proposal for ${ctx.contact?.contact?.
       } catch {
       }
     }, 2e4);
+    const controller = new AbortController();
+    leadAgentAbortControllers.set(jobId, controller);
     let result;
     try {
       const { runOneSearch: runOneSearch2 } = await Promise.resolve().then(() => (init_lead_agent(), lead_agent_exports));
@@ -32994,10 +33007,12 @@ ${customInstructions || ""}` : `Generate a proposal for ${ctx.contact?.contact?.
         mode: job.mode,
         params: job.params || {},
         enrichWithApollo: job.enrichWithApollo,
-        maxApolloMatches: job.maxApolloMatches
+        maxApolloMatches: job.maxApolloMatches,
+        abortSignal: controller.signal
       });
     } finally {
       clearInterval(heartbeat);
+      leadAgentAbortControllers.delete(jobId);
     }
     const settings = await storage.getApiSettings(orgId);
     const raw = settings?.[leadAgentJobKey(jobId)];
@@ -33106,15 +33121,28 @@ ${customInstructions || ""}` : `Generate a proposal for ${ctx.contact?.contact?.
   app2.post("/api/lead-agent/jobs/:jobId/cancel", requireAuth, async (req, res) => {
     try {
       const orgId = req.user.organizationId;
+      const jobId = req.params.jobId;
       const settings = await storage.getApiSettings(orgId);
-      const raw = settings?.[leadAgentJobKey(req.params.jobId)];
+      const raw = settings?.[leadAgentJobKey(jobId)];
       if (!raw) return res.status(404).json({ message: "Job not found" });
       const job = JSON.parse(raw);
       if (job.organizationId !== orgId) return res.status(403).json({ message: "Forbidden" });
       if (job.status !== "running") return res.json({ ok: true, status: job.status });
       job.cancelRequested = true;
-      await storage.setApiSetting(orgId, leadAgentJobKey(req.params.jobId), JSON.stringify(job));
-      res.json({ ok: true, status: "cancelling" });
+      job.status = "cancelled";
+      job.finishedAt = (/* @__PURE__ */ new Date()).toISOString();
+      job.heartbeatAt = job.finishedAt;
+      job.error = "Cancelled by user";
+      await storage.setApiSetting(orgId, leadAgentJobKey(jobId), JSON.stringify(job));
+      const ctrl = leadAgentAbortControllers.get(jobId);
+      if (ctrl) {
+        try {
+          ctrl.abort();
+        } catch {
+        }
+        leadAgentAbortControllers.delete(jobId);
+      }
+      res.json({ ok: true, status: "cancelled" });
     } catch (error) {
       console.error("[LeadAgent] Job cancel error:", error?.message || error);
       res.status(500).json({ message: "Failed to cancel job" });

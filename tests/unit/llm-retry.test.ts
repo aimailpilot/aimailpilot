@@ -119,6 +119,17 @@ describe('classifyAnthropicError — non-retryable', () => {
     const r = classifyAnthropicError({ status: 500, message: 'boom' }, { attempt: 1, hasJsonSchema: true });
     expect(r.kind).toBe('fatal');
   });
+
+  it('AbortError → fatal regardless of attempt count or schema', () => {
+    const abortByName = { name: 'AbortError', message: 'aborted' };
+    expect(classifyAnthropicError(abortByName, { attempt: 1, hasJsonSchema: true }).kind).toBe('fatal');
+    expect(classifyAnthropicError(abortByName, { attempt: 2, hasJsonSchema: true }).kind).toBe('fatal');
+  });
+
+  it('error message containing "aborted" → fatal (no retry)', () => {
+    const abortByMessage = { status: 0, message: 'Request was aborted by user' };
+    expect(classifyAnthropicError(abortByMessage, { attempt: 1, hasJsonSchema: false }).kind).toBe('fatal');
+  });
 });
 
 describe('backoffFor', () => {

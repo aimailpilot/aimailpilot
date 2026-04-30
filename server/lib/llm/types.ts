@@ -48,6 +48,10 @@ export interface LlmRequest {
   /** Override the configured provider for this single call. Use only when the feature
    *  has a hard requirement (e.g. lead_agent forcing Anthropic for web search). */
   forceProvider?: LlmProviderId;
+  /** Optional AbortSignal — providers wire it into their SDK call so a user-triggered
+   *  cancel (e.g. lead-agent /cancel) can short-circuit the in-flight HTTP request
+   *  rather than waiting for the model to finish and consuming credits. */
+  abortSignal?: AbortSignal;
 }
 
 export interface LlmUsage {

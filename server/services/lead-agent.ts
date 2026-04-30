@@ -41,6 +41,9 @@ export interface RunSearchOptions {
   enrichWithApollo?: boolean;
   /** Cap on Apollo /v1/people/match calls (1 credit each). Default 10. */
   maxApolloMatches?: number;
+  /** Caller-controlled abort — when fired, short-circuits the in-flight Anthropic
+   *  call so a user-cancelled job stops eating credits and frees the conflict slot. */
+  abortSignal?: AbortSignal;
 }
 
 export interface RunSearchResult {
@@ -95,6 +98,7 @@ export async function runOneSearch(opts: RunSearchOptions): Promise<RunSearchRes
     webSearch: needsWebSearch,
     thinking: true,
     maxTokens: 16000,
+    abortSignal: opts.abortSignal,
   });
 
   // Parse — schema enforcement usually guarantees valid JSON, but providers

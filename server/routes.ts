@@ -15160,6 +15160,12 @@ Generate an appropriate reply to the LATEST email above, considering the full co
 
   const LEAD_AGENT_JOB_TTL_MS = 30 * 60 * 1000; // 30 min — web-search calls take a while
   const leadAgentJobKey = (jobId: string) => `lead_agent_job_${jobId}`;
+  // In-process registry of AbortControllers keyed by jobId. Lets the cancel
+  // route abort the in-flight Anthropic call so cancellation actually stops
+  // the work (not just sets a flag). Best-effort: if the server restarts
+  // mid-call there's no controller to abort, but the stale-jobs sweeper will
+  // eventually retire the row. Cleared in the runner's finally.
+  const leadAgentAbortControllers = new Map<string, AbortController>();
 
   type LeadAgentJobMode = 'funded' | 'cxo_changes' | 'academics' | 'custom';
   interface LeadAgentJob {
@@ -15213,6 +15219,10 @@ Generate an appropriate reply to the LATEST email above, considering the full co
       } catch { /* heartbeat is best-effort */ }
     }, 20_000);
 
+    // Register an abort controller so /cancel can short-circuit the SDK call.
+    const controller = new AbortController();
+    leadAgentAbortControllers.set(jobId, controller);
+
     let result: any;
     try {
       const { runOneSearch } = await import('./services/lead-agent.js');
@@ -15222,9 +15232,11 @@ Generate an appropriate reply to the LATEST email above, considering the full co
         params: job.params || {},
         enrichWithApollo: job.enrichWithApollo,
         maxApolloMatches: job.maxApolloMatches,
+        abortSignal: controller.signal,
       });
     } finally {
       clearInterval(heartbeat);
+      leadAgentAbortControllers.delete(jobId);
     }
 
     // Persist final state
@@ -15345,18 +15357,42 @@ Generate an appropriate reply to the LATEST email above, considering the full co
   });
 
   // POST /api/lead-agent/jobs/:jobId/cancel
+  // Two effects, both of which were missing in the original implementation:
+  //   1. Flip status to 'cancelled' RIGHT NOW so the per-org "one job at a
+  //      time" conflict check (findActiveLeadAgentJob looks for status==
+  //      'running') frees up immediately. User can start a new search the
+  //      moment they click Cancel — they no longer wait for the old call to
+  //      finish naturally.
+  //   2. Abort the in-flight SDK call via the registered AbortController so
+  //      we stop consuming Anthropic credits on a search the user no longer
+  //      cares about. Best-effort — if the server restarted mid-run the
+  //      controller is gone, but the status flip in (1) still works.
   app.post('/api/lead-agent/jobs/:jobId/cancel', requireAuth, async (req: any, res) => {
     try {
       const orgId = req.user.organizationId;
+      const jobId = req.params.jobId;
       const settings = await storage.getApiSettings(orgId);
-      const raw = settings?.[leadAgentJobKey(req.params.jobId)];
+      const raw = settings?.[leadAgentJobKey(jobId)];
       if (!raw) return res.status(404).json({ message: 'Job not found' });
       const job = JSON.parse(raw) as LeadAgentJob;
       if (job.organizationId !== orgId) return res.status(403).json({ message: 'Forbidden' });
       if (job.status !== 'running') return res.json({ ok: true, status: job.status });
+
       job.cancelRequested = true;
-      await storage.setApiSetting(orgId, leadAgentJobKey(req.params.jobId), JSON.stringify(job));
-      res.json({ ok: true, status: 'cancelling' });
+      job.status = 'cancelled';
+      job.finishedAt = new Date().toISOString();
+      job.heartbeatAt = job.finishedAt;
+      job.error = 'Cancelled by user';
+      await storage.setApiSetting(orgId, leadAgentJobKey(jobId), JSON.stringify(job));
+
+      // Abort the in-flight SDK call (best-effort)
+      const ctrl = leadAgentAbortControllers.get(jobId);
+      if (ctrl) {
+        try { ctrl.abort(); } catch { /* ignore */ }
+        leadAgentAbortControllers.delete(jobId);
+      }
+
+      res.json({ ok: true, status: 'cancelled' });
     } catch (error: any) {
       console.error('[LeadAgent] Job cancel error:', error?.message || error);
       res.status(500).json({ message: 'Failed to cancel job' });
