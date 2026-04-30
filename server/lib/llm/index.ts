@@ -39,8 +39,40 @@ import { callAzureOpenAI } from './providers/azure-openai';
 export * from './types';
 export { resolveProvider } from './config';
 
+/**
+ * Load settings with the same fallback chain the existing Claude-using services
+ * use (campaign-planner-agent, campaign-review-agent): per-org first, then
+ * superadmin org for credentials shared platform-wide, then env vars. Routing
+ * preferences (ai_provider, ai_provider_<feature>) follow the per-org value
+ * since they're per-org config; credentials fall back so a single org-level
+ * API key works for every tenant.
+ */
+async function loadResolvedSettings(orgId: string): Promise<SettingsMap> {
+  const orgSettings = (await storage.getApiSettings(orgId)) as SettingsMap;
+  let superSettings: SettingsMap = {};
+  try {
+    superSettings = (await storage.getApiSettings('superadmin')) as SettingsMap;
+  } catch { /* superadmin org may not exist on every install */ }
+
+  const merged: SettingsMap = { ...superSettings, ...orgSettings };
+  // Env-var credential fallbacks (only when not already set in either org).
+  if (!merged.claude_api_key && process.env.CLAUDE_API_KEY) {
+    merged.claude_api_key = process.env.CLAUDE_API_KEY;
+  }
+  if (!merged.azure_openai_endpoint && process.env.AZURE_OPENAI_ENDPOINT) {
+    merged.azure_openai_endpoint = process.env.AZURE_OPENAI_ENDPOINT;
+  }
+  if (!merged.azure_openai_api_key && process.env.AZURE_OPENAI_API_KEY) {
+    merged.azure_openai_api_key = process.env.AZURE_OPENAI_API_KEY;
+  }
+  if (!merged.azure_openai_deployment && process.env.AZURE_OPENAI_DEPLOYMENT) {
+    merged.azure_openai_deployment = process.env.AZURE_OPENAI_DEPLOYMENT;
+  }
+  return merged;
+}
+
 export async function runLlm(request: LlmRequest): Promise<LlmResponse> {
-  const settings = (await storage.getApiSettings(request.orgId)) as SettingsMap;
+  const settings = await loadResolvedSettings(request.orgId);
   const config = resolveProvider(request.feature, settings, request.forceProvider);
 
   // Capability check — webSearch needs Anthropic's built-in tool. Azure

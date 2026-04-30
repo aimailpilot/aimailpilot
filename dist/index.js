@@ -12162,8 +12162,30 @@ var init_azure_openai = __esm({
 });
 
 // server/lib/llm/index.ts
+async function loadResolvedSettings(orgId) {
+  const orgSettings = await storage.getApiSettings(orgId);
+  let superSettings = {};
+  try {
+    superSettings = await storage.getApiSettings("superadmin");
+  } catch {
+  }
+  const merged = { ...superSettings, ...orgSettings };
+  if (!merged.claude_api_key && process.env.CLAUDE_API_KEY) {
+    merged.claude_api_key = process.env.CLAUDE_API_KEY;
+  }
+  if (!merged.azure_openai_endpoint && process.env.AZURE_OPENAI_ENDPOINT) {
+    merged.azure_openai_endpoint = process.env.AZURE_OPENAI_ENDPOINT;
+  }
+  if (!merged.azure_openai_api_key && process.env.AZURE_OPENAI_API_KEY) {
+    merged.azure_openai_api_key = process.env.AZURE_OPENAI_API_KEY;
+  }
+  if (!merged.azure_openai_deployment && process.env.AZURE_OPENAI_DEPLOYMENT) {
+    merged.azure_openai_deployment = process.env.AZURE_OPENAI_DEPLOYMENT;
+  }
+  return merged;
+}
 async function runLlm(request) {
-  const settings = await storage.getApiSettings(request.orgId);
+  const settings = await loadResolvedSettings(request.orgId);
   const config = resolveProvider(request.feature, settings, request.forceProvider);
   if (request.webSearch && config.provider !== "anthropic") {
     throw new LlmCapabilityError(
