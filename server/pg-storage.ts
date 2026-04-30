@@ -1706,12 +1706,44 @@ export class PostgresStorage {
   }
 
   // ========== Campaigns ==========
-  async getCampaigns(organizationId: string, limit = 20, offset = 0) {
-    return (await queryAll('SELECT * FROM campaigns WHERE "organizationId" = $1 ORDER BY "createdAt" DESC LIMIT $2 OFFSET $3', [organizationId, limit, offset])).map(hydrateCampaign);
+  async getCampaigns(organizationId: string, limit = 20, offset = 0, status?: string) {
+    // status filter mirrors /api/campaigns/count: 'active' expands to (active OR following_up).
+    // Without this, the dashboard tab filtering happened ONLY client-side over the paginated
+    // page-1 result, which made Completed/Paused tabs render empty when the most-recent 7
+    // campaigns were all active/draft.
+    let sql = 'SELECT * FROM campaigns WHERE "organizationId" = $1';
+    const params: any[] = [organizationId];
+    if (status && status !== 'all') {
+      if (status === 'active') {
+        sql += ` AND (status = 'active' OR status = 'following_up')`;
+      } else {
+        params.push(status);
+        sql += ` AND status = $${params.length}`;
+      }
+    }
+    params.push(limit);
+    sql += ` ORDER BY "createdAt" DESC LIMIT $${params.length}`;
+    params.push(offset);
+    sql += ` OFFSET $${params.length}`;
+    return (await queryAll(sql, params)).map(hydrateCampaign);
   }
 
-  async getCampaignsForUser(organizationId: string, userId: string, limit = 20, offset = 0) {
-    return (await queryAll('SELECT * FROM campaigns WHERE "organizationId" = $1 AND "createdBy" = $2 ORDER BY "createdAt" DESC LIMIT $3 OFFSET $4', [organizationId, userId, limit, offset])).map(hydrateCampaign);
+  async getCampaignsForUser(organizationId: string, userId: string, limit = 20, offset = 0, status?: string) {
+    let sql = 'SELECT * FROM campaigns WHERE "organizationId" = $1 AND "createdBy" = $2';
+    const params: any[] = [organizationId, userId];
+    if (status && status !== 'all') {
+      if (status === 'active') {
+        sql += ` AND (status = 'active' OR status = 'following_up')`;
+      } else {
+        params.push(status);
+        sql += ` AND status = $${params.length}`;
+      }
+    }
+    params.push(limit);
+    sql += ` ORDER BY "createdAt" DESC LIMIT $${params.length}`;
+    params.push(offset);
+    sql += ` OFFSET $${params.length}`;
+    return (await queryAll(sql, params)).map(hydrateCampaign);
   }
 
   async getCampaign(id: string) { return hydrateCampaign(await queryOne('SELECT * FROM campaigns WHERE id = $1', [id])); }

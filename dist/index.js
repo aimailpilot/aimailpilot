@@ -1886,11 +1886,39 @@ var init_pg_storage = __esm({
         return { total, assigned, unassigned, byUser };
       }
       // ========== Campaigns ==========
-      async getCampaigns(organizationId, limit = 20, offset = 0) {
-        return (await queryAll('SELECT * FROM campaigns WHERE "organizationId" = $1 ORDER BY "createdAt" DESC LIMIT $2 OFFSET $3', [organizationId, limit, offset])).map(hydrateCampaign);
+      async getCampaigns(organizationId, limit = 20, offset = 0, status) {
+        let sql = 'SELECT * FROM campaigns WHERE "organizationId" = $1';
+        const params = [organizationId];
+        if (status && status !== "all") {
+          if (status === "active") {
+            sql += ` AND (status = 'active' OR status = 'following_up')`;
+          } else {
+            params.push(status);
+            sql += ` AND status = $${params.length}`;
+          }
+        }
+        params.push(limit);
+        sql += ` ORDER BY "createdAt" DESC LIMIT $${params.length}`;
+        params.push(offset);
+        sql += ` OFFSET $${params.length}`;
+        return (await queryAll(sql, params)).map(hydrateCampaign);
       }
-      async getCampaignsForUser(organizationId, userId, limit = 20, offset = 0) {
-        return (await queryAll('SELECT * FROM campaigns WHERE "organizationId" = $1 AND "createdBy" = $2 ORDER BY "createdAt" DESC LIMIT $3 OFFSET $4', [organizationId, userId, limit, offset])).map(hydrateCampaign);
+      async getCampaignsForUser(organizationId, userId, limit = 20, offset = 0, status) {
+        let sql = 'SELECT * FROM campaigns WHERE "organizationId" = $1 AND "createdBy" = $2';
+        const params = [organizationId, userId];
+        if (status && status !== "all") {
+          if (status === "active") {
+            sql += ` AND (status = 'active' OR status = 'following_up')`;
+          } else {
+            params.push(status);
+            sql += ` AND status = $${params.length}`;
+          }
+        }
+        params.push(limit);
+        sql += ` ORDER BY "createdAt" DESC LIMIT $${params.length}`;
+        params.push(offset);
+        sql += ` OFFSET $${params.length}`;
+        return (await queryAll(sql, params)).map(hydrateCampaign);
       }
       async getCampaign(id) {
         return hydrateCampaign(await queryOne("SELECT * FROM campaigns WHERE id = $1", [id]));
@@ -6414,11 +6442,35 @@ var init_storage = __esm({
         return { total, assigned, unassigned, byUser };
       }
       // ========== Campaigns ==========
-      async getCampaigns(organizationId, limit = 20, offset = 0) {
-        return db.prepare("SELECT * FROM campaigns WHERE organizationId = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?").all(organizationId, limit, offset).map(hydrateCampaign2);
+      async getCampaigns(organizationId, limit = 20, offset = 0, status) {
+        let sql = "SELECT * FROM campaigns WHERE organizationId = ?";
+        const params = [organizationId];
+        if (status && status !== "all") {
+          if (status === "active") {
+            sql += " AND (status = 'active' OR status = 'following_up')";
+          } else {
+            sql += " AND status = ?";
+            params.push(status);
+          }
+        }
+        sql += " ORDER BY createdAt DESC LIMIT ? OFFSET ?";
+        params.push(limit, offset);
+        return db.prepare(sql).all(...params).map(hydrateCampaign2);
       }
-      async getCampaignsForUser(organizationId, userId, limit = 20, offset = 0) {
-        return db.prepare("SELECT * FROM campaigns WHERE organizationId = ? AND createdBy = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?").all(organizationId, userId, limit, offset).map(hydrateCampaign2);
+      async getCampaignsForUser(organizationId, userId, limit = 20, offset = 0, status) {
+        let sql = "SELECT * FROM campaigns WHERE organizationId = ? AND createdBy = ?";
+        const params = [organizationId, userId];
+        if (status && status !== "all") {
+          if (status === "active") {
+            sql += " AND (status = 'active' OR status = 'following_up')";
+          } else {
+            sql += " AND status = ?";
+            params.push(status);
+          }
+        }
+        sql += " ORDER BY createdAt DESC LIMIT ? OFFSET ?";
+        params.push(limit, offset);
+        return db.prepare(sql).all(...params).map(hydrateCampaign2);
       }
       async getCampaign(id) {
         return hydrateCampaign2(db.prepare("SELECT * FROM campaigns WHERE id = ?").get(id));
@@ -22519,12 +22571,13 @@ Which account should I use and why? If I need to split across accounts, provide 
     try {
       const limit = parseInt(req.query.limit) || 20;
       const offset = parseInt(req.query.offset) || 0;
+      const status = typeof req.query.status === "string" ? req.query.status : void 0;
       const isAdmin = req.user.role === "owner" || req.user.role === "admin";
       let campaigns;
       if (isAdmin) {
-        campaigns = await storage.getCampaigns(req.user.organizationId, limit, offset);
+        campaigns = await storage.getCampaigns(req.user.organizationId, limit, offset, status);
       } else {
-        campaigns = await storage.getCampaignsForUser(req.user.organizationId, req.user.id, limit, offset);
+        campaigns = await storage.getCampaignsForUser(req.user.organizationId, req.user.id, limit, offset, status);
       }
       for (const c of campaigns) {
         const originalAudienceSize = Array.isArray(c.contactIds) ? c.contactIds.length : 0;

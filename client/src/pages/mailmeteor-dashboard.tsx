@@ -308,7 +308,20 @@ export default function MailMeteorDashboard() {
   
   const [campaignPage, setCampaignPage] = useState(0);
   const campaignsPerPage = 7;
-  const { campaigns, isLoading } = useCampaigns({ limit: campaignsPerPage, offset: campaignPage * campaignsPerPage });
+  // Map the dashboard tab label to the server's status filter. 'Active' covers
+  // both `active` and `following_up` on the server side.
+  const campaignStatusForServer = (() => {
+    const map: Record<string, string> = {
+      Active: 'active', Scheduled: 'scheduled', Drafts: 'draft',
+      Completed: 'completed', Paused: 'paused',
+    };
+    return map[activeFilter];
+  })();
+  const { campaigns, isLoading } = useCampaigns({
+    limit: campaignsPerPage,
+    offset: campaignPage * campaignsPerPage,
+    status: campaignStatusForServer,
+  });
 
   // Fetch total campaign count for pagination
   const { data: campaignCountData } = useQuery<{ total: number }>({

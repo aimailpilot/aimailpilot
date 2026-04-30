@@ -1686,11 +1686,35 @@ export class DatabaseStorage {
   }
 
   // ========== Campaigns ==========
-  async getCampaigns(organizationId: string, limit = 20, offset = 0) {
-    return db.prepare('SELECT * FROM campaigns WHERE organizationId = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(organizationId, limit, offset).map(hydrateCampaign);
+  async getCampaigns(organizationId: string, limit = 20, offset = 0, status?: string) {
+    let sql = 'SELECT * FROM campaigns WHERE organizationId = ?';
+    const params: any[] = [organizationId];
+    if (status && status !== 'all') {
+      if (status === 'active') {
+        sql += " AND (status = 'active' OR status = 'following_up')";
+      } else {
+        sql += ' AND status = ?';
+        params.push(status);
+      }
+    }
+    sql += ' ORDER BY createdAt DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+    return db.prepare(sql).all(...params).map(hydrateCampaign);
   }
-  async getCampaignsForUser(organizationId: string, userId: string, limit = 20, offset = 0) {
-    return db.prepare('SELECT * FROM campaigns WHERE organizationId = ? AND createdBy = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?').all(organizationId, userId, limit, offset).map(hydrateCampaign);
+  async getCampaignsForUser(organizationId: string, userId: string, limit = 20, offset = 0, status?: string) {
+    let sql = 'SELECT * FROM campaigns WHERE organizationId = ? AND createdBy = ?';
+    const params: any[] = [organizationId, userId];
+    if (status && status !== 'all') {
+      if (status === 'active') {
+        sql += " AND (status = 'active' OR status = 'following_up')";
+      } else {
+        sql += ' AND status = ?';
+        params.push(status);
+      }
+    }
+    sql += ' ORDER BY createdAt DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+    return db.prepare(sql).all(...params).map(hydrateCampaign);
   }
   async getCampaign(id: string) { return hydrateCampaign(db.prepare('SELECT * FROM campaigns WHERE id = ?').get(id)); }
   async createCampaign(campaign: any) {

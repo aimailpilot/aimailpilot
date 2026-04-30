@@ -5,18 +5,22 @@ import type { Campaign } from "@/types";
 interface UseCampaignsOptions {
   limit?: number;
   offset?: number;
+  /** Server-side status filter — matches the dashboard tab. 'active' expands
+   *  to (active OR following_up) on the server. Omit for "All". */
+  status?: string;
 }
 
 export function useCampaigns(options: UseCampaignsOptions = {}) {
   const queryClient = useQueryClient();
 
   const campaignsQuery = useQuery<Campaign[]>({
-    queryKey: ["/api/campaigns", options.limit, options.offset],
+    queryKey: ["/api/campaigns", options.limit, options.offset, options.status],
     queryFn: async () => {
       const params = new URLSearchParams();
       if (options.limit) params.set('limit', options.limit.toString());
       if (options.offset) params.set('offset', options.offset.toString());
-      
+      if (options.status) params.set('status', options.status);
+
       const response = await fetch(`/api/campaigns?${params}`);
       if (!response.ok) throw new Error('Failed to fetch campaigns');
       return response.json();

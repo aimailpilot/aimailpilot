@@ -3396,13 +3396,14 @@ Which account should I use and why? If I need to split across accounts, provide 
     try {
       const limit = parseInt(req.query.limit) || 20;
       const offset = parseInt(req.query.offset) || 0;
+      const status = typeof req.query.status === 'string' ? req.query.status : undefined;
       const isAdmin = req.user.role === 'owner' || req.user.role === 'admin';
       // Members only see their own campaigns; admins/owners see all org campaigns
       let campaigns;
       if (isAdmin) {
-        campaigns = await storage.getCampaigns(req.user.organizationId, limit, offset);
+        campaigns = await storage.getCampaigns(req.user.organizationId, limit, offset, status);
       } else {
-        campaigns = await storage.getCampaignsForUser(req.user.organizationId, req.user.id, limit, offset);
+        campaigns = await storage.getCampaignsForUser(req.user.organizationId, req.user.id, limit, offset, status);
       }
       
       // Auto-fix stale sentCount for campaigns that have messages but sentCount=0
