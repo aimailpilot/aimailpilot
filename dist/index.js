@@ -12022,6 +12022,58 @@ var init_config = __esm({
   }
 });
 
+// server/lib/llm/retry.ts
+function normalizeAnthropicError(err) {
+  if (!err) return { status: 500, message: "Unknown error" };
+  const status = Number(err.status || err.statusCode || 0) || 500;
+  let message = "";
+  if (typeof err.message === "string") message = err.message;
+  else if (typeof err === "string") message = err;
+  else {
+    try {
+      message = JSON.stringify(err);
+    } catch {
+      message = String(err);
+    }
+  }
+  const typeMatch = message.match(/"type"\s*:\s*"([a-z_]+)"/);
+  const errorType = typeMatch ? typeMatch[typeMatch.index === message.indexOf('"type"') ? 1 : 1] : void 0;
+  const innerMatch = message.match(/"error"\s*:\s*\{\s*"type"\s*:\s*"([a-z_]+)"/);
+  return { status, message, errorType: innerMatch ? innerMatch[1] : errorType };
+}
+function classifyAnthropicError(err, ctx) {
+  const e = normalizeAnthropicError(err);
+  const maxRetries = ctx.maxRetries ?? DEFAULT_MAX_RETRIES;
+  const isGrammarCompilation = /grammar compilation/i.test(e.message);
+  const isOverloaded = e.errorType === "overloaded_error" || e.status === 503 || e.status === 529;
+  const isRateLimit = e.errorType === "rate_limit_error" || e.status === 429;
+  if (isGrammarCompilation && ctx.hasJsonSchema) {
+    if (ctx.attempt < 2) {
+      return { kind: "retry_same", backoffMs: backoffFor(ctx.attempt) };
+    }
+    return { kind: "retry_no_schema", backoffMs: backoffFor(ctx.attempt) };
+  }
+  if (isOverloaded || isRateLimit) {
+    if (ctx.attempt < maxRetries) {
+      return { kind: "retry_same", backoffMs: backoffFor(ctx.attempt) };
+    }
+    return { kind: "fatal" };
+  }
+  return { kind: "fatal" };
+}
+function backoffFor(attempt) {
+  const base = Math.min(16e3, 1e3 * Math.pow(2, Math.max(0, attempt - 1)));
+  const jitter = base * (Math.random() * 0.4 - 0.2);
+  return Math.round(base + jitter);
+}
+var DEFAULT_MAX_RETRIES;
+var init_retry = __esm({
+  "server/lib/llm/retry.ts"() {
+    "use strict";
+    DEFAULT_MAX_RETRIES = 3;
+  }
+});
+
 // server/lib/llm/providers/anthropic.ts
 import Anthropic from "@anthropic-ai/sdk";
 async function callAnthropic(request, apiKey, model) {
@@ -12035,26 +12087,59 @@ async function callAnthropic(request, apiKey, model) {
   if (request.jsonSchema) {
     outputConfig.format = { type: "json_schema", schema: request.jsonSchema };
   }
-  const params = {
-    model,
-    max_tokens: maxTokens,
-    messages: request.messages.map((m) => ({ role: m.role, content: m.content }))
+  const SCHEMA_FALLBACK_SUFFIX = "\n\nIMPORTANT: Return ONLY a single valid JSON object that conforms to the structure described in the user message. Do not wrap it in markdown code fences. Do not include any prose before or after the JSON.";
+  const buildParams = (includeSchema) => {
+    const p = {
+      model,
+      max_tokens: maxTokens,
+      messages: request.messages.map((m) => ({ role: m.role, content: m.content }))
+    };
+    if (request.systemPrompt) {
+      p.system = includeSchema || !request.jsonSchema ? request.systemPrompt : request.systemPrompt + SCHEMA_FALLBACK_SUFFIX;
+    } else if (!includeSchema && request.jsonSchema) {
+      p.system = SCHEMA_FALLBACK_SUFFIX.trim();
+    }
+    if (request.thinking) p.thinking = { type: "adaptive" };
+    if (tools.length > 0) p.tools = tools;
+    if (includeSchema && Object.keys(outputConfig).length > 0) p.output_config = outputConfig;
+    return p;
   };
-  if (request.systemPrompt) params.system = request.systemPrompt;
-  if (request.thinking) params.thinking = { type: "adaptive" };
-  if (tools.length > 0) params.tools = tools;
-  if (Object.keys(outputConfig).length > 0) params.output_config = outputConfig;
-  let response;
-  try {
+  const callOnce = async (params) => {
     if (maxTokens > 16e3) {
       const stream = client.messages.stream(params);
-      response = await stream.finalMessage();
-    } else {
-      response = await client.messages.create(params);
+      return stream.finalMessage();
     }
-  } catch (e) {
-    const status = e?.status || 500;
-    throw new LlmProviderError(`Anthropic API error: ${e?.message || String(e)}`, status);
+    return client.messages.create(params);
+  };
+  let response;
+  let useSchema = !!request.jsonSchema;
+  let attempt = 0;
+  const MAX_RETRIES = 3;
+  while (true) {
+    attempt++;
+    try {
+      response = await callOnce(buildParams(useSchema));
+      break;
+    } catch (e) {
+      const action = classifyAnthropicError(e, {
+        attempt,
+        hasJsonSchema: useSchema,
+        maxRetries: MAX_RETRIES
+      });
+      if (action.kind === "fatal") {
+        const status = e?.status || 500;
+        throw new LlmProviderError(`Anthropic API error: ${e?.message || String(e)}`, status);
+      }
+      if (action.kind === "retry_no_schema") {
+        console.warn(`[Anthropic] Grammar compiler unavailable \u2014 falling back to schema-less call (attempt ${attempt})`);
+        useSchema = false;
+      } else {
+        console.warn(`[Anthropic] Transient error on attempt ${attempt}, retrying in ${action.backoffMs}ms \u2014 ${e?.message?.slice(0, 200)}`);
+      }
+      if (action.backoffMs > 0) {
+        await new Promise((r) => setTimeout(r, action.backoffMs));
+      }
+    }
   }
   const textBlocks = (response.content || []).filter((b) => b.type === "text");
   const content = textBlocks.map((b) => b.text).join("\n");
@@ -12082,6 +12167,7 @@ var init_anthropic = __esm({
   "server/lib/llm/providers/anthropic.ts"() {
     "use strict";
     init_types();
+    init_retry();
     PRICING = {
       "claude-opus-4-7": { input: 5, output: 25 },
       "claude-opus-4-6": { input: 5, output: 25 },
