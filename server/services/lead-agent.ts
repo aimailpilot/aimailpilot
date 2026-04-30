@@ -96,8 +96,13 @@ export async function runOneSearch(opts: RunSearchOptions): Promise<RunSearchRes
     messages: [{ role: 'user', content: userMessage }],
     jsonSchema: LEAD_RESULT_SCHEMA as any,
     webSearch: needsWebSearch,
-    thinking: true,
-    maxTokens: 16000,
+    // thinking disabled for lead-agent: web search itself provides reasoning
+    // (Claude reads sources, cites them) and adaptive thinking adds 30-120s
+    // of latency that pushed this past the 4-min provider timeout in production.
+    thinking: false,
+    // 8K is comfortably enough for 25 leads × ~250 tokens each + summary;
+    // larger ceilings just slow generation without adding value here.
+    maxTokens: 8000,
     abortSignal: opts.abortSignal,
   });
 

@@ -82,10 +82,11 @@ export async function callAnthropic(
   // (each adds 5-30s) and the connection sits idle while it does so.
   const useStreaming = !!request.webSearch || maxTokens > 16000;
 
-  // Hard ceiling on a single call (one attempt). 4 minutes is generous for
-  // a complex web-search call (typical: 30-90s) and prevents a single hung
-  // socket from holding the request thread for 10+ minutes.
-  const HARD_TIMEOUT_MS = 4 * 60 * 1000;
+  // Hard ceiling on a single call (one attempt). 6 minutes is generous for
+  // a complex web-search call (typical: 30-120s; outliers up to 4-5 min when
+  // Claude does many sequential searches) and prevents a single hung socket
+  // from holding the request thread for 10+ minutes.
+  const HARD_TIMEOUT_MS = 6 * 60 * 1000;
 
   const callOnce = async (params: any): Promise<any> => {
     // External abort short-circuits before we even hit the SDK.

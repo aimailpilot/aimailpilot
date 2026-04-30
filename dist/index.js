@@ -12108,7 +12108,7 @@ async function callAnthropic(request, apiKey, model) {
     return p;
   };
   const useStreaming = !!request.webSearch || maxTokens > 16e3;
-  const HARD_TIMEOUT_MS = 4 * 60 * 1e3;
+  const HARD_TIMEOUT_MS = 6 * 60 * 1e3;
   const callOnce = async (params) => {
     if (request.abortSignal?.aborted) {
       const err = new Error("Anthropic call aborted by caller");
@@ -13208,8 +13208,13 @@ async function runOneSearch(opts) {
     messages: [{ role: "user", content: userMessage }],
     jsonSchema: LEAD_RESULT_SCHEMA,
     webSearch: needsWebSearch,
-    thinking: true,
-    maxTokens: 16e3,
+    // thinking disabled for lead-agent: web search itself provides reasoning
+    // (Claude reads sources, cites them) and adaptive thinking adds 30-120s
+    // of latency that pushed this past the 4-min provider timeout in production.
+    thinking: false,
+    // 8K is comfortably enough for 25 leads × ~250 tokens each + summary;
+    // larger ceilings just slow generation without adding value here.
+    maxTokens: 8e3,
     abortSignal: opts.abortSignal
   });
   let parsed = llmResp.parsed;
